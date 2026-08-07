@@ -1,0 +1,40 @@
+<?php
+if (!defined('GV_BOOT')) { http_response_code(404); exit; }
+
+// TEST-ONLY configuration for the local dev router. Never deploy this file:
+// the secret is public, every enforce toggle is on, and the limits are tiny
+// so the rate-limit case trips within a few dozen requests.
+return array(
+	'secret'           => 'dev-only-secret',
+	'cookie_name'      => '_gv',
+	'token_ttl'        => 604800,
+	'nonce_ttl'        => 120,
+	'enforce'          => array(
+		'block'     => true,
+		'challenge' => true,
+		'ratelimit' => true,
+	),
+	'hard_block_score' => 60,
+	'limits'           => array(
+		'window' => 60,
+		'device' => 10,
+		'ip_ua'  => 15,
+		'ip'     => 25,
+		'bot'    => 10,
+	),
+	'honeypot_path'    => '/old-archive',
+	'exempt_paths'     => array('/exempt-me'),
+	'exempt_params'    => array(),
+	'known_bots'       => array('googlebot', 'bingbot'),
+	'cdn_ranges'       => array(),
+	'redis'            => array('host' => '127.0.0.1', 'port' => 6379,
+	                            'timeout' => 0.05),
+	'log_dir'          => sys_get_temp_dir() . '/gv-logs',
+	'strings'          => array(
+		'lang'     => 'en',
+		'dir'      => 'ltr',
+		'title'    => 'Please wait a moment...',
+		'sub'      => 'We are checking your browser.',
+		'noscript' => 'Please enable JavaScript and cookies to continue.',
+	),
+);
