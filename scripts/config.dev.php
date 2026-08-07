@@ -17,8 +17,15 @@ return array(
 	'signals'          => array(              // ON here so the matrix can exercise them
 		'reputation' => true,
 		'ml'         => true,
+		'clf'        => true,
 	),
 	'ml_weight'        => 0.4,
+	'clf_weight'       => 0.5,
+	// A 5% holdout would almost never catch the handful of identities the test
+	// matrix uses, so the matrix seeds a known-holdout identity instead. The
+	// salt is fixed here so that identity stays in the holdout across runs.
+	'holdout_pct'      => 5,
+	'holdout_salt'     => 'dev-holdout-salt',
 	'bot_suffixes'     => array(
 		'googlebot' => array('.googlebot.com', '.google.com'),
 		'bingbot'   => array('.search.msn.com'),

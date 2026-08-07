@@ -215,7 +215,8 @@ $tmp = sys_get_temp_dir() . '/gv-selftest-' . getmypid();
 $facts = t_facts(array('referer' => 'https://example.com/a/b?c=d'));
 $state = array('tok' => 'v', 'dev' => 'abc123', 'sc' => 15, 'rs' => array('FEW_HDR'),
 	'cd' => 1, 'ciu' => 2, 'ci' => 3, 'rd' => 0, 'hp' => 0, 'bot' => '',
-	'botv' => 'ok', 'rep' => -20, 'ml' => 30, 'esc' => 15);
+	'botv' => 'ok', 'rep' => -20, 'ml' => 30, 'clf' => 12, 'esc' => 15,
+	'hold' => 0, 'ovr' => '');
 gv_log(gv_log_row($facts, $state, 'allow', 0, microtime(true) - 0.01), $tmp);
 
 $file = $tmp . '/guard-' . date('Ymd') . '.jsonl';
@@ -229,7 +230,7 @@ t_ok('log line is valid JSON', is_array($row));
 
 $schema = array('ts', 'ip', 'ua', 'uah', 'm', 'p', 'q', 'aj', 'nav', 'tok', 'dev', 'sf',
 	'al', 'hc', 'sc', 'esc', 'rs', 'cd', 'ciu', 'ci', 'rd', 'hp', 'bot', 'ref',
-	'botv', 'rep', 'ml', 'act', 'sh', 'ms');
+	'botv', 'rep', 'ml', 'clf', 'hold', 'ovr', 'act', 'sh', 'ms');
 t_ok('log line carries every schema key in order', is_array($row) && array_keys($row) === $schema);
 t_ok('referer is reduced to its host', is_array($row) && $row['ref'] === 'example.com');
 t_ok('navigation and ajax flags are recorded',
@@ -240,6 +241,8 @@ t_ok('phase 2 verdicts appear in the log row',
 	is_array($row) && $row['botv'] === 'ok' && $row['rep'] === -20 && $row['ml'] === 30);
 t_ok('static and effective scores are both logged',
 	is_array($row) && $row['sc'] === 15 && $row['esc'] === 15);
+t_ok('phase 3 fields appear in the log row',
+	is_array($row) && $row['clf'] === 12 && $row['hold'] === 0 && $row['ovr'] === '');
 
 if (is_file($file)) { @unlink($file); }
 if (is_dir($tmp)) { @rmdir($tmp); }
@@ -284,6 +287,87 @@ t_ok('one toggle on does not enable the other',
 
 $weighted = gv_cfg_defaults(array('signals' => array('ml' => true), 'ml_weight' => 1.0));
 t_ok('ml_weight is honoured', gv_effective_score(0, 0, 70, $weighted) === 70);
+
+// --------------------------------------------------------------------------
+t_section('Fail-open on a stalled Redis read');
+
+// A server that accepts the connection and then never answers. The write
+// succeeds, the read times out, and gv_r_get returns false rather than null -
+// which is exactly the case that used to be mistaken for a 'bad' verdict.
+$stall_errno  = 0;
+$stall_errstr = '';
+$stall = @stream_socket_server('tcp://127.0.0.1:0', $stall_errno, $stall_errstr);
+if (!$stall) {
+	t_skip('a stalled redis read yields no verdict', 'could not open a local listening socket');
+} else {
+	$stall_name = stream_socket_get_name($stall, false);
+	$stall_port = (int)substr($stall_name, strrpos($stall_name, ':') + 1);
+	$stall_conn = gv_redis_connect(array('host' => '127.0.0.1', 'port' => $stall_port,
+		'timeout' => 0.05));
+	t_ok('connecting to a silent server succeeds', $stall_conn !== false);
+	if ($stall_conn) {
+		$t_start = microtime(true);
+		$stall_reply = gv_r_get($stall_conn, 'gv:botbad:203.0.113.5');
+		$stall_took = microtime(true) - $t_start;
+		t_ok('a stalled read returns false, not null', $stall_reply === false);
+		t_ok('a stalled read gives up quickly (' . number_format($stall_took, 3) . ' s)',
+			$stall_took < 1.0);
+		t_ok('a stalled read yields no bot verdict rather than a bad one',
+			gv_bot_verdict($stall_conn, '203.0.113.5') === '');
+		gv_redis_close($stall_conn);
+	}
+	fclose($stall);
+}
+
+// --------------------------------------------------------------------------
+t_section('Phase 3 holdout membership');
+
+t_ok('holdout is off by default', gv_is_holdout('devA', 'salt', 0) === false);
+t_ok('a negative percentage is treated as off', gv_is_holdout('devA', 'salt', -3) === false);
+t_ok('an empty identity is never in the holdout', gv_is_holdout('', 'salt', 5) === false);
+
+$ident = 'devA';
+$first = gv_is_holdout($ident, 'salt', 5);
+$stable = true;
+for ($i = 0; $i < 200; $i++) {
+	if (gv_is_holdout($ident, 'salt', 5) !== $first) { $stable = false; break; }
+}
+t_ok('membership is deterministic for the same identity', $stable);
+
+$hits_salt_a = 0;
+$hits_salt_b = 0;
+for ($i = 0; $i < 2000; $i++) {
+	if (gv_is_holdout('dev' . $i, 'salt-a', 5)) { $hits_salt_a++; }
+	if (gv_is_holdout('dev' . $i, 'salt-b', 5)) { $hits_salt_b++; }
+}
+t_ok('changing the salt reshuffles membership', $hits_salt_a !== $hits_salt_b);
+
+// Rate across many synthetic identities should land near the configured target.
+$sample = 20000;
+$rates  = array();
+foreach (array(1, 2, 5) as $pct) {
+	$hits = 0;
+	for ($i = 0; $i < $sample; $i++) {
+		if (gv_is_holdout('device-' . $i, 'measure-salt', $pct)) { $hits++; }
+	}
+	$rates[$pct] = 100.0 * $hits / $sample;
+}
+t_ok('1 percent lands near target (' . number_format($rates[1], 2) . '%)',
+	abs($rates[1] - 1.0) < 0.5);
+t_ok('2 percent lands near target (' . number_format($rates[2], 2) . '%)',
+	abs($rates[2] - 2.0) < 0.7);
+t_ok('5 percent lands near target (' . number_format($rates[5], 2) . '%)',
+	abs($rates[5] - 5.0) < 1.0);
+
+$clamped = 0;
+$at_five = 0;
+for ($i = 0; $i < 5000; $i++) {
+	if (gv_is_holdout('device-' . $i, 'measure-salt', 90)) { $clamped++; }
+	if (gv_is_holdout('device-' . $i, 'measure-salt', 5)) { $at_five++; }
+}
+t_ok('a percentage above 5 is clamped to 5', $clamped === $at_five);
+t_ok('the clamped rate stays near 5 percent (' . number_format(100.0 * $clamped / 5000, 2) . '%)',
+	abs(100.0 * $clamped / 5000 - 5.0) < 1.0);
 
 // --------------------------------------------------------------------------
 t_section('Phase 2 decision engine');

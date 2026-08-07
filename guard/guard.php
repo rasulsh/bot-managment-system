@@ -30,6 +30,9 @@ function gv_cfg_defaults(array $cfg) {
 		'cdn_ranges'       => array(),
 		'log_dir'          => dirname(__DIR__) . '/logs',
 		'ml_weight'        => 0.4,
+		'clf_weight'       => 0.5,
+		'holdout_pct'      => 0,
+		'holdout_salt'     => 'CHANGE_ME_TOO',
 		'bot_suffixes'     => array(
 			'googlebot' => array('.googlebot.com', '.google.com'),
 			'bingbot'   => array('.search.msn.com'),
@@ -43,7 +46,7 @@ function gv_cfg_defaults(array $cfg) {
 	$cfg['enforce'] = array_merge($enforce, $cfg['enforce']);
 	// Phase 2 signals merge exactly like enforce, so a Phase 1 config file
 	// without them keeps working and stays in shadow.
-	$signals = array('reputation' => false, 'ml' => false);
+	$signals = array('reputation' => false, 'ml' => false, 'clf' => false);
 	if (!isset($cfg['signals']) || !is_array($cfg['signals'])) { $cfg['signals'] = array(); }
 	$cfg['signals'] = array_merge($signals, $cfg['signals']);
 	$limits = array('window' => 300, 'device' => 150, 'ip_ua' => 400, 'ip' => 1200, 'bot' => 600);
@@ -319,6 +322,9 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 		'botv' => (string)$st['botv'],
 		'rep' => (int)$st['rep'],
 		'ml'  => (int)$st['ml'],
+		'clf' => (int)$st['clf'],
+		'hold' => (int)$st['hold'],
+		'ovr' => (string)$st['ovr'],
 		'act' => (string)$act,
 		'sh'  => (int)$sh,
 		'ms'  => round((microtime(true) - $t0) * 1000, 2),
@@ -331,13 +337,16 @@ function gv_emit(array $f, array $st, $act, $sh, $t0, $log_dir) {
 }
 
 // Default per-request state, filled in as the flow progresses.
-// botv/rep/ml carry the Phase 2 verdicts: '' means no bot verdict was read,
-// 0 is a neutral reputation, and -1 means no ML level was available.
+// botv/rep/ml/clf carry the offline verdicts: '' means no bot verdict was read,
+// 0 is a neutral reputation, and -1 means no level was available.
+// hold marks a request in the measured-but-never-enforced slice; ovr records an
+// operator override.
 function gv_state_new() {
 	return array(
 		'tok' => 'm', 'dev' => '', 'sc' => 0, 'rs' => array(),
 		'cd'  => 0, 'ciu' => 0, 'ci' => 0, 'rd' => 0, 'hp' => 0, 'bot' => '',
-		'botv' => '', 'rep' => 0, 'ml' => -1, 'esc' => 0,
+		'botv' => '', 'rep' => 0, 'ml' => -1, 'clf' => -1, 'esc' => 0,
+		'hold' => 0, 'ovr' => '',
 	);
 }
 
@@ -347,11 +356,41 @@ function gv_state_new() {
 
 // Read the offline bot verification verdict for an address.
 // Returns 'bad', 'ok' or '' (no verdict / degraded mode). A bad verdict wins.
+//
+// The === '1' comparison is load-bearing: gv_r_get returns the string on a hit,
+// null on a miss and FALSE on a command error or read timeout. Comparing
+// against null treated a stalled Redis as a bad verdict, which stamped
+// BOT_FAKE (+35) on a real crawler that will never solve a challenge. A read
+// that failed is no signal at all.
 function gv_bot_verdict($conn, $ip) {
 	if (!$conn) { return ''; }
-	if (gv_r_get($conn, 'gv:botbad:' . $ip) !== null) { return 'bad'; }
-	if (gv_r_get($conn, 'gv:botok:' . $ip) !== null) { return 'ok'; }
+	if (gv_r_get($conn, 'gv:botbad:' . $ip) === '1') { return 'bad'; }
+	if (gv_r_get($conn, 'gv:botok:' . $ip) === '1') { return 'ok'; }
 	return '';
+}
+
+// --------------------------------------------------------------------------
+// Phase 3 holdout
+// --------------------------------------------------------------------------
+
+// Deterministic holdout membership. Identity is the device id when the client
+// has one, else its address. Returns false whenever holdout is disabled.
+//
+// Determinism is the whole point: an identity that flickered in and out of the
+// holdout between requests would give useless measurements and an erratic
+// experience. The 5% ceiling is deliberate - this is a measurement sample, not
+// a bypass, and every request inside it is traffic nobody is protected from.
+// The & 0x7FFFFFFF is not decoration: crc32 returns a signed int, and on a
+// 32-bit PHP build roughly half of all identities hash negative, where the
+// modulo is also negative and the comparison is always true. That would put
+// half the traffic in the holdout instead of the configured few percent -
+// exactly the bypass the clamp exists to prevent. Masking the sign bit costs
+// one bit of a CRC and keeps the distribution uniform on every build.
+function gv_is_holdout($ident, $salt, $pct) {
+	$pct = (int)$pct;
+	if ($pct <= 0 || (string)$ident === '') { return false; }
+	if ($pct > 5) { $pct = 5; }
+	return ((crc32((string)$salt . '|' . (string)$ident) & 0x7FFFFFFF) % 10000) < ($pct * 100);
 }
 
 // Fold the Phase 2 verdicts into the static score. Pure.
@@ -562,8 +601,21 @@ function gv_run($t0) {
 	} else {
 		$enforced = !empty($cfg['enforce']['challenge']);
 	}
+
+	// Holdout: a small deterministic slice measured but never enforced against.
+	// It is the only source of outcome data this system has not already biased
+	// with its own gating, and the only way to estimate false negatives.
+	// Applied at the gate, so the intended action is still computed and logged.
+	$st['hold'] = gv_is_holdout(($st['dev'] !== '' ? $st['dev'] : $f['ip']),
+		$cfg['holdout_salt'], $cfg['holdout_pct']) ? 1 : 0;
+	if ($st['hold'] === 1 && ($intended === '403' || $intended === 'challenge')) {
+		// 429 is never held out: rate limiting is resource protection, not
+		// classification, and the holdout must not become a way to hammer a site.
+		$enforced = false;
+	}
+
 	if (!$enforced) {
-		// Monitor mode: record what would have happened and allow.
+		// Monitor mode or holdout: record what would have happened and allow.
 		gv_emit($f, $st, $intended, 1, $t0, $log);
 		return;
 	}
