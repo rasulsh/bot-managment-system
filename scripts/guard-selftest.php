@@ -261,32 +261,61 @@ t_ok('a phase 1 config without signals still merges cleanly',
 	gv_cfg_defaults(array('secret' => 'x'))['signals']['ml'] === false);
 
 t_ok('with signals off a positive reputation does not move the score',
-	gv_effective_score(20, 60, -1, $shadow_cfg) === 20);
+	gv_effective_score(20, 60, -1, -1, $shadow_cfg) === 20);
 t_ok('with signals off an anomaly level does not move the score',
-	gv_effective_score(20, 0, 100, $shadow_cfg) === 20);
+	gv_effective_score(20, 0, 100, -1, $shadow_cfg) === 20);
 t_ok('with signals off effective equals static even with both verdicts',
-	gv_effective_score(20, 60, 100, $shadow_cfg) === 20);
+	gv_effective_score(20, 60, 100, -1, $shadow_cfg) === 20);
 
 $on_cfg = gv_cfg_defaults(array('signals' => array('reputation' => true, 'ml' => true)));
 t_ok('with reputation on a positive verdict is added',
-	gv_effective_score(20, 45, -1, $on_cfg) === 65);
+	gv_effective_score(20, 45, -1, -1, $on_cfg) === 65);
 t_ok('with reputation on a negative verdict rescues the score',
-	gv_effective_score(30, -20, -1, $on_cfg) === 10);
+	gv_effective_score(30, -20, -1, -1, $on_cfg) === 10);
 t_ok('with ml on the level scales by ml_weight',
-	gv_effective_score(20, 0, 80, $on_cfg) === 52);
+	gv_effective_score(20, 0, 80, -1, $on_cfg) === 52);
 t_ok('an ml level of -1 means no verdict and contributes nothing',
-	gv_effective_score(20, 0, -1, $on_cfg) === 20);
+	gv_effective_score(20, 0, -1, -1, $on_cfg) === 20);
 t_ok('an ml level of 0 is a real verdict and contributes zero',
-	gv_effective_score(20, 0, 0, $on_cfg) === 20);
+	gv_effective_score(20, 0, 0, -1, $on_cfg) === 20);
 t_ok('both signals fold together',
-	gv_effective_score(10, 30, 50, $on_cfg) === 60);
+	gv_effective_score(10, 30, 50, -1, $on_cfg) === 60);
 
 $rep_only = gv_cfg_defaults(array('signals' => array('reputation' => true)));
 t_ok('one toggle on does not enable the other',
-	gv_effective_score(20, 10, 100, $rep_only) === 30);
+	gv_effective_score(20, 10, 100, -1, $rep_only) === 30);
 
 $weighted = gv_cfg_defaults(array('signals' => array('ml' => true), 'ml_weight' => 1.0));
-t_ok('ml_weight is honoured', gv_effective_score(0, 0, 70, $weighted) === 70);
+t_ok('ml_weight is honoured', gv_effective_score(0, 0, 70, -1, $weighted) === 70);
+
+// --- classifier signal ----------------------------------------------------
+t_ok('clf defaults to off', $shadow_cfg['signals']['clf'] === false);
+t_ok('clf_weight defaults to 0.5', $shadow_cfg['clf_weight'] === 0.5);
+t_ok('with clf off a classifier level does not move the score',
+	gv_effective_score(20, 0, -1, 100, $shadow_cfg) === 20);
+
+$clf_cfg = gv_cfg_defaults(array('signals' => array('clf' => true)));
+t_ok('with clf on the level scales by clf_weight',
+	gv_effective_score(20, 0, -1, 80, $clf_cfg) === 60);
+t_ok('a clf level of -1 means no verdict and contributes nothing',
+	gv_effective_score(20, 0, -1, -1, $clf_cfg) === 20);
+t_ok('a clf level of 0 is a real verdict and contributes zero',
+	gv_effective_score(20, 0, -1, 0, $clf_cfg) === 20);
+t_ok('clf alone does not enable the other signals',
+	gv_effective_score(20, 40, 100, 0, $clf_cfg) === 20);
+
+$all_on = gv_cfg_defaults(array('signals' => array(
+	'reputation' => true, 'ml' => true, 'clf' => true)));
+t_ok('all three signals fold together',
+	gv_effective_score(10, 20, 50, 40, $all_on) === 70);
+t_ok('with every signal on and no verdicts the score is untouched',
+	gv_effective_score(25, 0, -1, -1, $all_on) === 25);
+t_ok('clf_weight is honoured',
+	gv_effective_score(0, 0, -1, 60, gv_cfg_defaults(array(
+		'signals' => array('clf' => true), 'clf_weight' => 1.0))) === 60);
+t_ok('a classifier level can flip a borderline device once enabled',
+	gv_decide(gv_effective_score(40, 0, -1, 50, $clf_cfg), false, true, 'v', 60, '') === '403'
+	&& gv_decide(gv_effective_score(40, 0, -1, 50, $shadow_cfg), false, true, 'v', 60, '') === 'allow');
 
 // --------------------------------------------------------------------------
 t_section('Phase 3 operator overrides');
@@ -411,13 +440,13 @@ t_ok('the rate rule wins over the challenge rule',
 // moved by the hard-score rule.
 $borderline_sc = 40;
 t_ok('a borderline tokened device is allowed while reputation is shadowed',
-	gv_decide(gv_effective_score($borderline_sc, 30, -1, $shadow_cfg), false, true, 'v', 60, '') === 'allow');
+	gv_decide(gv_effective_score($borderline_sc, 30, -1, -1, $shadow_cfg), false, true, 'v', 60, '') === 'allow');
 t_ok('the same device is blocked once reputation is enabled',
-	gv_decide(gv_effective_score($borderline_sc, 30, -1, $on_cfg), false, true, 'v', 60, '') === '403');
+	gv_decide(gv_effective_score($borderline_sc, 30, -1, -1, $on_cfg), false, true, 'v', 60, '') === '403');
 t_ok('an anomaly level alone can flip the same borderline device',
-	gv_decide(gv_effective_score($borderline_sc, 0, 60, $on_cfg), false, true, 'v', 60, '') === '403');
+	gv_decide(gv_effective_score($borderline_sc, 0, 60, -1, $on_cfg), false, true, 'v', 60, '') === '403');
 t_ok('a trustworthy reputation keeps a scored device out of the block',
-	gv_decide(gv_effective_score(65, -20, -1, $on_cfg), false, true, 'v', 60, '') === 'allow');
+	gv_decide(gv_effective_score(65, -20, -1, -1, $on_cfg), false, true, 'v', 60, '') === 'allow');
 
 // --------------------------------------------------------------------------
 t_section('Redis roundtrip (optional)');
@@ -471,11 +500,11 @@ if ($redis_bin === '') {
 		// Googlebot UA with no Accept-Language and few headers.
 		$fake_sc = 15 + 15 + 35;                  // NO_AL plus FEW_HDR plus BOT_FAKE
 		t_ok('a revoked bot claim blocks even with every signal toggle off',
-			gv_decide(gv_effective_score($fake_sc, 0, -1, $shadow_cfg), false, true, 'm', 60, '') === '403');
+			gv_decide(gv_effective_score($fake_sc, 0, -1, -1, $shadow_cfg), false, true, 'm', 60, '') === '403');
 		t_ok('the same headers without BOT_FAKE are only challenged',
-			gv_decide(gv_effective_score(30, 0, -1, $shadow_cfg), false, true, 'm', 60, '') === 'challenge');
+			gv_decide(gv_effective_score(30, 0, -1, -1, $shadow_cfg), false, true, 'm', 60, '') === 'challenge');
 		t_ok('BOT_FAKE alone does not block: an impersonator is still judged on its merits',
-			gv_decide(gv_effective_score(35, 0, -1, $shadow_cfg), false, true, 'm', 60, '') === 'challenge');
+			gv_decide(gv_effective_score(35, 0, -1, -1, $shadow_cfg), false, true, 'm', 60, '') === 'challenge');
 
 		// --- operator overrides against a live keyspace --------------------
 		$odev = 'overridedev';

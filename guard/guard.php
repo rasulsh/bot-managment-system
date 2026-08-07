@@ -393,20 +393,26 @@ function gv_is_holdout($ident, $salt, $pct) {
 	return ((crc32((string)$salt . '|' . (string)$ident) & 0x7FFFFFFF) % 10000) < ($pct * 100);
 }
 
-// Fold the Phase 2 verdicts into the static score. Pure.
+// Fold the offline verdicts into the static score. Pure.
 //
-// Shadow-first: each signal is only ADDED when its toggle is on. With both
-// toggles off the effective score equals the static score exactly, so the
+// Shadow-first: each signal is only ADDED when its toggle is on. With every
+// toggle off the effective score equals the static score exactly, so the
 // verdicts are visible in the logs long before they can change an outcome.
 // BOT_FAKE is deliberately not gated here - it is already part of the static
 // score, because an impersonator is a hard signal, not a shadow one.
-function gv_effective_score($sc, $rep, $ml, array $cfg) {
+//
+// The signature stays plain values on purpose: this function is mirrored in
+// analyzer/decision.py and parity-tested case by case against it.
+function gv_effective_score($sc, $rep, $ml, $clf, array $cfg) {
 	$esc = (int)$sc;
 	if (!empty($cfg['signals']['reputation']) && (int)$rep !== 0) {
 		$esc += (int)$rep;
 	}
 	if (!empty($cfg['signals']['ml']) && (int)$ml >= 0) {
 		$esc += (int)round((int)$ml * (float)$cfg['ml_weight']);
+	}
+	if (!empty($cfg['signals']['clf']) && (int)$clf >= 0) {
+		$esc += (int)round((int)$clf * (float)$cfg['clf_weight']);
 	}
 	return $esc;
 }
@@ -560,13 +566,17 @@ function gv_run($t0) {
 		}
 	}
 
-	// 7b. Phase 2 verdicts for real users. Both are per device, because they
-	// describe a browsing identity rather than an address.
+	// 7b. Offline verdicts for real users. All three are per device, because
+	// they describe a browsing identity rather than an address. is_numeric()
+	// rejects both a miss (null) and a failed read (false), so a stalled Redis
+	// leaves the neutral sentinels in place.
 	if ($st['dev'] !== '' && $conn) {
 		$rep = gv_r_get($conn, 'gv:rep:' . $st['dev']);
 		$st['rep'] = is_numeric($rep) ? (int)$rep : 0;
 		$ml = gv_r_get($conn, 'gv:ml:' . $st['dev']);
 		$st['ml'] = is_numeric($ml) ? (int)$ml : -1;
+		$clf = gv_r_get($conn, 'gv:clf:' . $st['dev']);
+		$st['clf'] = is_numeric($clf) ? (int)$clf : -1;
 	}
 
 	// 7c. Operator overrides. An allow short-circuits everything below it: no
@@ -612,7 +622,7 @@ function gv_run($t0) {
 	gv_redis_close($conn);
 
 	// 10. Decision, now judging the effective score.
-	$st['esc'] = gv_effective_score($st['sc'], $st['rep'], $st['ml'], $cfg);
+	$st['esc'] = gv_effective_score($st['sc'], $st['rep'], $st['ml'], $st['clf'], $cfg);
 	$nav       = gv_is_nav($f);
 	$intended  = gv_decide($st['esc'], $over, $nav, $st['tok'], $cfg['hard_block_score'],
 		$st['ovr']);
