@@ -10,6 +10,7 @@ when those are not installed.
 from __future__ import print_function
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -633,6 +634,85 @@ replay_source = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 ok('replay never imports redis_io', 'redis_io' not in replay_source)
 ok('replay never opens a file for writing',
    "'w'" not in replay_source and '"w"' not in replay_source)
+
+# ---------------------------------------------------------------------------
+section('Period report')
+
+from analyzer import report as report_mod
+
+report_rows = list(replay_rows_in)
+report_rows.append(row(950000.0, dev='', ip='10.2.2.2', act='nonce_bad'))
+report_rows.append(row(950100.0, dev='rhuman0', act='allow', ovr='allow',
+                       tok='v'))
+report_stats = report_mod.collect(report_rows, cfg, {'source': 'defaults',
+                                                     'holdout_pct': 5})
+
+ok('the report counts every request', report_stats['requests'] == len(report_rows))
+ok('the report counts unique devices', len(report_stats['devices']) == 9)
+ok('the report separates enforced from holdout requests',
+   report_stats['holdout_requests'] == 1
+   and report_stats['enforced_requests'] == len(report_rows) - 1)
+ok('the report counts the challenge funnel',
+   report_stats['token_issued'] == 6 and report_stats['challenge_served'] == 0)
+ok('the report notices operator overrides',
+   report_stats['overrides'].get('allow') == 1)
+ok('the report tracks verdict coverage',
+   report_stats['has_rep'] > 0 and report_stats['has_clf'] > 0)
+ok('the report records no divergence when esc equals sc',
+   report_stats['diverged'] == 0)
+
+text = report_mod.render_text(report_stats, 7)
+for heading in ('1. Traffic', '2. Decisions', '3. Challenge funnel',
+                '4. Score distribution', '5. Verdict coverage',
+                '6. Holdout comparison', '7. Top offenders',
+                '8. Anomalies worth a look'):
+    ok('the text report contains section "%s"' % heading, heading in text)
+ok('the text report names the false-negative estimate',
+   'false-negative estimate' in text)
+
+disabled = report_mod.collect([row(1000.0, dev='d1')], cfg,
+                              {'source': 'defaults', 'holdout_pct': 0})
+ok('the report says so when holdout is disabled',
+   'holdout disabled' in report_mod.render_text(disabled, 7))
+
+low_funnel = report_mod.collect(
+    [row(1000.0 + i, dev='', ip='10.3.3.3', act='challenge') for i in range(20)]
+    + [row(2000.0, dev='d9', act='token_issued')], cfg,
+    {'source': 'defaults', 'holdout_pct': 0})
+ok('a poor challenge funnel is called out in words',
+   'BELOW TARGET' in report_mod.render_text(low_funnel, 7))
+
+html = report_mod.render_html(report_stats, 7)
+ok('the html report starts with a doctype', html.startswith('<!doctype html>'))
+ok('the html report closes cleanly', html.rstrip().endswith('</html>'))
+ok('the html report contains no script tag', '<script' not in html.lower())
+ok('the html report references no external asset',
+   not re.search(r'(?:src|href)\s*=', html) and 'http://' not in html
+   and 'https://' not in html)
+ok('the html report has no inline event handler',
+   not re.search(r'\son[a-z]+\s*=', html))
+ok('the html report loads no remote font or image',
+   '@import' not in html and 'url(' not in html)
+try:
+    import xml.etree.ElementTree as ElementTree
+    ElementTree.fromstring(html[html.index('<main'):html.rindex('</main>') + 7])
+    ok('the html body is well-formed markup', True)
+except Exception as exc:
+    ok('the html body is well-formed markup: %s' % exc, False)
+
+ok('html escaping neutralises markup in an identity',
+   '&lt;script&gt;' in report_mod._esc_html('<script>'))
+
+spiky = {'2026-01-01': {'nonce_bad': 1, 'botv_bad': 0, 'block': 0, 'degraded': 0},
+         '2026-01-02': {'nonce_bad': 40, 'botv_bad': 0, 'block': 0, 'degraded': 0}}
+ok('a day-over-day jump is reported',
+   any('failed handshakes' in line for line in report_mod.anomalies(spiky)))
+ok('a single day produces no anomaly', report_mod.anomalies(
+    {'2026-01-01': {'nonce_bad': 99}}) == [])
+
+report_source = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'report.py')).read()
+ok('the report never imports redis_io', 'redis_io' not in report_source)
 
 # ---------------------------------------------------------------------------
 section('Isolation Forest')
