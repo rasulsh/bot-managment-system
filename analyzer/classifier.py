@@ -27,6 +27,8 @@ every training run.
 
 from __future__ import print_function
 
+import os
+
 from analyzer.features import FEATURE_ORDER
 
 try:
@@ -157,6 +159,41 @@ def load(model_path):
     if 'model' not in bundle:
         return None
     return bundle
+
+
+def inspect(model_path):
+    """Why a classifier bundle did or did not load. Returns a dict, never raises.
+
+    Same reasoning as model.inspect: a stale classifier stops gv:clf being
+    written, and with signals.clf on the effective score silently drops.
+    """
+    out = {'exists': False, 'loadable': False, 'stale': False,
+           'feature_order': None, 'metrics': None, 'error': ''}
+    if not os.path.isfile(model_path):
+        out['error'] = 'no file at %s' % model_path
+        return out
+    out['exists'] = True
+    if not SKLEARN_AVAILABLE:
+        out['error'] = 'scikit-learn unavailable'
+        return out
+    try:
+        bundle = joblib.load(model_path)
+    except Exception as exc:
+        out['error'] = 'unreadable: %s' % exc
+        return out
+    if not isinstance(bundle, dict) or 'model' not in bundle:
+        out['error'] = 'not a classifier bundle'
+        return out
+    out['feature_order'] = bundle.get('feature_order')
+    out['metrics'] = bundle.get('metrics')
+    if out['feature_order'] != list(FEATURE_ORDER):
+        out['stale'] = True
+        out['error'] = ('feature order mismatch: bundle has %d features, the '
+                        'analyzer now has %d'
+                        % (len(out['feature_order'] or []), len(FEATURE_ORDER)))
+        return out
+    out['loadable'] = True
+    return out
 
 
 def score(bundle, vector):

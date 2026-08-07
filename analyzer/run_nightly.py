@@ -20,6 +20,7 @@ from analyzer import features as features_mod
 from analyzer import labels as labels_mod
 from analyzer import logs as logs_mod
 from analyzer import model as model_mod
+from analyzer import promote as promote_mod
 from analyzer import redis_io
 from analyzer import reputation as reputation_mod
 
@@ -108,6 +109,10 @@ def parse_args(argv):
     parser.add_argument('--train', action='store_true', help='retrain the anomaly model')
     parser.add_argument('--train-clf', action='store_true',
                         help='retrain the supervised classifier')
+    parser.add_argument('--candidate', action='store_true',
+                        help='train to the candidate paths and leave the live '
+                             'models untouched (the documented default for a '
+                             'feature-set migration)')
     parser.add_argument('--ground-truth', default=None, help='operator label file')
     parser.add_argument('--dry-run', action='store_true',
                         help='compute and report without writing verdicts')
@@ -154,7 +159,14 @@ def main(argv=None):
     train_note = 'not requested'
     bundle = None
 
-    want_train = args.train or not os.path.isfile(cfg['model_path'])
+    ml_train_path = cfg['model_candidate_path'] if args.candidate else cfg['model_path']
+    clf_train_path = cfg['clf_candidate_path'] if args.candidate else cfg['clf_path']
+
+    # --candidate never implies training: it only redirects where training
+    # writes. Without --train it would otherwise silently start writing a
+    # candidate on every nightly run.
+    want_train = args.train or (not args.candidate
+                                and not os.path.isfile(cfg['model_path']))
     if not model_mod.SKLEARN_AVAILABLE:
         train_note = 'scikit-learn unavailable, no ML this run'
     elif want_train:
@@ -162,8 +174,9 @@ def main(argv=None):
         train_n = len(vectors)
         try:
             trained = model_mod.train(vectors, cfg['contamination'],
-                                      cfg['model_path'], cfg['ml_min_train'])
-            train_note = ('trained on %d clean sessions' % train_n if trained
+                                      ml_train_path, cfg['ml_min_train'])
+            train_note = ('trained on %d clean sessions -> %s'
+                          % (train_n, os.path.basename(ml_train_path)) if trained
                           else 'skipped: %d clean sessions is below ml_min_train=%d'
                                % (train_n, cfg['ml_min_train']))
         except Exception as exc:
@@ -196,20 +209,22 @@ def main(argv=None):
     clf_bundle = None
     clf_written = 0
 
-    want_clf_train = args.train_clf or not os.path.isfile(cfg['clf_path'])
+    want_clf_train = args.train_clf or (not args.candidate
+                                        and not os.path.isfile(cfg['clf_path']))
     if not clf_mod.SKLEARN_AVAILABLE:
         clf_note = 'scikit-learn unavailable, no classifier this run'
     elif want_clf_train:
         X, y = collect_training_set(devices, ground_truth)
         positives = sum(1 for v in y if v == 1)
         try:
-            written = clf_mod.train(X, y, cfg['clf_path'],
+            written = clf_mod.train(X, y, clf_train_path,
                                     min_positive=cfg['clf_min_positive'],
                                     test_size=cfg['clf_test_size'],
                                     target_precision=cfg['clf_target_precision'])
             if written:
-                clf_note = 'trained on %d labelled sessions (%d bot, %d human)' % (
-                    len(y), positives, len(y) - positives)
+                clf_note = 'trained on %d labelled sessions (%d bot, %d human) -> %s' % (
+                    len(y), positives, len(y) - positives,
+                    os.path.basename(clf_train_path))
             else:
                 clf_note = ('skipped: %d bot-labelled sessions is below '
                             'clf_min_positive=%d, or one class was missing'
@@ -239,6 +254,15 @@ def main(argv=None):
     # --- summary ----------------------------------------------------------
     device_keys = sum(1 for e in devices.values()
                       if e['is_device'] and not e.get('holdout'))
+
+    # A stale live model is the one failure mode that makes the system quietly
+    # more permissive, so it is said out loud with the fix attached.
+    for kind, info in sorted(promote_mod.live_status(cfg).items()):
+        warning = promote_mod.stale_warning(kind, info)
+        if warning:
+            print(warning, file=sys.stderr)
+            print(warning)
+
     if client is None:
         print('Redis unavailable: verdicts were computed but not stored.')
     if bundle is None and model_mod.SKLEARN_AVAILABLE:

@@ -15,3 +15,8 @@ analyzer/clf.joblib
 analyzer/ground-truth.txt
 analyzer/reports/
 *.html
+
+# Phase 4 candidate model artefacts.
+analyzer/model.joblib.candidate
+analyzer/clf.joblib.candidate
+analyzer/*.candidate

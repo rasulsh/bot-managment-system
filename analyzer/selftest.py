@@ -1129,6 +1129,146 @@ else:
     os.rmdir(clf_dir)
 
 # ---------------------------------------------------------------------------
+section('Phase 4 candidate models and promotion')
+
+from analyzer import promote as promote_mod
+
+ok('config carries both candidate paths',
+   cfg['model_candidate_path'].endswith('.candidate')
+   and cfg['clf_candidate_path'].endswith('.candidate'))
+ok('a candidate path is not the live path',
+   cfg['model_candidate_path'] != cfg['model_path']
+   and cfg['clf_candidate_path'] != cfg['clf_path'])
+ok('paths_for returns (live, candidate) for each kind',
+   promote_mod.paths_for('ml', cfg) == (cfg['model_path'], cfg['model_candidate_path'])
+   and promote_mod.paths_for('clf', cfg) == (cfg['clf_path'], cfg['clf_candidate_path']))
+try:
+    promote_mod.paths_for('nonsense', cfg)
+    ok('an unknown model kind is rejected', False)
+except ValueError:
+    ok('an unknown model kind is rejected', True)
+
+promo_dir = tempfile.mkdtemp(prefix='gv-selftest-promo-')
+promo_cfg = dict(cfg,
+                 model_path=os.path.join(promo_dir, 'model.joblib'),
+                 model_candidate_path=os.path.join(promo_dir, 'model.joblib.candidate'),
+                 clf_path=os.path.join(promo_dir, 'clf.joblib'),
+                 clf_candidate_path=os.path.join(promo_dir, 'clf.joblib.candidate'))
+
+missing = promote_mod.check('ml', promo_cfg)
+ok('promotion refuses a missing candidate', missing['ok'] is False)
+ok('the refusal names the command that produces one',
+   '--candidate' in missing['reason'])
+ok('promote() on a missing candidate is a no-op refusal',
+   promote_mod.promote('ml', promo_cfg)['ok'] is False)
+
+ok('an absent live model is reported as absent, not stale',
+   model_mod.inspect(promo_cfg['model_path'])['exists'] is False)
+ok('no warning is emitted for an absent model',
+   promote_mod.stale_warning('ml', model_mod.inspect(promo_cfg['model_path'])) == '')
+
+if not model_mod.SKLEARN_AVAILABLE:
+    skip('candidate training and promotion round-trip',
+         'scikit-learn not installed: ' + model_mod.SKLEARN_ERROR)
+else:
+    import random as promo_random
+    promo_random.seed(17)
+
+    def promo_vector():
+        n_req = promo_random.uniform(5, 20)
+        dur = promo_random.uniform(60, 400)
+        return [n_req, dur, dur / n_req, promo_random.uniform(4, 12),
+                promo_random.uniform(1, 4), promo_random.uniform(0.7, 1.0),
+                promo_random.uniform(0.5, 0.9), promo_random.uniform(0, 8),
+                0.0, 0.0, 0.0, 0.0,
+                promo_random.uniform(0, 0.05), 0.0, 0.0,
+                promo_random.uniform(8000, 60000), promo_random.uniform(0.8, 1.0)]
+
+    vectors = [promo_vector() for _ in range(300)]
+
+    # Training to the candidate path must not touch the live path at all.
+    ok('candidate training writes the candidate',
+       model_mod.train(vectors, 0.05, promo_cfg['model_candidate_path'],
+                       min_train=200) is True)
+    ok('candidate training left the live model untouched',
+       not os.path.isfile(promo_cfg['model_path']))
+
+    verdict = promote_mod.check('ml', promo_cfg)
+    ok('a matching candidate passes the check', verdict['ok'] is True)
+
+    result = promote_mod.promote('ml', promo_cfg)
+    ok('promotion moves the candidate into place', result['ok'] is True)
+    ok('the live model now exists', os.path.isfile(promo_cfg['model_path']))
+    ok('the candidate no longer exists after promotion',
+       not os.path.isfile(promo_cfg['model_candidate_path']))
+    ok('the promoted model loads', model_mod.load(promo_cfg['model_path']) is not None)
+
+    # A bundle from before the feature extension must be refused, and must
+    # produce the loud warning that names the fix.
+    stale_bundle = model_mod.load(promo_cfg['model_path'])
+    stale_bundle = dict(stale_bundle)
+    stale_bundle['feature_order'] = list(features_mod.FEATURE_ORDER)[:12]
+    import joblib as promo_joblib
+    promo_joblib.dump(stale_bundle, promo_cfg['model_candidate_path'])
+    stale_check = promote_mod.check('ml', promo_cfg)
+    ok('promotion refuses a feature-order mismatch', stale_check['ok'] is False)
+    ok('the mismatch refusal states both feature counts',
+       '12 features' in stale_check['reason'] and '17' in stale_check['reason'])
+    ok('the stale candidate was not moved into place',
+       os.path.isfile(promo_cfg['model_candidate_path']))
+
+    promo_joblib.dump(stale_bundle, promo_cfg['model_path'])
+    stale_info = model_mod.inspect(promo_cfg['model_path'])
+    ok('a stale live model is detected as stale',
+       stale_info['stale'] is True and stale_info['loadable'] is False)
+    warning = promote_mod.stale_warning('ml', stale_info)
+    ok('a stale live model produces a loud warning', warning.startswith('WARNING'))
+    ok('the warning explains the silent-permissiveness risk',
+       'silently dropped' in warning)
+    ok('the warning names the promotion command',
+       'promote-model ml' in warning and '--candidate' in warning)
+    ok('live_status inspects both kinds',
+       set(promote_mod.live_status(promo_cfg)) == set(['ml', 'clf']))
+
+    # The classifier gate: a candidate below target precision is refused, so a
+    # false-positive problem cannot be promoted into production.
+    def promo_bot_vector():
+        n_req = promo_random.uniform(60, 400)
+        dur = n_req * promo_random.uniform(0.15, 0.3)
+        return [n_req, dur, dur / n_req, promo_random.uniform(0.0, 0.05),
+                promo_random.uniform(0.05, 0.2), 1.0, promo_random.uniform(0.95, 1.0),
+                promo_random.uniform(25, 45), 1.0, 1.0, promo_random.uniform(0.5, 1.0), 0.0,
+                promo_random.uniform(0.3, 0.7), 0.0, 0.0,
+                promo_random.uniform(100000, 400000), promo_random.uniform(0.8, 1.0)]
+
+    clf_X = [promo_vector() for _ in range(300)] + [promo_bot_vector() for _ in range(120)]
+    clf_y = [0] * 300 + [1] * 120
+    ok('a classifier candidate trains to the candidate path',
+       clf_mod.train(clf_X, clf_y, promo_cfg['clf_candidate_path'], min_positive=50) is True)
+    ok('classifier candidate training left the live classifier untouched',
+       not os.path.isfile(promo_cfg['clf_path']))
+    ok('a classifier candidate meeting its target may be promoted',
+       promote_mod.check('clf', promo_cfg)['ok'] is True)
+
+    weak = dict(clf_mod.load(promo_cfg['clf_candidate_path']))
+    weak['metrics'] = dict(weak['metrics'], precision=0.42)
+    promo_joblib.dump(weak, promo_cfg['clf_candidate_path'])
+    weak_check = promote_mod.check('clf', promo_cfg)
+    ok('promotion refuses a classifier below target precision', weak_check['ok'] is False)
+    ok('the precision refusal explains the cost',
+       'restrict real users' in weak_check['reason'])
+
+    no_metrics = dict(clf_mod.load(promo_cfg['clf_candidate_path']))
+    no_metrics['metrics'] = None
+    promo_joblib.dump(no_metrics, promo_cfg['clf_candidate_path'])
+    ok('promotion refuses a classifier carrying no metrics',
+       promote_mod.check('clf', promo_cfg)['ok'] is False)
+
+for name in os.listdir(promo_dir):
+    os.unlink(os.path.join(promo_dir, name))
+os.rmdir(promo_dir)
+
+# ---------------------------------------------------------------------------
 print('')
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)
