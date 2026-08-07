@@ -26,6 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from analyzer import bridge
 from analyzer import config as config_mod
 from analyzer import logs as logs_mod
+from analyzer import outcomes as outcomes_mod
+
+STATUS_ORDER = ('2xx', '3xx', '404', '4xx', '5xx', 'other')
 
 SCORE_BUCKETS = ((0, 0), (1, 14), (15, 29), (30, 44), (45, 59), (60, 79), (80, 10 ** 9))
 
@@ -93,6 +96,15 @@ def collect(rows, cfg, guard_cfg):
         'top_clf': {},
         'top_hp': {},
         'overrides': {},
+        # Phase 4 response outcomes.
+        'outcome_known': 0,
+        'status': {},
+        'status_holdout': {},
+        'status_enforced': {},
+        'dur': [],
+        'top_404': {},
+        'top_bytes': {},
+        'bytes_total': 0.0,
     }
 
     for r in rows:
@@ -160,6 +172,25 @@ def collect(rows, cfg, guard_cfg):
         if int(r.get('hp') or 0) == 1 and key:
             stats['top_hp'][key] = stats['top_hp'].get(key, 0) + 1
 
+        # --- Phase 4: what the application actually did ------------------
+        out = r.get('_out')
+        bucket_name = outcomes_mod.status_class(out)
+        if bucket_name is not None:
+            stats['outcome_known'] += 1
+            stats['status'][bucket_name] = stats['status'].get(bucket_name, 0) + 1
+            side = 'status_holdout' if held else 'status_enforced'
+            stats[side][bucket_name] = stats[side].get(bucket_name, 0) + 1
+            if bucket_name == '404' and key:
+                stats['top_404'][key] = stats['top_404'].get(key, 0) + 1
+            size = out.get('by')
+            if isinstance(size, (int, float)) and not isinstance(size, bool) and size >= 0:
+                stats['bytes_total'] += float(size)
+                if key:
+                    stats['top_bytes'][key] = stats['top_bytes'].get(key, 0.0) + float(size)
+            duration = out.get('dur')
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                stats['dur'].append(float(duration))
+
         if held:
             stats['holdout_requests'] += 1
             if key:
@@ -196,6 +227,7 @@ def collect(rows, cfg, guard_cfg):
             bucket['degraded'] += 1
 
     stats['guard'] = guard_cfg
+    stats['models'] = cfg.get('_models') or {}
     stats['challenge_target'] = float(cfg.get('challenge_success_target', 0.95))
     stats['top_n'] = int(cfg.get('report_top_n', 20))
     return stats
@@ -296,9 +328,64 @@ def render_text(stats, days):
     if total and stats['has_rep'] == 0 and stats['has_ml'] == 0 and stats['has_clf'] == 0:
         A('   NO VERDICTS AT ALL. The analyzer is probably not running, or Redis is not')
         A('   shared between the guard and the analyzer. Check the cron jobs first.')
+    elif total and stats['has_rep'] and not (stats['has_ml'] or stats['has_clf']):
+        A('   Reputations are being written but no model verdicts are. That usually')
+        A('   means a stale model after a feature-set change: run_nightly.py --train')
+        A('   --train-clf --candidate, then ctl.py promote-model ml and clf.')
+    for kind, info in sorted((stats.get('models') or {}).items()):
+        if info.get('stale'):
+            A('   STALE %s MODEL: %s' % (kind.upper(), info.get('error', '')))
+        elif not info.get('exists'):
+            A('   no %s model on disk yet' % kind)
     A('')
 
-    A('6. Holdout comparison')
+    A('6. Response outcomes')
+    known = stats['outcome_known']
+    coverage = _pct(known, total)
+    A('   requests with an outcome  %d (%.1f%%)' % (known, coverage))
+    if known == 0:
+        A('   No outcome lines in this window. Either capture_outcomes is off, or')
+        A('   Phase 4 has only just been deployed. Nothing below applies yet.')
+    else:
+        if coverage < 80.0:
+            A('   Coverage under ~80%% is normal when the application does not declare')
+            A('   a Content-Length (compressed or streamed responses), or when capture')
+            A('   was enabled part way through this window. It is not an error - the')
+            A('   outcome_cov feature exists so the model knows how much to trust the')
+            A('   rest.')
+        A('')
+        A('   %-8s %10s %8s' % ('status', 'count', 'share'))
+        for name in STATUS_ORDER:
+            count = stats['status'].get(name, 0)
+            if count:
+                A('   %-8s %10d %7.1f%%' % (name, count, _pct(count, known)))
+        A('')
+        A('   Enforced population vs holdout')
+        enf = stats['status_enforced']
+        held = stats['status_holdout']
+        enf_n = sum(enf.values())
+        held_n = sum(held.values())
+        if held_n == 0:
+            A('   No holdout outcomes yet, so there is nothing to compare against.')
+        else:
+            A('   %-8s %12s %12s' % ('status', 'enforced', 'holdout'))
+            for name in STATUS_ORDER:
+                if enf.get(name, 0) or held.get(name, 0):
+                    A('   %-8s %11.1f%% %11.1f%%'
+                      % (name, _pct(enf.get(name, 0), enf_n), _pct(held.get(name, 0), held_n)))
+            A('   A 404 rate several times higher in the unenforced slice is a direct')
+            A('   estimate of what enforcement is currently catching.')
+        A('')
+        A('   total bytes served      %.1f MB' % (stats['bytes_total'] / (1024.0 * 1024.0)))
+        A('   request time median     %.1f ms' % _percentile(stats['dur'], 0.5))
+        A('   request time p99        %.1f ms' % _percentile(stats['dur'], 0.99))
+        A('')
+        _top_block(A, 'top identities by 404 count', stats['top_404'], stats['top_n'])
+        _top_block(A, 'top identities by bytes served',
+                   dict((k, int(v)) for k, v in stats['top_bytes'].items()), stats['top_n'])
+    A('')
+
+    A('7. Holdout comparison')
     if int(stats['guard'].get('holdout_pct', 0) or 0) == 0 and stats['holdout_requests'] == 0:
         A('   holdout disabled (holdout_pct = 0), so there is no unbiased slice to')
         A('   compare against and no false-negative estimate is possible.')
@@ -324,14 +411,14 @@ def render_text(stats, days):
         A('   holdout shows and the enforced population does not is what enforcement hides.')
     A('')
 
-    A('7. Top offenders')
+    A('8. Top offenders')
     top_n = stats['top_n']
     _top_block(A, 'by reputation', stats['top_rep'], top_n)
     _top_block(A, 'by classifier level', stats['top_clf'], top_n)
     _top_block(A, 'by honeypot hits', stats['top_hp'], top_n)
     A('')
 
-    A('8. Anomalies worth a look')
+    A('9. Anomalies worth a look')
     found = anomalies(stats['by_day'])
     if not found:
         A('   nothing stood out day over day')
@@ -457,7 +544,58 @@ def render_html(stats, days):
         A('<div class="note">No verdicts at all. The analyzer is probably not running, '
           'or Redis is not shared between the guard and the analyzer.</div>')
 
-    A('<h2>6. Holdout comparison</h2>')
+    A('<h2>6. Response outcomes</h2>')
+    known = stats['outcome_known']
+    if known == 0:
+        A('<p class="sub">No outcome lines in this window &#8212; either '
+          '<code>capture_outcomes</code> is off, or Phase 4 has only just been '
+          'deployed.</p>')
+    else:
+        A('<p class="sub">%d of %d requests (%.1f%%) matched an outcome line.</p>'
+          % (known, total, _pct(known, total)))
+        if _pct(known, total) < 80.0:
+            A('<div class="note">Coverage under ~80% is normal when the application '
+              'does not declare a Content-Length (compressed or streamed responses), '
+              'or when capture was enabled part way through this window.</div>')
+        A('<table>')
+        A(_bar_rows([(n, stats['status'].get(n, 0)) for n in STATUS_ORDER
+                     if stats['status'].get(n, 0)], known))
+        A('</table>')
+        enf = stats['status_enforced']
+        held_st = stats['status_holdout']
+        enf_n = sum(enf.values())
+        held_n = sum(held_st.values())
+        if held_n:
+            A('<p class="sub">Enforced population vs holdout</p><table>')
+            A('<tr><th>status</th><td class="n">enforced</td><td class="n">holdout</td></tr>')
+            for name in STATUS_ORDER:
+                if enf.get(name, 0) or held_st.get(name, 0):
+                    A('<tr><th>%s</th><td class="n">%.1f%%</td><td class="n">%.1f%%</td></tr>'
+                      % (_esc_html(name), _pct(enf.get(name, 0), enf_n),
+                         _pct(held_st.get(name, 0), held_n)))
+            A('</table>')
+            A('<p class="sub">A 404 rate several times higher in the unenforced slice '
+              'is a direct estimate of what enforcement is currently catching.</p>')
+        A('<table>')
+        A('<tr><th>total bytes served</th><td class="n">%.1f MB</td><td></td></tr>'
+          % (stats['bytes_total'] / (1024.0 * 1024.0)))
+        A('<tr><th>request time median</th><td class="n">%.1f ms</td><td></td></tr>'
+          % _percentile(stats['dur'], 0.5))
+        A('<tr><th>request time p99</th><td class="n">%.1f ms</td><td></td></tr>'
+          % _percentile(stats['dur'], 0.99))
+        A('</table>')
+        for title, mapping in (('Top identities by 404 count', stats['top_404']),
+                               ('Top identities by bytes served',
+                                dict((k, int(v)) for k, v in stats['top_bytes'].items()))):
+            A('<p class="sub">%s</p><table>' % _esc_html(title))
+            ordered = sorted(mapping.items(), key=lambda kv: -kv[1])[:stats['top_n']]
+            if not ordered:
+                A('<tr><th>(none)</th><td class="n"></td><td></td></tr>')
+            else:
+                A(_bar_rows(ordered, ordered[0][1] or 1))
+            A('</table>')
+
+    A('<h2>7. Holdout comparison</h2>')
     if int(stats['guard'].get('holdout_pct', 0) or 0) == 0 and stats['holdout_requests'] == 0:
         A('<p class="sub">Holdout disabled (<code>holdout_pct = 0</code>). No unbiased '
           'slice, so no false-negative estimate is possible.</p>')
@@ -476,7 +614,7 @@ def render_html(stats, days):
         A('</table>')
         A('<p class="sub">The gap between these columns is the false-negative estimate.</p>')
 
-    A('<h2>7. Top offenders</h2>')
+    A('<h2>8. Top offenders</h2>')
     for title, mapping in (('By reputation', stats['top_rep']),
                            ('By classifier level', stats['top_clf']),
                            ('By honeypot hits', stats['top_hp'])):
@@ -489,7 +627,7 @@ def render_html(stats, days):
             A(_bar_rows(ordered, top))
         A('</table>')
 
-    A('<h2>8. Anomalies worth a look</h2>')
+    A('<h2>9. Anomalies worth a look</h2>')
     found = anomalies(stats['by_day'])
     if not found:
         A('<p class="sub">Nothing stood out day over day.</p>')
@@ -509,6 +647,9 @@ def parse_args(argv):
     parser.add_argument('--log-dir', default=None, help='override the log directory')
     parser.add_argument('--days', type=int, default=None, help='window in days')
     parser.add_argument('--html', default=None, help='also write a standalone HTML file here')
+    parser.add_argument('--model', choices=('live', 'candidate'), default='live',
+                        help='which model bundle to describe (candidate lets a '
+                             'migration be evaluated before promotion)')
     return parser.parse_args(argv)
 
 
@@ -527,6 +668,16 @@ def main(argv=None):
         return 2
 
     guard_cfg = bridge.guard_config(cfg)
+
+    # Describe whichever bundle the operator asked about, so a candidate can be
+    # evaluated before it goes anywhere near production.
+    from analyzer import promote as promote_mod
+    described = dict(cfg)
+    if args.model == 'candidate':
+        described['model_path'] = cfg['model_candidate_path']
+        described['clf_path'] = cfg['clf_candidate_path']
+    cfg['_models'] = promote_mod.live_status(described)
+
     rows = list(logs_mod.read_lines(cfg['log_dir'], days))
     stats = collect(rows, cfg, guard_cfg)
 

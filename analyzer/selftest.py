@@ -906,8 +906,8 @@ ok('the report records no divergence when esc equals sc',
 text = report_mod.render_text(report_stats, 7)
 for heading in ('1. Traffic', '2. Decisions', '3. Challenge funnel',
                 '4. Score distribution', '5. Verdict coverage',
-                '6. Holdout comparison', '7. Top offenders',
-                '8. Anomalies worth a look'):
+                '6. Response outcomes', '7. Holdout comparison',
+                '8. Top offenders', '9. Anomalies worth a look'):
     ok('the text report contains section "%s"' % heading, heading in text)
 ok('the text report names the false-negative estimate',
    'false-negative estimate' in text)
@@ -947,6 +947,73 @@ ok('html escaping neutralises markup in an identity',
 
 spiky = {'2026-01-01': {'nonce_bad': 1, 'botv_bad': 0, 'block': 0, 'degraded': 0},
          '2026-01-02': {'nonce_bad': 40, 'botv_bad': 0, 'block': 0, 'degraded': 0}}
+# --- Phase 4 outcomes section ---------------------------------------------
+outcome_report_rows = []
+for i in range(10):
+    r = 'ro%d' % i
+    outcome_report_rows.append(dict(row(6000.0 + i, dev='rephuman', p='/p%d' % i),
+                                    rid=r, _out=orow(r, st=200, by=12000)))
+for i in range(10, 20):
+    r = 'ro%d' % i
+    outcome_report_rows.append(dict(row(6000.0 + i, dev='', ip='198.18.5.5',
+                                        p='/gone%d' % i, hold=1, sh=1),
+                                    rid=r, _out=orow(r, st=404, by=300)))
+outcome_report_rows.append(dict(row(6100.0, dev='repnoout', p='/x'), rid='ro-none',
+                                _out=None))
+out_stats = report_mod.collect(outcome_report_rows, cfg,
+                               {'source': 'defaults', 'holdout_pct': 5})
+ok('the report counts outcome-known rows', out_stats['outcome_known'] == 20)
+ok('the report buckets statuses',
+   out_stats['status'].get('2xx') == 10 and out_stats['status'].get('404') == 10)
+ok('the report splits status by enforced and holdout',
+   out_stats['status_enforced'].get('2xx') == 10
+   and out_stats['status_holdout'].get('404') == 10)
+ok('the report totals bytes served',
+   out_stats['bytes_total'] == 10 * 12000 + 10 * 300)
+ok('the report ranks identities by 404 count',
+   out_stats['top_404'].get('198.18.5.5|aaaaaaaaaaaa') == 10)
+ok('the report collects request durations', len(out_stats['dur']) == 20)
+
+out_text = report_mod.render_text(out_stats, 7)
+ok('the text report contains the outcomes section', '6. Response outcomes' in out_text)
+ok('the outcomes section compares enforced against holdout',
+   'Enforced population vs holdout' in out_text)
+ok('the outcomes section explains what the gap estimates',
+   'what enforcement is currently catching' in out_text)
+ok('the later sections were renumbered',
+   '7. Holdout comparison' in out_text and '8. Top offenders' in out_text
+   and '9. Anomalies worth a look' in out_text)
+
+no_out = report_mod.collect([row(1.0, dev='d1')], cfg,
+                            {'source': 'defaults', 'holdout_pct': 0})
+no_out_text = report_mod.render_text(no_out, 7)
+ok('the report says so when there are no outcome lines',
+   'No outcome lines in this window' in no_out_text)
+ok('low coverage is explained rather than flagged as an error',
+   'Coverage under' in report_mod.render_text(
+       report_mod.collect(outcome_report_rows + [dict(row(7000.0 + i, dev='x'),
+                                                      rid='rq%d' % i, _out=None)
+                                                 for i in range(40)],
+                          cfg, {'source': 'defaults', 'holdout_pct': 5}), 7))
+
+out_html = report_mod.render_html(out_stats, 7)
+ok('the html report contains the outcomes section',
+   '6. Response outcomes' in out_html)
+ok('the html outcomes section is still script-free',
+   '<script' not in out_html.lower() and not re.search(r'(?:src|href)\s*=', out_html))
+
+stale_stats = report_mod.collect(
+    [dict(row(1.0, dev='d1'), rep=5)],
+    dict(cfg, _models={'ml': {'exists': True, 'stale': True,
+                              'error': 'feature order mismatch: bundle has 12 features'},
+                       'clf': {'exists': False, 'stale': False}}),
+    {'source': 'defaults', 'holdout_pct': 0})
+stale_text = report_mod.render_text(stale_stats, 7)
+ok('the report names a stale model in verdict coverage',
+   'STALE ML MODEL' in stale_text)
+ok('the report names a stale model as the likely cause of missing verdicts',
+   'stale model after a feature-set change' in stale_text)
+
 ok('a day-over-day jump is reported',
    any('failed handshakes' in line for line in report_mod.anomalies(spiky)))
 ok('a single day produces no anomaly', report_mod.anomalies(
