@@ -23,7 +23,10 @@ EPS_GAP_STD = 0.15         # seconds of gap jitter below which timing is metrono
 MIN_REQ_METRONOMIC = 5     # need this many requests before flat timing means anything
 MAX_HUMAN_RATE = 2.0       # requests per second a real browser session stays under
 COLD_DETAIL_RATIO = 0.7    # share of detail hits with no preceding listing
-NAV_RATIO_HUMAN = (0.2, 0.95)   # plausible share of top-level navigations
+# Plausible share of top-level navigations. The upper bound is 1.0 on purpose:
+# on a server-rendered site almost every logged request IS a navigation, so
+# only a session that is nearly all non-navigation traffic is excluded here.
+NAV_RATIO_HUMAN = (0.2, 1.0)
 MIN_HUMAN_DWELL_S = 20.0   # a real visit lasts at least this long
 HIGH_PATH_UNIQ = 0.6       # share of distinct paths that reads as exploring
 IRREGULAR_GAP_STD = 1.0    # gap jitter above which timing looks hand-driven

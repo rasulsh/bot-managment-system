@@ -28,6 +28,11 @@ except Exception as exc:                      # pragma: no cover - env dependent
     SKLEARN_ERROR = str(exc)
 
 
+# decision_function magnitude that maps to the end of the 0..100 range. Widen
+# it if the levels in your logs bunch up around 50, narrow it if they saturate.
+DECISION_SPAN = 0.2
+
+
 class ModelUnavailable(RuntimeError):
     """Raised when a model operation needs scikit-learn and it is not installed."""
 
@@ -88,15 +93,18 @@ def load(model_path):
 def score(bundle, vector):
     """Map one feature vector to an anomaly level in 0..100 (higher = stranger).
 
-    decision_function is positive for inliers and negative for outliers, and in
-    practice lands within roughly [-0.5, 0.5]. The mapping below is a fixed
-    linear transform of that range, clamped at both ends, so the same vector
-    always produces the same level:
+    decision_function is positive for inliers and negative for outliers, and is
+    already centred on the contamination boundary chosen at fit time, so 0 is
+    the natural midpoint. Isolation Forest keeps that value in a narrow band
+    rather than growing without bound, so the mapping spreads DECISION_SPAN of
+    magnitude across each half of the range and clamps the tails:
 
-        level = clamp((0.5 - decision) * 100, 0, 100)
+        level = clamp(50 - (decision / DECISION_SPAN) * 50, 0, 100)
 
-    A decision of +0.5 (deep inside the normal manifold) gives 0, a decision of
-    0.0 (right on the boundary) gives 50, and -0.5 or below gives 100.
+    A decision of +DECISION_SPAN (deep inside the normal manifold) gives 0, a
+    decision of 0.0 (right on the boundary) gives 50, and -DECISION_SPAN or
+    below gives 100. The transform is fixed, so the same vector against the
+    same bundle always produces the same level.
     """
     _require_sklearn()
     if bundle is None:
@@ -104,5 +112,5 @@ def score(bundle, vector):
     matrix = numpy.asarray([list(vector)], dtype=float)
     scaled = bundle['scaler'].transform(matrix)
     decision = float(bundle['model'].decision_function(scaled)[0])
-    level = (0.5 - decision) * 100.0
+    level = 50.0 - (decision / DECISION_SPAN) * 50.0
     return int(max(0, min(100, round(level))))

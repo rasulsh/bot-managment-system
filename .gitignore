@@ -1,3 +1,11 @@
 logs/*.jsonl
 logs/*.gz
 guard.off
+
+# Phase 2 analyzer artefacts: all derived from real traffic, never committed.
+analyzer/model.joblib
+analyzer/*.csv
+analyzer/*.lock
+analyzer/.*.lock
+__pycache__/
+*.pyc
