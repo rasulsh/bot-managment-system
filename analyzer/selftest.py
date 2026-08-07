@@ -423,6 +423,104 @@ ok('peak_rate reports the fastest session',
                              {'n_req': 40.0, 'dur_s': 10.0}]) == 4.0)
 
 # ---------------------------------------------------------------------------
+section('Phase 4 outcome reputation rules')
+
+NEUTRAL_LABELS = {'hp_any': 0, 'challenge_unsolved': 0, 'solved_challenge': 0}
+
+
+def out_feats(**over):
+    """A deliberately unremarkable session, so only the rule under test fires."""
+    base = {'n_req': 40.0, 'dur_s': 600.0, 'gap_mean': 15.0, 'gap_std': 6.0,
+            'gap_min': 2.0, 'nav_ratio': 1.0, 'path_uniq_ratio': 0.5,
+            'score_mean': 0.0, 'script_ratio': 0.0, 'few_hdr_ratio': 0.0,
+            'no_al_ratio': 0.0, 'detail_no_listing_ratio': 0.0,
+            'notfound_ratio': 0.0, 'err_ratio': 0.0, 'srv_err_ratio': 0.0,
+            'bytes_mean': 10000.0, 'outcome_cov': 1.0}
+    base.update(over)
+    return base
+
+
+baseline_rep = reputation_mod.device_reputation([out_feats()], NEUTRAL_LABELS, clamp)
+ok('the neutral outcome session is a clean baseline', baseline_rep == 0)
+
+stale_rep = reputation_mod.device_reputation(
+    [out_feats(notfound_ratio=0.6)], NEUTRAL_LABELS, clamp)
+ok('a stale URL list walking into 404s adds W_NOTFOUND',
+   stale_rep - baseline_rep == reputation_mod.W_NOTFOUND)
+
+ok('a 404 share below the threshold does not fire',
+   reputation_mod.device_reputation(
+       [out_feats(notfound_ratio=0.2)], NEUTRAL_LABELS, clamp) == baseline_rep)
+ok('too few requests makes a 404 share meaningless',
+   reputation_mod.device_reputation(
+       [out_feats(notfound_ratio=0.9, n_req=5.0)], NEUTRAL_LABELS, clamp) == baseline_rep)
+ok('sparse outcome coverage suppresses the 404 rule',
+   reputation_mod.device_reputation(
+       [out_feats(notfound_ratio=0.9, outcome_cov=0.2)], NEUTRAL_LABELS, clamp)
+   == baseline_rep)
+
+# The bulk rule needs a wide path spread, which by itself also earns the
+# Phase 2 varied-browsing credit. Compare against a baseline carrying the same
+# spread so only the bulk rule differs between the two.
+spread_baseline = reputation_mod.device_reputation(
+    [out_feats(path_uniq_ratio=0.9)], NEUTRAL_LABELS, clamp)
+bulk_rep = reputation_mod.device_reputation(
+    [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, path_uniq_ratio=0.9)],
+    NEUTRAL_LABELS, clamp)
+ok('moving 80 MB in one session adds W_BULK',
+   bulk_rep - spread_baseline == reputation_mod.W_BULK)
+ok('bulk transfer without path spread does not fire',
+   reputation_mod.device_reputation(
+       [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, path_uniq_ratio=0.2)],
+       NEUTRAL_LABELS, clamp) == baseline_rep)
+ok('a normal amount of content does not fire the bulk rule',
+   reputation_mod.device_reputation(
+       [out_feats(bytes_mean=50000.0, path_uniq_ratio=0.9)], NEUTRAL_LABELS, clamp)
+   == spread_baseline)
+ok('sparse coverage suppresses the bulk rule too',
+   reputation_mod.device_reputation(
+       [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, path_uniq_ratio=0.9,
+                  outcome_cov=0.2)], NEUTRAL_LABELS, clamp) == spread_baseline)
+
+srv_rep = reputation_mod.device_reputation(
+    [out_feats(srv_err_ratio=0.4)], NEUTRAL_LABELS, clamp)
+ok('driving the application into 5xx adds W_SRV_ERR',
+   srv_rep - baseline_rep == reputation_mod.W_SRV_ERR)
+ok('an occasional 5xx below the threshold does not fire',
+   reputation_mod.device_reputation(
+       [out_feats(srv_err_ratio=0.05)], NEUTRAL_LABELS, clamp) == baseline_rep)
+
+all_three = reputation_mod.device_reputation(
+    [out_feats(notfound_ratio=0.6, srv_err_ratio=0.4,
+               bytes_mean=2 * 1024 * 1024, path_uniq_ratio=0.9)],
+    NEUTRAL_LABELS, clamp)
+ok('the three outcome rules add together',
+   all_three - spread_baseline == (reputation_mod.W_NOTFOUND + reputation_mod.W_BULK
+                                   + reputation_mod.W_SRV_ERR))
+
+# The migration guarantee: a pre-capture session must score exactly as it did
+# before Phase 4, because every outcome feature is 0.0 and coverage gates each
+# rule.
+zero_cov = out_feats(notfound_ratio=0.0, srv_err_ratio=0.0, bytes_mean=0.0,
+                     outcome_cov=0.0)
+ok('a session with zero outcome coverage is scored exactly as before Phase 4',
+   reputation_mod.device_reputation([zero_cov], NEUTRAL_LABELS, clamp) == baseline_rep)
+ok('the existing human session reputation is unchanged by Phase 4',
+   reputation_mod.device_reputation(
+       [human_f], {'hp_any': 0, 'challenge_unsolved': 0, 'solved_challenge': 1},
+       clamp) == human_rep)
+ok('the existing scraper reputation is unchanged by Phase 4',
+   reputation_mod.device_reputation(
+       [bot_f], {'hp_any': 0, 'challenge_unsolved': 1, 'solved_challenge': 0},
+       clamp) == bot_rep)
+
+ok('peak_bytes reports the heaviest session',
+   reputation_mod.peak_bytes([{'bytes_mean': 1000.0, 'n_req': 10.0},
+                              {'bytes_mean': 5000.0, 'n_req': 100.0}]) == 500000.0)
+ok('peak_bytes is zero without any byte data',
+   reputation_mod.peak_bytes([{'n_req': 100.0}]) == 0.0)
+
+# ---------------------------------------------------------------------------
 section('Reverse DNS verification')
 
 
