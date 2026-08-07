@@ -195,7 +195,7 @@ ok('gap_min picks the tightest gap', human_f['gap_min'] == 5.0)
 
 vector = features_mod.feature_vector(bot_f)
 ok('the vector length matches FEATURE_ORDER',
-   len(vector) == len(features_mod.FEATURE_ORDER) == 12)
+   len(vector) == len(features_mod.FEATURE_ORDER) == 17)
 ok('the vector follows FEATURE_ORDER exactly',
    vector == [bot_f[name] for name in features_mod.FEATURE_ORDER])
 ok('an empty session yields a zero vector of the right shape',
@@ -212,6 +212,150 @@ ok('detail hits before any listing are counted',
        - (2.0 / 3.0)) < 1e-9)
 ok('an invalid operator regex is ignored rather than fatal',
    features_mod.detail_no_listing_ratio(cold_rows, ['['], [r'^/item/']) == 0.0)
+
+# ---------------------------------------------------------------------------
+section('Phase 4 outcome join')
+
+from analyzer import outcomes as outcomes_mod
+
+
+def orow(rid, st=200, by=None, dur=1.0, ts=1.0):
+    """One synthetic outcome line."""
+    return {'o': 1, 'rid': rid, 'st': st, 'by': by, 'dur': dur, 'ts': ts}
+
+
+mixed = [
+    dict(row(1000.0, dev='joindev', p='/a'), rid='r1', v=4),
+    orow('r1', st=200, by=4096),
+    dict(row(1001.0, dev='joindev', p='/b'), rid='r2', v=4),
+    orow('r2', st=404),
+    dict(row(1002.0, dev='joindev', p='/c'), rid='r3', v=4),      # no outcome
+    orow('r9', st=500),                                           # no decision
+]
+dec_rows, out_rows = outcomes_mod.split_rows(mixed)
+ok('split separates decision rows from outcome rows',
+   len(dec_rows) == 3 and len(out_rows) == 3)
+ok('split keys on o == 1 only', all(r.get('o') != 1 for r in dec_rows))
+
+index, collisions = outcomes_mod.index_outcomes(out_rows)
+ok('outcomes index by rid', set(index) == set(['r1', 'r2', 'r9']))
+ok('a clean index reports no collisions', collisions == 0)
+
+dup_index, dup_collisions = outcomes_mod.index_outcomes(
+    [orow('dup', st=200), orow('dup', st=500), orow('other', st=200)])
+ok('a duplicate rid is counted rather than silently overwriting', dup_collisions == 1)
+ok('the first outcome wins on a duplicate rid', dup_index['dup']['st'] == 200)
+ok('an outcome line without a rid is ignored',
+   outcomes_mod.index_outcomes([{'o': 1, 'st': 200}])[0] == {})
+
+attached = outcomes_mod.attach(dec_rows, index)
+by_rid = dict((r['rid'], r) for r in attached)
+ok('a matched decision row carries its outcome', by_rid['r1']['_out']['st'] == 200)
+ok('an unmatched decision row carries None', by_rid['r3']['_out'] is None)
+ok('an unmatched outcome simply has no decision to attach to',
+   'r9' not in by_rid)
+ok('the derived field is underscore-prefixed', '_out' in by_rid['r1'])
+
+joined, join_collisions = outcomes_mod.join(mixed)
+ok('join does split, index and attach in one call',
+   len(joined) == 3 and joined[0]['_out']['by'] == 4096 and join_collisions == 0)
+
+ok('status_class buckets a 404', outcomes_mod.status_class(orow('x', st=404)) == '404')
+ok('status_class buckets other 4xx separately',
+   outcomes_mod.status_class(orow('x', st=403)) == '4xx')
+ok('status_class buckets 5xx', outcomes_mod.status_class(orow('x', st=502)) == '5xx')
+ok('status_class buckets 2xx', outcomes_mod.status_class(orow('x', st=204)) == '2xx')
+ok('status_class returns None for a missing outcome',
+   outcomes_mod.status_class(None) is None)
+ok('status_class returns None for a zero status',
+   outcomes_mod.status_class(orow('x', st=0)) is None)
+
+# read_lines joins per file, so callers above it never see outcome lines.
+join_dir = tempfile.mkdtemp(prefix='gv-selftest-join-')
+join_file = os.path.join(join_dir, 'guard-%s.jsonl' % today.strftime('%Y%m%d'))
+with open(join_file, 'w') as fh:
+    for entry in mixed:
+        fh.write(json_mod.dumps(entry) + '\n')
+read_joined = list(logs_mod.read_lines(join_dir, 1))
+ok('read_lines yields only decision rows', len(read_joined) == 3)
+ok('read_lines attaches outcomes per file',
+   sum(1 for r in read_joined if r.get('_out')) == 2)
+read_raw = list(logs_mod.read_lines(join_dir, 1, join_outcomes=False))
+ok('read_lines can still yield both kinds when asked', len(read_raw) == 6)
+os.unlink(join_file)
+os.rmdir(join_dir)
+
+# ---------------------------------------------------------------------------
+section('Phase 4 outcome features')
+
+ok('FEATURE_ORDER gained exactly five names',
+   len(features_mod.FEATURE_ORDER) == 17)
+ok('the new names are appended, never inserted',
+   features_mod.FEATURE_ORDER[:12] == [
+       'n_req', 'dur_s', 'gap_mean', 'gap_std', 'gap_min', 'nav_ratio',
+       'path_uniq_ratio', 'score_mean', 'script_ratio', 'few_hdr_ratio',
+       'no_al_ratio', 'detail_no_listing_ratio']
+   and features_mod.FEATURE_ORDER[12:] == [
+       'notfound_ratio', 'err_ratio', 'srv_err_ratio', 'bytes_mean', 'outcome_cov'])
+
+# A scraper walking a stale URL list: 6 of 8 known outcomes are 404s, and two
+# rows have no outcome at all, so coverage is 8/10.
+stale_rows = []
+for i in range(6):
+    stale_rows.append(dict(row(3000.0 + i, dev='staledev', p='/gone%d' % i),
+                           rid='s%d' % i, _out=orow('s%d' % i, st=404, by=512)))
+for i in range(6, 8):
+    stale_rows.append(dict(row(3000.0 + i, dev='staledev', p='/ok%d' % i),
+                           rid='s%d' % i, _out=orow('s%d' % i, st=200, by=20000)))
+for i in range(8, 10):
+    stale_rows.append(dict(row(3000.0 + i, dev='staledev', p='/unknown%d' % i),
+                           rid='s%d' % i, _out=None))
+stale_f = features_mod.session_features({'rows': stale_rows})
+ok('notfound_ratio counts 404s over outcome-known rows only',
+   abs(stale_f['notfound_ratio'] - 0.75) < 1e-9)
+ok('outcome_cov reports the share of rows with any outcome',
+   abs(stale_f['outcome_cov'] - 0.8) < 1e-9)
+ok('bytes_mean averages only the declared sizes',
+   abs(stale_f['bytes_mean'] - ((6 * 512 + 2 * 20000) / 8.0)) < 1e-9)
+ok('err_ratio excludes 404 from the other-4xx bucket', stale_f['err_ratio'] == 0.0)
+ok('srv_err_ratio is zero without any 5xx', stale_f['srv_err_ratio'] == 0.0)
+
+mixed_status = [
+    dict(row(4000.0, dev='mixdev'), rid='m1', _out=orow('m1', st=403)),
+    dict(row(4001.0, dev='mixdev'), rid='m2', _out=orow('m2', st=500)),
+    dict(row(4002.0, dev='mixdev'), rid='m3', _out=orow('m3', st=404)),
+    dict(row(4003.0, dev='mixdev'), rid='m4', _out=orow('m4', st=200)),
+]
+mix_f = features_mod.session_features({'rows': mixed_status})
+ok('each status bucket lands in its own feature',
+   mix_f['notfound_ratio'] == 0.25 and mix_f['err_ratio'] == 0.25
+   and mix_f['srv_err_ratio'] == 0.25)
+ok('a full-coverage session reports coverage 1.0', mix_f['outcome_cov'] == 1.0)
+ok('an undeclared size is excluded from bytes_mean rather than counted as zero',
+   mix_f['bytes_mean'] == 0.0)
+
+# A session recorded before capture was enabled: all five stay 0.0.
+pre4 = features_mod.session_features(human_session)
+ok('a session with no outcome data scores 0.0 on all five new features',
+   all(pre4[name] == 0.0 for name in features_mod.FEATURE_ORDER[12:]))
+ok('the pre-capture session is otherwise unchanged',
+   pre4['n_req'] == human_f['n_req'] and pre4['gap_std'] == human_f['gap_std'])
+
+ok('a session with rows but zero coverage reports coverage 0.0',
+   features_mod.outcome_features(
+       [dict(row(1.0, dev='d'), _out=None)])['outcome_cov'] == 0.0)
+ok('an empty session yields zeroed outcome features',
+   features_mod.outcome_features([])['outcome_cov'] == 0.0)
+ok('a malformed status is ignored rather than counted',
+   features_mod.outcome_features(
+       [dict(row(1.0, dev='d'), _out={'o': 1, 'rid': 'x', 'st': 'nonsense'})])
+   ['outcome_cov'] == 0.0)
+ok('a boolean is not mistaken for a byte count',
+   features_mod.outcome_features(
+       [dict(row(1.0, dev='d'), _out=orow('x', st=200, by=True))])['bytes_mean'] == 0.0)
+ok('the feature vector still matches FEATURE_ORDER after the extension',
+   features_mod.feature_vector(stale_f)
+   == [stale_f[name] for name in features_mod.FEATURE_ORDER])
 
 # ---------------------------------------------------------------------------
 section('Labels')
@@ -729,7 +873,10 @@ else:
         dur = random.uniform(60, 400)
         return [n_req, dur, dur / n_req, random.uniform(4, 12), random.uniform(1, 4),
                 random.uniform(0.7, 1.0), random.uniform(0.5, 0.9), random.uniform(0, 8),
-                0.0, random.uniform(0, 0.1), random.uniform(0, 0.1), 0.0]
+                0.0, random.uniform(0, 0.1), random.uniform(0, 0.1), 0.0,
+                # Phase 4 outcomes: a person mostly gets pages that exist.
+                random.uniform(0, 0.05), 0.0, 0.0,
+                random.uniform(8000, 60000), random.uniform(0.8, 1.0)]
 
     clean = [normal_vector() for _ in range(400)]
     probe = normal_vector()
@@ -749,7 +896,8 @@ else:
     normal_level = model_mod.score(bundle, probe)
     # A metronomic 400-request burst: nothing like the training distribution.
     anomalous_level = model_mod.score(bundle, [400.0, 100.0, 0.25, 0.001, 0.2,
-                                               1.0, 1.0, 30.0, 1.0, 1.0, 1.0, 0.0])
+                                               1.0, 1.0, 30.0, 1.0, 1.0, 1.0, 0.0,
+                                               0.6, 0.05, 0.0, 350000.0, 0.95])
     ok('scores are integers inside 0..100',
        isinstance(normal_level, int) and 0 <= normal_level <= 100
        and 0 <= anomalous_level <= 100)
@@ -788,14 +936,20 @@ else:
         dur = random.uniform(60, 400)
         return [n_req, dur, dur / n_req, random.uniform(4, 12), random.uniform(1, 4),
                 random.uniform(0.7, 1.0), random.uniform(0.4, 0.8), random.uniform(0, 8),
-                0.0, random.uniform(0, 0.1), random.uniform(0, 0.1), 0.0]
+                0.0, random.uniform(0, 0.1), random.uniform(0, 0.1), 0.0,
+                random.uniform(0, 0.05), 0.0, 0.0,
+                random.uniform(8000, 60000), random.uniform(0.8, 1.0)]
 
     def bot_vector():
         n_req = random.uniform(60, 400)
         dur = n_req * random.uniform(0.15, 0.3)
         return [n_req, dur, dur / n_req, random.uniform(0.0, 0.05),
                 random.uniform(0.05, 0.2), 1.0, random.uniform(0.95, 1.0),
-                random.uniform(25, 45), 1.0, 1.0, random.uniform(0.5, 1.0), 0.0]
+                random.uniform(25, 45), 1.0, 1.0, random.uniform(0.5, 1.0), 0.0,
+                # Phase 4 outcomes: a stale URL list walks into 404s and moves
+                # far more bytes than a person reading pages.
+                random.uniform(0.3, 0.7), random.uniform(0, 0.1), 0.0,
+                random.uniform(100000, 400000), random.uniform(0.8, 1.0)]
 
     clf_dir = tempfile.mkdtemp(prefix='gv-selftest-clf-')
     clf_path = os.path.join(clf_dir, 'clf.joblib')

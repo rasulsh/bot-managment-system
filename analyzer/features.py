@@ -25,6 +25,14 @@ FEATURE_ORDER = [
     'few_hdr_ratio',
     'no_al_ratio',
     'detail_no_listing_ratio',
+    # --- Phase 4 response outcomes. APPENDED, never inserted: the order is the
+    # contract between training and scoring, and reordering it silently
+    # mislabels every column of an existing model.
+    'notfound_ratio',
+    'err_ratio',
+    'srv_err_ratio',
+    'bytes_mean',
+    'outcome_cov',
 ]
 
 
@@ -87,6 +95,64 @@ def detail_no_listing_ratio(rows, path_listing=None, path_detail=None):
     return float(cold) / total if total else 0.0
 
 
+def outcome_features(rows):
+    """Response-outcome features for one session's rows.
+
+    Ratios are computed over OUTCOME-KNOWN rows only, never over all rows. A
+    session where only a third of requests produced an outcome line would
+    otherwise look artificially clean, because the unknown two thirds would
+    count as "not a 404". outcome_cov is what tells the model how much weight
+    the other four deserve, which is why it belongs in the vector rather than
+    being treated as metadata.
+
+    Every value is 0.0 for a session recorded before capture was enabled, so old
+    sessions stay usable - they simply carry no outcome signal.
+    """
+    rows = rows or []
+    total = len(rows)
+    if total == 0:
+        return {'notfound_ratio': 0.0, 'err_ratio': 0.0, 'srv_err_ratio': 0.0,
+                'bytes_mean': 0.0, 'outcome_cov': 0.0}
+
+    known = 0
+    notfound = 0
+    other_4xx = 0
+    server_err = 0
+    byte_values = []
+    for row in rows:
+        out = row.get('_out')
+        if not isinstance(out, dict):
+            continue
+        try:
+            status = int(out.get('st') or 0)
+        except (TypeError, ValueError):
+            continue
+        if status <= 0:
+            continue
+        known += 1
+        if status == 404:
+            notfound += 1
+        elif 400 <= status <= 499:
+            other_4xx += 1
+        elif status >= 500:
+            server_err += 1
+        size = out.get('by')
+        if isinstance(size, (int, float)) and not isinstance(size, bool) and size >= 0:
+            byte_values.append(float(size))
+
+    if known == 0:
+        return {'notfound_ratio': 0.0, 'err_ratio': 0.0, 'srv_err_ratio': 0.0,
+                'bytes_mean': 0.0, 'outcome_cov': 0.0}
+
+    return {
+        'notfound_ratio': float(notfound) / known,
+        'err_ratio': float(other_4xx) / known,
+        'srv_err_ratio': float(server_err) / known,
+        'bytes_mean': _mean(byte_values),
+        'outcome_cov': float(known) / total,
+    }
+
+
 def session_features(session, path_listing=None, path_detail=None):
     """Return the numeric feature dict for one session."""
     rows = session.get('rows') or []
@@ -113,7 +179,7 @@ def session_features(session, path_listing=None, path_detail=None):
 
     navs = sum(1 for row in rows if int(row.get('nav') or 0) == 1)
 
-    return {
+    out = {
         'n_req': float(n_req),
         'dur_s': float(stamps[-1] - stamps[0]),
         'gap_mean': _mean(gaps),
@@ -127,6 +193,8 @@ def session_features(session, path_listing=None, path_detail=None):
         'no_al_ratio': float(sum(1 for r in rows if _has_reason(r, 'NO_AL'))) / n_req,
         'detail_no_listing_ratio': detail_no_listing_ratio(rows, path_listing, path_detail),
     }
+    out.update(outcome_features(rows))
+    return out
 
 
 def feature_vector(features):
