@@ -21,11 +21,13 @@ return array(
 	),
 	'ml_weight'        => 0.4,
 	'clf_weight'       => 0.5,
-	// A 5% holdout would almost never catch the handful of identities the test
-	// matrix uses, so the matrix seeds a known-holdout identity instead. The
-	// salt is fixed here so that identity stays in the holdout across runs.
+	// The matrix drives a single client, so it cannot rely on chance to land
+	// inside a 5% holdout: scripts/holdout-probe.php asks the guard which
+	// device id is a member and mints a token for it. This salt is chosen so
+	// that 127.0.0.1 itself is NOT a member - otherwise every token-less case
+	// in the matrix would be held out and nothing would ever be enforced.
 	'holdout_pct'      => 5,
-	'holdout_salt'     => 'dev-holdout-salt',
+	'holdout_salt'     => 'gv-dev-1',
 	'bot_suffixes'     => array(
 		'googlebot' => array('.googlebot.com', '.google.com'),
 		'bingbot'   => array('.search.msn.com'),
