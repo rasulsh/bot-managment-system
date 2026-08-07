@@ -10,17 +10,23 @@ when those are not installed.
 from __future__ import print_function
 
 import os
+import re
+import shutil
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import botverify
+from analyzer import bridge
 from analyzer import config as config_mod
+from analyzer import decision
 from analyzer import features as features_mod
+from analyzer import labels as labels_mod
 from analyzer import logs as logs_mod
 from analyzer import model as model_mod
 from analyzer import redis_io
+from analyzer import replay as replay_mod
 from analyzer import reputation as reputation_mod
 
 PASS = 0
@@ -49,12 +55,15 @@ def section(name):
 
 
 def row(ts, dev='', ip='10.0.0.1', uah='aaaaaaaaaaaa', p='/', nav=1, sc=0,
-        rs=None, act='allow', sh=0, hp=0, bot=''):
-    """One synthetic Phase 1 log row."""
+        rs=None, act='allow', sh=0, hp=0, bot='', botv='', rep=0, ml=-1, clf=-1,
+        hold=0, ovr='', tok=None):
+    """One synthetic guard log row."""
     return {'ts': ts, 'ip': ip, 'ua': 'x', 'uah': uah, 'm': 'GET', 'p': p, 'q': '',
-            'aj': 0, 'nav': nav, 'tok': 'v' if dev else 'm', 'dev': dev, 'sf': '',
-            'al': 1, 'hc': 10, 'sc': sc, 'rs': rs or [], 'cd': 0, 'ciu': 0, 'ci': 0,
-            'rd': 0, 'hp': hp, 'bot': bot, 'ref': '', 'act': act, 'sh': sh, 'ms': 1.0}
+            'aj': 0, 'nav': nav, 'tok': tok if tok else ('v' if dev else 'm'),
+            'dev': dev, 'sf': '', 'al': 1, 'hc': 10, 'sc': sc, 'esc': sc,
+            'rs': rs or [], 'cd': 0, 'ciu': 0, 'ci': 0, 'rd': 0, 'hp': hp, 'bot': bot,
+            'ref': '', 'botv': botv, 'rep': rep, 'ml': ml, 'clf': clf, 'hold': hold,
+            'ovr': ovr, 'act': act, 'sh': sh, 'ms': 1.0}
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +377,344 @@ else:
         client.delete(key)
 
 # ---------------------------------------------------------------------------
+section('Decision mirror parity with PHP')
+
+import json as json_parity
+import subprocess
+
+PARITY_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             'scripts', 'decision-parity.php')
+php_bin = shutil.which('php') if hasattr(shutil, 'which') else None
+if not php_bin:
+    skip('decision parity against the PHP matrix', 'php not available in this environment')
+elif not os.path.isfile(PARITY_SCRIPT):
+    skip('decision parity against the PHP matrix', 'decision-parity.php not found')
+else:
+    try:
+        raw = subprocess.check_output([php_bin, PARITY_SCRIPT, '--emit'],
+                                      stderr=subprocess.PIPE)
+        matrix = json_parity.loads(raw.decode('utf-8', 'replace'))
+    except Exception as exc:
+        matrix = None
+        skip('decision parity against the PHP matrix', 'could not run the emitter: %s' % exc)
+    if matrix is not None:
+        ok('the PHP matrix carries at least 40 cases', len(matrix) >= 40)
+        esc_bad = []
+        dec_bad = []
+        for index, case in enumerate(matrix):
+            got_esc = decision.effective_score(case['sc'], case['rep'], case['ml'],
+                                               case['clf'], case['cfg'])
+            got_dec = decision.decide(got_esc, case['over'], case['nav'], case['tok'],
+                                      case['hard_block_score'], case['ovr'])
+            if got_esc != case['esc']:
+                esc_bad.append((index, got_esc, case['esc']))
+            if got_dec != case['decision']:
+                dec_bad.append((index, got_dec, case['decision']))
+        ok('every effective score matches PHP exactly (%d cases)' % len(matrix), not esc_bad)
+        if esc_bad:
+            print('      first mismatch: case %d python=%s php=%s' % esc_bad[0])
+        ok('every decision matches PHP exactly (%d cases)' % len(matrix), not dec_bad)
+        if dec_bad:
+            print('      first mismatch: case %d python=%s php=%s' % dec_bad[0])
+        branches = set(c['decision'] for c in matrix)
+        ok('the matrix exercises every decision branch',
+           branches == set(['allow', 'challenge', '403', '429']))
+        ok('the matrix exercises both override values',
+           set(c['ovr'] for c in matrix) == set(['', 'allow', 'deny']))
+
+ok('php_round rounds half away from zero like PHP',
+   decision.php_round(0.5) == 1 and decision.php_round(1.5) == 2
+   and decision.php_round(2.5) == 3)
+ok('php_round handles negatives symmetrically',
+   decision.php_round(-0.5) == -1 and decision.php_round(-1.5) == -2)
+ok('absent verdicts never contribute with every signal on',
+   decision.effective_score(25, 0, -1, -1, {
+       'signals': {'reputation': True, 'ml': True, 'clf': True},
+       'ml_weight': 0.4, 'clf_weight': 0.5}) == 25)
+
+# ---------------------------------------------------------------------------
+section('Config bridge')
+
+bridged = bridge.guard_config(cfg)
+ok('the bridge returns a threshold set', isinstance(bridged, dict)
+   and 'hard_block_score' in bridged)
+ok('the bridge never carries the secret or the salt',
+   'secret' not in bridged and 'holdout_salt' not in bridged)
+ok('the bridge reports where the thresholds came from',
+   bridged.get('source') in ('guard', 'defaults'))
+if php_bin:
+    ok('with php present the thresholds come from the guard itself',
+       bridged.get('source') == 'guard')
+else:
+    skip('thresholds come from the guard itself', 'php not available')
+
+fallback = bridge.guard_config(cfg, php='/nonexistent/php-binary')
+ok('a missing php falls back instead of raising',
+   fallback.get('source') == 'defaults' and fallback['hard_block_score'] == 60)
+
+dcfg = bridge.decision_config(bridged, {'hard_block_score': 45, 'signals.clf': True,
+                                        'ml_weight': 0.9})
+ok('dotted overrides are applied to the decision config',
+   dcfg['hard_block_score'] == 45 and dcfg['signals']['clf'] is True
+   and dcfg['ml_weight'] == 0.9)
+ok('every signal key is present after building a decision config',
+   set(dcfg['signals']) >= set(['reputation', 'ml', 'clf']))
+
+# ---------------------------------------------------------------------------
+section('Training labels and the circularity guard')
+
+hp_sess = logs_mod.sessionize([row(1000.0, dev='hpdev', p='/old-archive', hp=1,
+                                   act='404_hp')], 1800)[0]
+ok('a honeypot session is labelled bot',
+   labels_mod.bot_labels(hp_sess, {'hp_any': 1}, hp_sess['rows']) == 1)
+
+bad_rows = [row(1000.0, ip='192.0.2.1', botv='bad', bot='googlebot', act='403')]
+bad_sess = logs_mod.sessionize(bad_rows, 1800)[0]
+ok('a refuted bot claim is labelled bot',
+   labels_mod.bot_labels(bad_sess, {'hp_any': 0}, bad_rows) == 1)
+
+# The circularity guard: an unsolved challenge is the guard's own decision fed
+# back as truth, so it must never produce a label on its own.
+unsolved_rows = [row(1000.0, dev='', ip='10.9.9.9', act='challenge'),
+                 row(1005.0, dev='', ip='10.9.9.9', act='challenge')]
+unsolved = logs_mod.sessionize(unsolved_rows, 1800)[0]
+ok('challenge_unsolved alone produces no label',
+   labels_mod.bot_labels(unsolved, {'hp_any': 0, 'challenge_unsolved': 1,
+                                    'solved_challenge': 0}, unsolved_rows) is None)
+ok('a 403 the guard served produces no label either',
+   labels_mod.bot_labels(unsolved, {'hp_any': 0, 'challenge_unsolved': 1,
+                                    'solved_challenge': 0},
+                         [row(1000.0, act='403')]) is None)
+
+human_sess = dict(logs_mod.sessionize(
+    [row(1000.0, dev='hdev', act='token_issued'),
+     row(1040.0, dev='hdev', p='/a'),
+     row(1090.0, dev='hdev', p='/b')], 1800)[0])
+human_sess['features'] = {'script_ratio': 0.0}
+human_lbl = {'hp_any': 0, 'challenge_unsolved': 0, 'solved_challenge': 1}
+ok('a solved, dwelling, returning identity is labelled human',
+   labels_mod.bot_labels(human_sess, human_lbl, human_sess['rows'],
+                         session_count=2, median_dwell=90.0) == 0)
+ok('one session is not enough for a human label',
+   labels_mod.bot_labels(human_sess, human_lbl, human_sess['rows'],
+                         session_count=1, median_dwell=90.0) is None)
+ok('too little dwell is not enough for a human label',
+   labels_mod.bot_labels(human_sess, human_lbl, human_sess['rows'],
+                         session_count=3, median_dwell=2.0) is None)
+scripted = dict(human_sess)
+scripted['features'] = {'script_ratio': 1.0}
+ok('a scripted user agent blocks the human label',
+   labels_mod.bot_labels(scripted, human_lbl, scripted['rows'],
+                         session_count=3, median_dwell=90.0) is None)
+ok('a honeypot hit beats every human signal',
+   labels_mod.bot_labels(human_sess, {'hp_any': 1, 'solved_challenge': 1},
+                         human_sess['rows'], session_count=5, median_dwell=500.0) == 1)
+
+gt_handle, gt_path = tempfile.mkstemp(suffix='.txt')
+with os.fdopen(gt_handle, 'w') as fh:
+    fh.write('# operator ground truth\n')
+    fh.write('scraperdev,1\n')
+    fh.write('realuser,0\n')
+    fh.write('malformed line without a comma\n')
+    fh.write('baddev,7\n')
+    fh.write('\n')
+truth = labels_mod.load_ground_truth(gt_path)
+ok('ground truth parses valid lines', truth == {'scraperdev': 1, 'realuser': 0})
+ok('a missing ground truth file is not an error',
+   labels_mod.load_ground_truth('/nonexistent/ground-truth.txt') == {})
+ok('ground truth overrides an inferred label',
+   labels_mod.bot_labels(dict(human_sess, dev='realuser'), {'hp_any': 1},
+                         human_sess['rows'], truth) == 0)
+os.unlink(gt_path)
+
+hold_rows = [row(1000.0 + i, dev='', ip='198.18.0.1', hold=1, sh=1, act='challenge')
+             for i in range(5)]
+hold_rows.append(row(1010.0, dev='', ip='198.18.0.1', hold=1, sh=1, hp=1, act='404_hp'))
+hold_sessions = logs_mod.sessionize(hold_rows, 1800)
+outcomes = labels_mod.holdout_outcomes(hold_sessions)
+ok('holdout outcomes count only held-out rows', outcomes['requests'] == 6)
+ok('holdout outcomes count suppressed challenges', outcomes['would_challenge'] == 5)
+ok('holdout outcomes notice a honeypot hit', outcomes['honeypot_sessions'] == 1)
+ok('holdout outcomes ignore enforced traffic',
+   labels_mod.holdout_outcomes(logs_mod.sessionize(
+       [row(1000.0, dev='enforced', act='challenge')], 1800))['requests'] == 0)
+
+# ---------------------------------------------------------------------------
+section('Counterfactual replay')
+
+# 6 humans, each with two sessions far enough apart to split, a solved
+# handshake and real dwell; 3 honeypot bots; one holdout row; and three rows
+# that never reach the decision step.
+replay_rows_in = []
+for d in range(6):
+    dev = 'rhuman%d' % d
+    base_ts = 2000.0 + d * 100000
+    replay_rows_in.append(row(base_ts, dev=dev, act='token_issued'))
+    for i in range(4):
+        replay_rows_in.append(row(base_ts + 40 + i * 30, dev=dev, p='/p%d' % i,
+                                  sc=10, rep=-20, ml=15, clf=5))
+    for i in range(4):                       # second session, well past the gap
+        replay_rows_in.append(row(base_ts + 9000 + i * 30, dev=dev, p='/s%d' % i,
+                                  sc=10, rep=-20, ml=15, clf=5))
+for d in range(3):
+    dev = 'rbot%d' % d
+    base_ts = 800000.0 + d * 1000
+    replay_rows_in.append(row(base_ts, dev=dev, p='/old-archive', hp=1, act='404_hp'))
+    for i in range(4):
+        replay_rows_in.append(row(base_ts + 10 + i, dev=dev, p='/q%d' % i,
+                                  sc=45, rep=60, ml=90, clf=88))
+replay_rows_in.append(row(900000.0, dev='', ip='198.18.9.9', sc=45, hold=1, sh=1,
+                          act='challenge'))
+replay_rows_in.append(row(900100.0, dev='', ip='10.1.1.1', act='exempt'))
+replay_rows_in.append(row(900200.0, dev='', ip='10.1.1.1', act='allow_bot', bot='googlebot'))
+
+# 6 token_issued + 3 404_hp + 1 exempt + 1 allow_bot never reach the decision.
+EXPECT_SKIPPED = 11
+EXPECT_HUMAN_ROWS = 6 * 8
+EXPECT_BOT_ROWS = 3 * 4
+
+replay_sessions = logs_mod.sessionize(replay_rows_in, 1800)
+label_map = replay_mod.identity_label_map(replay_sessions)
+ok('replay labels the honeypot identities as bots',
+   all(label_map.get('rbot%d' % d) == 1 for d in range(3)))
+ok('replay labels the returning solved identities as human',
+   all(label_map.get('rhuman%d' % d) == 0 for d in range(6)))
+
+base_cfg = {'hard_block_score': 60, 'signals': {'reputation': False, 'ml': False,
+                                                'clf': False},
+            'ml_weight': 0.4, 'clf_weight': 0.5}
+same = replay_mod.replay_rows(replay_rows_in, base_cfg, base_cfg, label_map)
+ok('replaying a config against itself moves nothing', same['movement'] == {})
+ok('replay skips rows that never reached the decision step',
+   same['skipped_non_decision'] == EXPECT_SKIPPED)
+ok('replay considers every remaining row',
+   same['considered'] == len(replay_rows_in) - EXPECT_SKIPPED)
+
+cand = dict(base_cfg, signals={'reputation': True, 'ml': False, 'clf': False})
+moved = replay_mod.replay_rows(replay_rows_in, base_cfg, cand, label_map)
+ok('enabling reputation moves bot rows into 403',
+   moved['movement'].get('allow->403', 0) == EXPECT_BOT_ROWS)
+ok('the movement is credited to the bot-labelled subset',
+   moved['bot_newly_caught'] == EXPECT_BOT_ROWS and moved['bot_rows'] == EXPECT_BOT_ROWS)
+ok('no human-labelled row is newly restricted',
+   moved['human_newly_restricted'] == 0 and moved['human_rows'] == EXPECT_HUMAN_ROWS)
+ok('the holdout row is counted separately', moved['holdout_rows'] == 1)
+ok('replay reports how many effective scores moved', moved['esc_changed'] > 0)
+
+lower = replay_mod.replay_rows(replay_rows_in, base_cfg,
+                               dict(base_cfg, hard_block_score=40), label_map)
+ok('lowering the block score restricts more rows',
+   lower['candidate']['403'] > lower['baseline']['403'])
+ok('a threshold change alone does not move any effective score',
+   lower['esc_changed'] == 0)
+
+ok('replay parses a boolean signal override',
+   replay_mod.parse_set(['signals.clf=true'])['signals.clf'] is True)
+ok('replay parses an integer override',
+   replay_mod.parse_set(['hard_block_score=45'])['hard_block_score'] == 45)
+ok('replay parses a float override',
+   replay_mod.parse_set(['ml_weight=0.6'])['ml_weight'] == 0.6)
+try:
+    replay_mod.parse_set(['nonsense'])
+    ok('a malformed override is rejected', False)
+except ValueError:
+    ok('a malformed override is rejected', True)
+
+ok('replay renders a report containing the movement table',
+   'Movement table' in replay_mod.format_report(moved, base_cfg, cand,
+                                                {'signals.reputation': True},
+                                                'threshold', 'guard'))
+ok('the replay report names the deciding number',
+   'the number that decides this change' in replay_mod.format_report(
+       moved, base_cfg, cand, {}, 'threshold', 'guard'))
+
+# Read-only by construction: the module must not import redis at all.
+replay_source = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'replay.py')).read()
+ok('replay never imports redis_io', 'redis_io' not in replay_source)
+ok('replay never opens a file for writing',
+   "'w'" not in replay_source and '"w"' not in replay_source)
+
+# ---------------------------------------------------------------------------
+section('Period report')
+
+from analyzer import report as report_mod
+
+report_rows = list(replay_rows_in)
+report_rows.append(row(950000.0, dev='', ip='10.2.2.2', act='nonce_bad'))
+report_rows.append(row(950100.0, dev='rhuman0', act='allow', ovr='allow',
+                       tok='v'))
+report_stats = report_mod.collect(report_rows, cfg, {'source': 'defaults',
+                                                     'holdout_pct': 5})
+
+ok('the report counts every request', report_stats['requests'] == len(report_rows))
+ok('the report counts unique devices', len(report_stats['devices']) == 9)
+ok('the report separates enforced from holdout requests',
+   report_stats['holdout_requests'] == 1
+   and report_stats['enforced_requests'] == len(report_rows) - 1)
+ok('the report counts the challenge funnel',
+   report_stats['token_issued'] == 6 and report_stats['challenge_served'] == 0)
+ok('the report notices operator overrides',
+   report_stats['overrides'].get('allow') == 1)
+ok('the report tracks verdict coverage',
+   report_stats['has_rep'] > 0 and report_stats['has_clf'] > 0)
+ok('the report records no divergence when esc equals sc',
+   report_stats['diverged'] == 0)
+
+text = report_mod.render_text(report_stats, 7)
+for heading in ('1. Traffic', '2. Decisions', '3. Challenge funnel',
+                '4. Score distribution', '5. Verdict coverage',
+                '6. Holdout comparison', '7. Top offenders',
+                '8. Anomalies worth a look'):
+    ok('the text report contains section "%s"' % heading, heading in text)
+ok('the text report names the false-negative estimate',
+   'false-negative estimate' in text)
+
+disabled = report_mod.collect([row(1000.0, dev='d1')], cfg,
+                              {'source': 'defaults', 'holdout_pct': 0})
+ok('the report says so when holdout is disabled',
+   'holdout disabled' in report_mod.render_text(disabled, 7))
+
+low_funnel = report_mod.collect(
+    [row(1000.0 + i, dev='', ip='10.3.3.3', act='challenge') for i in range(20)]
+    + [row(2000.0, dev='d9', act='token_issued')], cfg,
+    {'source': 'defaults', 'holdout_pct': 0})
+ok('a poor challenge funnel is called out in words',
+   'BELOW TARGET' in report_mod.render_text(low_funnel, 7))
+
+html = report_mod.render_html(report_stats, 7)
+ok('the html report starts with a doctype', html.startswith('<!doctype html>'))
+ok('the html report closes cleanly', html.rstrip().endswith('</html>'))
+ok('the html report contains no script tag', '<script' not in html.lower())
+ok('the html report references no external asset',
+   not re.search(r'(?:src|href)\s*=', html) and 'http://' not in html
+   and 'https://' not in html)
+ok('the html report has no inline event handler',
+   not re.search(r'\son[a-z]+\s*=', html))
+ok('the html report loads no remote font or image',
+   '@import' not in html and 'url(' not in html)
+try:
+    import xml.etree.ElementTree as ElementTree
+    ElementTree.fromstring(html[html.index('<main'):html.rindex('</main>') + 7])
+    ok('the html body is well-formed markup', True)
+except Exception as exc:
+    ok('the html body is well-formed markup: %s' % exc, False)
+
+ok('html escaping neutralises markup in an identity',
+   '&lt;script&gt;' in report_mod._esc_html('<script>'))
+
+spiky = {'2026-01-01': {'nonce_bad': 1, 'botv_bad': 0, 'block': 0, 'degraded': 0},
+         '2026-01-02': {'nonce_bad': 40, 'botv_bad': 0, 'block': 0, 'degraded': 0}}
+ok('a day-over-day jump is reported',
+   any('failed handshakes' in line for line in report_mod.anomalies(spiky)))
+ok('a single day produces no anomaly', report_mod.anomalies(
+    {'2026-01-01': {'nonce_bad': 99}}) == [])
+
+report_source = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'report.py')).read()
+ok('the report never imports redis_io', 'redis_io' not in report_source)
+
+# ---------------------------------------------------------------------------
 section('Isolation Forest')
 
 if not model_mod.SKLEARN_AVAILABLE:
@@ -423,6 +770,111 @@ else:
 
     os.unlink(model_path)
     os.rmdir(os.path.dirname(model_path))
+
+# ---------------------------------------------------------------------------
+section('Supervised classifier')
+
+from analyzer import classifier as clf_mod
+
+if not clf_mod.SKLEARN_AVAILABLE:
+    skip('supervised classifier train/score',
+         'scikit-learn not installed: ' + clf_mod.SKLEARN_ERROR)
+else:
+    import random
+    random.seed(5)
+
+    def human_vector():
+        n_req = random.uniform(5, 20)
+        dur = random.uniform(60, 400)
+        return [n_req, dur, dur / n_req, random.uniform(4, 12), random.uniform(1, 4),
+                random.uniform(0.7, 1.0), random.uniform(0.4, 0.8), random.uniform(0, 8),
+                0.0, random.uniform(0, 0.1), random.uniform(0, 0.1), 0.0]
+
+    def bot_vector():
+        n_req = random.uniform(60, 400)
+        dur = n_req * random.uniform(0.15, 0.3)
+        return [n_req, dur, dur / n_req, random.uniform(0.0, 0.05),
+                random.uniform(0.05, 0.2), 1.0, random.uniform(0.95, 1.0),
+                random.uniform(25, 45), 1.0, 1.0, random.uniform(0.5, 1.0), 0.0]
+
+    clf_dir = tempfile.mkdtemp(prefix='gv-selftest-clf-')
+    clf_path = os.path.join(clf_dir, 'clf.joblib')
+
+    X_small = [human_vector() for _ in range(60)] + [bot_vector() for _ in range(10)]
+    y_small = [0] * 60 + [1] * 10
+    ok('training refuses below min_positive',
+       clf_mod.train(X_small, y_small, clf_path, min_positive=50) is False)
+    ok('nothing was written when training was refused', not os.path.isfile(clf_path))
+
+    X_one = [human_vector() for _ in range(200)]
+    ok('training refuses when the bot class is missing entirely',
+       clf_mod.train(X_one, [0] * 200, clf_path, min_positive=1) is False)
+    ok('training refuses when the human class is missing entirely',
+       clf_mod.train([bot_vector() for _ in range(200)], [1] * 200, clf_path,
+                     min_positive=1) is False)
+
+    X = [human_vector() for _ in range(300)] + [bot_vector() for _ in range(120)]
+    y = [0] * 300 + [1] * 120
+    ok('training succeeds with enough labelled examples of both classes',
+       clf_mod.train(X, y, clf_path, min_positive=50) is True)
+
+    clf_bundle = clf_mod.load(clf_path)
+    ok('the trained classifier loads', clf_bundle is not None)
+    ok('the bundle records FEATURE_ORDER',
+       clf_bundle['feature_order'] == list(features_mod.FEATURE_ORDER))
+    ok('the bundle carries an operating threshold',
+       0.0 <= float(clf_bundle['threshold']) <= 1.0)
+
+    metrics = clf_bundle.get('metrics') or {}
+    ok('metrics report precision and recall, not accuracy',
+       'precision' in metrics and 'recall' in metrics and 'accuracy' not in metrics)
+    ok('metrics include PR-AUC and a confusion matrix',
+       'pr_auc' in metrics and set(metrics.get('confusion') or {})
+       == set(['tn', 'fp', 'fn', 'tp']))
+    ok('metrics record which target precision was asked for',
+       metrics.get('target_precision') == 0.98)
+    ok('the held-out precision is usable (%.3f)' % metrics.get('precision', 0.0),
+       metrics.get('precision', 0.0) >= 0.9)
+    ok('the metrics block renders as English',
+       'precision' in clf_mod.format_metrics(metrics))
+
+    bot_level = clf_mod.score(clf_bundle, bot_vector())
+    human_level = clf_mod.score(clf_bundle, human_vector())
+    ok('levels are integers inside 0..100',
+       isinstance(bot_level, int) and 0 <= bot_level <= 100 and 0 <= human_level <= 100)
+    ok('a bot-shaped vector scores above a human-shaped one (%d > %d)'
+       % (bot_level, human_level), bot_level > human_level)
+    probe = bot_vector()
+    ok('scoring the same vector twice is deterministic',
+       clf_mod.score(clf_bundle, probe) == clf_mod.score(clf_bundle, probe))
+    ok('loading a missing classifier returns None',
+       clf_mod.load(os.path.join(clf_dir, 'absent.joblib')) is None)
+
+    # Threshold choice on deliberately overlapping scores, where the answer is
+    # not trivially 1.0 and the precision/recall trade-off is real.
+    over_y, over_s = [], []
+    for _ in range(400):
+        over_y.append(0)
+        over_s.append(random.betavariate(2, 8))
+    for _ in range(120):
+        over_y.append(1)
+        over_s.append(random.betavariate(6, 3))
+    strict = clf_mod.choose_threshold(over_y, over_s, 0.98)
+    loose = clf_mod.choose_threshold(over_y, over_s, 0.70)
+    ok('a strict precision target is met', strict['reached_target']
+       and strict['precision'] >= 0.98)
+    ok('a looser target gives a lower threshold and more recall',
+       loose['threshold'] < strict['threshold'] and loose['recall'] > strict['recall'])
+    ok('an unreachable target is reported rather than faked',
+       clf_mod.choose_threshold(over_y, over_s, 1.01)['reached_target'] is False)
+    ok('an unreachable target warns against enabling the signal',
+       'Do not enable' in clf_mod.format_metrics(
+           {'precision': 0.4, 'recall': 0.9, 'reached_target': False,
+            'confusion': {'tn': 1, 'fp': 1, 'fn': 1, 'tp': 1}}))
+
+    if os.path.isfile(clf_path):
+        os.unlink(clf_path)
+    os.rmdir(clf_dir)
 
 # ---------------------------------------------------------------------------
 print('')

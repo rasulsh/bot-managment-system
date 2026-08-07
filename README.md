@@ -232,3 +232,102 @@ job and confirm those device ids come back with a high `ml` and a positive
 
 Bot verification needs no toggle and is safe from day one — it only ever
 replaces a blind pass with a checked one.
+
+---
+
+# Phase 3 — measure, tune, then classify
+
+Phase 3 adds no new detection surface. It makes the first two phases
+**measurable**: a control group that produces unbiased outcome data, a replay
+tool that answers "what would this change have done?" against real history, a
+report that turns the KPIs into one command, a fast escape hatch for false
+positives — and only then a supervised classifier, trained on labels that do
+not come from the guard's own decisions.
+
+## Holdout control group
+
+```php
+'holdout_pct'  => 0,                 // 1-2 is the right place to start
+'holdout_salt' => 'CHANGE_ME_TOO',   // any stable string
+```
+
+A deterministic slice of identities is scored and logged exactly as usual, but
+never actually challenged or blocked. Those requests carry `hold=1` and the
+intended action with `sh=1`, so the report can compare the enforced population
+against a population nothing was done to.
+
+**What it costs:** those requests are genuinely unprotected. At 1% that is one
+visitor in a hundred, which is why the value is clamped at 5 — it is a
+measurement sample, not a bypass.
+
+**What it buys:** the only unbiased outcome data the system has. Every other
+label is contaminated by enforcement — `challenge_unsolved` means "we
+challenged it and it did not answer", which says as much about the guard as
+about the client. The holdout is also the only way to estimate **false
+negatives** at all: whatever the holdout shows and the enforced population does
+not is what enforcement is hiding from you.
+
+Rate limiting (`429`) is never held out. It is resource protection, not
+classification, and the holdout must not become a way to hammer the site.
+
+**Identity limitation:** a holdout identity is never challenged, so it never
+receives a token, so it has no stable `dev` and falls back to `ip|uah`. Holdout
+data is therefore **sound in aggregate only** — the nightly job deliberately
+writes no per-device reputation or classifier verdict from holdout sessions.
+
+Changing `holdout_salt` reshuffles who is in the holdout, so change it rarely.
+
+## Operator overrides
+
+```bash
+python3 analyzer/ctl.py show  <device_id|ip>     # run this FIRST
+python3 analyzer/ctl.py allow <device_id> --ttl 3600
+python3 analyzer/ctl.py deny  <device_id|ip> --ttl 86400
+python3 analyzer/ctl.py list  [--kind allow|deny]
+python3 analyzer/ctl.py clear <device_id|ip>
+```
+
+When someone reports being blocked, `ctl.py show` is the first response: it
+prints every `gv:` verdict for that identity — reputation, anomaly level,
+classifier level, bot verification, honeypot history and any override — which
+usually explains what happened without reading a log line. The device id is the
+leading field of the `_gv` cookie.
+
+**Allow is ungated, deny is not.** A permissive override can only ever make the
+guard less strict, so it is safe in any mode and takes effect on the customer's
+very next request — it is the five-second fix. A restrictive override is an
+enforcement action, so it respects `enforce.block` like everything else;
+otherwise monitor mode would no longer mean what you were promised. Allow wins
+over deny. Every override carries a TTL, and TTLs above 30 days are refused: an
+override that never expires is a config change in disguise.
+
+## New config keys
+
+| key | meaning |
+|-----|---------|
+| `holdout_pct` | Percent of identities measured but never enforced against. 0 = off, clamped at 5. |
+| `holdout_salt` | Stable string that fixes holdout membership. Changing it reshuffles the sample. |
+| `signals.clf` | Add the scaled `gv:clf:{dev}` classifier level to the score. Default off (shadow). |
+| `clf_weight` | Multiplier turning a classifier level of 0..100 into a score contribution. Default 0.5. |
+
+## New log fields
+
+`clf` (classifier level, `-1` = no verdict), `hold` (1 = in the holdout) and
+`ovr` (`allow` / `deny` / empty). A new action, `allow_override`, appears when a
+permissive override short-circuits the request.
+
+## Phase 3 rollout
+
+1. **Enable the holdout first** — `holdout_pct = 1` and a real `holdout_salt` —
+   and let it fill for a couple of weeks. Everything downstream reads better
+   with a control group in the data.
+2. **Never touch a threshold without replaying it.** `analyzer/replay.py` tells
+   you exactly what a change would have done to traffic you already have.
+3. **Run the report weekly.** It is what turns "enable the next toggle" from a
+   leap into a decision.
+4. **Enable `signals.clf` last**, and only after the classifier's precision on
+   held-out data is above target — `run_nightly.py --train-clf` prints it on
+   every training run, and says so in words when the target was not reached.
+
+Bot verification and the holdout need no toggle. Everything else stays
+shadow-first.

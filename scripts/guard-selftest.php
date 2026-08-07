@@ -215,7 +215,8 @@ $tmp = sys_get_temp_dir() . '/gv-selftest-' . getmypid();
 $facts = t_facts(array('referer' => 'https://example.com/a/b?c=d'));
 $state = array('tok' => 'v', 'dev' => 'abc123', 'sc' => 15, 'rs' => array('FEW_HDR'),
 	'cd' => 1, 'ciu' => 2, 'ci' => 3, 'rd' => 0, 'hp' => 0, 'bot' => '',
-	'botv' => 'ok', 'rep' => -20, 'ml' => 30, 'esc' => 15);
+	'botv' => 'ok', 'rep' => -20, 'ml' => 30, 'clf' => 12, 'esc' => 15,
+	'hold' => 0, 'ovr' => '');
 gv_log(gv_log_row($facts, $state, 'allow', 0, microtime(true) - 0.01), $tmp);
 
 $file = $tmp . '/guard-' . date('Ymd') . '.jsonl';
@@ -229,7 +230,7 @@ t_ok('log line is valid JSON', is_array($row));
 
 $schema = array('ts', 'ip', 'ua', 'uah', 'm', 'p', 'q', 'aj', 'nav', 'tok', 'dev', 'sf',
 	'al', 'hc', 'sc', 'esc', 'rs', 'cd', 'ciu', 'ci', 'rd', 'hp', 'bot', 'ref',
-	'botv', 'rep', 'ml', 'act', 'sh', 'ms');
+	'botv', 'rep', 'ml', 'clf', 'hold', 'ovr', 'act', 'sh', 'ms');
 t_ok('log line carries every schema key in order', is_array($row) && array_keys($row) === $schema);
 t_ok('referer is reduced to its host', is_array($row) && $row['ref'] === 'example.com');
 t_ok('navigation and ajax flags are recorded',
@@ -240,6 +241,8 @@ t_ok('phase 2 verdicts appear in the log row',
 	is_array($row) && $row['botv'] === 'ok' && $row['rep'] === -20 && $row['ml'] === 30);
 t_ok('static and effective scores are both logged',
 	is_array($row) && $row['sc'] === 15 && $row['esc'] === 15);
+t_ok('phase 3 fields appear in the log row',
+	is_array($row) && $row['clf'] === 12 && $row['hold'] === 0 && $row['ovr'] === '');
 
 if (is_file($file)) { @unlink($file); }
 if (is_dir($tmp)) { @rmdir($tmp); }
@@ -258,48 +261,178 @@ t_ok('a phase 1 config without signals still merges cleanly',
 	gv_cfg_defaults(array('secret' => 'x'))['signals']['ml'] === false);
 
 t_ok('with signals off a positive reputation does not move the score',
-	gv_effective_score(20, 60, -1, $shadow_cfg) === 20);
+	gv_effective_score(20, 60, -1, -1, $shadow_cfg) === 20);
 t_ok('with signals off an anomaly level does not move the score',
-	gv_effective_score(20, 0, 100, $shadow_cfg) === 20);
+	gv_effective_score(20, 0, 100, -1, $shadow_cfg) === 20);
 t_ok('with signals off effective equals static even with both verdicts',
-	gv_effective_score(20, 60, 100, $shadow_cfg) === 20);
+	gv_effective_score(20, 60, 100, -1, $shadow_cfg) === 20);
 
 $on_cfg = gv_cfg_defaults(array('signals' => array('reputation' => true, 'ml' => true)));
 t_ok('with reputation on a positive verdict is added',
-	gv_effective_score(20, 45, -1, $on_cfg) === 65);
+	gv_effective_score(20, 45, -1, -1, $on_cfg) === 65);
 t_ok('with reputation on a negative verdict rescues the score',
-	gv_effective_score(30, -20, -1, $on_cfg) === 10);
+	gv_effective_score(30, -20, -1, -1, $on_cfg) === 10);
 t_ok('with ml on the level scales by ml_weight',
-	gv_effective_score(20, 0, 80, $on_cfg) === 52);
+	gv_effective_score(20, 0, 80, -1, $on_cfg) === 52);
 t_ok('an ml level of -1 means no verdict and contributes nothing',
-	gv_effective_score(20, 0, -1, $on_cfg) === 20);
+	gv_effective_score(20, 0, -1, -1, $on_cfg) === 20);
 t_ok('an ml level of 0 is a real verdict and contributes zero',
-	gv_effective_score(20, 0, 0, $on_cfg) === 20);
+	gv_effective_score(20, 0, 0, -1, $on_cfg) === 20);
 t_ok('both signals fold together',
-	gv_effective_score(10, 30, 50, $on_cfg) === 60);
+	gv_effective_score(10, 30, 50, -1, $on_cfg) === 60);
 
 $rep_only = gv_cfg_defaults(array('signals' => array('reputation' => true)));
 t_ok('one toggle on does not enable the other',
-	gv_effective_score(20, 10, 100, $rep_only) === 30);
+	gv_effective_score(20, 10, 100, -1, $rep_only) === 30);
 
 $weighted = gv_cfg_defaults(array('signals' => array('ml' => true), 'ml_weight' => 1.0));
-t_ok('ml_weight is honoured', gv_effective_score(0, 0, 70, $weighted) === 70);
+t_ok('ml_weight is honoured', gv_effective_score(0, 0, 70, -1, $weighted) === 70);
+
+// --- classifier signal ----------------------------------------------------
+t_ok('clf defaults to off', $shadow_cfg['signals']['clf'] === false);
+t_ok('clf_weight defaults to 0.5', $shadow_cfg['clf_weight'] === 0.5);
+t_ok('with clf off a classifier level does not move the score',
+	gv_effective_score(20, 0, -1, 100, $shadow_cfg) === 20);
+
+$clf_cfg = gv_cfg_defaults(array('signals' => array('clf' => true)));
+t_ok('with clf on the level scales by clf_weight',
+	gv_effective_score(20, 0, -1, 80, $clf_cfg) === 60);
+t_ok('a clf level of -1 means no verdict and contributes nothing',
+	gv_effective_score(20, 0, -1, -1, $clf_cfg) === 20);
+t_ok('a clf level of 0 is a real verdict and contributes zero',
+	gv_effective_score(20, 0, -1, 0, $clf_cfg) === 20);
+t_ok('clf alone does not enable the other signals',
+	gv_effective_score(20, 40, 100, 0, $clf_cfg) === 20);
+
+$all_on = gv_cfg_defaults(array('signals' => array(
+	'reputation' => true, 'ml' => true, 'clf' => true)));
+t_ok('all three signals fold together',
+	gv_effective_score(10, 20, 50, 40, $all_on) === 70);
+t_ok('with every signal on and no verdicts the score is untouched',
+	gv_effective_score(25, 0, -1, -1, $all_on) === 25);
+t_ok('clf_weight is honoured',
+	gv_effective_score(0, 0, -1, 60, gv_cfg_defaults(array(
+		'signals' => array('clf' => true), 'clf_weight' => 1.0))) === 60);
+t_ok('a classifier level can flip a borderline device once enabled',
+	gv_decide(gv_effective_score(40, 0, -1, 50, $clf_cfg), false, true, 'v', 60, '') === '403'
+	&& gv_decide(gv_effective_score(40, 0, -1, 50, $shadow_cfg), false, true, 'v', 60, '') === 'allow');
+
+// --------------------------------------------------------------------------
+t_section('Phase 3 operator overrides');
+
+t_ok('no override leaves the decision alone',
+	gv_decide(0, false, true, 'v', 60, '') === 'allow');
+t_ok('a deny override forces 403 on a clean request',
+	gv_decide(0, false, true, 'v', 60, 'deny') === '403');
+t_ok('a deny override forces 403 on a non-navigation too',
+	gv_decide(0, false, false, 'v', 60, 'deny') === '403');
+t_ok('a deny override wins over the rate rule',
+	gv_decide(0, true, true, 'v', 60, 'deny') === '403');
+t_ok('a deny override wins over the challenge rule',
+	gv_decide(0, false, true, 'm', 60, 'deny') === '403');
+t_ok('an unknown override value is ignored',
+	gv_decide(0, false, true, 'v', 60, 'maybe') === 'allow');
+t_ok('override reads in degraded mode return no signal',
+	gv_override(false, '203.0.113.1', 'devA') === '');
+
+// --------------------------------------------------------------------------
+t_section('Fail-open on a stalled Redis read');
+
+// A server that accepts the connection and then never answers. The write
+// succeeds, the read times out, and gv_r_get returns false rather than null -
+// which is exactly the case that used to be mistaken for a 'bad' verdict.
+$stall_errno  = 0;
+$stall_errstr = '';
+$stall = @stream_socket_server('tcp://127.0.0.1:0', $stall_errno, $stall_errstr);
+if (!$stall) {
+	t_skip('a stalled redis read yields no verdict', 'could not open a local listening socket');
+} else {
+	$stall_name = stream_socket_get_name($stall, false);
+	$stall_port = (int)substr($stall_name, strrpos($stall_name, ':') + 1);
+	$stall_conn = gv_redis_connect(array('host' => '127.0.0.1', 'port' => $stall_port,
+		'timeout' => 0.05));
+	t_ok('connecting to a silent server succeeds', $stall_conn !== false);
+	if ($stall_conn) {
+		$t_start = microtime(true);
+		$stall_reply = gv_r_get($stall_conn, 'gv:botbad:203.0.113.5');
+		$stall_took = microtime(true) - $t_start;
+		t_ok('a stalled read returns false, not null', $stall_reply === false);
+		t_ok('a stalled read gives up quickly (' . number_format($stall_took, 3) . ' s)',
+			$stall_took < 1.0);
+		t_ok('a stalled read yields no bot verdict rather than a bad one',
+			gv_bot_verdict($stall_conn, '203.0.113.5') === '');
+		t_ok('a stalled read yields no operator override either',
+			gv_override($stall_conn, '203.0.113.5', 'devA') === '');
+		gv_redis_close($stall_conn);
+	}
+	fclose($stall);
+}
+
+// --------------------------------------------------------------------------
+t_section('Phase 3 holdout membership');
+
+t_ok('holdout is off by default', gv_is_holdout('devA', 'salt', 0) === false);
+t_ok('a negative percentage is treated as off', gv_is_holdout('devA', 'salt', -3) === false);
+t_ok('an empty identity is never in the holdout', gv_is_holdout('', 'salt', 5) === false);
+
+$ident = 'devA';
+$first = gv_is_holdout($ident, 'salt', 5);
+$stable = true;
+for ($i = 0; $i < 200; $i++) {
+	if (gv_is_holdout($ident, 'salt', 5) !== $first) { $stable = false; break; }
+}
+t_ok('membership is deterministic for the same identity', $stable);
+
+$hits_salt_a = 0;
+$hits_salt_b = 0;
+for ($i = 0; $i < 2000; $i++) {
+	if (gv_is_holdout('dev' . $i, 'salt-a', 5)) { $hits_salt_a++; }
+	if (gv_is_holdout('dev' . $i, 'salt-b', 5)) { $hits_salt_b++; }
+}
+t_ok('changing the salt reshuffles membership', $hits_salt_a !== $hits_salt_b);
+
+// Rate across many synthetic identities should land near the configured target.
+$sample = 20000;
+$rates  = array();
+foreach (array(1, 2, 5) as $pct) {
+	$hits = 0;
+	for ($i = 0; $i < $sample; $i++) {
+		if (gv_is_holdout('device-' . $i, 'measure-salt', $pct)) { $hits++; }
+	}
+	$rates[$pct] = 100.0 * $hits / $sample;
+}
+t_ok('1 percent lands near target (' . number_format($rates[1], 2) . '%)',
+	abs($rates[1] - 1.0) < 0.5);
+t_ok('2 percent lands near target (' . number_format($rates[2], 2) . '%)',
+	abs($rates[2] - 2.0) < 0.7);
+t_ok('5 percent lands near target (' . number_format($rates[5], 2) . '%)',
+	abs($rates[5] - 5.0) < 1.0);
+
+$clamped = 0;
+$at_five = 0;
+for ($i = 0; $i < 5000; $i++) {
+	if (gv_is_holdout('device-' . $i, 'measure-salt', 90)) { $clamped++; }
+	if (gv_is_holdout('device-' . $i, 'measure-salt', 5)) { $at_five++; }
+}
+t_ok('a percentage above 5 is clamped to 5', $clamped === $at_five);
+t_ok('the clamped rate stays near 5 percent (' . number_format(100.0 * $clamped / 5000, 2) . '%)',
+	abs(100.0 * $clamped / 5000 - 5.0) < 1.0);
 
 // --------------------------------------------------------------------------
 t_section('Phase 2 decision engine');
 
-t_ok('a clean tokened navigation is allowed', gv_decide(0, false, true, 'v', 60) === 'allow');
-t_ok('a hard score blocks a navigation', gv_decide(60, false, true, 'v', 60) === '403');
+t_ok('a clean tokened navigation is allowed', gv_decide(0, false, true, 'v', 60, '') === 'allow');
+t_ok('a hard score blocks a navigation', gv_decide(60, false, true, 'v', 60, '') === '403');
 t_ok('a hard score never blocks a non-navigation',
-	gv_decide(90, false, false, 'v', 60) === 'allow');
-t_ok('an over-limit counter returns 429', gv_decide(0, true, true, 'v', 60) === '429');
-t_ok('a token-less navigation is challenged', gv_decide(0, false, true, 'm', 60) === 'challenge');
+	gv_decide(90, false, false, 'v', 60, '') === 'allow');
+t_ok('an over-limit counter returns 429', gv_decide(0, true, true, 'v', 60, '') === '429');
+t_ok('a token-less navigation is challenged', gv_decide(0, false, true, 'm', 60, '') === 'challenge');
 t_ok('a token-less non-navigation is never challenged',
-	gv_decide(0, false, false, 'm', 60) === 'allow');
+	gv_decide(0, false, false, 'm', 60, '') === 'allow');
 t_ok('the score rule wins over the rate rule',
-	gv_decide(60, true, true, 'm', 60) === '403');
+	gv_decide(60, true, true, 'm', 60, '') === '403');
 t_ok('the rate rule wins over the challenge rule',
-	gv_decide(0, true, true, 'm', 60) === '429');
+	gv_decide(0, true, true, 'm', 60, '') === '429');
 
 // Reputation flipping a borderline decision, end to end through both functions.
 // Note the flip lands on 403, not challenge: the challenge rule is gated on the
@@ -307,13 +440,13 @@ t_ok('the rate rule wins over the challenge rule',
 // moved by the hard-score rule.
 $borderline_sc = 40;
 t_ok('a borderline tokened device is allowed while reputation is shadowed',
-	gv_decide(gv_effective_score($borderline_sc, 30, -1, $shadow_cfg), false, true, 'v', 60) === 'allow');
+	gv_decide(gv_effective_score($borderline_sc, 30, -1, -1, $shadow_cfg), false, true, 'v', 60, '') === 'allow');
 t_ok('the same device is blocked once reputation is enabled',
-	gv_decide(gv_effective_score($borderline_sc, 30, -1, $on_cfg), false, true, 'v', 60) === '403');
+	gv_decide(gv_effective_score($borderline_sc, 30, -1, -1, $on_cfg), false, true, 'v', 60, '') === '403');
 t_ok('an anomaly level alone can flip the same borderline device',
-	gv_decide(gv_effective_score($borderline_sc, 0, 60, $on_cfg), false, true, 'v', 60) === '403');
+	gv_decide(gv_effective_score($borderline_sc, 0, 60, -1, $on_cfg), false, true, 'v', 60, '') === '403');
 t_ok('a trustworthy reputation keeps a scored device out of the block',
-	gv_decide(gv_effective_score(65, -20, -1, $on_cfg), false, true, 'v', 60) === 'allow');
+	gv_decide(gv_effective_score(65, -20, -1, -1, $on_cfg), false, true, 'v', 60, '') === 'allow');
 
 // --------------------------------------------------------------------------
 t_section('Redis roundtrip (optional)');
@@ -367,11 +500,31 @@ if ($redis_bin === '') {
 		// Googlebot UA with no Accept-Language and few headers.
 		$fake_sc = 15 + 15 + 35;                  // NO_AL plus FEW_HDR plus BOT_FAKE
 		t_ok('a revoked bot claim blocks even with every signal toggle off',
-			gv_decide(gv_effective_score($fake_sc, 0, -1, $shadow_cfg), false, true, 'm', 60) === '403');
+			gv_decide(gv_effective_score($fake_sc, 0, -1, -1, $shadow_cfg), false, true, 'm', 60, '') === '403');
 		t_ok('the same headers without BOT_FAKE are only challenged',
-			gv_decide(gv_effective_score(30, 0, -1, $shadow_cfg), false, true, 'm', 60) === 'challenge');
+			gv_decide(gv_effective_score(30, 0, -1, -1, $shadow_cfg), false, true, 'm', 60, '') === 'challenge');
 		t_ok('BOT_FAKE alone does not block: an impersonator is still judged on its merits',
-			gv_decide(gv_effective_score(35, 0, -1, $shadow_cfg), false, true, 'm', 60) === 'challenge');
+			gv_decide(gv_effective_score(35, 0, -1, -1, $shadow_cfg), false, true, 'm', 60, '') === 'challenge');
+
+		// --- operator overrides against a live keyspace --------------------
+		$odev = 'overridedev';
+		$oip  = '203.0.113.88';
+		t_ok('no override keys reads as no signal', gv_override($conn, $oip, $odev) === '');
+		gv_r_setex($conn, 'gv:deny:' . $oip, 60, '1');
+		t_ok('an ip deny is read even without a device',
+			gv_override($conn, $oip, '') === 'deny');
+		gv_r_setex($conn, 'gv:allow:' . $odev, 60, '1');
+		t_ok('a device allow wins over an ip deny',
+			gv_override($conn, $oip, $odev) === 'allow');
+		gv_r_setex($conn, 'gv:deny:' . $odev, 60, '1');
+		t_ok('a device allow wins over a device deny',
+			gv_override($conn, $oip, $odev) === 'allow');
+		gv_redis_cmd($conn, array('DEL', 'gv:allow:' . $odev));
+		t_ok('removing the allow leaves the device deny in force',
+			gv_override($conn, $oip, $odev) === 'deny');
+		gv_redis_cmd($conn, array('DEL', 'gv:deny:' . $odev, 'gv:deny:' . $oip));
+		t_ok('device keys are not read for an empty device id',
+			gv_override($conn, $oip, '') === '');
 
 		$vdev = 'selftestdev';
 		gv_r_setex($conn, 'gv:rep:' . $vdev, 60, '-20');

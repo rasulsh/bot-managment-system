@@ -43,6 +43,27 @@ DEFAULTS = {
     # default: nothing here knows anything about any particular platform.
     'path_listing': [],
     'path_detail': [],
+
+    # --- Phase 3 -----------------------------------------------------------
+    # The supervised classifier. Its thresholds are chosen for precision, not
+    # accuracy: the cost of a false positive is a paying customer who cannot
+    # reach the site, and the classes are heavily imbalanced.
+    'clf_path': os.path.join(REPO_ROOT, 'analyzer', 'clf.joblib'),
+    'clf_min_positive': 50,
+    'clf_test_size': 0.25,
+    'clf_target_precision': 0.98,
+    # Optional operator label file: one `identity,0|1` per line.
+    'ground_truth_path': os.path.join(REPO_ROOT, 'analyzer', 'ground-truth.txt'),
+    # How the bridge reaches the guard's effective config. guard_config_path
+    # is passed to config-dump.php --config when set.
+    'php_bin': 'php',
+    'guard_config_path': '',
+    # Report defaults.
+    'report_days': 7,
+    'report_top_n': 20,
+    # Below this challenge->token_issued rate the report says so in words:
+    # real users are burning on the challenge.
+    'challenge_success_target': 0.95,
 }
 
 _NESTED = ('redis', 'bot_suffixes')
@@ -94,6 +115,12 @@ def validate(cfg):
     for key in ('path_listing', 'path_detail'):
         if not isinstance(cfg.get(key), (list, tuple)):
             raise ValueError(key + ' must be a list of regex strings')
+    if not 0.0 < float(cfg.get('clf_target_precision', 0)) <= 1.0:
+        raise ValueError('clf_target_precision must be between 0 and 1')
+    if not 0.0 < float(cfg.get('clf_test_size', 0)) < 1.0:
+        raise ValueError('clf_test_size must be between 0 and 1')
+    if int(cfg.get('clf_min_positive', 0)) < 1:
+        raise ValueError('clf_min_positive must be >= 1')
     return cfg
 
 

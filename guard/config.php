@@ -15,11 +15,18 @@ return array(
 		'challenge' => false,                 // stage 2
 		'ratelimit' => false,                 // stage 3
 	),
-	'signals'          => array(              // Phase 2, all false = shadow only
+	'signals'          => array(              // all false = shadow only
 		'reputation' => false,                // add gv:rep:{dev} to the score
 		'ml'         => false,                // add the gv:ml:{dev} anomaly level
+		'clf'        => false,                // add the gv:clf:{dev} classifier level
 	),
 	'ml_weight'        => 0.4,                // ml level 0..100 -> score contribution
+	'clf_weight'       => 0.5,                // clf level 0..100 -> score contribution
+	'holdout_pct'      => 0,                  // percent of identities measured but never
+	                                          // enforced against. 0 = off. Values above 5
+	                                          // are clamped: a measurement sample, not a bypass.
+	'holdout_salt'     => 'CHANGE_ME_TOO',    // any stable string; changing it reshuffles
+	                                          // who is in the holdout, so change it rarely
 	'bot_suffixes'     => array(              // consumed by the Python verifier;
 	                                          // documented here for one source of truth.
 	                                          // Keep in sync with analyzer/config.py.

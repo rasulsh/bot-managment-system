@@ -17,6 +17,9 @@ if [ -z "$BASE_URL" ]; then
 fi
 BASE_URL="${BASE_URL%/}"
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PHP_BIN="${GV_PHP:-php}"
+
 CHROME_UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 ACCEPT_HTML='text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
 
@@ -121,10 +124,15 @@ if [ "$redis_up" = '0' ]; then
 	row '10 known bot with gv:botbad seeded' 'SKIP' 'n/a' '403 with BOT_FAKE'
 	row '11 device with gv:rep seeded' 'SKIP' 'n/a' 'esc raised'
 	row '12 device with gv:ml seeded' 'SKIP' 'n/a' 'esc raised'
+	row '13 allow override on a blocked device' 'SKIP' 'n/a' '200 allow_override'
+	row '14 deny override on a clean device' 'SKIP' 'n/a' '403'
+	row '15 holdout identity is measured only' 'SKIP' 'n/a' '200 with hold=1'
+	row '16 same request outside the holdout' 'SKIP' 'n/a' '403'
 	echo
-	echo "SKIP-note: cases 9-12 need redis-cli and a reachable Redis to seed"
-	echo "verdicts. Without Redis the guard has no verdicts to read and behaves"
-	echo "exactly as it did in Phase 1 - that is the expected degraded result."
+	echo "SKIP-note: cases 9-16 need redis-cli and a reachable Redis to seed"
+	echo "verdicts and overrides. Without Redis the guard reads no verdict, no"
+	echo "override and no holdout-relevant state, and behaves exactly as it did"
+	echo "in Phase 1 - that is the expected degraded result, not a failure."
 else
 	# The client IP the dev server sees. Verdict keys are per address.
 	CLIENT_IP="${GV_CLIENT_IP:-127.0.0.1}"
@@ -187,6 +195,50 @@ else
 		got=$(browser -o /dev/null -w '%{http_code}' -b "$jar" "$BASE_URL/?gv=both")
 		row '12b gv:ml=100 plus gv:rep=25' "$got" '200' '403'
 		$REDIS_CLI $REDIS_ARGS del "gv:ml:$dev" "gv:rep:$dev" >/dev/null 2>&1
+
+		# 13/14. Operator overrides. Allow short-circuits to 200 with no
+		# scoring; deny forces 403. Both are keyed on the device id.
+		$REDIS_CLI $REDIS_ARGS setex "gv:rep:$dev" 120 80 >/dev/null 2>&1
+		$REDIS_CLI $REDIS_ARGS setex "gv:allow:$dev" 120 1 >/dev/null 2>&1
+		got=$(browser -o /dev/null -w '%{http_code}' -b "$jar" "$BASE_URL/?gv=allowovr")
+		row '13 allow override on a blocked device' "$got" '200' '200 allow_override'
+		$REDIS_CLI $REDIS_ARGS del "gv:allow:$dev" "gv:rep:$dev" >/dev/null 2>&1
+
+		$REDIS_CLI $REDIS_ARGS setex "gv:deny:$dev" 120 1 >/dev/null 2>&1
+		got=$(browser -o /dev/null -w '%{http_code}' -b "$jar" "$BASE_URL/?gv=denyovr")
+		row '14 deny override on a clean device' "$got" '200' '403'
+		$REDIS_CLI $REDIS_ARGS del "gv:deny:$dev" >/dev/null 2>&1
+
+		# 15/16. The holdout. Membership is deterministic per identity, so the
+		# matrix asks the guard itself which device id lands in the holdout
+		# under the dev config, then mints a real token for it. The dev config
+		# publishes its secret, which is exactly what makes this possible here
+		# and impossible in production.
+		hold_pair=$("$PHP_BIN" "$ROOT/scripts/holdout-probe.php" 2>/dev/null)
+		hold_dev="${hold_pair%% *}"
+		hold_tok="${hold_pair##* }"
+		free_pair=$("$PHP_BIN" "$ROOT/scripts/holdout-probe.php" --outside 2>/dev/null)
+		free_dev="${free_pair%% *}"
+		free_tok="${free_pair##* }"
+
+		if [ -z "$hold_dev" ] || [ -z "$free_dev" ]; then
+			row '15 holdout identity is measured only' 'SKIP' 'n/a' '200 with hold=1'
+			row '16 same request outside the holdout' 'SKIP' 'n/a' '403'
+			echo
+			echo "SKIP-note: could not resolve a holdout identity (is holdout_pct 0?)."
+		else
+			# Seed a reputation high enough to block, on both identities. The
+			# only difference between them is holdout membership.
+			$REDIS_CLI $REDIS_ARGS setex "gv:rep:$hold_dev" 120 80 >/dev/null 2>&1
+			$REDIS_CLI $REDIS_ARGS setex "gv:rep:$free_dev" 120 80 >/dev/null 2>&1
+			got=$(browser -o /dev/null -w '%{http_code}' \
+				-H "Cookie: _gv=$hold_tok" "$BASE_URL/?gv=holdout")
+			row '15 holdout identity is measured only' "$got" '200' '200 with hold=1'
+			got=$(browser -o /dev/null -w '%{http_code}' \
+				-H "Cookie: _gv=$free_tok" "$BASE_URL/?gv=enforced")
+			row '16 same request outside the holdout' "$got" '200' '403'
+			$REDIS_CLI $REDIS_ARGS del "gv:rep:$hold_dev" "gv:rep:$free_dev" >/dev/null 2>&1
+		fi
 	fi
 	rm -f "$jar"
 fi

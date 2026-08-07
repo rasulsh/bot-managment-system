@@ -91,3 +91,183 @@ Tune `DECISION_SPAN` in `model.py` if the levels in your logs bunch up around 50
 analyzer decides which addresses are impersonators, the guard honours the
 verdict. If they drift, the guard will keep passing a UA the analyzer never
 checks. Change both together.
+
+---
+
+# Phase 3 additions
+
+## The config bridge — thresholds are no longer duplicated
+
+`analyzer/bridge.py` shells out to `php scripts/config-dump.php` and reads the
+guard's **effective** configuration: the dump runs through the guard's own
+`gv_cfg_load()`, so it reflects the shipped defaults and the forced-monitor
+rule. `secret` and `holdout_salt` are stripped unconditionally and there is no
+flag to print them.
+
+This is what keeps replay honest — it tunes against the thresholds actually in
+force, not a copy that drifted. When PHP is unavailable the bridge warns once
+and falls back to the documented defaults; it never raises.
+
+`known_bots` and `bot_suffixes` remain the only intentionally duplicated keys,
+because they are the analyzer's own inputs rather than guard thresholds.
+
+## Decision parity
+
+`analyzer/decision.py` mirrors exactly two PHP functions —
+`gv_effective_score` and `gv_decide` — and nothing else. Duplicated decision
+logic across two languages is a maintenance hazard; the parity test is what
+makes it acceptable:
+
+```bash
+php scripts/decision-parity.php --emit     # 54 cases of inputs + PHP's answers
+python3 analyzer/selftest.py               # recomputes each one and asserts equality
+```
+
+The matrix covers every signal-toggle combination, the absent-verdict sentinels
+(`rep = 0`, `ml = -1`, `clf = -1`), both sides of `hard_block_score`, every
+decision branch, both override values, and the rounding cases — PHP rounds half
+away from zero and Python's `round()` does not, which is why
+`decision.php_round` exists. If either side changes, the parity test fails
+until they match again.
+
+## Replay — never tune a threshold blind
+
+```bash
+python3 analyzer/replay.py --set hard_block_score=50
+python3 analyzer/replay.py --set signals.clf=true --days 14
+python3 analyzer/replay.py --mode full --set ml_weight=0.6
+```
+
+`threshold` mode (the default) is cheap and exact: it reuses the `sc`, `rep`,
+`ml` and `clf` already in each log row. Use it for `hard_block_score`, the three
+weights and the signal toggles. `full` mode re-derives reputation and anomaly
+levels from the window, and is only needed when tuning the reputation weights
+themselves.
+
+Replay is **read-only by construction** — it imports no Redis client and opens
+no file for writing, and the self-test asserts both.
+
+### Reading the movement table
+
+```
+Movement table
+  allow->403                      240
+  challenge->403                   60
+
+Impact by labelled subset
+  bot-labelled rows               260
+    newly restricted              240   (recall proxy, higher is better)
+  human-labelled rows             560
+    newly restricted                0   <-- the number that decides this change
+  holdout rows                      60
+    would newly be restricted      60   (unenforced slice)
+```
+
+The movement table says how much changes; the labelled subsets say whether the
+change is good. **The human-labelled row is the one that decides it.** A change
+that catches 240 more bot requests and restricts zero human ones is free. The
+same change restricting even a handful of human-labelled requests is a
+different conversation, because each of those is a real customer.
+
+If the human subset is empty, the report says so explicitly — that means the
+window has no confidently-human identities, not that there are no false
+positives.
+
+## Labels — and what must never become one
+
+`analyzer/labels.py` produces `1` (bot), `0` (human) or `None` (excluded).
+
+**Positives**, all independent of the guard's own gating: a honeypot hit, a
+`botv == 'bad'` reverse-DNS refutation, or an identity in the operator ground
+truth. **Negatives** require positive evidence of a person: solved the
+handshake, real median dwell, more than one session in the window, and no
+scripted user agent. **Everything else is excluded from training entirely.**
+
+`challenge_unsolved` is deliberately not a label. It records that the guard
+served a gate and got no answer — the guard's own decision handed back as
+ground truth. A model trained on it learns to reproduce the rules that produced
+it: it scores brilliantly offline and adds nothing in production, because
+everything it flags was already flagged. It also inherits those rules' false
+positives, so a real customer whose browser could not run the challenge teaches
+the model to block people like them. It stays a reputation input, where its
+circularity is visible and bounded by a fixed weight.
+
+### Generating real labels
+
+```
+# analyzer/ground-truth.txt - one identity,label per line
+# comments and blank lines are ignored
+a1b2c3d4e5f6a1b2c3d4e5f6,1
+203.0.113.44,1
+9f8e7d6c5b4a9f8e7d6c5b4a,0
+```
+
+Point a headless browser or HTTP client **that you control** at a staging copy
+of the site, let it browse, then list those device ids or addresses as
+positives. Browse the same staging copy yourself and list your device id as a
+negative. That is how genuine labels enter the system; the file is optional and
+git-ignored.
+
+## Report
+
+```bash
+python3 analyzer/report.py
+python3 analyzer/report.py --days 14 --html /tmp/guard-report.html
+scripts/analyzer-cron.sh report | mail -s "Bot Guard weekly" you@example.com
+```
+
+Eight sections: traffic, decisions split enforced versus shadow, the challenge
+funnel judged against the target rate in words, `sc` and `esc` histograms,
+verdict coverage, the enforced-versus-holdout comparison, top offenders, and
+day-over-day anomalies.
+
+`--html` writes **one self-contained static file**: inline CSS, no JavaScript,
+no external assets, no fonts, no charting library. Bars are table rows with
+proportional-width divs. It is a report to open or email, not a dashboard, and
+it has no live data connection of any kind.
+
+## Supervised classifier
+
+```bash
+python3 analyzer/run_nightly.py --train-clf
+scripts/analyzer-cron.sh train-clf
+```
+
+`HistGradientBoostingClassifier` over **the same `FEATURE_ORDER`** the Isolation
+Forest uses. That is deliberate: an unsupervised density and a supervised
+boundary are genuinely different signals on identical inputs, and adding new
+features at the same time would make it impossible to tell which change helped.
+
+The operating threshold is the **lowest one that reaches
+`clf_target_precision`** (default 0.98) on held-out data — not the most
+accurate. The classes are heavily imbalanced, so accuracy is meaningless, and
+the two errors do not cost the same: a false negative is one scraped page, a
+false positive is a paying customer who cannot reach the site. Every training
+run prints precision, recall, F1, PR-AUC and the confusion matrix, and says so
+in words when no threshold reached the target:
+
+```
+  WARNING: no threshold reached the target precision. Do not enable
+           signals.clf yet - it would restrict real users.
+```
+
+Training returns without writing when positives are below `clf_min_positive`
+(default 50) or when either class is missing. Both are ordinary early in a
+deployment, not errors — a model fitted on eleven bots is a random number
+generator with a confusion matrix.
+
+Holdout identities are excluded from training and from every per-device verdict:
+they have no stable device id, so their data is sound in aggregate only.
+
+## New settings
+
+| key | meaning |
+|-----|---------|
+| `clf_path` | Where the classifier bundle is persisted. Git-ignored. |
+| `clf_min_positive` | Refuse to train below this many bot-labelled sessions. |
+| `clf_test_size` | Held-out fraction for the metrics. |
+| `clf_target_precision` | Precision the operating threshold must reach. |
+| `ground_truth_path` | Optional operator label file. |
+| `php_bin`, `guard_config_path` | How the bridge reaches the guard's config. |
+| `report_days`, `report_top_n` | Report window and table caps. |
+| `challenge_success_target` | Below this rate the report warns in words. |

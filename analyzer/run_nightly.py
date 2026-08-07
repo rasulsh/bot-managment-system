@@ -14,8 +14,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from analyzer import classifier as clf_mod
 from analyzer import config as config_mod
 from analyzer import features as features_mod
+from analyzer import labels as labels_mod
 from analyzer import logs as logs_mod
 from analyzer import model as model_mod
 from analyzer import redis_io
@@ -35,10 +37,58 @@ def build_device_view(sessions, cfg):
             'dev': session['dev'],
             'features': [],
             'labels': [],
+            'sessions': [],
+            'holdout': False,
         })
         entry['features'].append(feats)
         entry['labels'].append(labels)
+        entry['sessions'].append(session)
+        # A holdout identity is never challenged, so it never gets a token and
+        # has no stable device id. Its data is sound in aggregate only, so no
+        # per-device verdict is ever written from it.
+        if any(int(r.get('hold') or 0) == 1 for r in (session.get('rows') or [])):
+            entry['holdout'] = True
     return devices
+
+
+def _median(values):
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return float(ordered[middle])
+    return (float(ordered[middle - 1]) + float(ordered[middle])) / 2.0
+
+
+def collect_training_set(devices, ground_truth):
+    """Build (X, y) from identities that carry a label independent of the guard.
+
+    Sessions of unlabelled identities are dropped entirely rather than assumed
+    human - see analyzer/labels.py for why challenge_unsolved in particular
+    never becomes a label.
+    """
+    X = []
+    y = []
+    for entry in devices.values():
+        if entry.get('holdout'):
+            continue
+        rows = []
+        for session in entry['sessions']:
+            rows.extend(session.get('rows') or [])
+        agg = reputation_mod.aggregate_labels(entry['labels'])
+        median_dwell = _median([f.get('dur_s', 0.0) for f in entry['features']])
+        merged = dict(entry['sessions'][0])
+        merged['features'] = entry['features'][0] if entry['features'] else {}
+        label = labels_mod.bot_labels(merged, agg, rows, ground_truth,
+                                      session_count=len(entry['sessions']),
+                                      median_dwell=median_dwell)
+        if label is None:
+            continue
+        for feats in entry['features']:
+            X.append(features_mod.feature_vector(feats))
+            y.append(int(label))
+    return X, y
 
 
 def collect_clean_vectors(devices):
@@ -56,6 +106,9 @@ def parse_args(argv):
     parser.add_argument('--config', default=None, help='path to a .json or .py config override')
     parser.add_argument('--log-dir', default=None, help='override the log directory')
     parser.add_argument('--train', action='store_true', help='retrain the anomaly model')
+    parser.add_argument('--train-clf', action='store_true',
+                        help='retrain the supervised classifier')
+    parser.add_argument('--ground-truth', default=None, help='operator label file')
     parser.add_argument('--dry-run', action='store_true',
                         help='compute and report without writing verdicts')
     return parser.parse_args(argv)
@@ -82,9 +135,13 @@ def main(argv=None):
 
     # --- reputation -------------------------------------------------------
     rep_written = 0
+    holdout_skipped = 0
     for key, entry in devices.items():
         if not entry['is_device']:
             continue          # rep/ml are per browsing identity, not per IP
+        if entry.get('holdout'):
+            holdout_skipped += 1
+            continue          # holdout data is aggregate-only, never per device
         labels = reputation_mod.aggregate_labels(entry['labels'])
         value = reputation_mod.device_reputation(entry['features'], labels, cfg['rep_clamp'])
         entry['reputation'] = value
@@ -117,7 +174,7 @@ def main(argv=None):
         bundle = model_mod.load(cfg['model_path'])
     if bundle is not None:
         for key, entry in devices.items():
-            if not entry['is_device']:
+            if not entry['is_device'] or entry.get('holdout'):
                 continue
             levels = []
             for feats in entry['features']:
@@ -132,16 +189,73 @@ def main(argv=None):
             if not args.dry_run and redis_io.set_ml(client, entry['dev'], entry['ml'], cfg['ml_ttl']):
                 ml_written += 1
 
+    # --- supervised classifier --------------------------------------------
+    ground_truth = labels_mod.load_ground_truth(
+        args.ground_truth or cfg.get('ground_truth_path'))
+    clf_note = 'not requested'
+    clf_bundle = None
+    clf_written = 0
+
+    want_clf_train = args.train_clf or not os.path.isfile(cfg['clf_path'])
+    if not clf_mod.SKLEARN_AVAILABLE:
+        clf_note = 'scikit-learn unavailable, no classifier this run'
+    elif want_clf_train:
+        X, y = collect_training_set(devices, ground_truth)
+        positives = sum(1 for v in y if v == 1)
+        try:
+            written = clf_mod.train(X, y, cfg['clf_path'],
+                                    min_positive=cfg['clf_min_positive'],
+                                    test_size=cfg['clf_test_size'],
+                                    target_precision=cfg['clf_target_precision'])
+            if written:
+                clf_note = 'trained on %d labelled sessions (%d bot, %d human)' % (
+                    len(y), positives, len(y) - positives)
+            else:
+                clf_note = ('skipped: %d bot-labelled sessions is below '
+                            'clf_min_positive=%d, or one class was missing'
+                            % (positives, cfg['clf_min_positive']))
+        except Exception as exc:
+            clf_note = 'failed: %s' % exc
+
+    if clf_mod.SKLEARN_AVAILABLE:
+        clf_bundle = clf_mod.load(cfg['clf_path'])
+    if clf_bundle is not None:
+        for key, entry in devices.items():
+            if not entry['is_device'] or entry.get('holdout'):
+                continue
+            levels = []
+            for feats in entry['features']:
+                try:
+                    levels.append(clf_mod.score(clf_bundle, features_mod.feature_vector(feats)))
+                except Exception:
+                    continue
+            if not levels:
+                continue
+            entry['clf'] = max(levels)
+            if not args.dry_run and redis_io.set_clf(client, entry['dev'], entry['clf'],
+                                                     cfg['ml_ttl']):
+                clf_written += 1
+
     # --- summary ----------------------------------------------------------
-    device_keys = sum(1 for e in devices.values() if e['is_device'])
+    device_keys = sum(1 for e in devices.values()
+                      if e['is_device'] and not e.get('holdout'))
     if client is None:
         print('Redis unavailable: verdicts were computed but not stored.')
     if bundle is None and model_mod.SKLEARN_AVAILABLE:
         print('No usable model on disk: skipping ML verdicts. Run with --train.')
+    if clf_bundle is None and clf_mod.SKLEARN_AVAILABLE:
+        print('No usable classifier on disk: skipping clf verdicts. Run with --train-clf.')
     print('Nightly analysis: %d rows, %d sessions, %d devices scored.'
           % (len(rows), len(sessions), device_keys))
+    if holdout_skipped:
+        print('Holdout identities skipped for per-device verdicts: %d '
+              '(their data is sound in aggregate only).' % holdout_skipped)
     print('Reputations written: %d. Model: %s. ML verdicts written: %d.'
           % (rep_written, train_note, ml_written))
+    print('Classifier: %s. clf verdicts written: %d.' % (clf_note, clf_written))
+    if clf_bundle is not None and clf_bundle.get('metrics'):
+        print('Classifier metrics on held-out data:')
+        print(clf_mod.format_metrics(clf_bundle['metrics']))
     return 0
 
 

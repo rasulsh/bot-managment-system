@@ -115,3 +115,95 @@ def get_ml(client, dev):
         return int(raw) if raw is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def set_clf(client, dev, level, ttl):
+    level = max(0, min(100, int(level)))
+    return _setex(client, 'gv:clf:' + str(dev), ttl, level)
+
+
+def get_clf(client, dev):
+    raw = _get(client, 'gv:clf:' + str(dev))
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+# --- operator overrides ---------------------------------------------------
+# Written by ctl.py, read by the guard. The TTL is the operator's, not ours:
+# an override without an expiry is a config change in disguise, and it will be
+# forgotten.
+
+def set_override(client, kind, identity, ttl):
+    if kind not in ('allow', 'deny'):
+        warn('ignoring unknown override kind: %r' % (kind,))
+        return False
+    return _setex(client, 'gv:%s:%s' % (kind, identity), ttl, '1')
+
+
+def get_override(client, identity):
+    """Return {'allow': ttl|None, 'deny': ttl|None} for one identity."""
+    out = {}
+    for kind in ('allow', 'deny'):
+        key = 'gv:%s:%s' % (kind, identity)
+        if _get(client, key) == '1':
+            out[kind] = ttl_of(client, key)
+        else:
+            out[kind] = None
+    return out
+
+
+def clear_override(client, identity):
+    """Delete both override keys for an identity. Returns how many were removed."""
+    if client is None:
+        return 0
+    removed = 0
+    for kind in ('allow', 'deny'):
+        try:
+            removed += int(client.delete('gv:%s:%s' % (kind, identity)) or 0)
+        except Exception as exc:
+            warn('delete failed for %s override: %s' % (kind, exc))
+    return removed
+
+
+def ttl_of(client, key):
+    if client is None:
+        return None
+    try:
+        value = int(client.ttl(key))
+    except Exception:
+        return None
+    return value if value >= 0 else None
+
+
+def list_overrides(client, kind=None, limit=500):
+    """Return [(kind, identity, ttl)] for the override keys currently set."""
+    if client is None:
+        return []
+    kinds = ('allow', 'deny') if kind is None else (kind,)
+    out = []
+    for one in kinds:
+        prefix = 'gv:%s:' % one
+        try:
+            for key in client.scan_iter(match=prefix + '*', count=100):
+                out.append((one, str(key)[len(prefix):], ttl_of(client, key)))
+                if len(out) >= limit:
+                    return out
+        except Exception as exc:
+            warn('scan failed for %s overrides: %s' % (one, exc))
+    return out
+
+
+def identity_verdicts(client, identity):
+    """Every gv: verdict touching one identity - the first thing to look at
+    when a customer reports being blocked."""
+    return {
+        'reputation': get_rep(client, identity),
+        'ml': get_ml(client, identity),
+        'clf': get_clf(client, identity),
+        'botok': _get(client, 'gv:botok:' + str(identity)) == '1',
+        'botbad': _get(client, 'gv:botbad:' + str(identity)) == '1',
+        'honeypot': _get(client, 'gv:hp:' + str(identity)) == '1',
+        'overrides': get_override(client, identity),
+    }
