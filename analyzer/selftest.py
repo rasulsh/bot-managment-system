@@ -772,6 +772,111 @@ else:
     os.rmdir(os.path.dirname(model_path))
 
 # ---------------------------------------------------------------------------
+section('Supervised classifier')
+
+from analyzer import classifier as clf_mod
+
+if not clf_mod.SKLEARN_AVAILABLE:
+    skip('supervised classifier train/score',
+         'scikit-learn not installed: ' + clf_mod.SKLEARN_ERROR)
+else:
+    import random
+    random.seed(5)
+
+    def human_vector():
+        n_req = random.uniform(5, 20)
+        dur = random.uniform(60, 400)
+        return [n_req, dur, dur / n_req, random.uniform(4, 12), random.uniform(1, 4),
+                random.uniform(0.7, 1.0), random.uniform(0.4, 0.8), random.uniform(0, 8),
+                0.0, random.uniform(0, 0.1), random.uniform(0, 0.1), 0.0]
+
+    def bot_vector():
+        n_req = random.uniform(60, 400)
+        dur = n_req * random.uniform(0.15, 0.3)
+        return [n_req, dur, dur / n_req, random.uniform(0.0, 0.05),
+                random.uniform(0.05, 0.2), 1.0, random.uniform(0.95, 1.0),
+                random.uniform(25, 45), 1.0, 1.0, random.uniform(0.5, 1.0), 0.0]
+
+    clf_dir = tempfile.mkdtemp(prefix='gv-selftest-clf-')
+    clf_path = os.path.join(clf_dir, 'clf.joblib')
+
+    X_small = [human_vector() for _ in range(60)] + [bot_vector() for _ in range(10)]
+    y_small = [0] * 60 + [1] * 10
+    ok('training refuses below min_positive',
+       clf_mod.train(X_small, y_small, clf_path, min_positive=50) is False)
+    ok('nothing was written when training was refused', not os.path.isfile(clf_path))
+
+    X_one = [human_vector() for _ in range(200)]
+    ok('training refuses when the bot class is missing entirely',
+       clf_mod.train(X_one, [0] * 200, clf_path, min_positive=1) is False)
+    ok('training refuses when the human class is missing entirely',
+       clf_mod.train([bot_vector() for _ in range(200)], [1] * 200, clf_path,
+                     min_positive=1) is False)
+
+    X = [human_vector() for _ in range(300)] + [bot_vector() for _ in range(120)]
+    y = [0] * 300 + [1] * 120
+    ok('training succeeds with enough labelled examples of both classes',
+       clf_mod.train(X, y, clf_path, min_positive=50) is True)
+
+    clf_bundle = clf_mod.load(clf_path)
+    ok('the trained classifier loads', clf_bundle is not None)
+    ok('the bundle records FEATURE_ORDER',
+       clf_bundle['feature_order'] == list(features_mod.FEATURE_ORDER))
+    ok('the bundle carries an operating threshold',
+       0.0 <= float(clf_bundle['threshold']) <= 1.0)
+
+    metrics = clf_bundle.get('metrics') or {}
+    ok('metrics report precision and recall, not accuracy',
+       'precision' in metrics and 'recall' in metrics and 'accuracy' not in metrics)
+    ok('metrics include PR-AUC and a confusion matrix',
+       'pr_auc' in metrics and set(metrics.get('confusion') or {})
+       == set(['tn', 'fp', 'fn', 'tp']))
+    ok('metrics record which target precision was asked for',
+       metrics.get('target_precision') == 0.98)
+    ok('the held-out precision is usable (%.3f)' % metrics.get('precision', 0.0),
+       metrics.get('precision', 0.0) >= 0.9)
+    ok('the metrics block renders as English',
+       'precision' in clf_mod.format_metrics(metrics))
+
+    bot_level = clf_mod.score(clf_bundle, bot_vector())
+    human_level = clf_mod.score(clf_bundle, human_vector())
+    ok('levels are integers inside 0..100',
+       isinstance(bot_level, int) and 0 <= bot_level <= 100 and 0 <= human_level <= 100)
+    ok('a bot-shaped vector scores above a human-shaped one (%d > %d)'
+       % (bot_level, human_level), bot_level > human_level)
+    probe = bot_vector()
+    ok('scoring the same vector twice is deterministic',
+       clf_mod.score(clf_bundle, probe) == clf_mod.score(clf_bundle, probe))
+    ok('loading a missing classifier returns None',
+       clf_mod.load(os.path.join(clf_dir, 'absent.joblib')) is None)
+
+    # Threshold choice on deliberately overlapping scores, where the answer is
+    # not trivially 1.0 and the precision/recall trade-off is real.
+    over_y, over_s = [], []
+    for _ in range(400):
+        over_y.append(0)
+        over_s.append(random.betavariate(2, 8))
+    for _ in range(120):
+        over_y.append(1)
+        over_s.append(random.betavariate(6, 3))
+    strict = clf_mod.choose_threshold(over_y, over_s, 0.98)
+    loose = clf_mod.choose_threshold(over_y, over_s, 0.70)
+    ok('a strict precision target is met', strict['reached_target']
+       and strict['precision'] >= 0.98)
+    ok('a looser target gives a lower threshold and more recall',
+       loose['threshold'] < strict['threshold'] and loose['recall'] > strict['recall'])
+    ok('an unreachable target is reported rather than faked',
+       clf_mod.choose_threshold(over_y, over_s, 1.01)['reached_target'] is False)
+    ok('an unreachable target warns against enabling the signal',
+       'Do not enable' in clf_mod.format_metrics(
+           {'precision': 0.4, 'recall': 0.9, 'reached_target': False,
+            'confusion': {'tn': 1, 'fp': 1, 'fn': 1, 'tp': 1}}))
+
+    if os.path.isfile(clf_path):
+        os.unlink(clf_path)
+    os.rmdir(clf_dir)
+
+# ---------------------------------------------------------------------------
 print('')
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)
