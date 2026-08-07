@@ -1,0 +1,43 @@
+<?php
+if (!defined('GV_BOOT')) { http_response_code(404); exit; }
+
+// Bot Guard configuration.
+// Copy this file per deployment and point GV_CONFIG at it, or edit it in place.
+// While 'secret' equals CHANGE_ME every enforce toggle is forced to false
+// (monitor only), so an unconfigured install can never affect a live site.
+return array(
+	'secret'           => 'CHANGE_ME',        // per deployment: openssl rand -hex 32
+	'cookie_name'      => '_gv',
+	'token_ttl'        => 604800,             // 7 days
+	'nonce_ttl'        => 120,                // seconds
+	'enforce'          => array(              // all false = monitor mode
+		'block'     => false,                 // stage 1
+		'challenge' => false,                 // stage 2
+		'ratelimit' => false,                 // stage 3
+	),
+	'hard_block_score' => 60,
+	'limits'           => array(              // fixed window, per 'window' seconds
+		'window' => 300,
+		'device' => 150,
+		'ip_ua'  => 400,
+		'ip'     => 1200,                     // deliberately generous: CGNAT reality
+		'bot'    => 600,
+	),
+	'honeypot_path'    => '/old-archive',     // change per site; must 404 today
+	'exempt_paths'     => array(),            // URI prefixes, e.g. '/wp-cron.php', '/wp-json/'
+	'exempt_params'    => array(),            // param => array of value prefixes,
+	                                          // e.g. 'route' => array('payment/', 'api/')
+	'known_bots'       => array('googlebot', 'bingbot'),  // lowercase UA substrings
+	'cdn_ranges'       => array(),            // v4 CIDRs; XFF trusted only when
+	                                          // REMOTE_ADDR is inside one of these
+	'redis'            => array('host' => '127.0.0.1', 'port' => 6379,
+	                            'timeout' => 0.05),
+	'log_dir'          => dirname(__DIR__) . '/logs',
+	'strings'          => array(              // user-facing, operator-localizable
+		'lang'     => 'fa',
+		'dir'      => 'rtl',
+		'title'    => 'لطفاً چند لحظه صبر کنید…',
+		'sub'      => 'در حال بررسی مرورگر شما هستیم.',
+		'noscript' => 'برای ادامه، لطفاً JavaScript و Cookie مرورگر را فعال کنید.',
+	),
+);
