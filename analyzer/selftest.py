@@ -10,17 +10,22 @@ when those are not installed.
 from __future__ import print_function
 
 import os
+import shutil
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import botverify
+from analyzer import bridge
 from analyzer import config as config_mod
+from analyzer import decision
 from analyzer import features as features_mod
+from analyzer import labels as labels_mod
 from analyzer import logs as logs_mod
 from analyzer import model as model_mod
 from analyzer import redis_io
+from analyzer import replay as replay_mod
 from analyzer import reputation as reputation_mod
 
 PASS = 0
@@ -49,12 +54,15 @@ def section(name):
 
 
 def row(ts, dev='', ip='10.0.0.1', uah='aaaaaaaaaaaa', p='/', nav=1, sc=0,
-        rs=None, act='allow', sh=0, hp=0, bot=''):
-    """One synthetic Phase 1 log row."""
+        rs=None, act='allow', sh=0, hp=0, bot='', botv='', rep=0, ml=-1, clf=-1,
+        hold=0, ovr='', tok=None):
+    """One synthetic guard log row."""
     return {'ts': ts, 'ip': ip, 'ua': 'x', 'uah': uah, 'm': 'GET', 'p': p, 'q': '',
-            'aj': 0, 'nav': nav, 'tok': 'v' if dev else 'm', 'dev': dev, 'sf': '',
-            'al': 1, 'hc': 10, 'sc': sc, 'rs': rs or [], 'cd': 0, 'ciu': 0, 'ci': 0,
-            'rd': 0, 'hp': hp, 'bot': bot, 'ref': '', 'act': act, 'sh': sh, 'ms': 1.0}
+            'aj': 0, 'nav': nav, 'tok': tok if tok else ('v' if dev else 'm'),
+            'dev': dev, 'sf': '', 'al': 1, 'hc': 10, 'sc': sc, 'esc': sc,
+            'rs': rs or [], 'cd': 0, 'ciu': 0, 'ci': 0, 'rd': 0, 'hp': hp, 'bot': bot,
+            'ref': '', 'botv': botv, 'rep': rep, 'ml': ml, 'clf': clf, 'hold': hold,
+            'ovr': ovr, 'act': act, 'sh': sh, 'ms': 1.0}
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +374,265 @@ else:
        redis_io.get_rep(None, dev) is None)
     for key in ('gv:rep:' + dev, 'gv:ml:' + dev, 'gv:botok:' + ip, 'gv:botbad:' + ip):
         client.delete(key)
+
+# ---------------------------------------------------------------------------
+section('Decision mirror parity with PHP')
+
+import json as json_parity
+import subprocess
+
+PARITY_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             'scripts', 'decision-parity.php')
+php_bin = shutil.which('php') if hasattr(shutil, 'which') else None
+if not php_bin:
+    skip('decision parity against the PHP matrix', 'php not available in this environment')
+elif not os.path.isfile(PARITY_SCRIPT):
+    skip('decision parity against the PHP matrix', 'decision-parity.php not found')
+else:
+    try:
+        raw = subprocess.check_output([php_bin, PARITY_SCRIPT, '--emit'],
+                                      stderr=subprocess.PIPE)
+        matrix = json_parity.loads(raw.decode('utf-8', 'replace'))
+    except Exception as exc:
+        matrix = None
+        skip('decision parity against the PHP matrix', 'could not run the emitter: %s' % exc)
+    if matrix is not None:
+        ok('the PHP matrix carries at least 40 cases', len(matrix) >= 40)
+        esc_bad = []
+        dec_bad = []
+        for index, case in enumerate(matrix):
+            got_esc = decision.effective_score(case['sc'], case['rep'], case['ml'],
+                                               case['clf'], case['cfg'])
+            got_dec = decision.decide(got_esc, case['over'], case['nav'], case['tok'],
+                                      case['hard_block_score'], case['ovr'])
+            if got_esc != case['esc']:
+                esc_bad.append((index, got_esc, case['esc']))
+            if got_dec != case['decision']:
+                dec_bad.append((index, got_dec, case['decision']))
+        ok('every effective score matches PHP exactly (%d cases)' % len(matrix), not esc_bad)
+        if esc_bad:
+            print('      first mismatch: case %d python=%s php=%s' % esc_bad[0])
+        ok('every decision matches PHP exactly (%d cases)' % len(matrix), not dec_bad)
+        if dec_bad:
+            print('      first mismatch: case %d python=%s php=%s' % dec_bad[0])
+        branches = set(c['decision'] for c in matrix)
+        ok('the matrix exercises every decision branch',
+           branches == set(['allow', 'challenge', '403', '429']))
+        ok('the matrix exercises both override values',
+           set(c['ovr'] for c in matrix) == set(['', 'allow', 'deny']))
+
+ok('php_round rounds half away from zero like PHP',
+   decision.php_round(0.5) == 1 and decision.php_round(1.5) == 2
+   and decision.php_round(2.5) == 3)
+ok('php_round handles negatives symmetrically',
+   decision.php_round(-0.5) == -1 and decision.php_round(-1.5) == -2)
+ok('absent verdicts never contribute with every signal on',
+   decision.effective_score(25, 0, -1, -1, {
+       'signals': {'reputation': True, 'ml': True, 'clf': True},
+       'ml_weight': 0.4, 'clf_weight': 0.5}) == 25)
+
+# ---------------------------------------------------------------------------
+section('Config bridge')
+
+bridged = bridge.guard_config(cfg)
+ok('the bridge returns a threshold set', isinstance(bridged, dict)
+   and 'hard_block_score' in bridged)
+ok('the bridge never carries the secret or the salt',
+   'secret' not in bridged and 'holdout_salt' not in bridged)
+ok('the bridge reports where the thresholds came from',
+   bridged.get('source') in ('guard', 'defaults'))
+if php_bin:
+    ok('with php present the thresholds come from the guard itself',
+       bridged.get('source') == 'guard')
+else:
+    skip('thresholds come from the guard itself', 'php not available')
+
+fallback = bridge.guard_config(cfg, php='/nonexistent/php-binary')
+ok('a missing php falls back instead of raising',
+   fallback.get('source') == 'defaults' and fallback['hard_block_score'] == 60)
+
+dcfg = bridge.decision_config(bridged, {'hard_block_score': 45, 'signals.clf': True,
+                                        'ml_weight': 0.9})
+ok('dotted overrides are applied to the decision config',
+   dcfg['hard_block_score'] == 45 and dcfg['signals']['clf'] is True
+   and dcfg['ml_weight'] == 0.9)
+ok('every signal key is present after building a decision config',
+   set(dcfg['signals']) >= set(['reputation', 'ml', 'clf']))
+
+# ---------------------------------------------------------------------------
+section('Training labels and the circularity guard')
+
+hp_sess = logs_mod.sessionize([row(1000.0, dev='hpdev', p='/old-archive', hp=1,
+                                   act='404_hp')], 1800)[0]
+ok('a honeypot session is labelled bot',
+   labels_mod.bot_labels(hp_sess, {'hp_any': 1}, hp_sess['rows']) == 1)
+
+bad_rows = [row(1000.0, ip='192.0.2.1', botv='bad', bot='googlebot', act='403')]
+bad_sess = logs_mod.sessionize(bad_rows, 1800)[0]
+ok('a refuted bot claim is labelled bot',
+   labels_mod.bot_labels(bad_sess, {'hp_any': 0}, bad_rows) == 1)
+
+# The circularity guard: an unsolved challenge is the guard's own decision fed
+# back as truth, so it must never produce a label on its own.
+unsolved_rows = [row(1000.0, dev='', ip='10.9.9.9', act='challenge'),
+                 row(1005.0, dev='', ip='10.9.9.9', act='challenge')]
+unsolved = logs_mod.sessionize(unsolved_rows, 1800)[0]
+ok('challenge_unsolved alone produces no label',
+   labels_mod.bot_labels(unsolved, {'hp_any': 0, 'challenge_unsolved': 1,
+                                    'solved_challenge': 0}, unsolved_rows) is None)
+ok('a 403 the guard served produces no label either',
+   labels_mod.bot_labels(unsolved, {'hp_any': 0, 'challenge_unsolved': 1,
+                                    'solved_challenge': 0},
+                         [row(1000.0, act='403')]) is None)
+
+human_sess = dict(logs_mod.sessionize(
+    [row(1000.0, dev='hdev', act='token_issued'),
+     row(1040.0, dev='hdev', p='/a'),
+     row(1090.0, dev='hdev', p='/b')], 1800)[0])
+human_sess['features'] = {'script_ratio': 0.0}
+human_lbl = {'hp_any': 0, 'challenge_unsolved': 0, 'solved_challenge': 1}
+ok('a solved, dwelling, returning identity is labelled human',
+   labels_mod.bot_labels(human_sess, human_lbl, human_sess['rows'],
+                         session_count=2, median_dwell=90.0) == 0)
+ok('one session is not enough for a human label',
+   labels_mod.bot_labels(human_sess, human_lbl, human_sess['rows'],
+                         session_count=1, median_dwell=90.0) is None)
+ok('too little dwell is not enough for a human label',
+   labels_mod.bot_labels(human_sess, human_lbl, human_sess['rows'],
+                         session_count=3, median_dwell=2.0) is None)
+scripted = dict(human_sess)
+scripted['features'] = {'script_ratio': 1.0}
+ok('a scripted user agent blocks the human label',
+   labels_mod.bot_labels(scripted, human_lbl, scripted['rows'],
+                         session_count=3, median_dwell=90.0) is None)
+ok('a honeypot hit beats every human signal',
+   labels_mod.bot_labels(human_sess, {'hp_any': 1, 'solved_challenge': 1},
+                         human_sess['rows'], session_count=5, median_dwell=500.0) == 1)
+
+gt_handle, gt_path = tempfile.mkstemp(suffix='.txt')
+with os.fdopen(gt_handle, 'w') as fh:
+    fh.write('# operator ground truth\n')
+    fh.write('scraperdev,1\n')
+    fh.write('realuser,0\n')
+    fh.write('malformed line without a comma\n')
+    fh.write('baddev,7\n')
+    fh.write('\n')
+truth = labels_mod.load_ground_truth(gt_path)
+ok('ground truth parses valid lines', truth == {'scraperdev': 1, 'realuser': 0})
+ok('a missing ground truth file is not an error',
+   labels_mod.load_ground_truth('/nonexistent/ground-truth.txt') == {})
+ok('ground truth overrides an inferred label',
+   labels_mod.bot_labels(dict(human_sess, dev='realuser'), {'hp_any': 1},
+                         human_sess['rows'], truth) == 0)
+os.unlink(gt_path)
+
+hold_rows = [row(1000.0 + i, dev='', ip='198.18.0.1', hold=1, sh=1, act='challenge')
+             for i in range(5)]
+hold_rows.append(row(1010.0, dev='', ip='198.18.0.1', hold=1, sh=1, hp=1, act='404_hp'))
+hold_sessions = logs_mod.sessionize(hold_rows, 1800)
+outcomes = labels_mod.holdout_outcomes(hold_sessions)
+ok('holdout outcomes count only held-out rows', outcomes['requests'] == 6)
+ok('holdout outcomes count suppressed challenges', outcomes['would_challenge'] == 5)
+ok('holdout outcomes notice a honeypot hit', outcomes['honeypot_sessions'] == 1)
+ok('holdout outcomes ignore enforced traffic',
+   labels_mod.holdout_outcomes(logs_mod.sessionize(
+       [row(1000.0, dev='enforced', act='challenge')], 1800))['requests'] == 0)
+
+# ---------------------------------------------------------------------------
+section('Counterfactual replay')
+
+# 6 humans, each with two sessions far enough apart to split, a solved
+# handshake and real dwell; 3 honeypot bots; one holdout row; and three rows
+# that never reach the decision step.
+replay_rows_in = []
+for d in range(6):
+    dev = 'rhuman%d' % d
+    base_ts = 2000.0 + d * 100000
+    replay_rows_in.append(row(base_ts, dev=dev, act='token_issued'))
+    for i in range(4):
+        replay_rows_in.append(row(base_ts + 40 + i * 30, dev=dev, p='/p%d' % i,
+                                  sc=10, rep=-20, ml=15, clf=5))
+    for i in range(4):                       # second session, well past the gap
+        replay_rows_in.append(row(base_ts + 9000 + i * 30, dev=dev, p='/s%d' % i,
+                                  sc=10, rep=-20, ml=15, clf=5))
+for d in range(3):
+    dev = 'rbot%d' % d
+    base_ts = 800000.0 + d * 1000
+    replay_rows_in.append(row(base_ts, dev=dev, p='/old-archive', hp=1, act='404_hp'))
+    for i in range(4):
+        replay_rows_in.append(row(base_ts + 10 + i, dev=dev, p='/q%d' % i,
+                                  sc=45, rep=60, ml=90, clf=88))
+replay_rows_in.append(row(900000.0, dev='', ip='198.18.9.9', sc=45, hold=1, sh=1,
+                          act='challenge'))
+replay_rows_in.append(row(900100.0, dev='', ip='10.1.1.1', act='exempt'))
+replay_rows_in.append(row(900200.0, dev='', ip='10.1.1.1', act='allow_bot', bot='googlebot'))
+
+# 6 token_issued + 3 404_hp + 1 exempt + 1 allow_bot never reach the decision.
+EXPECT_SKIPPED = 11
+EXPECT_HUMAN_ROWS = 6 * 8
+EXPECT_BOT_ROWS = 3 * 4
+
+replay_sessions = logs_mod.sessionize(replay_rows_in, 1800)
+label_map = replay_mod.identity_label_map(replay_sessions)
+ok('replay labels the honeypot identities as bots',
+   all(label_map.get('rbot%d' % d) == 1 for d in range(3)))
+ok('replay labels the returning solved identities as human',
+   all(label_map.get('rhuman%d' % d) == 0 for d in range(6)))
+
+base_cfg = {'hard_block_score': 60, 'signals': {'reputation': False, 'ml': False,
+                                                'clf': False},
+            'ml_weight': 0.4, 'clf_weight': 0.5}
+same = replay_mod.replay_rows(replay_rows_in, base_cfg, base_cfg, label_map)
+ok('replaying a config against itself moves nothing', same['movement'] == {})
+ok('replay skips rows that never reached the decision step',
+   same['skipped_non_decision'] == EXPECT_SKIPPED)
+ok('replay considers every remaining row',
+   same['considered'] == len(replay_rows_in) - EXPECT_SKIPPED)
+
+cand = dict(base_cfg, signals={'reputation': True, 'ml': False, 'clf': False})
+moved = replay_mod.replay_rows(replay_rows_in, base_cfg, cand, label_map)
+ok('enabling reputation moves bot rows into 403',
+   moved['movement'].get('allow->403', 0) == EXPECT_BOT_ROWS)
+ok('the movement is credited to the bot-labelled subset',
+   moved['bot_newly_caught'] == EXPECT_BOT_ROWS and moved['bot_rows'] == EXPECT_BOT_ROWS)
+ok('no human-labelled row is newly restricted',
+   moved['human_newly_restricted'] == 0 and moved['human_rows'] == EXPECT_HUMAN_ROWS)
+ok('the holdout row is counted separately', moved['holdout_rows'] == 1)
+ok('replay reports how many effective scores moved', moved['esc_changed'] > 0)
+
+lower = replay_mod.replay_rows(replay_rows_in, base_cfg,
+                               dict(base_cfg, hard_block_score=40), label_map)
+ok('lowering the block score restricts more rows',
+   lower['candidate']['403'] > lower['baseline']['403'])
+ok('a threshold change alone does not move any effective score',
+   lower['esc_changed'] == 0)
+
+ok('replay parses a boolean signal override',
+   replay_mod.parse_set(['signals.clf=true'])['signals.clf'] is True)
+ok('replay parses an integer override',
+   replay_mod.parse_set(['hard_block_score=45'])['hard_block_score'] == 45)
+ok('replay parses a float override',
+   replay_mod.parse_set(['ml_weight=0.6'])['ml_weight'] == 0.6)
+try:
+    replay_mod.parse_set(['nonsense'])
+    ok('a malformed override is rejected', False)
+except ValueError:
+    ok('a malformed override is rejected', True)
+
+ok('replay renders a report containing the movement table',
+   'Movement table' in replay_mod.format_report(moved, base_cfg, cand,
+                                                {'signals.reputation': True},
+                                                'threshold', 'guard'))
+ok('the replay report names the deciding number',
+   'the number that decides this change' in replay_mod.format_report(
+       moved, base_cfg, cand, {}, 'threshold', 'guard'))
+
+# Read-only by construction: the module must not import redis at all.
+replay_source = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'replay.py')).read()
+ok('replay never imports redis_io', 'redis_io' not in replay_source)
+ok('replay never opens a file for writing',
+   "'w'" not in replay_source and '"w"' not in replay_source)
 
 # ---------------------------------------------------------------------------
 section('Isolation Forest')
