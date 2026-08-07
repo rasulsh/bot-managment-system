@@ -29,6 +29,11 @@ function gv_cfg_defaults(array $cfg) {
 		'known_bots'       => array(),
 		'cdn_ranges'       => array(),
 		'log_dir'          => dirname(__DIR__) . '/logs',
+		'ml_weight'        => 0.4,
+		'bot_suffixes'     => array(
+			'googlebot' => array('.googlebot.com', '.google.com'),
+			'bingbot'   => array('.search.msn.com'),
+		),
 	);
 	foreach ($d as $k => $v) {
 		if (!isset($cfg[$k])) { $cfg[$k] = $v; }
@@ -36,6 +41,11 @@ function gv_cfg_defaults(array $cfg) {
 	$enforce = array('block' => false, 'challenge' => false, 'ratelimit' => false);
 	if (!isset($cfg['enforce']) || !is_array($cfg['enforce'])) { $cfg['enforce'] = array(); }
 	$cfg['enforce'] = array_merge($enforce, $cfg['enforce']);
+	// Phase 2 signals merge exactly like enforce, so a Phase 1 config file
+	// without them keeps working and stays in shadow.
+	$signals = array('reputation' => false, 'ml' => false);
+	if (!isset($cfg['signals']) || !is_array($cfg['signals'])) { $cfg['signals'] = array(); }
+	$cfg['signals'] = array_merge($signals, $cfg['signals']);
 	$limits = array('window' => 300, 'device' => 150, 'ip_ua' => 400, 'ip' => 1200, 'bot' => 600);
 	if (!isset($cfg['limits']) || !is_array($cfg['limits'])) { $cfg['limits'] = array(); }
 	$cfg['limits'] = array_merge($limits, $cfg['limits']);
@@ -51,7 +61,7 @@ function gv_cfg_defaults(array $cfg) {
 	);
 	if (!isset($cfg['strings']) || !is_array($cfg['strings'])) { $cfg['strings'] = array(); }
 	$cfg['strings'] = array_merge($strings, $cfg['strings']);
-	foreach (array('exempt_paths', 'exempt_params', 'known_bots', 'cdn_ranges') as $k) {
+	foreach (array('exempt_paths', 'exempt_params', 'known_bots', 'cdn_ranges', 'bot_suffixes') as $k) {
 		if (!is_array($cfg[$k])) { $cfg[$k] = array(); }
 	}
 	return $cfg;
@@ -297,6 +307,7 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 		'al'  => ((string)$f['al'] !== '') ? 1 : 0,
 		'hc'  => (int)$f['hc'],
 		'sc'  => (int)$st['sc'],
+		'esc' => (int)$st['esc'],
 		'rs'  => array_values($st['rs']),
 		'cd'  => (int)$st['cd'],
 		'ciu' => (int)$st['ciu'],
@@ -305,6 +316,9 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 		'hp'  => (int)$st['hp'],
 		'bot' => (string)$st['bot'],
 		'ref' => $ref,
+		'botv' => (string)$st['botv'],
+		'rep' => (int)$st['rep'],
+		'ml'  => (int)$st['ml'],
 		'act' => (string)$act,
 		'sh'  => (int)$sh,
 		'ms'  => round((microtime(true) - $t0) * 1000, 2),
@@ -317,11 +331,56 @@ function gv_emit(array $f, array $st, $act, $sh, $t0, $log_dir) {
 }
 
 // Default per-request state, filled in as the flow progresses.
+// botv/rep/ml carry the Phase 2 verdicts: '' means no bot verdict was read,
+// 0 is a neutral reputation, and -1 means no ML level was available.
 function gv_state_new() {
 	return array(
 		'tok' => 'm', 'dev' => '', 'sc' => 0, 'rs' => array(),
 		'cd'  => 0, 'ciu' => 0, 'ci' => 0, 'rd' => 0, 'hp' => 0, 'bot' => '',
+		'botv' => '', 'rep' => 0, 'ml' => -1, 'esc' => 0,
 	);
+}
+
+// --------------------------------------------------------------------------
+// Phase 2 verdicts
+// --------------------------------------------------------------------------
+
+// Read the offline bot verification verdict for an address.
+// Returns 'bad', 'ok' or '' (no verdict / degraded mode). A bad verdict wins.
+function gv_bot_verdict($conn, $ip) {
+	if (!$conn) { return ''; }
+	if (gv_r_get($conn, 'gv:botbad:' . $ip) !== null) { return 'bad'; }
+	if (gv_r_get($conn, 'gv:botok:' . $ip) !== null) { return 'ok'; }
+	return '';
+}
+
+// Fold the Phase 2 verdicts into the static score. Pure.
+//
+// Shadow-first: each signal is only ADDED when its toggle is on. With both
+// toggles off the effective score equals the static score exactly, so the
+// verdicts are visible in the logs long before they can change an outcome.
+// BOT_FAKE is deliberately not gated here - it is already part of the static
+// score, because an impersonator is a hard signal, not a shadow one.
+function gv_effective_score($sc, $rep, $ml, array $cfg) {
+	$esc = (int)$sc;
+	if (!empty($cfg['signals']['reputation']) && (int)$rep !== 0) {
+		$esc += (int)$rep;
+	}
+	if (!empty($cfg['signals']['ml']) && (int)$ml >= 0) {
+		$esc += (int)round((int)$ml * (float)$cfg['ml_weight']);
+	}
+	return $esc;
+}
+
+// The Phase 1 decision, unchanged except that it now judges the effective
+// score. First match wins. Pure.
+function gv_decide($esc, $over, $nav, $tok, $hard_block_score) {
+	if ((int)$esc >= (int)$hard_block_score && $nav) { return '403'; }
+	if ($over) { return '429'; }
+	// Only navigations reach this rule, so POST, XHR and REST clients are
+	// never challenged: payment callbacks and webhooks stay untouched.
+	if ($nav && $tok !== 'v') { return 'challenge'; }
+	return 'allow';
 }
 
 // --------------------------------------------------------------------------
@@ -399,20 +458,31 @@ function gv_run($t0) {
 	$conn = gv_redis_connect($cfg['redis']);
 	if (!$conn) { $st['rd'] = 1; }
 
-	// 5. Known bots. No live reverse DNS in Phase 1: DNS latency does not
-	// belong in the request path. Offline verification is Phase 2.
+	// 5. Known bots. Still no live reverse DNS: DNS latency does not belong in
+	// the request path. The Phase 2 analyzer verifies out of band and leaves a
+	// verdict here, so this step costs one cheap GET.
 	$bot      = gv_match_bot($f['ua'], $cfg['known_bots']);
 	$bot_over = false;
+	$bot_fake = false;
 	if ($bot !== '') {
 		$st['bot'] = $bot;
-		if ($conn) {
-			$n = gv_bump($conn, 'gv:rb:' . $f['ip'], $cfg['limits']['window']);
-			if ($n > (int)$cfg['limits']['bot']) { $bot_over = true; }
-		}
-		if (!$bot_over) {
-			gv_emit($f, $st, 'allow_bot', 0, $t0, $log);
-			gv_redis_close($conn);
-			return;
+		$verdict = gv_bot_verdict($conn, $f['ip']);
+		if ($verdict === 'bad') {
+			// An impersonator must be judged, not trusted. Revoke the pass and
+			// fall through into normal scoring like any other client.
+			$st['botv'] = 'bad';
+			$bot_fake   = true;
+		} else {
+			if ($verdict === 'ok') { $st['botv'] = 'ok'; }
+			if ($conn) {
+				$n = gv_bump($conn, 'gv:rb:' . $f['ip'], $cfg['limits']['window']);
+				if ($n > (int)$cfg['limits']['bot']) { $bot_over = true; }
+			}
+			if (!$bot_over) {
+				gv_emit($f, $st, 'allow_bot', 0, $t0, $log);
+				gv_redis_close($conn);
+				return;
+			}
 		}
 	}
 
@@ -437,12 +507,28 @@ function gv_run($t0) {
 		}
 	}
 
-	// 8. Static score.
+	// 7b. Phase 2 verdicts for real users. Both are per device, because they
+	// describe a browsing identity rather than an address.
+	if ($st['dev'] !== '' && $conn) {
+		$rep = gv_r_get($conn, 'gv:rep:' . $st['dev']);
+		$st['rep'] = is_numeric($rep) ? (int)$rep : 0;
+		$ml = gv_r_get($conn, 'gv:ml:' . $st['dev']);
+		$st['ml'] = is_numeric($ml) ? (int)$ml : -1;
+	}
+
+	// 8. Static score. gv_score stays pure and Phase 1 shaped; the Phase 2
+	// contributions are folded in below.
 	$hp_hist = false;
 	if ($conn && gv_r_get($conn, 'gv:hp:' . $f['ip']) === '1') { $hp_hist = true; }
 	$scored    = gv_score($f, $hp_hist);
 	$st['sc']  = $scored[0];
 	$st['rs']  = $scored[1];
+	if ($bot_fake) {
+		// Part of the static score on purpose: it counts whatever the signal
+		// toggles say, because a revoked bot claim is not a shadow signal.
+		$st['sc'] += 35;
+		$st['rs'][] = 'BOT_FAKE';
+	}
 
 	// 9. Rate counters. Skipped entirely in degraded mode; values stay 0.
 	$over = $bot_over;
@@ -459,18 +545,10 @@ function gv_run($t0) {
 	}
 	gv_redis_close($conn);
 
-	// 10. Decision. First match wins.
-	$nav      = gv_is_nav($f);
-	$intended = 'allow';
-	if ($st['sc'] >= (int)$cfg['hard_block_score'] && $nav) {
-		$intended = '403';
-	} elseif ($over) {
-		$intended = '429';
-	} elseif ($nav && $st['tok'] !== 'v') {
-		// Only navigations reach this rule, so POST, XHR and REST clients are
-		// never challenged: payment callbacks and webhooks stay untouched.
-		$intended = 'challenge';
-	}
+	// 10. Decision, now judging the effective score.
+	$st['esc'] = gv_effective_score($st['sc'], $st['rep'], $st['ml'], $cfg);
+	$nav       = gv_is_nav($f);
+	$intended  = gv_decide($st['esc'], $over, $nav, $st['tok'], $cfg['hard_block_score']);
 
 	// 11. Act. Every branch logs exactly one line.
 	if ($intended === 'allow') {

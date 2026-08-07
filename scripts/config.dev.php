@@ -14,6 +14,15 @@ return array(
 		'challenge' => true,
 		'ratelimit' => true,
 	),
+	'signals'          => array(              // ON here so the matrix can exercise them
+		'reputation' => true,
+		'ml'         => true,
+	),
+	'ml_weight'        => 0.4,
+	'bot_suffixes'     => array(
+		'googlebot' => array('.googlebot.com', '.google.com'),
+		'bingbot'   => array('.search.msn.com'),
+	),
 	'hard_block_score' => 60,
 	'limits'           => array(
 		'window' => 60,

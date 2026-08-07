@@ -15,6 +15,17 @@ return array(
 		'challenge' => false,                 // stage 2
 		'ratelimit' => false,                 // stage 3
 	),
+	'signals'          => array(              // Phase 2, all false = shadow only
+		'reputation' => false,                // add gv:rep:{dev} to the score
+		'ml'         => false,                // add the gv:ml:{dev} anomaly level
+	),
+	'ml_weight'        => 0.4,                // ml level 0..100 -> score contribution
+	'bot_suffixes'     => array(              // consumed by the Python verifier;
+	                                          // documented here for one source of truth.
+	                                          // Keep in sync with analyzer/config.py.
+		'googlebot' => array('.googlebot.com', '.google.com'),
+		'bingbot'   => array('.search.msn.com'),
+	),
 	'hard_block_score' => 60,
 	'limits'           => array(              // fixed window, per 'window' seconds
 		'window' => 300,
