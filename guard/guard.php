@@ -411,9 +411,23 @@ function gv_effective_score($sc, $rep, $ml, array $cfg) {
 	return $esc;
 }
 
+// Read an operator override. Returns 'allow', 'deny' or ''.
+//
+// Allow wins over deny: the operator's most specific intent is assumed to be
+// the rescue, and a permissive override is the five-second fix when a real
+// customer is stuck. Every read uses === '1' so a failed read is no signal.
+function gv_override($conn, $ip, $dev) {
+	if (!$conn) { return ''; }
+	if ($dev !== '' && gv_r_get($conn, 'gv:allow:' . $dev) === '1') { return 'allow'; }
+	if ($dev !== '' && gv_r_get($conn, 'gv:deny:' . $dev) === '1') { return 'deny'; }
+	if (gv_r_get($conn, 'gv:deny:' . $ip) === '1') { return 'deny'; }
+	return '';
+}
+
 // The Phase 1 decision, unchanged except that it now judges the effective
-// score. First match wins. Pure.
-function gv_decide($esc, $over, $nav, $tok, $hard_block_score) {
+// score and honours a deny override. First match wins. Pure.
+function gv_decide($esc, $over, $nav, $tok, $hard_block_score, $ovr) {
+	if ($ovr === 'deny') { return '403'; }
 	if ((int)$esc >= (int)$hard_block_score && $nav) { return '403'; }
 	if ($over) { return '429'; }
 	// Only navigations reach this rule, so POST, XHR and REST clients are
@@ -555,6 +569,19 @@ function gv_run($t0) {
 		$st['ml'] = is_numeric($ml) ? (int)$ml : -1;
 	}
 
+	// 7c. Operator overrides. An allow short-circuits everything below it: no
+	// scoring, no counters, no challenge. It is deliberately not gated by any
+	// enforce toggle, because a permissive override can only ever make the
+	// guard less strict and must work the instant it is set.
+	if ($conn) {
+		$st['ovr'] = gv_override($conn, $f['ip'], $st['dev']);
+		if ($st['ovr'] === 'allow') {
+			gv_emit($f, $st, 'allow_override', 0, $t0, $log);
+			gv_redis_close($conn);
+			return;                               // zero bytes of output
+		}
+	}
+
 	// 8. Static score. gv_score stays pure and Phase 1 shaped; the Phase 2
 	// contributions are folded in below.
 	$hp_hist = false;
@@ -587,7 +614,8 @@ function gv_run($t0) {
 	// 10. Decision, now judging the effective score.
 	$st['esc'] = gv_effective_score($st['sc'], $st['rep'], $st['ml'], $cfg);
 	$nav       = gv_is_nav($f);
-	$intended  = gv_decide($st['esc'], $over, $nav, $st['tok'], $cfg['hard_block_score']);
+	$intended  = gv_decide($st['esc'], $over, $nav, $st['tok'], $cfg['hard_block_score'],
+		$st['ovr']);
 
 	// 11. Act. Every branch logs exactly one line.
 	if ($intended === 'allow') {
