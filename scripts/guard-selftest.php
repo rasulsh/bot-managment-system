@@ -214,7 +214,8 @@ t_section('Logger');
 $tmp = sys_get_temp_dir() . '/gv-selftest-' . getmypid();
 $facts = t_facts(array('referer' => 'https://example.com/a/b?c=d'));
 $state = array('tok' => 'v', 'dev' => 'abc123', 'sc' => 15, 'rs' => array('FEW_HDR'),
-	'cd' => 1, 'ciu' => 2, 'ci' => 3, 'rd' => 0, 'hp' => 0, 'bot' => '');
+	'cd' => 1, 'ciu' => 2, 'ci' => 3, 'rd' => 0, 'hp' => 0, 'bot' => '',
+	'botv' => 'ok', 'rep' => -20, 'ml' => 30, 'esc' => 15);
 gv_log(gv_log_row($facts, $state, 'allow', 0, microtime(true) - 0.01), $tmp);
 
 $file = $tmp . '/guard-' . date('Ymd') . '.jsonl';
@@ -227,15 +228,92 @@ $row = count($lines) === 1 ? json_decode($lines[0], true) : null;
 t_ok('log line is valid JSON', is_array($row));
 
 $schema = array('ts', 'ip', 'ua', 'uah', 'm', 'p', 'q', 'aj', 'nav', 'tok', 'dev', 'sf',
-	'al', 'hc', 'sc', 'rs', 'cd', 'ciu', 'ci', 'rd', 'hp', 'bot', 'ref', 'act', 'sh', 'ms');
+	'al', 'hc', 'sc', 'esc', 'rs', 'cd', 'ciu', 'ci', 'rd', 'hp', 'bot', 'ref',
+	'botv', 'rep', 'ml', 'act', 'sh', 'ms');
 t_ok('log line carries every schema key in order', is_array($row) && array_keys($row) === $schema);
 t_ok('referer is reduced to its host', is_array($row) && $row['ref'] === 'example.com');
 t_ok('navigation and ajax flags are recorded',
 	is_array($row) && $row['nav'] === 1 && $row['aj'] === 0);
 t_ok('guard wall time is recorded', is_array($row) && $row['ms'] >= 10 && $row['ms'] < 1000);
 
+t_ok('phase 2 verdicts appear in the log row',
+	is_array($row) && $row['botv'] === 'ok' && $row['rep'] === -20 && $row['ml'] === 30);
+t_ok('static and effective scores are both logged',
+	is_array($row) && $row['sc'] === 15 && $row['esc'] === 15);
+
 if (is_file($file)) { @unlink($file); }
 if (is_dir($tmp)) { @rmdir($tmp); }
+
+// --------------------------------------------------------------------------
+t_section('Phase 2 score folding (shadow-first)');
+
+$shadow_cfg = gv_cfg_defaults(array());
+t_ok('signals default to off', $shadow_cfg['signals']['reputation'] === false
+	&& $shadow_cfg['signals']['ml'] === false);
+t_ok('ml_weight defaults to 0.4', $shadow_cfg['ml_weight'] === 0.4);
+t_ok('bot_suffixes defaults cover googlebot and bingbot',
+	isset($shadow_cfg['bot_suffixes']['googlebot'])
+	&& isset($shadow_cfg['bot_suffixes']['bingbot']));
+t_ok('a phase 1 config without signals still merges cleanly',
+	gv_cfg_defaults(array('secret' => 'x'))['signals']['ml'] === false);
+
+t_ok('with signals off a positive reputation does not move the score',
+	gv_effective_score(20, 60, -1, $shadow_cfg) === 20);
+t_ok('with signals off an anomaly level does not move the score',
+	gv_effective_score(20, 0, 100, $shadow_cfg) === 20);
+t_ok('with signals off effective equals static even with both verdicts',
+	gv_effective_score(20, 60, 100, $shadow_cfg) === 20);
+
+$on_cfg = gv_cfg_defaults(array('signals' => array('reputation' => true, 'ml' => true)));
+t_ok('with reputation on a positive verdict is added',
+	gv_effective_score(20, 45, -1, $on_cfg) === 65);
+t_ok('with reputation on a negative verdict rescues the score',
+	gv_effective_score(30, -20, -1, $on_cfg) === 10);
+t_ok('with ml on the level scales by ml_weight',
+	gv_effective_score(20, 0, 80, $on_cfg) === 52);
+t_ok('an ml level of -1 means no verdict and contributes nothing',
+	gv_effective_score(20, 0, -1, $on_cfg) === 20);
+t_ok('an ml level of 0 is a real verdict and contributes zero',
+	gv_effective_score(20, 0, 0, $on_cfg) === 20);
+t_ok('both signals fold together',
+	gv_effective_score(10, 30, 50, $on_cfg) === 60);
+
+$rep_only = gv_cfg_defaults(array('signals' => array('reputation' => true)));
+t_ok('one toggle on does not enable the other',
+	gv_effective_score(20, 10, 100, $rep_only) === 30);
+
+$weighted = gv_cfg_defaults(array('signals' => array('ml' => true), 'ml_weight' => 1.0));
+t_ok('ml_weight is honoured', gv_effective_score(0, 0, 70, $weighted) === 70);
+
+// --------------------------------------------------------------------------
+t_section('Phase 2 decision engine');
+
+t_ok('a clean tokened navigation is allowed', gv_decide(0, false, true, 'v', 60) === 'allow');
+t_ok('a hard score blocks a navigation', gv_decide(60, false, true, 'v', 60) === '403');
+t_ok('a hard score never blocks a non-navigation',
+	gv_decide(90, false, false, 'v', 60) === 'allow');
+t_ok('an over-limit counter returns 429', gv_decide(0, true, true, 'v', 60) === '429');
+t_ok('a token-less navigation is challenged', gv_decide(0, false, true, 'm', 60) === 'challenge');
+t_ok('a token-less non-navigation is never challenged',
+	gv_decide(0, false, false, 'm', 60) === 'allow');
+t_ok('the score rule wins over the rate rule',
+	gv_decide(60, true, true, 'm', 60) === '403');
+t_ok('the rate rule wins over the challenge rule',
+	gv_decide(0, true, true, 'm', 60) === '429');
+
+// Reputation flipping a borderline decision, end to end through both functions.
+// Note the flip lands on 403, not challenge: the challenge rule is gated on the
+// token, not on the score, so a device that already holds a token can only be
+// moved by the hard-score rule.
+$borderline_sc = 40;
+t_ok('a borderline tokened device is allowed while reputation is shadowed',
+	gv_decide(gv_effective_score($borderline_sc, 30, -1, $shadow_cfg), false, true, 'v', 60) === 'allow');
+t_ok('the same device is blocked once reputation is enabled',
+	gv_decide(gv_effective_score($borderline_sc, 30, -1, $on_cfg), false, true, 'v', 60) === '403');
+t_ok('an anomaly level alone can flip the same borderline device',
+	gv_decide(gv_effective_score($borderline_sc, 0, 60, $on_cfg), false, true, 'v', 60) === '403');
+t_ok('a trustworthy reputation keeps a scored device out of the block',
+	gv_decide(gv_effective_score(65, -20, -1, $on_cfg), false, true, 'v', 60) === 'allow');
 
 // --------------------------------------------------------------------------
 t_section('Redis roundtrip (optional)');
@@ -270,6 +348,41 @@ if ($redis_bin === '') {
 		t_ok('redis error reply returns false', gv_redis_cmd($conn, array('INCR')) === false);
 		t_ok('counter bump against live redis counts up', gv_bump($conn, $key . ':b', 60) === 1
 			&& gv_bump($conn, $key . ':b', 60) === 2);
+
+		// --- Phase 2 verdict reads against a live keyspace -----------------
+		$vip = '203.0.113.77';
+		t_ok('no verdict reads as an empty string', gv_bot_verdict($conn, $vip) === '');
+		gv_r_setex($conn, 'gv:botok:' . $vip, 60, '1');
+		t_ok('a botok verdict reads as ok', gv_bot_verdict($conn, $vip) === 'ok');
+		gv_r_setex($conn, 'gv:botbad:' . $vip, 60, '1');
+		t_ok('a botbad verdict wins over botok', gv_bot_verdict($conn, $vip) === 'bad');
+		gv_redis_cmd($conn, array('DEL', 'gv:botbad:' . $vip));
+		gv_redis_cmd($conn, array('DEL', 'gv:botok:' . $vip));
+		t_ok('deleting both verdicts returns to no signal', gv_bot_verdict($conn, $vip) === '');
+		t_ok('verdict reads in degraded mode return no signal',
+			gv_bot_verdict(false, $vip) === '');
+
+		// A revoked bot claim: +35 lands in the static score, so it counts even
+		// with every signal toggle off. A typical impersonator sends a bare
+		// Googlebot UA with no Accept-Language and few headers.
+		$fake_sc = 15 + 15 + 35;                  // NO_AL plus FEW_HDR plus BOT_FAKE
+		t_ok('a revoked bot claim blocks even with every signal toggle off',
+			gv_decide(gv_effective_score($fake_sc, 0, -1, $shadow_cfg), false, true, 'm', 60) === '403');
+		t_ok('the same headers without BOT_FAKE are only challenged',
+			gv_decide(gv_effective_score(30, 0, -1, $shadow_cfg), false, true, 'm', 60) === 'challenge');
+		t_ok('BOT_FAKE alone does not block: an impersonator is still judged on its merits',
+			gv_decide(gv_effective_score(35, 0, -1, $shadow_cfg), false, true, 'm', 60) === 'challenge');
+
+		$vdev = 'selftestdev';
+		gv_r_setex($conn, 'gv:rep:' . $vdev, 60, '-20');
+		gv_r_setex($conn, 'gv:ml:' . $vdev, 60, '75');
+		t_ok('a signed reputation round-trips through redis',
+			(int)gv_r_get($conn, 'gv:rep:' . $vdev) === -20);
+		t_ok('an anomaly level round-trips through redis',
+			(int)gv_r_get($conn, 'gv:ml:' . $vdev) === 75);
+		t_ok('a missing reputation is not numeric and folds as neutral',
+			is_numeric(gv_r_get($conn, 'gv:rep:missing')) === false);
+
 		gv_redis_cmd($conn, array('FLUSHALL'));
 		gv_redis_cmd($conn, array('SHUTDOWN', 'NOSAVE'));
 		gv_redis_close($conn);

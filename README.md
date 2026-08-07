@@ -52,6 +52,10 @@ cache layer and needs zero host-app changes. Then set a real secret in
 | `redis` | `host`, `port`, `timeout` (0.05 s: fail fast, never stall a page). |
 | `log_dir` | JSONL destination. |
 | `strings` | `lang`, `dir`, `title`, `sub`, `noscript` — the only user-facing text; translate here, the code stays English. |
+| `signals.reputation` | Phase 2. Add `gv:rep:{dev}` to the score. Default off (shadow). |
+| `signals.ml` | Phase 2. Add the scaled `gv:ml:{dev}` anomaly level to the score. Default off (shadow). |
+| `ml_weight` | Phase 2. Multiplier turning an anomaly level of 0..100 into a score contribution. Default 0.4. |
+| `bot_suffixes` | Phase 2. Reverse-DNS suffixes per known bot. Consumed by the Python verifier; kept here as one source of truth. |
 
 ## Platform notes
 
@@ -126,3 +130,105 @@ The dev router uses `scripts/config.dev.php`: a public secret, all enforce
 toggles on and tiny limits. **It is test-only and must never be deployed.**
 Without Redis the matrix shows degraded behaviour (`rd=1` in the logs, no 429 in
 case 8) — that is the expected result, not a failure.
+
+---
+
+# Phase 2 — offline analyzer
+
+Phase 2 adds an **out-of-band Python analyzer** (`analyzer/`) that reads these
+same JSONL logs, writes verdicts into Redis, and stops there. It never sees a
+live request, never blocks and never challenges — the in-band PHP guard remains
+the only component that touches traffic. The guard reads the verdicts as cheap
+Redis GETs and folds them into the score it already computes.
+
+Everything Phase 2 adds is **shadow-first**: the verdicts are always logged, but
+only change a decision once you switch a `signals` toggle on. See
+`analyzer/README.md` for the analyzer's own operator guide.
+
+## Requirements
+
+Python 3.8+ and `python3 -m pip install -r analyzer/requirements.txt` (redis,
+scikit-learn, numpy). Redis must be reachable by both the PHP guard and the
+analyzer — it is the only channel between them. Without Redis both sides simply
+degrade: the guard runs as in Phase 1, the analyzer computes and reports without
+storing.
+
+## Verdict contract
+
+All keys are written by Python and read by PHP. All are optional — absence means
+no signal — and all carry a TTL, so a stopped analyzer cannot pin a stale
+verdict forever.
+
+| key | writer | value | TTL | effect in the guard |
+|-----|--------|-------|-----|---------------------|
+| `gv:botok:{ip}` | `run_verify` | `"1"` | 86400 | The UA-claimed bot is forward-confirmed. Logged as `botv=ok`; the known-bot pass stands. |
+| `gv:botbad:{ip}` | `run_verify` | `"1"` | 86400 | The UA claims a known bot but reverse DNS failed. Logged as `botv=bad`; **revokes** the pass and adds `BOT_FAKE` (+35). |
+| `gv:rep:{dev}` | `run_nightly` | signed int, clamped [-50, 80] | 2592000 | Behavioural reputation. Logged as `rep`; added to the score when `signals.reputation` is on. |
+| `gv:ml:{dev}` | `run_nightly` | int 0..100 | 86400 | Isolation Forest anomaly level. Logged as `ml`; `round(ml * ml_weight)` is added when `signals.ml` is on. |
+
+Positive reputation is suspicious, negative is trustworthy — the same sign
+convention the static score uses. `botok`/`botbad` are per IP because bots do
+not carry the cookie; `rep`/`ml` are per device because they describe a browsing
+identity.
+
+`BOT_FAKE` is deliberately **not** gated by any toggle: it is part of the static
+score, because a revoked bot claim is a hard signal. It still does not block on
+its own (+35 is below the default `hard_block_score`) — an impersonator is
+scored like any other client, not summarily blocked.
+
+## Cron
+
+```
+*/10 * * * * /full/path/bot-guard/scripts/analyzer-cron.sh verify  >/dev/null 2>&1
+17 4   * * * /full/path/bot-guard/scripts/analyzer-cron.sh nightly >/dev/null 2>&1
+41 5   * * 0 /full/path/bot-guard/scripts/analyzer-cron.sh train   >/dev/null 2>&1
+```
+
+Each mode takes its own `flock`, so overlapping firings skip cleanly rather than
+writing partial verdicts.
+
+## New log fields
+
+`botv` (`ok` / `bad` / empty), `rep`, `ml` (`-1` means no verdict), and `esc` —
+the effective score. `sc` remains the pure static score, so `esc` next to `sc`
+shows exactly what the new signals contributed.
+
+```bash
+# Distribution of bot verification verdicts.
+jq -r 'select(.bot!="")|.botv' logs/guard-*.jsonl | sort | uniq -c | sort -rn
+
+# Requests where the Phase 2 signals actually moved the score.
+jq -c 'select(.esc != .sc)|{ip,dev,sc,esc,rep,ml,act,sh}' logs/guard-*.jsonl
+
+# Top devices by anomaly level.
+jq -r 'select(.ml>=0)|[.ml,.dev]|@tsv' logs/guard-*.jsonl | sort -rnu | head -20
+```
+
+## Keep the two configs in sync
+
+`known_bots` and `bot_suffixes` live in **both** `guard/config.php` and
+`analyzer/config.py`. They are one contract seen from two sides: the analyzer
+decides which addresses are impersonators, the guard honours the verdict. If
+they drift, the guard keeps passing a UA the analyzer never checks.
+
+## Evaluating the signals
+
+To generate labelled bot traffic, point a headless browser or HTTP client you
+control at a **staging copy** of the site, let it browse, then run the nightly
+job and confirm those device ids come back with a high `ml` and a positive
+`rep`. Compare against your own real browsing session on the same staging copy.
+
+## Phase 2 rollout
+
+1. Install the requirements and wire both cron jobs. Leave
+   `signals.reputation` and `signals.ml` **off**.
+2. Run about two weeks. `botv`, `rep`, `ml` and `esc` appear in every log line
+   while `esc` still equals `sc` — nothing can change a decision yet.
+3. Read the logs. Check that devices you believe are human carry a negative
+   `rep`, and that `esc` would only have moved requests you are happy to move.
+4. Enable `signals.reputation`. Watch the `403` and `challenge` rates.
+5. Later, enable `signals.ml`, and tune `ml_weight` (and the reputation weights
+   in `analyzer/reputation.py`) from what the logs show.
+
+Bot verification needs no toggle and is safe from day one — it only ever
+replaces a blind pass with a checked one.

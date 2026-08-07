@@ -99,7 +99,100 @@ else
 	echo "guard runs in degraded mode (rd=1 in the logs) and all counters stay 0."
 fi
 
+# --- Phase 2: verdicts injected into Redis ---------------------------------
+#
+# These cases seed the keys the Python analyzer would normally write and check
+# the documented effect. They need redis-cli and a reachable Redis; without one
+# they SKIP, and the Phase 1 outcomes above are still the pass.
+echo
+GOOGLEBOT_UA='Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+REDIS_CLI="${REDIS_CLI:-redis-cli}"
+REDIS_ARGS="${REDIS_ARGS:--h 127.0.0.1 -p 6379}"
+
+redis_up=0
+if command -v "$REDIS_CLI" >/dev/null 2>&1; then
+	if [ "$($REDIS_CLI $REDIS_ARGS ping 2>/dev/null)" = 'PONG' ]; then
+		redis_up=1
+	fi
+fi
+
+if [ "$redis_up" = '0' ]; then
+	row '9 known bot with gv:botok seeded' 'SKIP' 'n/a' 'allow_bot 200'
+	row '10 known bot with gv:botbad seeded' 'SKIP' 'n/a' '403 with BOT_FAKE'
+	row '11 device with gv:rep seeded' 'SKIP' 'n/a' 'esc raised'
+	row '12 device with gv:ml seeded' 'SKIP' 'n/a' 'esc raised'
+	echo
+	echo "SKIP-note: cases 9-12 need redis-cli and a reachable Redis to seed"
+	echo "verdicts. Without Redis the guard has no verdicts to read and behaves"
+	echo "exactly as it did in Phase 1 - that is the expected degraded result."
+else
+	# The client IP the dev server sees. Verdict keys are per address.
+	CLIENT_IP="${GV_CLIENT_IP:-127.0.0.1}"
+	# Case 5 left a honeypot mark on this address (+40 HP_HIST) and case 8 blew
+	# through the tiny dev limits. Clear both so each case below isolates the
+	# one Phase 2 signal it is meant to demonstrate.
+	$REDIS_CLI $REDIS_ARGS del "gv:botok:$CLIENT_IP" "gv:botbad:$CLIENT_IP" \
+		"gv:hp:$CLIENT_IP" >/dev/null 2>&1
+
+	# Clear the rate counters so the cases below exercise the verdict path
+	# rather than the 429.
+	for pattern in 'gv:ri:*' 'gv:riu:*' 'gv:rd:*' 'gv:rb:*'; do
+		keys=$($REDIS_CLI $REDIS_ARGS --scan --pattern "$pattern" 2>/dev/null)
+		[ -n "$keys" ] && echo "$keys" | xargs -r $REDIS_CLI $REDIS_ARGS del >/dev/null 2>&1
+	done
+
+	# 9. A forward-confirmed bot keeps its Phase 1 pass and is stamped botv=ok.
+	$REDIS_CLI $REDIS_ARGS setex "gv:botok:$CLIENT_IP" 120 1 >/dev/null 2>&1
+	got=$(curl -sk -o /dev/null -w '%{http_code}' -H "User-Agent: $GOOGLEBOT_UA" \
+		-H "Accept: $ACCEPT_HTML" "$BASE_URL/?gv=botok")
+	row '9 known bot with gv:botok seeded' "$got" '200' '200 allow_bot'
+	$REDIS_CLI $REDIS_ARGS del "gv:botok:$CLIENT_IP" >/dev/null 2>&1
+
+	# 10. An impersonator loses the pass and is scored: NO_AL + FEW_HDR + BOT_FAKE.
+	$REDIS_CLI $REDIS_ARGS setex "gv:botbad:$CLIENT_IP" 120 1 >/dev/null 2>&1
+	got=$(curl -sk -o /dev/null -w '%{http_code}' -H "User-Agent: $GOOGLEBOT_UA" \
+		-H "Accept: $ACCEPT_HTML" "$BASE_URL/?gv=botbad")
+	row '10 known bot with gv:botbad seeded' "$got" '200' '403'
+	$REDIS_CLI $REDIS_ARGS del "gv:botbad:$CLIENT_IP" >/dev/null 2>&1
+
+	# 11/12. Reputation and anomaly level on a real device. Complete the
+	# handshake first: the device_id is the leading field of the token cookie.
+	jar=$(mktemp)
+	body=$(browser "$BASE_URL/?gv=seed")
+	nonce=$(printf '%s' "$body" | sed -n "s/.*'X-GV': '\([0-9a-f.]*\)'.*/\1/p" | head -1)
+	dev=''
+	if [ -n "$nonce" ]; then
+		curl -sk -o /dev/null -X POST -H "X-GV: $nonce" -c "$jar" "$BASE_URL/" >/dev/null 2>&1
+		dev=$(awk '$6 == "_gv" {print $7}' "$jar" | head -1 | cut -d. -f1)
+	fi
+
+	if [ -z "$dev" ]; then
+		row '11 device with gv:rep seeded' 'SKIP' 'n/a' 'esc raised'
+		row '12 device with gv:ml seeded' 'SKIP' 'n/a' 'esc raised'
+		echo
+		echo "SKIP-note: cases 11-12 need a completed handshake to obtain a device_id."
+	else
+		# A tokened device is normally allowed; a high reputation must block it.
+		$REDIS_CLI $REDIS_ARGS setex "gv:rep:$dev" 120 80 >/dev/null 2>&1
+		got=$(browser -o /dev/null -w '%{http_code}' -b "$jar" "$BASE_URL/?gv=rep")
+		row '11 device with gv:rep=80 seeded' "$got" '200' '403'
+		$REDIS_CLI $REDIS_ARGS del "gv:rep:$dev" >/dev/null 2>&1
+
+		# 100 * 0.4 = 40 on its own is below the block score, so pair it with a
+		# mild reputation to show the two signals folding together.
+		$REDIS_CLI $REDIS_ARGS setex "gv:ml:$dev" 120 100 >/dev/null 2>&1
+		got=$(browser -o /dev/null -w '%{http_code}' -b "$jar" "$BASE_URL/?gv=ml")
+		row '12 device with gv:ml=100 seeded' "$got" '200' '200 (40 < block score)'
+		$REDIS_CLI $REDIS_ARGS setex "gv:rep:$dev" 120 25 >/dev/null 2>&1
+		got=$(browser -o /dev/null -w '%{http_code}' -b "$jar" "$BASE_URL/?gv=both")
+		row '12b gv:ml=100 plus gv:rep=25' "$got" '200' '403'
+		$REDIS_CLI $REDIS_ARGS del "gv:ml:$dev" "gv:rep:$dev" >/dev/null 2>&1
+	fi
+	rm -f "$jar"
+fi
+
 echo
 echo "Inspect the log directory for one JSONL line per request above."
+echo "Phase 2 fields to watch: botv, rep, ml, and esc next to sc."
 echo "Default deployment path: <guard>/logs/guard-$(date +%Y%m%d).jsonl"
 echo "Dev router (scripts/config.dev.php) path: ${TMPDIR:-/tmp}/gv-logs/guard-$(date +%Y%m%d).jsonl"
