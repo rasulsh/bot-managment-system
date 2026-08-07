@@ -8,6 +8,7 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 
 require_once __DIR__ . '/redis.php';
 require_once __DIR__ . '/log.php';
+require_once __DIR__ . '/challenge.php';
 
 // --------------------------------------------------------------------------
 // Configuration
@@ -370,6 +371,24 @@ function gv_run($t0) {
 	$log = (string)$cfg['log_dir'];
 	$st  = gv_state_new();
 
+	// 2. Verify handshake intercept. Runs before exemptions so the challenge
+	// page can always complete its own POST back to the same URL.
+	if ($f['method'] === 'POST' && $f['xgv'] !== '') {
+		if (gv_nonce_check($f['xgv'], $cfg['secret'], $cfg['nonce_ttl'])) {
+			$token = gv_tok_make($cfg['secret']);
+			$dev   = gv_tok_check($token, $cfg['secret'], $cfg['token_ttl']);
+			gv_set_token_cookie($cfg, $token, $f['https']);
+			$st['tok'] = 'v';
+			$st['dev'] = ($dev === false) ? '' : $dev;
+			gv_emit($f, $st, 'token_issued', 0, $t0, $log);
+			if (!headers_sent()) { http_response_code(204); }
+			exit;
+		}
+		gv_emit($f, $st, 'nonce_bad', 0, $t0, $log);
+		if (!headers_sent()) { http_response_code(403); }
+		exit;
+	}
+
 	// 3. Exemptions. CLI was already excluded by prepend.php.
 	if (gv_is_exempt($f, $cfg['exempt_paths'], $cfg['exempt_params'])) {
 		gv_emit($f, $st, 'exempt', 0, $t0, $log);
@@ -407,6 +426,17 @@ function gv_run($t0) {
 		exit;
 	}
 
+	// 7. Token.
+	if ($f['cookie'] !== '') {
+		$dev = gv_tok_check($f['cookie'], $cfg['secret'], $cfg['token_ttl']);
+		if ($dev === false) {
+			$st['tok'] = 'b';
+		} else {
+			$st['tok'] = 'v';
+			$st['dev'] = $dev;
+		}
+	}
+
 	// 8. Static score.
 	$hp_hist = false;
 	if ($conn && gv_r_get($conn, 'gv:hp:' . $f['ip']) === '1') { $hp_hist = true; }
@@ -436,6 +466,10 @@ function gv_run($t0) {
 		$intended = '403';
 	} elseif ($over) {
 		$intended = '429';
+	} elseif ($nav && $st['tok'] !== 'v') {
+		// Only navigations reach this rule, so POST, XHR and REST clients are
+		// never challenged: payment callbacks and webhooks stay untouched.
+		$intended = 'challenge';
 	}
 
 	// 11. Act. Every branch logs exactly one line.
@@ -443,9 +477,13 @@ function gv_run($t0) {
 		gv_emit($f, $st, 'allow', 0, $t0, $log);
 		return;                                   // zero bytes of output
 	}
-	$enforced = ($intended === '403')
-		? !empty($cfg['enforce']['block'])
-		: !empty($cfg['enforce']['ratelimit']);
+	if ($intended === '403') {
+		$enforced = !empty($cfg['enforce']['block']);
+	} elseif ($intended === '429') {
+		$enforced = !empty($cfg['enforce']['ratelimit']);
+	} else {
+		$enforced = !empty($cfg['enforce']['challenge']);
+	}
 	if (!$enforced) {
 		// Monitor mode: record what would have happened and allow.
 		gv_emit($f, $st, $intended, 1, $t0, $log);
@@ -453,7 +491,8 @@ function gv_run($t0) {
 	}
 	gv_emit($f, $st, $intended, 0, $t0, $log);
 	if ($intended === '403') { gv_send_403(); exit; }
-	gv_send_429();
+	if ($intended === '429') { gv_send_429(); exit; }
+	gv_challenge_render(gv_nonce_make($cfg['secret']), $cfg['strings']);
 	exit;
 }
 
