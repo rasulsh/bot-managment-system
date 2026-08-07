@@ -28,6 +28,9 @@ return array(
 	// in the matrix would be held out and nothing would ever be enforced.
 	'holdout_pct'      => 5,
 	'holdout_salt'     => 'gv-dev-1',
+	// ON here so the matrix can prove outcome lines appear. The byte-identity
+	// test flips this via GV_CAPTURE to compare the same pages both ways.
+	'capture_outcomes' => (getenv('GV_CAPTURE') !== '0'),
 	'bot_suffixes'     => array(
 		'googlebot' => array('.googlebot.com', '.google.com'),
 		'bingbot'   => array('.search.msn.com'),
