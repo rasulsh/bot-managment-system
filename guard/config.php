@@ -27,6 +27,11 @@ return array(
 	                                          // are clamped: a measurement sample, not a bypass.
 	'holdout_salt'     => 'CHANGE_ME_TOO',    // any stable string; changing it reshuffles
 	                                          // who is in the holdout, so change it rarely
+	'capture_outcomes' => false,              // Phase 4. Off by default: this is the only
+	                                          // guard code that runs after the application,
+	                                          // so it is opt-in like every other new behaviour.
+	                                          // Adds a second tiny JSONL line per allowed
+	                                          // request, correlated by rid.
 	'bot_suffixes'     => array(              // consumed by the Python verifier;
 	                                          // documented here for one source of truth.
 	                                          // Keep in sync with analyzer/config.py.

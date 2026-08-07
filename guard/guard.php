@@ -9,6 +9,7 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 require_once __DIR__ . '/redis.php';
 require_once __DIR__ . '/log.php';
 require_once __DIR__ . '/challenge.php';
+require_once __DIR__ . '/outcome.php';
 
 // --------------------------------------------------------------------------
 // Configuration
@@ -33,6 +34,7 @@ function gv_cfg_defaults(array $cfg) {
 		'clf_weight'       => 0.5,
 		'holdout_pct'      => 0,
 		'holdout_salt'     => 'CHANGE_ME_TOO',
+		'capture_outcomes' => false,
 		'bot_suffixes'     => array(
 			'googlebot' => array('.googlebot.com', '.google.com'),
 			'bingbot'   => array('.search.msn.com'),
@@ -160,6 +162,7 @@ function gv_facts(array $server, array $get, array $cookie, array $cfg) {
 	if (isset($server['HTTP_X_FORWARDED_PROTO']) && strtolower((string)$server['HTTP_X_FORWARDED_PROTO']) === 'https') { $https = true; }
 	$name = (string)$cfg['cookie_name'];
 	return array(
+		'rid'     => gv_rid(),
 		'ip'      => gv_client_ip($server, $cfg['cdn_ranges']),
 		'method'  => isset($server['REQUEST_METHOD']) ? strtoupper((string)$server['REQUEST_METHOD']) : 'GET',
 		'path'    => $path,
@@ -295,6 +298,8 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 		if (is_string($host)) { $ref = gv_cut($host, 100); }
 	}
 	return array(
+		'v'   => 4,
+		'rid' => isset($f['rid']) ? (string)$f['rid'] : '',
 		'ts'  => round(microtime(true), 3),
 		'ip'  => (string)$f['ip'],
 		'ua'  => gv_cut($ua, 120),
@@ -334,6 +339,18 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 // Emit the single log line for this request.
 function gv_emit(array $f, array $st, $act, $sh, $t0, $log_dir) {
 	gv_log(gv_log_row($f, $st, $act, $sh, $t0), $log_dir);
+}
+
+// Arm outcome capture. Called immediately before every gv_run() path that
+// RETURNS, and before none that exits.
+//
+// The distinction is the whole point: a return means the host application is
+// about to run and produce a response nobody has recorded yet. An exit means
+// the guard produced the response itself, and gv_log_row already recorded what
+// it was in act - a second line describing our own 403 would be noise.
+function gv_arm_outcome(array $cfg, array $f, $log_dir) {
+	if (empty($cfg['capture_outcomes'])) { return; }
+	gv_capture_outcome(isset($f['rid']) ? $f['rid'] : '', $log_dir);
 }
 
 // Default per-request state, filled in as the flow progresses.
@@ -510,6 +527,7 @@ function gv_run($t0) {
 	// 3. Exemptions. CLI was already excluded by prepend.php.
 	if (gv_is_exempt($f, $cfg['exempt_paths'], $cfg['exempt_params'])) {
 		gv_emit($f, $st, 'exempt', 0, $t0, $log);
+		gv_arm_outcome($cfg, $f, $log);
 		return;
 	}
 
@@ -540,6 +558,7 @@ function gv_run($t0) {
 			if (!$bot_over) {
 				gv_emit($f, $st, 'allow_bot', 0, $t0, $log);
 				gv_redis_close($conn);
+				gv_arm_outcome($cfg, $f, $log);
 				return;
 			}
 		}
@@ -588,6 +607,7 @@ function gv_run($t0) {
 		if ($st['ovr'] === 'allow') {
 			gv_emit($f, $st, 'allow_override', 0, $t0, $log);
 			gv_redis_close($conn);
+			gv_arm_outcome($cfg, $f, $log);
 			return;                               // zero bytes of output
 		}
 	}
@@ -630,6 +650,7 @@ function gv_run($t0) {
 	// 11. Act. Every branch logs exactly one line.
 	if ($intended === 'allow') {
 		gv_emit($f, $st, 'allow', 0, $t0, $log);
+		gv_arm_outcome($cfg, $f, $log);
 		return;                                   // zero bytes of output
 	}
 	if ($intended === '403') {
@@ -654,7 +675,10 @@ function gv_run($t0) {
 
 	if (!$enforced) {
 		// Monitor mode or holdout: record what would have happened and allow.
+		// The application runs, so this path is armed like any other allow -
+		// and it is where the holdout's outcome data comes from.
 		gv_emit($f, $st, $intended, 1, $t0, $log);
+		gv_arm_outcome($cfg, $f, $log);
 		return;
 	}
 	gv_emit($f, $st, $intended, 0, $t0, $log);
