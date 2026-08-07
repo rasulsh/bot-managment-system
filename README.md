@@ -56,6 +56,7 @@ cache layer and needs zero host-app changes. Then set a real secret in
 | `signals.ml` | Phase 2. Add the scaled `gv:ml:{dev}` anomaly level to the score. Default off (shadow). |
 | `ml_weight` | Phase 2. Multiplier turning an anomaly level of 0..100 into a score contribution. Default 0.4. |
 | `bot_suffixes` | Phase 2. Reverse-DNS suffixes per known bot. Consumed by the Python verifier; kept here as one source of truth. |
+| `capture_outcomes` | Phase 4. Record what the application did with each allowed request as a second tiny log line. Default off. |
 
 ## Platform notes
 
@@ -331,3 +332,86 @@ permissive override short-circuits the request.
 
 Bot verification and the holdout need no toggle. Everything else stays
 shadow-first.
+
+---
+
+# Phase 4 — response outcome capture
+
+Everything the guard logged before this phase ended at its own decision. A
+device that pulls three hundred product pages and a device that walks a stale
+URL list into three hundred 404s looked identical. Phase 4 records **what the
+host application actually did** with each allowed request.
+
+This is the first guard code that runs *after* the application, so it is held to
+one absolute rule: **the capture may never alter the response.** The shutdown
+callback emits no bytes, sends no header, sets no cookie, starts no buffer,
+never exits, and swallows every Throwable. It does exactly one thing — append
+one short line to a file. The test suite compares response bodies and headers
+byte-for-byte with capture on and off, across a normal page, a 404, a 500, a
+128 KiB body, custom headers and a fatal error.
+
+## Turning it on
+
+```php
+'capture_outcomes' => false,   // Phase 4, off by default
+```
+
+Off by default, like every other new behaviour. When off, no closure is
+registered and nothing changes anywhere.
+
+## Two kinds of log line
+
+The decision line gains `v` (schema version, `4`) and `rid` (12 hex chars),
+placed first. A line without `v` predates this phase and simply has no outcome.
+
+The outcome line is separate and deliberately tiny:
+
+```json
+{"o":1,"rid":"a1b2c3d4e5f6","st":404,"by":1183,"dur":38.4,"ts":1786134525.912}
+```
+
+| key | value |
+|-----|-------|
+| `o` | always `1`, so the analyzer can split on one cheap key test |
+| `rid` | correlation key, matches a decision line in the same file |
+| `st` | `http_response_code()` at shutdown |
+| `by` | declared `Content-Length`, or `null` |
+| `dur` | total request milliseconds |
+| `ts` | shutdown timestamp |
+
+Roughly +40% lines but only a few percent of bytes. The existing rotation
+handles it; there is no sampling.
+
+The hook is armed on every path where the guard **returns** and the application
+runs — `allow`, `allow_bot`, `exempt`, `allow_override`, and the monitor and
+holdout suppressed paths — and on none of the paths where the guard **exits**
+having produced the response itself. A `403` or a `challenge` therefore has no
+outcome line: `act` already says what happened.
+
+## When there is no outcome line — none of these are bugs
+
+- **The process was killed.** `register_shutdown_function` runs on fatal errors,
+  which is exactly why it is the right hook — a request that fataled is itself a
+  signal. It does not run on `SIGKILL`, an OOM kill, or a hard server timeout.
+  Those requests have no outcome, and the analyzer treats that as unknown.
+- **The web server substituted the status.** `http_response_code()` returns what
+  PHP knows. A `304` from the server's own cache validation, or an error page it
+  generated itself, is invisible here.
+- **No `Content-Length` was declared.** `by` is `null`, never guessed. This is
+  normal for compressed and streamed responses. Buffering the response to
+  measure it would break streaming and downloads, double the memory of large
+  pages, and collide with the application's own buffering — so we do not.
+  Partial coverage of a safe signal beats full coverage of a dangerous one, and
+  the `outcome_cov` feature exists precisely so the model learns how much to
+  trust the rest.
+
+If the application calls `fastcgi_finish_request()`, the callback runs after the
+client already holds the full response, so the capture costs the visitor nothing.
+
+## Rollout
+
+Outcome capture extends the model feature set, which makes both existing model
+bundles stale. **Follow the ordered runbook in `analyzer/README.md`** — getting
+it out of order opens a window where the models stop writing verdicts and, if
+`signals.ml` or `signals.clf` are on, the effective score silently drops for
+everyone.
