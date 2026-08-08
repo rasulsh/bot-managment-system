@@ -122,8 +122,10 @@ def build(rows, cfg, guard_cfg=None):
 
         # Hourly buckets for the decisions-over-time chart.
         try:
-            hour = datetime.datetime.utcfromtimestamp(
-                float(row.get('ts') or 0)).strftime('%H:00')
+            # See report.py: the utc* constructor is deprecated as of 3.12, and
+            # the module-level UTC alias is 3.11+ while our floor is 3.8.
+            hour = datetime.datetime.fromtimestamp(
+                float(row.get('ts') or 0), datetime.timezone.utc).strftime('%H:00')
         except Exception:
             hour = '??'
         slot = timeline.setdefault(hour, {})

@@ -211,7 +211,13 @@ def collect(rows, cfg, guard_cfg):
         # Day-over-day series for the anomaly section.
         try:
             import datetime
-            day = datetime.datetime.utcfromtimestamp(float(r.get('ts') or 0)).strftime('%Y-%m-%d')
+            # fromtimestamp(..., timezone.utc) rather than the deprecated
+            # utcfromtimestamp(), which prints a warning into the middle of the
+            # report an operator is reading and is scheduled for removal.
+            # timezone.utc, not the module-level UTC alias: that alias is 3.11+
+            # and this project's floor is 3.8.
+            day = datetime.datetime.fromtimestamp(
+                float(r.get('ts') or 0), datetime.timezone.utc).strftime('%Y-%m-%d')
         except Exception:
             day = 'unknown'
         bucket = stats['by_day'].setdefault(day, {'requests': 0, 'nonce_bad': 0,
