@@ -401,6 +401,136 @@ if ($redis_bin === '') {
 }
 
 // --------------------------------------------------------------------------
+t_section('Stored XSS: everything rendered comes from the attacker');
+
+require_once __DIR__ . '/../panel/data.php';
+
+$XSS = '<script>alert(1)</script>"><img src=x onerror=alert(1)>';
+
+t_ok('gp_e escapes angle brackets',
+	strpos(gp_e($XSS), '<script') === false && strpos(gp_e($XSS), '<img') === false);
+t_ok('gp_e escapes double quotes so an attribute cannot be broken out of',
+	strpos(gp_e($XSS), '"') === false);
+t_ok('gp_e escapes single quotes too', strpos(gp_e("it's"), "'") === false);
+t_ok('gp_e produces the expected entity form',
+	strpos(gp_e($XSS), '&lt;script&gt;alert(1)&lt;/script&gt;') !== false);
+t_ok('gp_e substitutes invalid UTF-8 rather than returning empty',
+	gp_e("bad \xC3\x28 bytes") !== '');
+t_ok('gp_u percent-encodes a payload used in a URL',
+	strpos(gp_u($XSS), '<') === false && strpos(gp_u($XSS), '"') === false);
+t_ok('gp_json escapes tags, ampersands and quotes for an inline script',
+	strpos(gp_json(array('ua' => $XSS)), '<') === false
+	&& strpos(gp_json(array('ua' => $XSS)), "'") === false);
+
+// Render the real log explorer view over a crafted row and inspect the output.
+if (!function_exists('gp_t')) {
+	$GP_STRINGS = require __DIR__ . '/../panel/lang.php';
+	function gp_t($key) {
+		global $GP_STRINGS;
+		return isset($GP_STRINGS[$key]) ? $GP_STRINGS[$key] : $key;
+	}
+}
+if (!function_exists('gp_csrf_token_stub')) {
+	// gp_csrf_token() needs an installed panel; the view only echoes it.
+	function gp_csrf_token_stub() { return str_repeat('a', 64); }
+}
+if (!function_exists('gp_csrf_token')) {
+	function gp_csrf_token() { return gp_csrf_token_stub(); }
+}
+
+$xss_row = array(
+	'v' => 4, 'rid' => 'abcdef012345', 'ts' => time(), 'ip' => '203.0.113.5',
+	'ua' => $XSS, 'uah' => 'aaaaaaaaaaaa', 'm' => 'GET', 'p' => '/' . $XSS,
+	'q' => 'q=' . $XSS, 'aj' => 0, 'nav' => 1, 'tok' => 'm', 'dev' => $XSS,
+	'sf' => '', 'al' => 1, 'hc' => 4, 'sc' => 30, 'esc' => 30,
+	'rs' => array($XSS), 'cd' => 0, 'ciu' => 0, 'ci' => 0, 'rd' => 0, 'hp' => 0,
+	'bot' => $XSS, 'ref' => $XSS, 'botv' => '', 'rep' => 0, 'ml' => -1, 'clf' => -1,
+	'hold' => 0, 'ovr' => $XSS, 'act' => $XSS, 'sh' => 0, 'ms' => 0.4,
+	'_out' => array('o' => 1, 'rid' => 'abcdef012345', 'st' => 404, 'by' => 1,
+		'dur' => 1.0, 'ts' => time()),
+);
+
+$filter = array('date' => date('Ymd'), 'path' => $XSS, 'dev' => $XSS, 'ip' => $XSS);
+$rows = array($xss_row);
+$meta = array('file' => 'guard-' . $XSS . '.jsonl', 'scanned_lines' => 1,
+	'scanned_bytes' => 1, 'capped' => false, 'next_cursor' => null, 'exists' => true);
+$dates = array(date('Ymd'));
+$route = 'logs';
+$user = 'tester';
+
+ob_start();
+require __DIR__ . '/../panel/views/logs.php';
+$rendered = ob_get_clean();
+
+// Parse the output the way a browser would, rather than pattern-matching the
+// source. A naive regex cannot tell an escaped payload sitting inside an
+// attribute value from a real attribute, because &gt; does not close a tag -
+// only a parser knows the difference, and only the parser's answer matters.
+function t_dom_findings($html) {
+	$out = array('scripts' => 0, 'handlers' => array(), 'tags' => array(),
+		'js_urls' => array());
+	$doc = new DOMDocument();
+	$prev = libxml_use_internal_errors(true);
+	$doc->loadHTML('<?xml encoding="utf-8"?>' . $html);
+	libxml_clear_errors();
+	libxml_use_internal_errors($prev);
+	foreach ($doc->getElementsByTagName('*') as $el) {
+		$name = strtolower($el->nodeName);
+		$out['tags'][$name] = true;
+		if ($name === 'script') { $out['scripts']++; }
+		if (!$el->hasAttributes()) { continue; }
+		foreach ($el->attributes as $attr) {
+			$attr_name = strtolower($attr->nodeName);
+			if (strpos($attr_name, 'on') === 0) {
+				$out['handlers'][] = $name . '@' . $attr_name;
+			}
+			if (in_array($attr_name, array('href', 'src', 'action', 'formaction'), true)
+				&& stripos(trim($attr->nodeValue), 'javascript:') === 0) {
+				$out['js_urls'][] = $name . '@' . $attr_name;
+			}
+		}
+	}
+	return $out;
+}
+
+$dom = t_dom_findings($rendered);
+t_ok('the log explorer rendered output', strlen($rendered) > 500);
+t_ok('the browser sees no script element from log data', $dom['scripts'] === 0);
+t_ok('the browser sees no img element from log data',
+	!isset($dom['tags']['img']));
+t_ok('the browser sees no event-handler attribute anywhere'
+	. ($dom['handlers'] ? ' - found: ' . implode(', ', $dom['handlers']) : ''),
+	$dom['handlers'] === array());
+t_ok('no javascript: url survives', $dom['js_urls'] === array());
+t_ok('no raw closing script tag from the payload',
+	stripos($rendered, '</script>') === false);
+t_ok('the payload is present, escaped',
+	strpos($rendered, '&lt;script&gt;alert(1)&lt;/script&gt;') !== false);
+t_ok('the payload in the path is escaped too',
+	strpos($rendered, '&quot;&gt;&lt;img') !== false);
+t_ok('every attribute value is quoted and escaped',
+	preg_match('/=\s*"[^"]*<[^"]*"/', $rendered) === 0);
+
+// The same payload as a URL parameter must be percent-encoded, not echoed.
+t_ok('an identity link percent-encodes the payload',
+	strpos($rendered, 'id=%3Cscript%3E') !== false
+	|| strpos($rendered, 'id=' . rawurlencode($XSS)) !== false);
+
+// Render the audit view over a poisoned entry too.
+$entries = array(array('ts' => time(), 'event' => $XSS, 'actor' => $XSS,
+	'ip' => $XSS, 'key' => $XSS, 'old' => $XSS, 'new' => array($XSS)));
+$query = $XSS;
+ob_start();
+require __DIR__ . '/../panel/views/audit.php';
+$rendered_audit = ob_get_clean();
+$dom_audit = t_dom_findings($rendered_audit);
+t_ok('the audit view escapes a poisoned entry',
+	$dom_audit['scripts'] === 0 && $dom_audit['handlers'] === array()
+	&& !isset($dom_audit['tags']['img']));
+t_ok('the audit search box escapes the query it echoes back',
+	strpos($rendered_audit, 'value="&lt;script&gt;') !== false);
+
+// --------------------------------------------------------------------------
 t_section('No shell execution anywhere under panel/');
 
 $forbidden = array('exec', 'shell_exec', 'system', 'passthru', 'proc_open',
