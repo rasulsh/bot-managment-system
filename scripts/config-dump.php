@@ -41,9 +41,14 @@ require __DIR__ . '/../guard/guard.php';
 
 $gv_cfg = gv_cfg_load();
 
-// Strip the two secrets. unset() rather than masking: a masked value still
-// leaks its length, and nothing downstream has any use for either key.
-unset($gv_cfg['secret'], $gv_cfg['holdout_salt']);
+// Strip the secrets. unset() rather than masking: a masked value still leaks
+// its length, and nothing downstream has any use for any of these keys.
+// panel_* is stripped defensively - the panel keeps its credentials in
+// panel/panel.config.php and they can never reach the guard config, but an
+// operator who pastes something into the wrong file should not publish a hash.
+unset($gv_cfg['secret'], $gv_cfg['holdout_salt'],
+	$gv_cfg['panel'], $gv_cfg['panel_password_hash'], $gv_cfg['panel_session_secret'],
+	$gv_cfg['password_hash'], $gv_cfg['session_secret']);
 
 $gv_flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
 if (defined('JSON_PRETTY_PRINT')) { $gv_flags |= JSON_PRETTY_PRINT; }

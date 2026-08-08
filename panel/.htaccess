@@ -1,0 +1,53 @@
+# Bot Guard admin panel.
+#
+# Only index.php and the static assets are reachable. Everything else here -
+# credentials, the audit trail, the rate-limit counters, the view templates and
+# every library file - is denied outright.
+#
+# This is defence in depth, not the only defence: every PHP file under panel/
+# also refuses to run unless GP_BOOT is defined, so a server that ignores
+# .htaccess still exposes nothing.
+
+<IfModule mod_authz_core.c>
+	Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+	Order allow,deny
+	Deny from all
+</IfModule>
+
+<FilesMatch "^index\.php$">
+	<IfModule mod_authz_core.c>
+		Require all granted
+	</IfModule>
+	<IfModule !mod_authz_core.c>
+		Order allow,deny
+		Allow from all
+	</IfModule>
+</FilesMatch>
+
+<FilesMatch "\.(css|woff2)$">
+	<IfModule mod_authz_core.c>
+		Require all granted
+	</IfModule>
+	<IfModule !mod_authz_core.c>
+		Order allow,deny
+		Allow from all
+	</IfModule>
+</FilesMatch>
+
+# The credential file must never be served, whatever the rules above resolve to.
+<FilesMatch "^(panel\.config\.php|audit\.jsonl)$">
+	<IfModule mod_authz_core.c>
+		Require all denied
+	</IfModule>
+	<IfModule !mod_authz_core.c>
+		Order allow,deny
+		Deny from all
+	</IfModule>
+</FilesMatch>
+
+<IfModule mod_headers.c>
+	Header set X-Content-Type-Options "nosniff"
+	Header set Referrer-Policy "no-referrer"
+</IfModule>

@@ -72,7 +72,186 @@ function gv_cfg_defaults(array $cfg) {
 	return $cfg;
 }
 
-// Load the active config: GV_CONFIG env override, else guard/config.php.
+// --------------------------------------------------------------------------
+// Config overlay (Phase 5)
+//
+// guard/config.local.json is a flat JSON object of dotted keys, written only by
+// the admin panel. It lives here rather than in panel/ for two reasons: the
+// panel is optional and deleting it must change nothing, and the validation
+// applied when the panel WRITES a key has to be the same code that runs when
+// the guard READS it - not a copy that can drift.
+//
+// secret, holdout_salt and the panel credentials are deliberately absent from
+// the whitelist. There is no UI for them and no overlay path to them.
+// --------------------------------------------------------------------------
+
+// Overlay whitelist: dotted key => (type, min, max). Anything not listed here
+// is discarded on read and refused on write.
+function gv_overlay_whitelist() {
+	return array(
+		'enforce.block'      => array('bool'),
+		'enforce.challenge'  => array('bool'),
+		'enforce.ratelimit'  => array('bool'),
+		'signals.reputation' => array('bool'),
+		'signals.ml'         => array('bool'),
+		'signals.clf'        => array('bool'),
+		'hard_block_score'   => array('int', 10, 200),
+		'ml_weight'          => array('float', 0.0, 2.0),
+		'clf_weight'         => array('float', 0.0, 2.0),
+		'limits.window'      => array('int', 30, 3600),
+		'limits.device'      => array('int', 1, 100000),
+		'limits.ip_ua'       => array('int', 1, 100000),
+		'limits.ip'          => array('int', 1, 100000),
+		'limits.bot'         => array('int', 1, 100000),
+		'holdout_pct'        => array('int', 0, 5),
+		'capture_outcomes'   => array('bool'),
+		'exempt_paths'       => array('paths'),
+		'exempt_params'      => array('params'),
+		'known_bots'         => array('bots'),
+		'honeypot_path'      => array('hppath'),
+	);
+}
+
+// Validate one overlay value. Returns array(ok, value_or_error_code).
+// Out-of-range values are REJECTED, never clamped: silently clamping a number
+// the operator typed hides the mistake instead of reporting it.
+function gv_overlay_validate($key, $value) {
+	$rules = gv_overlay_whitelist();
+	if (!isset($rules[$key])) { return array(false, 'unknown_key'); }
+	$spec = $rules[$key];
+	$type = $spec[0];
+
+	if ($type === 'bool') {
+		if (!is_bool($value)) { return array(false, 'not_bool'); }
+		return array(true, $value);
+	}
+	if ($type === 'int') {
+		if (is_bool($value) || !is_int($value)) { return array(false, 'not_int'); }
+		if ($value < $spec[1] || $value > $spec[2]) { return array(false, 'out_of_range'); }
+		return array(true, $value);
+	}
+	if ($type === 'float') {
+		if (is_bool($value) || (!is_int($value) && !is_float($value))) {
+			return array(false, 'not_number');
+		}
+		$value = (float)$value;
+		if (!is_finite($value)) { return array(false, 'not_number'); }
+		if ($value < $spec[1] || $value > $spec[2]) { return array(false, 'out_of_range'); }
+		return array(true, $value);
+	}
+	if ($type === 'paths') {
+		if (!is_array($value) || gv_is_assoc($value)) { return array(false, 'not_list'); }
+		if (count($value) > 50) { return array(false, 'too_many'); }
+		$out = array();
+		foreach ($value as $entry) {
+			if (!is_string($entry) || $entry === '') { return array(false, 'not_string'); }
+			if (strlen($entry) > 200) { return array(false, 'too_long'); }
+			if (substr($entry, 0, 1) !== '/') { return array(false, 'must_start_slash'); }
+			$out[] = $entry;
+		}
+		return array(true, $out);
+	}
+	if ($type === 'params') {
+		if (!is_array($value)) { return array(false, 'not_map'); }
+		if (count($value) > 20) { return array(false, 'too_many'); }
+		$out = array();
+		foreach ($value as $name => $values) {
+			if (!is_string($name) || $name === '' || strlen($name) > 100) {
+				return array(false, 'bad_param_name');
+			}
+			if (!is_array($values) || gv_is_assoc($values)) { return array(false, 'not_list'); }
+			if (count($values) > 50) { return array(false, 'too_many'); }
+			$clean = array();
+			foreach ($values as $entry) {
+				if (!is_string($entry) || $entry === '') { return array(false, 'not_string'); }
+				if (strlen($entry) > 200) { return array(false, 'too_long'); }
+				$clean[] = $entry;
+			}
+			$out[$name] = $clean;
+		}
+		return array(true, $out);
+	}
+	if ($type === 'bots') {
+		if (!is_array($value) || gv_is_assoc($value)) { return array(false, 'not_list'); }
+		if (count($value) > 20) { return array(false, 'too_many'); }
+		$out = array();
+		foreach ($value as $entry) {
+			if (!is_string($entry) || $entry === '') { return array(false, 'not_string'); }
+			if (!preg_match('/^[a-z0-9._-]+$/', $entry)) { return array(false, 'bad_charset'); }
+			$out[] = $entry;
+		}
+		return array(true, $out);
+	}
+	if ($type === 'hppath') {
+		if (!is_string($value) || $value === '') { return array(false, 'not_string'); }
+		if (strlen($value) > 100) { return array(false, 'too_long'); }
+		if (substr($value, 0, 1) !== '/') { return array(false, 'must_start_slash'); }
+		return array(true, $value);
+	}
+	return array(false, 'unknown_type');
+}
+
+// True when an array has any non-sequential key, i.e. it is a map not a list.
+function gv_is_assoc(array $value) {
+	$i = 0;
+	foreach ($value as $k => $_v) {
+		if ($k !== $i) { return true; }
+		$i++;
+	}
+	return false;
+}
+
+// Read and validate the overlay. Returns a flat array of accepted dotted keys.
+//
+// Every failure path returns an empty array or drops the offending key alone.
+// A missing, unreadable, malformed or non-object file is ignored in silence:
+// the panel must never be able to take the guard down by writing a bad file,
+// and a warning here could reach output on the allow path.
+function gv_overlay_read($path) {
+	try {
+		if (!is_string($path) || $path === '' || !is_file($path)) { return array(); }
+		$raw = @file_get_contents($path);
+		if ($raw === false || $raw === '' || strlen($raw) > 262144) { return array(); }
+		$data = json_decode($raw, true);
+		if (!is_array($data) || !gv_is_assoc($data)) {
+			// A JSON list, scalar or null is not an overlay object.
+			if ($data !== array()) { return array(); }
+			return array();
+		}
+		$out = array();
+		foreach ($data as $key => $value) {
+			if (!is_string($key)) { continue; }
+			$check = gv_overlay_validate($key, $value);
+			if ($check[0]) { $out[$key] = $check[1]; }   // one bad key, not the file
+		}
+		return $out;
+	} catch (\Throwable $e) {
+		return array();
+	}
+}
+
+// Apply a validated flat overlay onto a config array, resolving dotted keys.
+function gv_overlay_apply(array $cfg, array $flat) {
+	foreach ($flat as $key => $value) {
+		$parts = explode('.', $key);
+		if (count($parts) === 1) {
+			$cfg[$parts[0]] = $value;
+		} elseif (count($parts) === 2) {
+			if (!isset($cfg[$parts[0]]) || !is_array($cfg[$parts[0]])) {
+				$cfg[$parts[0]] = array();
+			}
+			$cfg[$parts[0]][$parts[1]] = $value;
+		}
+	}
+	return $cfg;
+}
+
+function gv_overlay_path() {
+	return __DIR__ . '/config.local.json';
+}
+
+// Load the active config: GV_CONFIG env override, else guard/config.php,
+// then the panel's JSON overlay on top.
 // Safety rule: an unconfigured secret forces monitor mode.
 function gv_cfg_load() {
 	$path = getenv('GV_CONFIG');
@@ -82,6 +261,8 @@ function gv_cfg_load() {
 	$cfg = require $path;
 	if (!is_array($cfg)) { $cfg = array(); }
 	$cfg = gv_cfg_defaults($cfg);
+	// Merge order: shipped defaults -> PHP config -> JSON overlay.
+	$cfg = gv_overlay_apply($cfg, gv_overlay_read(gv_overlay_path()));
 	if ((string)$cfg['secret'] === 'CHANGE_ME') {
 		$cfg['enforce']['block']     = false;
 		$cfg['enforce']['challenge'] = false;
@@ -689,7 +870,11 @@ function gv_run($t0) {
 }
 
 $gv_t0 = microtime(true);
-if (PHP_SAPI !== 'cli') {
+// GV_NO_AUTORUN lets the admin panel load this file as a library - it needs
+// gv_cfg_load() and the overlay validators, and must not run a request cycle
+// on itself. prepend.php never defines it, so the guard still runs normally
+// in front of the host application.
+if (PHP_SAPI !== 'cli' && !defined('GV_NO_AUTORUN')) {
 	try {
 		gv_run($gv_t0);
 	} catch (\Throwable $e) {
