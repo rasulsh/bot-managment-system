@@ -13,6 +13,10 @@ fail; the site may not. IP is treated as a weak signal throughout (CGNAT, mobile
 carriers and shared VPN egress are normal), so the guard never hard-blocks on IP
 alone and always prefers a challenge over a block.
 
+Operational rollout and day-to-day monitoring: see **[ROLLOUT.md](ROLLOUT.md)**.
+This file is the reference; that one is the ordered sequence, with a pass
+criterion per stage.
+
 ## Requirements
 
 PHP 7.4+ (no Composer, no extensions, no external dependencies). Redis optional.
