@@ -20,3 +20,11 @@ analyzer/reports/
 analyzer/model.joblib.candidate
 analyzer/clf.joblib.candidate
 analyzer/*.candidate
+
+# Phase 5 panel: credentials, overlay, snapshot and audit trail stay local.
+panel/panel.config.php
+panel/audit.jsonl
+panel/*.log
+guard/config.local.json
+guard/config.local.json.tmp*
+analyzer/snapshot.json
