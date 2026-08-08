@@ -25,6 +25,7 @@ analyzer/*.candidate
 panel/panel.config.php
 panel/audit.jsonl
 panel/*.log
+panel/.ratelimit/
 guard/config.local.json
 guard/config.local.json.tmp*
 analyzer/snapshot.json
