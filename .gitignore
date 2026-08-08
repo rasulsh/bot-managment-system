@@ -28,3 +28,5 @@ panel/*.log
 guard/config.local.json
 guard/config.local.json.tmp*
 analyzer/snapshot.json
+analyzer/snapshot.json.tmp
+analyzer/.lastrun-*

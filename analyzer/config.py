@@ -72,6 +72,17 @@ DEFAULTS = {
     # promote-model moves a candidate into place.
     'model_candidate_path': os.path.join(REPO_ROOT, 'analyzer', 'model.joblib.candidate'),
     'clf_candidate_path': os.path.join(REPO_ROOT, 'analyzer', 'clf.joblib.candidate'),
+
+    # --- Phase 5 -----------------------------------------------------------
+    # The admin panel's dashboard reads only this file, so its cost is one
+    # small JSON read rather than a log scan.
+    'snapshot_path': os.path.join(REPO_ROOT, 'analyzer', 'snapshot.json'),
+    'snapshot_days': 1,
+    # The panel's job queue. The worker calls a Python function in-process for
+    # each allowed type and never builds a command line.
+    'queue_key': 'gp:jobs',
+    'job_ttl': 86400,
+    'worker_max_jobs': 4,
 }
 
 _NESTED = ('redis', 'bot_suffixes')

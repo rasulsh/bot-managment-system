@@ -22,6 +22,7 @@ from analyzer import logs as logs_mod
 from analyzer import model as model_mod
 from analyzer import promote as promote_mod
 from analyzer import redis_io
+from analyzer import snapshot as snapshot_mod
 from analyzer import reputation as reputation_mod
 
 
@@ -280,6 +281,7 @@ def main(argv=None):
     if clf_bundle is not None and clf_bundle.get('metrics'):
         print('Classifier metrics on held-out data:')
         print(clf_mod.format_metrics(clf_bundle['metrics']))
+    snapshot_mod.touch_run(cfg, 'run_nightly')
     return 0
 
 

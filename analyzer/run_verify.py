@@ -20,6 +20,7 @@ from analyzer import config as config_mod
 from analyzer import botverify
 from analyzer import logs as logs_mod
 from analyzer import redis_io
+from analyzer import snapshot as snapshot_mod
 
 # DNS is a shared resource and these lookups are not urgent.
 DNS_SLEEP_S = 0.05
@@ -94,6 +95,7 @@ def main(argv=None):
         print('Redis unavailable: verdicts were computed but not stored.')
     print('Bot verification: verified %d, flagged %d, skipped %d, candidates %d.'
           % (verified, flagged, skipped, len(claims)))
+    snapshot_mod.touch_run(cfg, 'run_verify')
     return 0
 
 
