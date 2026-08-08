@@ -1,0 +1,16 @@
+# Deny all direct web access to the operator scripts.
+#
+# Defence in depth, not a live fix: every script here already refuses a web
+# request on its own - config-dump.php, decision-parity.php, holdout-probe.php
+# and the self-tests are PHP_SAPI !== 'cli' guarded, and config.dev.php is
+# behind GV_BOOT. This makes scripts/ consistent with guard/ and logs/, so a
+# future script that forgets its own guard is still covered.
+#
+# No exceptions: nothing in this directory is meant to be reachable from the web.
+<IfModule mod_authz_core.c>
+	Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+	Order allow,deny
+	Deny from all
+</IfModule>

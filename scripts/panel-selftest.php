@@ -26,6 +26,20 @@ function t_skip($name, $why) {
 	echo "SKIP  " . $name . " (" . $why . ")\n";
 }
 
+// The DOM parse below is the only assertion in this file that needs an
+// extension beyond the core. Every other optional dependency in this project
+// degrades to SKIP; this one used to construct DOMDocument unconditionally, so
+// on a host without ext-dom the suite died with an uncaught Error and took
+// everything after it down - including the shell-execution section, which is
+// the last section anyone should discover was silently never run.
+$GP_HAS_DOM = class_exists('DOMDocument');
+
+function t_dom_ok($name, $cond) {
+	global $GP_HAS_DOM;
+	if (!$GP_HAS_DOM) { t_skip($name, 'ext-dom not installed'); return; }
+	t_ok($name, $cond);
+}
+
 function t_section($name) { echo "\n-- " . $name . "\n"; }
 
 // The overlay lives at a fixed path next to guard/config.php. The tests below
@@ -469,6 +483,10 @@ $rendered = ob_get_clean();
 function t_dom_findings($html) {
 	$out = array('scripts' => 0, 'handlers' => array(), 'tags' => array(),
 		'js_urls' => array());
+	// Without ext-dom there is no parse to report. Returning the empty shape
+	// keeps every call site's expression harmless; t_dom_ok() is what turns
+	// these into SKIPs, so an absent extension can never read as a pass.
+	if (!class_exists('DOMDocument')) { return $out; }
 	$doc = new DOMDocument();
 	$prev = libxml_use_internal_errors(true);
 	$doc->loadHTML('<?xml encoding="utf-8"?>' . $html);
@@ -495,13 +513,13 @@ function t_dom_findings($html) {
 
 $dom = t_dom_findings($rendered);
 t_ok('the log explorer rendered output', strlen($rendered) > 500);
-t_ok('the browser sees no script element from log data', $dom['scripts'] === 0);
-t_ok('the browser sees no img element from log data',
+t_dom_ok('the browser sees no script element from log data', $dom['scripts'] === 0);
+t_dom_ok('the browser sees no img element from log data',
 	!isset($dom['tags']['img']));
-t_ok('the browser sees no event-handler attribute anywhere'
+t_dom_ok('the browser sees no event-handler attribute anywhere'
 	. ($dom['handlers'] ? ' - found: ' . implode(', ', $dom['handlers']) : ''),
 	$dom['handlers'] === array());
-t_ok('no javascript: url survives', $dom['js_urls'] === array());
+t_dom_ok('no javascript: url survives', $dom['js_urls'] === array());
 t_ok('no raw closing script tag from the payload',
 	stripos($rendered, '</script>') === false);
 t_ok('the payload is present, escaped',
@@ -524,7 +542,7 @@ ob_start();
 require __DIR__ . '/../panel/views/audit.php';
 $rendered_audit = ob_get_clean();
 $dom_audit = t_dom_findings($rendered_audit);
-t_ok('the audit view escapes a poisoned entry',
+t_dom_ok('the audit view escapes a poisoned entry',
 	$dom_audit['scripts'] === 0 && $dom_audit['handlers'] === array()
 	&& !isset($dom_audit['tags']['img']));
 t_ok('the audit search box escapes the query it echoes back',
@@ -580,5 +598,10 @@ t_clear_overlay();
 if ($overlay_backup !== null) { file_put_contents($overlay, $overlay_backup); }
 
 echo "\n";
+// Say so out loud. A green run on a host missing the extension must never be
+// mistakable for full coverage.
+if (!$GP_HAS_DOM) {
+	echo "NOTE: ext-dom was unavailable; the DOM-level XSS assertions did not run.\n";
+}
 echo "PASS " . $GP_PASS . "  FAIL " . $GP_FAIL . "  SKIP " . $GP_SKIP . "\n";
 exit($GP_FAIL === 0 ? 0 : 1);
