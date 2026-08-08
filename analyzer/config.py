@@ -70,6 +70,11 @@ DEFAULTS = {
     # correctly refuses one. Training writes here first so the live models keep
     # working until the new ones have actually been evaluated; ctl.py
     # promote-model moves a candidate into place.
+    #
+    # These two are recomputed by load() as the EFFECTIVE model path plus
+    # '.candidate' unless the operator names them explicitly - see
+    # _derive_candidate_paths(). The literals here are what that computation
+    # produces for an untouched install, so nothing moves by default.
     'model_candidate_path': os.path.join(REPO_ROOT, 'analyzer', 'model.joblib.candidate'),
     'clf_candidate_path': os.path.join(REPO_ROOT, 'analyzer', 'clf.joblib.candidate'),
 
@@ -116,6 +121,30 @@ def _merge(base, overrides):
     return base
 
 
+def _derive_candidate_paths(cfg, explicit):
+    """Keep each candidate beside the live model it is a candidate for.
+
+    The defaults are the repository paths plus '.candidate'. An operator who
+    relocates model_path - to a data directory outside the repository, say -
+    used to get candidates written back into the repository directory instead.
+    Promotion still worked, because it moves candidate to live regardless, so
+    nothing broke: a model and its candidate just quietly lived in two
+    different places with no warning. Deriving from the effective path keeps
+    them together wherever the operator put them.
+
+    An explicitly configured candidate path always wins - someone who names it
+    has a reason.
+    """
+    for live_key, candidate_key in (('model_path', 'model_candidate_path'),
+                                    ('clf_path', 'clf_candidate_path')):
+        if candidate_key in explicit:
+            continue
+        live = cfg.get(live_key)
+        if isinstance(live, str) and live:
+            cfg[candidate_key] = live + '.candidate'
+    return cfg
+
+
 def validate(cfg):
     """Raise ValueError on a configuration that cannot produce useful output."""
     if not isinstance(cfg.get('log_dir'), str) or not cfg['log_dir']:
@@ -148,8 +177,13 @@ def load(path=None):
     cfg = copy.deepcopy(DEFAULTS)
     if path is None:
         path = os.environ.get('GV_ANALYZER_CONFIG', '')
+    explicit = set()
     if path:
         if not os.path.isfile(path):
             raise ValueError('config file not found: ' + path)
-        cfg = _merge(cfg, _read_overrides(path))
+        overrides = _read_overrides(path)
+        explicit = set(overrides)
+        cfg = _merge(cfg, overrides)
+    # After the merge, so a relocated model_path takes its candidate with it.
+    cfg = _derive_candidate_paths(cfg, explicit)
     return validate(cfg)

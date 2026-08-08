@@ -376,5 +376,5 @@ are not.
 
 | key | meaning |
 |-----|---------|
-| `model_candidate_path` | Where `--candidate` writes the anomaly model. Git-ignored. |
-| `clf_candidate_path` | Where `--candidate` writes the classifier. Git-ignored. |
+| `model_candidate_path` | Where `--candidate` writes the anomaly model. Defaults to `model_path` + `.candidate`, so relocating the model takes its candidate with it. Git-ignored. |
+| `clf_candidate_path` | Where `--candidate` writes the classifier. Defaults to `clf_path` + `.candidate`. Git-ignored. |
