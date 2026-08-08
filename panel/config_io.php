@@ -11,6 +11,13 @@ if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 // is the single definition, so what the panel accepts on write is exactly what
 // the guard accepts on read, permanently.
 
+// The panel loads the guard as a LIBRARY: it needs gv_cfg_load() and the
+// overlay validators, and must never run a guard request cycle on itself.
+// GV_BOOT satisfies the direct-access guard every guard/*.php carries;
+// GV_NO_AUTORUN suppresses the request-flow entry at the bottom of guard.php.
+if (!defined('GV_BOOT')) { define('GV_BOOT', 1); }
+if (!defined('GV_NO_AUTORUN')) { define('GV_NO_AUTORUN', 1); }
+
 require_once __DIR__ . '/../guard/guard.php';
 
 function gp_audit_path() {

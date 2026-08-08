@@ -870,7 +870,11 @@ function gv_run($t0) {
 }
 
 $gv_t0 = microtime(true);
-if (PHP_SAPI !== 'cli') {
+// GV_NO_AUTORUN lets the admin panel load this file as a library - it needs
+// gv_cfg_load() and the overlay validators, and must not run a request cycle
+// on itself. prepend.php never defines it, so the guard still runs normally
+// in front of the host application.
+if (PHP_SAPI !== 'cli' && !defined('GV_NO_AUTORUN')) {
 	try {
 		gv_run($gv_t0);
 	} catch (\Throwable $e) {
