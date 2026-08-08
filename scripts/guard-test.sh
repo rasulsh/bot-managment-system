@@ -243,8 +243,74 @@ else
 	rm -f "$jar"
 fi
 
+# --- Phase 4: response outcome capture -------------------------------------
+#
+# These cases read the log directory directly, so they only run against the
+# local dev router. Against a remote deployment they SKIP.
+echo
+GV_LOG_DIR="${GV_LOG_DIR:-${TMPDIR:-/tmp}/gv-logs}"
+LOG_FILE="$GV_LOG_DIR/guard-$(date +%Y%m%d).jsonl"
+
+outcomes_for() {   # $1 = path, prints the st of the newest outcome for that path
+	"$JQ_BIN" -s --arg p "$1" '
+		(map(select(.o != 1 and .p == $p)) | last) as $d
+		| if $d == null then "no-decision"
+		  else (map(select(.o == 1 and .rid == $d.rid)) | last) as $o
+		       | if $o == null then "no-outcome" else ($o.st|tostring) end
+		  end' "$LOG_FILE" 2>/dev/null | tr -d '"'
+}
+
+JQ_BIN="${JQ:-jq}"
+if ! command -v "$JQ_BIN" >/dev/null 2>&1 || [ ! -r "$LOG_FILE" ]; then
+	row '17 outcome line for an allowed 404' 'SKIP' 'n/a' 'st=404'
+	row '18 outcome line for a fatal error' 'SKIP' 'n/a' 'st=500'
+	row '19 no outcome line for a challenge' 'SKIP' 'n/a' 'none'
+	echo
+	echo "SKIP-note: cases 17-19 read the guard log directly and need jq plus a"
+	echo "readable log directory, so they only run against the local dev router."
+	echo "Set GV_LOG_DIR to point at one elsewhere."
+else
+	jar4=$(mktemp)
+	body=$(browser "$BASE_URL/?gv=p4seed")
+	nonce=$(printf '%s' "$body" | sed -n "s/.*'X-GV': '\([0-9a-f.]*\)'.*/\1/p" | head -1)
+	if [ -n "$nonce" ]; then
+		curl -sk -o /dev/null -X POST -H "X-GV: $nonce" -c "$jar4" "$BASE_URL/" >/dev/null 2>&1
+	fi
+
+	# 17. An allowed request the application 404s: the status the guard never
+	# saw before this phase.
+	got=$(browser -o /dev/null -w '%{http_code}' -b "$jar4" "$BASE_URL/t/404")
+	sleep 0.3
+	st=$(outcomes_for '/t/404')
+	row "17 outcome for an allowed 404 (http $got)" "st=$st" 'st=404' 'st=404'
+
+	# 18. A request that fatals still reaches the shutdown handler.
+	got=$(browser -o /dev/null -w '%{http_code}' -b "$jar4" "$BASE_URL/t/fatal")
+	sleep 0.3
+	st=$(outcomes_for '/t/fatal')
+	row "18 outcome for a fatal error (http $got)" "st=$st" 'st=500' 'st=500'
+
+	# 19. A challenge is the guard's own response: no outcome line may exist.
+	curl -sk -o /dev/null -w '%{http_code}' -H "User-Agent: $CHROME_UA" \
+		-H "Accept: $ACCEPT_HTML" -H 'Accept-Language: en-US' \
+		-H 'Sec-Fetch-Mode: navigate' "$BASE_URL/?gv=p4chal" >/dev/null 2>&1
+	sleep 0.3
+	chal_rid=$("$JQ_BIN" -r -s '(map(select(.o != 1 and .q == "gv=p4chal")) | last | .rid) // ""' \
+		"$LOG_FILE" 2>/dev/null)
+	if [ -z "$chal_rid" ]; then
+		row '19 no outcome line for a challenge' 'SKIP' 'n/a' 'none'
+	else
+		n_out=$("$JQ_BIN" -s --arg r "$chal_rid" '[.[] | select(.o == 1 and .rid == $r)] | length' \
+			"$LOG_FILE" 2>/dev/null)
+		row '19 no outcome line for a challenge' "$n_out outcome(s)" '0' '0'
+	fi
+	rm -f "$jar4"
+fi
+
 echo
 echo "Inspect the log directory for one JSONL line per request above."
 echo "Phase 2 fields to watch: botv, rep, ml, and esc next to sc."
+echo "Phase 4: decision lines carry v and rid; outcome lines carry o=1 and the"
+echo "same rid. Capture is off unless capture_outcomes is enabled."
 echo "Default deployment path: <guard>/logs/guard-$(date +%Y%m%d).jsonl"
 echo "Dev router (scripts/config.dev.php) path: ${TMPDIR:-/tmp}/gv-logs/guard-$(date +%Y%m%d).jsonl"

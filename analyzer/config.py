@@ -64,6 +64,14 @@ DEFAULTS = {
     # Below this challenge->token_issued rate the report says so in words:
     # real users are burning on the challenge.
     'challenge_success_target': 0.95,
+
+    # --- Phase 4 -----------------------------------------------------------
+    # Extending FEATURE_ORDER makes every existing bundle stale, and load()
+    # correctly refuses one. Training writes here first so the live models keep
+    # working until the new ones have actually been evaluated; ctl.py
+    # promote-model moves a candidate into place.
+    'model_candidate_path': os.path.join(REPO_ROOT, 'analyzer', 'model.joblib.candidate'),
+    'clf_candidate_path': os.path.join(REPO_ROOT, 'analyzer', 'clf.joblib.candidate'),
 }
 
 _NESTED = ('redis', 'bot_suffixes')

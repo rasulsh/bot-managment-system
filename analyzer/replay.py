@@ -321,6 +321,8 @@ def parse_args(argv):
                         metavar='KEY=VALUE',
                         help='candidate override, e.g. hard_block_score=50 or signals.clf=true')
     parser.add_argument('--ground-truth', default=None, help='operator label file')
+    parser.add_argument('--model', choices=('live', 'candidate'), default='live',
+                        help='which model bundle full mode should score with')
     return parser.parse_args(argv)
 
 
@@ -357,6 +359,8 @@ def main(argv=None):
     identity_labels = identity_label_map(sessions, ground_truth)
 
     if args.mode == 'full':
+        if args.model == 'candidate':
+            cfg = dict(cfg, model_path=cfg['model_candidate_path'])
         rows = recompute_rows_full(rows, sessions, cfg, guard_cfg)
 
     result = replay_rows(rows, base_cfg, cand_cfg, identity_labels)

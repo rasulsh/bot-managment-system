@@ -12,9 +12,48 @@ import io
 import json
 import os
 
+from analyzer import outcomes as outcomes_mod
 
-def read_lines(log_dir, window_days, today=None):
-    """Yield row dicts from the last window_days of guard-YYYYMMDD.jsonl[.gz]."""
+
+def _read_file(path, opener):
+    """Read one log file into a row list. A corrupt line is skipped, never fatal."""
+    rows = []
+    try:
+        handle = opener(path, 'rt', encoding='utf-8', errors='replace')
+    except Exception:
+        return rows
+    try:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue                  # skip the bad line, keep the file
+            if isinstance(row, dict):
+                rows.append(row)
+    except Exception:
+        pass
+    finally:
+        try:
+            handle.close()
+        except Exception:
+            pass
+    return rows
+
+
+def read_lines(log_dir, window_days, today=None, join_outcomes=True):
+    """Yield decision rows from the last window_days of guard-YYYYMMDD.jsonl[.gz].
+
+    Phase 4 writes two line kinds into the same file. This joins them file by
+    file and yields only decision rows, each carrying `_out` - the matched
+    outcome dict, or None. Callers above this point never see outcome lines and
+    do not have to know they exist.
+
+    Set join_outcomes=False to get the raw rows of both kinds, which is what the
+    report needs when it wants to count outcome lines directly.
+    """
     if today is None:
         today = datetime.date.today()
     for offset in range(int(window_days)):
@@ -23,25 +62,14 @@ def read_lines(log_dir, window_days, today=None):
         for path, opener in ((stem, io.open), (stem + '.gz', gzip.open)):
             if not os.path.isfile(path):
                 continue
-            try:
-                handle = opener(path, 'rt', encoding='utf-8', errors='replace')
-            except Exception:
+            rows = _read_file(path, opener)
+            if not join_outcomes:
+                for row in rows:
+                    yield row
                 continue
-            try:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except Exception:
-                        continue          # skip the bad line, keep the file
-                    if isinstance(row, dict):
-                        yield row
-            except Exception:
-                continue
-            finally:
-                handle.close()
+            joined, _collisions = outcomes_mod.join(rows)
+            for row in joined:
+                yield row
 
 
 def session_key(row):

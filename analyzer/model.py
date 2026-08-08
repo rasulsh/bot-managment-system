@@ -14,6 +14,8 @@ distribution IS partly bot - training on everything would teach the model that
 scraping is normal and quietly neutralise the signal.
 """
 
+import os
+
 from analyzer.features import FEATURE_ORDER
 
 try:
@@ -88,6 +90,43 @@ def load(model_path):
     if 'scaler' not in bundle or 'model' not in bundle:
         return None
     return bundle
+
+
+def inspect(model_path):
+    """Why a bundle did or did not load. Returns a dict, never raises.
+
+    Distinguishing "no model yet" from "stale model" matters: the second case
+    means gv:ml stops being written and, if signals.ml is on, the effective
+    score quietly drops for everyone. A system silently becoming more
+    permissive is exactly the failure nobody notices, so the caller needs to be
+    able to say so out loud.
+    """
+    out = {'exists': False, 'loadable': False, 'stale': False,
+           'feature_order': None, 'error': ''}
+    if not os.path.isfile(model_path):
+        out['error'] = 'no file at %s' % model_path
+        return out
+    out['exists'] = True
+    if not SKLEARN_AVAILABLE:
+        out['error'] = 'scikit-learn unavailable'
+        return out
+    try:
+        bundle = joblib.load(model_path)
+    except Exception as exc:
+        out['error'] = 'unreadable: %s' % exc
+        return out
+    if not isinstance(bundle, dict) or 'model' not in bundle:
+        out['error'] = 'not a model bundle'
+        return out
+    out['feature_order'] = bundle.get('feature_order')
+    if out['feature_order'] != list(FEATURE_ORDER):
+        out['stale'] = True
+        out['error'] = ('feature order mismatch: bundle has %d features, the '
+                        'analyzer now has %d'
+                        % (len(out['feature_order'] or []), len(FEATURE_ORDER)))
+        return out
+    out['loadable'] = True
+    return out
 
 
 def score(bundle, vector):

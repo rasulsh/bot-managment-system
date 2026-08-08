@@ -228,9 +228,9 @@ t_ok('log file holds exactly one line', count($lines) === 1);
 $row = count($lines) === 1 ? json_decode($lines[0], true) : null;
 t_ok('log line is valid JSON', is_array($row));
 
-$schema = array('ts', 'ip', 'ua', 'uah', 'm', 'p', 'q', 'aj', 'nav', 'tok', 'dev', 'sf',
-	'al', 'hc', 'sc', 'esc', 'rs', 'cd', 'ciu', 'ci', 'rd', 'hp', 'bot', 'ref',
-	'botv', 'rep', 'ml', 'clf', 'hold', 'ovr', 'act', 'sh', 'ms');
+$schema = array('v', 'rid', 'ts', 'ip', 'ua', 'uah', 'm', 'p', 'q', 'aj', 'nav', 'tok',
+	'dev', 'sf', 'al', 'hc', 'sc', 'esc', 'rs', 'cd', 'ciu', 'ci', 'rd', 'hp', 'bot',
+	'ref', 'botv', 'rep', 'ml', 'clf', 'hold', 'ovr', 'act', 'sh', 'ms');
 t_ok('log line carries every schema key in order', is_array($row) && array_keys($row) === $schema);
 t_ok('referer is reduced to its host', is_array($row) && $row['ref'] === 'example.com');
 t_ok('navigation and ajax flags are recorded',
@@ -316,6 +316,199 @@ t_ok('clf_weight is honoured',
 t_ok('a classifier level can flip a borderline device once enabled',
 	gv_decide(gv_effective_score(40, 0, -1, 50, $clf_cfg), false, true, 'v', 60, '') === '403'
 	&& gv_decide(gv_effective_score(40, 0, -1, 50, $shadow_cfg), false, true, 'v', 60, '') === 'allow');
+
+// --------------------------------------------------------------------------
+t_section('Phase 4 request id and outcome capture');
+
+$rid = gv_rid();
+t_ok('gv_rid returns 12 hex characters',
+	is_string($rid) && strlen($rid) === 12 && ctype_xdigit($rid));
+$rids = array();
+for ($i = 0; $i < 5000; $i++) { $rids[gv_rid()] = 1; }
+t_ok('gv_rid is unique across 5000 calls', count($rids) === 5000);
+
+t_ok('capture_outcomes defaults to false',
+	gv_cfg_defaults(array())['capture_outcomes'] === false);
+t_ok('a phase 1-3 config without capture_outcomes still merges',
+	gv_cfg_defaults(array('secret' => 'x'))['capture_outcomes'] === false);
+
+// gv_declared_length reads headers_list(), which is empty under CLI, so the
+// parsing itself is tested through the same helper the function uses.
+t_ok('an absent Content-Length yields null', gv_declared_length() === null);
+t_ok('gv_request_ms returns null without REQUEST_TIME_FLOAT',
+	!isset($_SERVER['REQUEST_TIME_FLOAT']) ? gv_request_ms() === null : true);
+
+// The decision line now carries the schema version and the correlation id.
+$rid_facts = t_facts(array('rid' => $rid));
+$rid_state = array('tok' => 'm', 'dev' => '', 'sc' => 0, 'rs' => array(),
+	'cd' => 0, 'ciu' => 0, 'ci' => 0, 'rd' => 0, 'hp' => 0, 'bot' => '',
+	'botv' => '', 'rep' => 0, 'ml' => -1, 'clf' => -1, 'esc' => 0,
+	'hold' => 0, 'ovr' => '');
+$rid_row = gv_log_row($rid_facts, $rid_state, 'allow', 0, microtime(true));
+$rid_keys = array_keys($rid_row);
+t_ok('the decision line starts with v then rid then ts',
+	array_slice($rid_keys, 0, 3) === array('v', 'rid', 'ts'));
+t_ok('the schema version is 4', $rid_row['v'] === 4);
+t_ok('the decision line carries the request id', $rid_row['rid'] === $rid);
+t_ok('a facts array without a rid still logs cleanly',
+	gv_log_row(t_facts(), $rid_state, 'allow', 0, microtime(true))['rid'] === '');
+
+// The outcome row shape, written through the real writer.
+$out_dir = sys_get_temp_dir() . '/gv-selftest-out-' . getmypid();
+$out_row = array('o' => 1, 'rid' => $rid, 'st' => 404, 'by' => 1183,
+	'dur' => 38.4, 'ts' => round(microtime(true), 3));
+gv_log_outcome($out_row, $out_dir);
+$out_file = $out_dir . '/guard-' . date('Ymd') . '.jsonl';
+t_ok('gv_log_outcome writes to the same daily file', is_file($out_file));
+$out_lines = is_file($out_file) ? file($out_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : array();
+t_ok('the outcome writer appended exactly one line', count($out_lines) === 1);
+$out_back = count($out_lines) === 1 ? json_decode($out_lines[0], true) : null;
+t_ok('the outcome line is valid JSON', is_array($out_back));
+t_ok('the outcome line has exactly the six documented keys in order',
+	is_array($out_back) && array_keys($out_back) === array('o', 'rid', 'st', 'by', 'dur', 'ts'));
+t_ok('the outcome line round-trips its values',
+	is_array($out_back) && $out_back['o'] === 1 && $out_back['rid'] === $rid
+	&& $out_back['st'] === 404 && $out_back['by'] === 1183 && $out_back['dur'] === 38.4);
+
+gv_log_outcome(array('o' => 1, 'rid' => $rid, 'st' => 200, 'by' => null,
+	'dur' => null, 'ts' => round(microtime(true), 3)), $out_dir);
+$out_lines = file($out_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+$null_back = json_decode($out_lines[1], true);
+t_ok('an undeclared length is logged as null, never guessed',
+	is_array($null_back) && array_key_exists('by', $null_back) && $null_back['by'] === null);
+t_ok('a missing duration is logged as null',
+	is_array($null_back) && $null_back['dur'] === null);
+
+t_ok('an unwritable outcome directory fails silently',
+	gv_log_outcome($out_row, '/proc/nonexistent/gv') === null);
+t_ok('an empty outcome directory fails silently',
+	gv_log_outcome($out_row, '') === null);
+if (is_file($out_file)) { @unlink($out_file); }
+if (is_dir($out_dir)) { @rmdir($out_dir); }
+
+// --------------------------------------------------------------------------
+t_section('Phase 4 capture safety (static analysis of guard/outcome.php)');
+
+// Tokenise the capture file and inspect ONLY the shutdown closure body.
+//
+// Scoping matters twice over: comments and string literals are stripped, so the
+// notes that MENTION these traps do not trip the check while a real call would;
+// and the file-level `if (!defined('GV_BOOT')) { http_response_code(404); exit; }`
+// guard that every guard/*.php carries is correctly excluded, because it can
+// only run when the file is fetched directly over the web - a context in which
+// there is no application response to protect.
+$cap_src = file_get_contents(__DIR__ . '/../guard/outcome.php');
+$cap_all = token_get_all($cap_src);
+
+$closure_start = -1;
+foreach ($cap_all as $index => $tk) {
+	if (is_array($tk) && $tk[0] === T_STRING
+		&& strtolower($tk[1]) === 'register_shutdown_function') {
+		$closure_start = $index;
+		break;
+	}
+}
+t_ok('the shutdown closure was located for inspection', $closure_start >= 0);
+
+// Collect the closure body: from its opening brace to the matching close.
+$cap_code = array();
+if ($closure_start >= 0) {
+	$depth = 0;
+	$started = false;
+	for ($i = $closure_start; $i < count($cap_all); $i++) {
+		$tk = $cap_all[$i];
+		$text = is_array($tk) ? $tk[1] : $tk;
+		if ($text === '{') { $depth++; $started = true; }
+		if ($started) {
+			if (is_array($tk)) {
+				if ($tk[0] !== T_COMMENT && $tk[0] !== T_DOC_COMMENT
+					&& $tk[0] !== T_INLINE_HTML && $tk[0] !== T_CONSTANT_ENCAPSED_STRING) {
+					$cap_code[] = array('t' => $tk[0], 's' => $tk[1]);
+				}
+			} else {
+				$cap_code[] = array('t' => null, 's' => $tk);
+			}
+		}
+		if ($text === '}') {
+			$depth--;
+			if ($started && $depth === 0) { break; }
+		}
+	}
+}
+t_ok('the closure body is non-trivial and balanced', count($cap_code) > 20);
+
+$cap_names = array();
+foreach ($cap_code as $tk) {
+	if ($tk['t'] === T_STRING || $tk['t'] === T_ECHO || $tk['t'] === T_PRINT
+		|| $tk['t'] === T_EXIT) {
+		$cap_names[] = strtolower($tk['s']);
+	}
+}
+
+$forbidden = array('echo', 'print', 'print_r', 'var_dump', 'printf', 'vprintf',
+	'header', 'header_remove', 'setcookie', 'setrawcookie', 'ob_start',
+	'ob_end_flush', 'ob_end_clean', 'ob_flush', 'ob_get_clean', 'flush',
+	'exit', 'die', 'readfile', 'fpassthru', 'passthru');
+$hits = array();
+foreach ($forbidden as $bad) {
+	if (in_array($bad, $cap_names, true)) { $hits[] = $bad; }
+}
+t_ok('the shutdown closure calls nothing that can touch the response'
+	. (count($hits) ? ' (found: ' . implode(', ', $hits) . ')' : ''), count($hits) === 0);
+
+// http_response_code is allowed only as a READ, with no argument.
+$writes_status = false;
+for ($i = 0; $i < count($cap_code); $i++) {
+	if ($cap_code[$i]['t'] !== T_STRING) { continue; }
+	if (strtolower($cap_code[$i]['s']) !== 'http_response_code') { continue; }
+	// The next two significant tokens must be exactly '(' and ')'.
+	$next = array();
+	for ($j = $i + 1; $j < count($cap_code) && count($next) < 2; $j++) {
+		if ($cap_code[$j]['t'] === T_WHITESPACE) { continue; }
+		$next[] = $cap_code[$j]['s'];
+	}
+	if ($next !== array('(', ')')) { $writes_status = true; }
+}
+t_ok('http_response_code is only ever read, never written', $writes_status === false);
+t_ok('the closure does read the status code', in_array('http_response_code', $cap_names, true));
+t_ok('the closure writes exactly one log line',
+	count(array_keys($cap_names, 'gv_log_outcome', true)) === 1);
+
+t_ok('the capture file registers exactly one shutdown function',
+	substr_count($cap_src, 'register_shutdown_function(') === 1);
+t_ok('the shutdown closure captures by value, never by reference',
+	strpos($cap_src, 'use (&') === false);
+t_ok('the shutdown closure body is wrapped in a catch-all',
+	preg_match('/register_shutdown_function\(function \(\) use \([^)]*\) \{\s*try \{/', $cap_src) === 1);
+t_ok('the capture file catches Throwable, not just Exception',
+	strpos($cap_src, 'catch (\\Throwable $e)') !== false);
+t_ok('the capture file never buffers the response',
+	strpos(implode(' ', $cap_names), 'ob_') === false);
+
+// The hook must be armed on every gv_run path that returns, and on none that
+// exits. Checked structurally against the source rather than by inspection.
+$run_src = file_get_contents(__DIR__ . '/../guard/guard.php');
+$run_body = substr($run_src, strpos($run_src, 'function gv_run('));
+$run_lines = explode("\n", $run_body);
+$armed_returns = 0;
+$bare_returns = 0;
+$armed_exits = 0;
+for ($i = 0; $i < count($run_lines); $i++) {
+	$line = trim($run_lines[$i]);
+	if (strpos($line, 'gv_arm_outcome(') === 0) {
+		$after = isset($run_lines[$i + 1]) ? trim($run_lines[$i + 1]) : '';
+		if (strpos($after, 'return;') === 0) { $armed_returns++; }
+		if (strpos($after, 'exit;') === 0) { $armed_exits++; }
+		continue;
+	}
+	if (strpos($line, 'return;') === 0) {
+		$before = $i > 0 ? trim($run_lines[$i - 1]) : '';
+		if (strpos($before, 'gv_arm_outcome(') !== 0) { $bare_returns++; }
+	}
+}
+t_ok('every return path in gv_run arms outcome capture (' . $armed_returns . ' armed)',
+	$armed_returns === 5 && $bare_returns === 0);
+t_ok('no exit path arms outcome capture', $armed_exits === 0);
 
 // --------------------------------------------------------------------------
 t_section('Phase 3 operator overrides');

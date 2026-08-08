@@ -35,3 +35,27 @@ function gv_log(array $row, $log_dir) {
 		// silent: the guard may fail, the site may not
 	}
 }
+
+// Append one outcome row to the same daily file.
+//
+// This deliberately mirrors gv_log() rather than adding a flag to it. The two
+// writers cannot then drift, and this one - the only logging that happens after
+// the host application has finished - stays short enough to audit at a glance.
+function gv_log_outcome(array $row, $log_dir) {
+	try {
+		$log_dir = (string)$log_dir;
+		if ($log_dir === '') { return; }
+		if (!is_dir($log_dir)) {
+			@mkdir($log_dir, 0775, true);
+			if (!is_dir($log_dir)) { return; }
+		}
+		$flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
+		if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) { $flags |= JSON_INVALID_UTF8_SUBSTITUTE; }
+		$line = json_encode($row, $flags);
+		if ($line === false) { return; }
+		$file = rtrim($log_dir, '/\\') . '/guard-' . date('Ymd') . '.jsonl';
+		@file_put_contents($file, $line . "\n", FILE_APPEND | LOCK_EX);
+	} catch (\Throwable $e) {
+		// silent: the response is already on its way to the client
+	}
+}

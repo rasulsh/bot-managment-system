@@ -271,3 +271,110 @@ they have no stable device id, so their data is sound in aggregate only.
 | `php_bin`, `guard_config_path` | How the bridge reaches the guard's config. |
 | `report_days`, `report_top_n` | Report window and table caps. |
 | `challenge_success_target` | Below this rate the report warns in words. |
+
+---
+
+# Phase 4 additions
+
+## Outcome join
+
+The guard now writes two line kinds into the same daily file: the wide decision
+line, and a tiny outcome line appended at shutdown, correlated by `rid`.
+`analyzer/outcomes.py` splits them, indexes by `rid` and attaches the match as
+`_out`.
+
+**The join is per file, not per window.** Both lines for a request come from the
+same process moments apart, so they land in the same daily file except for
+requests straddling midnight. Joining file by file keeps memory flat on a busy
+site — a whole week's rid index would be the analyzer's largest allocation — and
+loses only those few, which then simply carry no outcome. `logs.py` does this
+before yielding, so every consumer above it sees decision rows with `_out`
+already populated and never has to know outcome lines exist.
+
+Duplicate rids are counted rather than silently overwritten. A 12-hex id
+collides at a negligible rate, so a collision almost always means a file was
+concatenated twice or a deployment is broken.
+
+## Five new features
+
+Appended to `FEATURE_ORDER`, never inserted — the order is the contract between
+training and scoring:
+
+| feature | meaning |
+|---------|---------|
+| `notfound_ratio` | share of outcome-known rows with `st == 404` |
+| `err_ratio` | share with `st` in 400..499 excluding 404 |
+| `srv_err_ratio` | share with `st >= 500` |
+| `bytes_mean` | mean of known `by` values, 0.0 when none are known |
+| `outcome_cov` | share of the session's rows that have an outcome at all |
+
+The four ratios are computed over **outcome-known rows only**. Computing them
+over all rows would make a session with poor coverage look artificially clean,
+because the unknown rows would count as "not a 404". `outcome_cov` is what tells
+the model how much the other four are worth, which is why it belongs in the
+vector rather than being treated as metadata.
+
+Every one is `0.0` for a session recorded before capture was enabled, so old
+sessions stay usable and score exactly as they did before.
+
+## Three new reputation rules
+
+| constant | default | fires when |
+|----------|---------|-----------|
+| `W_NOTFOUND` | +20 | median `notfound_ratio` > `NOTFOUND_RATIO` (0.3), median `n_req` >= `MIN_REQ_OUTCOME` (10) |
+| `W_BULK` | +15 | one session moved more than `BULK_BYTES` (50 MB) with a wide path spread |
+| `W_SRV_ERR` | +10 | median `srv_err_ratio` > `SRV_ERR_RATIO` (0.1) |
+
+These are the hardest signals in the formula to fake. Timing can be randomised
+and every header forged, but a scraper working from a stale URL list cannot
+avoid requesting pages that are not there, and nothing lets it extract content
+without transferring the bytes.
+
+All three are gated on `outcome_cov >= MIN_COVERAGE` (0.5), so they are inert
+until capture has produced data — enabling Phase 4 cannot move a single existing
+reputation on its own.
+
+**`NOTFOUND_RATIO` is the first constant to tune.** A site with genuinely broken
+internal links produces human 404s and needs a higher threshold; check the
+report's status distribution before assuming a 404 rate is adversarial.
+
+## THE MIGRATION RUNBOOK — do these in order
+
+Extending `FEATURE_ORDER` makes both existing bundles stale, and `load()`
+correctly refuses one. Out of order, that opens a window where `gv:ml` and
+`gv:clf` stop being written, the keys expire within a day, and — if
+`signals.ml` or `signals.clf` are on — **the effective score silently drops for
+everyone**. A system quietly becoming more permissive is the failure nobody
+notices. So:
+
+1. **Deploy Phase 4 with `capture_outcomes` still false.** Confirm nothing
+   changed: same responses, same log schema apart from `v` and `rid`.
+2. **Turn `capture_outcomes` on.** Confirm outcome lines appear and that the
+   site is byte-identical.
+3. **Decide about the signals now.** If `signals.ml` or `signals.clf` are on,
+   either turn them off for the migration window, or accept that scores lose
+   those contributions once the feature set changes. Write down which you chose.
+4. **Let outcomes accumulate for at least two weeks.** The new features are
+   worthless on a few days of data.
+5. `python3 analyzer/run_nightly.py --train --train-clf --candidate`
+   — writes to the candidate paths and leaves the live models untouched.
+6. **Evaluate before promoting**: `python3 analyzer/report.py --model candidate`
+   and `python3 analyzer/replay.py --mode full --model candidate`. For the
+   classifier, check held-out precision against `clf_target_precision`.
+7. `python3 analyzer/ctl.py promote-model ml`, then `clf`. Promotion refuses a
+   missing candidate, a feature-order mismatch, and a classifier below target
+   precision.
+8. **Re-enable whatever you turned off in step 3, one signal at a time**, as in
+   Phase 3.
+
+While a live model is stale, every nightly run prints a loud warning naming the
+exact commands to fix it, and the report's verdict-coverage section says a stale
+model is the likely cause when reputations are being written but model verdicts
+are not.
+
+## New settings
+
+| key | meaning |
+|-----|---------|
+| `model_candidate_path` | Where `--candidate` writes the anomaly model. Git-ignored. |
+| `clf_candidate_path` | Where `--candidate` writes the classifier. Git-ignored. |

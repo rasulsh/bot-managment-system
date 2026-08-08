@@ -195,7 +195,7 @@ ok('gap_min picks the tightest gap', human_f['gap_min'] == 5.0)
 
 vector = features_mod.feature_vector(bot_f)
 ok('the vector length matches FEATURE_ORDER',
-   len(vector) == len(features_mod.FEATURE_ORDER) == 12)
+   len(vector) == len(features_mod.FEATURE_ORDER) == 17)
 ok('the vector follows FEATURE_ORDER exactly',
    vector == [bot_f[name] for name in features_mod.FEATURE_ORDER])
 ok('an empty session yields a zero vector of the right shape',
@@ -212,6 +212,150 @@ ok('detail hits before any listing are counted',
        - (2.0 / 3.0)) < 1e-9)
 ok('an invalid operator regex is ignored rather than fatal',
    features_mod.detail_no_listing_ratio(cold_rows, ['['], [r'^/item/']) == 0.0)
+
+# ---------------------------------------------------------------------------
+section('Phase 4 outcome join')
+
+from analyzer import outcomes as outcomes_mod
+
+
+def orow(rid, st=200, by=None, dur=1.0, ts=1.0):
+    """One synthetic outcome line."""
+    return {'o': 1, 'rid': rid, 'st': st, 'by': by, 'dur': dur, 'ts': ts}
+
+
+mixed = [
+    dict(row(1000.0, dev='joindev', p='/a'), rid='r1', v=4),
+    orow('r1', st=200, by=4096),
+    dict(row(1001.0, dev='joindev', p='/b'), rid='r2', v=4),
+    orow('r2', st=404),
+    dict(row(1002.0, dev='joindev', p='/c'), rid='r3', v=4),      # no outcome
+    orow('r9', st=500),                                           # no decision
+]
+dec_rows, out_rows = outcomes_mod.split_rows(mixed)
+ok('split separates decision rows from outcome rows',
+   len(dec_rows) == 3 and len(out_rows) == 3)
+ok('split keys on o == 1 only', all(r.get('o') != 1 for r in dec_rows))
+
+index, collisions = outcomes_mod.index_outcomes(out_rows)
+ok('outcomes index by rid', set(index) == set(['r1', 'r2', 'r9']))
+ok('a clean index reports no collisions', collisions == 0)
+
+dup_index, dup_collisions = outcomes_mod.index_outcomes(
+    [orow('dup', st=200), orow('dup', st=500), orow('other', st=200)])
+ok('a duplicate rid is counted rather than silently overwriting', dup_collisions == 1)
+ok('the first outcome wins on a duplicate rid', dup_index['dup']['st'] == 200)
+ok('an outcome line without a rid is ignored',
+   outcomes_mod.index_outcomes([{'o': 1, 'st': 200}])[0] == {})
+
+attached = outcomes_mod.attach(dec_rows, index)
+by_rid = dict((r['rid'], r) for r in attached)
+ok('a matched decision row carries its outcome', by_rid['r1']['_out']['st'] == 200)
+ok('an unmatched decision row carries None', by_rid['r3']['_out'] is None)
+ok('an unmatched outcome simply has no decision to attach to',
+   'r9' not in by_rid)
+ok('the derived field is underscore-prefixed', '_out' in by_rid['r1'])
+
+joined, join_collisions = outcomes_mod.join(mixed)
+ok('join does split, index and attach in one call',
+   len(joined) == 3 and joined[0]['_out']['by'] == 4096 and join_collisions == 0)
+
+ok('status_class buckets a 404', outcomes_mod.status_class(orow('x', st=404)) == '404')
+ok('status_class buckets other 4xx separately',
+   outcomes_mod.status_class(orow('x', st=403)) == '4xx')
+ok('status_class buckets 5xx', outcomes_mod.status_class(orow('x', st=502)) == '5xx')
+ok('status_class buckets 2xx', outcomes_mod.status_class(orow('x', st=204)) == '2xx')
+ok('status_class returns None for a missing outcome',
+   outcomes_mod.status_class(None) is None)
+ok('status_class returns None for a zero status',
+   outcomes_mod.status_class(orow('x', st=0)) is None)
+
+# read_lines joins per file, so callers above it never see outcome lines.
+join_dir = tempfile.mkdtemp(prefix='gv-selftest-join-')
+join_file = os.path.join(join_dir, 'guard-%s.jsonl' % today.strftime('%Y%m%d'))
+with open(join_file, 'w') as fh:
+    for entry in mixed:
+        fh.write(json_mod.dumps(entry) + '\n')
+read_joined = list(logs_mod.read_lines(join_dir, 1))
+ok('read_lines yields only decision rows', len(read_joined) == 3)
+ok('read_lines attaches outcomes per file',
+   sum(1 for r in read_joined if r.get('_out')) == 2)
+read_raw = list(logs_mod.read_lines(join_dir, 1, join_outcomes=False))
+ok('read_lines can still yield both kinds when asked', len(read_raw) == 6)
+os.unlink(join_file)
+os.rmdir(join_dir)
+
+# ---------------------------------------------------------------------------
+section('Phase 4 outcome features')
+
+ok('FEATURE_ORDER gained exactly five names',
+   len(features_mod.FEATURE_ORDER) == 17)
+ok('the new names are appended, never inserted',
+   features_mod.FEATURE_ORDER[:12] == [
+       'n_req', 'dur_s', 'gap_mean', 'gap_std', 'gap_min', 'nav_ratio',
+       'path_uniq_ratio', 'score_mean', 'script_ratio', 'few_hdr_ratio',
+       'no_al_ratio', 'detail_no_listing_ratio']
+   and features_mod.FEATURE_ORDER[12:] == [
+       'notfound_ratio', 'err_ratio', 'srv_err_ratio', 'bytes_mean', 'outcome_cov'])
+
+# A scraper walking a stale URL list: 6 of 8 known outcomes are 404s, and two
+# rows have no outcome at all, so coverage is 8/10.
+stale_rows = []
+for i in range(6):
+    stale_rows.append(dict(row(3000.0 + i, dev='staledev', p='/gone%d' % i),
+                           rid='s%d' % i, _out=orow('s%d' % i, st=404, by=512)))
+for i in range(6, 8):
+    stale_rows.append(dict(row(3000.0 + i, dev='staledev', p='/ok%d' % i),
+                           rid='s%d' % i, _out=orow('s%d' % i, st=200, by=20000)))
+for i in range(8, 10):
+    stale_rows.append(dict(row(3000.0 + i, dev='staledev', p='/unknown%d' % i),
+                           rid='s%d' % i, _out=None))
+stale_f = features_mod.session_features({'rows': stale_rows})
+ok('notfound_ratio counts 404s over outcome-known rows only',
+   abs(stale_f['notfound_ratio'] - 0.75) < 1e-9)
+ok('outcome_cov reports the share of rows with any outcome',
+   abs(stale_f['outcome_cov'] - 0.8) < 1e-9)
+ok('bytes_mean averages only the declared sizes',
+   abs(stale_f['bytes_mean'] - ((6 * 512 + 2 * 20000) / 8.0)) < 1e-9)
+ok('err_ratio excludes 404 from the other-4xx bucket', stale_f['err_ratio'] == 0.0)
+ok('srv_err_ratio is zero without any 5xx', stale_f['srv_err_ratio'] == 0.0)
+
+mixed_status = [
+    dict(row(4000.0, dev='mixdev'), rid='m1', _out=orow('m1', st=403)),
+    dict(row(4001.0, dev='mixdev'), rid='m2', _out=orow('m2', st=500)),
+    dict(row(4002.0, dev='mixdev'), rid='m3', _out=orow('m3', st=404)),
+    dict(row(4003.0, dev='mixdev'), rid='m4', _out=orow('m4', st=200)),
+]
+mix_f = features_mod.session_features({'rows': mixed_status})
+ok('each status bucket lands in its own feature',
+   mix_f['notfound_ratio'] == 0.25 and mix_f['err_ratio'] == 0.25
+   and mix_f['srv_err_ratio'] == 0.25)
+ok('a full-coverage session reports coverage 1.0', mix_f['outcome_cov'] == 1.0)
+ok('an undeclared size is excluded from bytes_mean rather than counted as zero',
+   mix_f['bytes_mean'] == 0.0)
+
+# A session recorded before capture was enabled: all five stay 0.0.
+pre4 = features_mod.session_features(human_session)
+ok('a session with no outcome data scores 0.0 on all five new features',
+   all(pre4[name] == 0.0 for name in features_mod.FEATURE_ORDER[12:]))
+ok('the pre-capture session is otherwise unchanged',
+   pre4['n_req'] == human_f['n_req'] and pre4['gap_std'] == human_f['gap_std'])
+
+ok('a session with rows but zero coverage reports coverage 0.0',
+   features_mod.outcome_features(
+       [dict(row(1.0, dev='d'), _out=None)])['outcome_cov'] == 0.0)
+ok('an empty session yields zeroed outcome features',
+   features_mod.outcome_features([])['outcome_cov'] == 0.0)
+ok('a malformed status is ignored rather than counted',
+   features_mod.outcome_features(
+       [dict(row(1.0, dev='d'), _out={'o': 1, 'rid': 'x', 'st': 'nonsense'})])
+   ['outcome_cov'] == 0.0)
+ok('a boolean is not mistaken for a byte count',
+   features_mod.outcome_features(
+       [dict(row(1.0, dev='d'), _out=orow('x', st=200, by=True))])['bytes_mean'] == 0.0)
+ok('the feature vector still matches FEATURE_ORDER after the extension',
+   features_mod.feature_vector(stale_f)
+   == [stale_f[name] for name in features_mod.FEATURE_ORDER])
 
 # ---------------------------------------------------------------------------
 section('Labels')
@@ -277,6 +421,104 @@ ok('a device with no sessions scores neutral',
 ok('peak_rate reports the fastest session',
    reputation_mod.peak_rate([{'n_req': 10.0, 'dur_s': 100.0},
                              {'n_req': 40.0, 'dur_s': 10.0}]) == 4.0)
+
+# ---------------------------------------------------------------------------
+section('Phase 4 outcome reputation rules')
+
+NEUTRAL_LABELS = {'hp_any': 0, 'challenge_unsolved': 0, 'solved_challenge': 0}
+
+
+def out_feats(**over):
+    """A deliberately unremarkable session, so only the rule under test fires."""
+    base = {'n_req': 40.0, 'dur_s': 600.0, 'gap_mean': 15.0, 'gap_std': 6.0,
+            'gap_min': 2.0, 'nav_ratio': 1.0, 'path_uniq_ratio': 0.5,
+            'score_mean': 0.0, 'script_ratio': 0.0, 'few_hdr_ratio': 0.0,
+            'no_al_ratio': 0.0, 'detail_no_listing_ratio': 0.0,
+            'notfound_ratio': 0.0, 'err_ratio': 0.0, 'srv_err_ratio': 0.0,
+            'bytes_mean': 10000.0, 'outcome_cov': 1.0}
+    base.update(over)
+    return base
+
+
+baseline_rep = reputation_mod.device_reputation([out_feats()], NEUTRAL_LABELS, clamp)
+ok('the neutral outcome session is a clean baseline', baseline_rep == 0)
+
+stale_rep = reputation_mod.device_reputation(
+    [out_feats(notfound_ratio=0.6)], NEUTRAL_LABELS, clamp)
+ok('a stale URL list walking into 404s adds W_NOTFOUND',
+   stale_rep - baseline_rep == reputation_mod.W_NOTFOUND)
+
+ok('a 404 share below the threshold does not fire',
+   reputation_mod.device_reputation(
+       [out_feats(notfound_ratio=0.2)], NEUTRAL_LABELS, clamp) == baseline_rep)
+ok('too few requests makes a 404 share meaningless',
+   reputation_mod.device_reputation(
+       [out_feats(notfound_ratio=0.9, n_req=5.0)], NEUTRAL_LABELS, clamp) == baseline_rep)
+ok('sparse outcome coverage suppresses the 404 rule',
+   reputation_mod.device_reputation(
+       [out_feats(notfound_ratio=0.9, outcome_cov=0.2)], NEUTRAL_LABELS, clamp)
+   == baseline_rep)
+
+# The bulk rule needs a wide path spread, which by itself also earns the
+# Phase 2 varied-browsing credit. Compare against a baseline carrying the same
+# spread so only the bulk rule differs between the two.
+spread_baseline = reputation_mod.device_reputation(
+    [out_feats(path_uniq_ratio=0.9)], NEUTRAL_LABELS, clamp)
+bulk_rep = reputation_mod.device_reputation(
+    [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, path_uniq_ratio=0.9)],
+    NEUTRAL_LABELS, clamp)
+ok('moving 80 MB in one session adds W_BULK',
+   bulk_rep - spread_baseline == reputation_mod.W_BULK)
+ok('bulk transfer without path spread does not fire',
+   reputation_mod.device_reputation(
+       [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, path_uniq_ratio=0.2)],
+       NEUTRAL_LABELS, clamp) == baseline_rep)
+ok('a normal amount of content does not fire the bulk rule',
+   reputation_mod.device_reputation(
+       [out_feats(bytes_mean=50000.0, path_uniq_ratio=0.9)], NEUTRAL_LABELS, clamp)
+   == spread_baseline)
+ok('sparse coverage suppresses the bulk rule too',
+   reputation_mod.device_reputation(
+       [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, path_uniq_ratio=0.9,
+                  outcome_cov=0.2)], NEUTRAL_LABELS, clamp) == spread_baseline)
+
+srv_rep = reputation_mod.device_reputation(
+    [out_feats(srv_err_ratio=0.4)], NEUTRAL_LABELS, clamp)
+ok('driving the application into 5xx adds W_SRV_ERR',
+   srv_rep - baseline_rep == reputation_mod.W_SRV_ERR)
+ok('an occasional 5xx below the threshold does not fire',
+   reputation_mod.device_reputation(
+       [out_feats(srv_err_ratio=0.05)], NEUTRAL_LABELS, clamp) == baseline_rep)
+
+all_three = reputation_mod.device_reputation(
+    [out_feats(notfound_ratio=0.6, srv_err_ratio=0.4,
+               bytes_mean=2 * 1024 * 1024, path_uniq_ratio=0.9)],
+    NEUTRAL_LABELS, clamp)
+ok('the three outcome rules add together',
+   all_three - spread_baseline == (reputation_mod.W_NOTFOUND + reputation_mod.W_BULK
+                                   + reputation_mod.W_SRV_ERR))
+
+# The migration guarantee: a pre-capture session must score exactly as it did
+# before Phase 4, because every outcome feature is 0.0 and coverage gates each
+# rule.
+zero_cov = out_feats(notfound_ratio=0.0, srv_err_ratio=0.0, bytes_mean=0.0,
+                     outcome_cov=0.0)
+ok('a session with zero outcome coverage is scored exactly as before Phase 4',
+   reputation_mod.device_reputation([zero_cov], NEUTRAL_LABELS, clamp) == baseline_rep)
+ok('the existing human session reputation is unchanged by Phase 4',
+   reputation_mod.device_reputation(
+       [human_f], {'hp_any': 0, 'challenge_unsolved': 0, 'solved_challenge': 1},
+       clamp) == human_rep)
+ok('the existing scraper reputation is unchanged by Phase 4',
+   reputation_mod.device_reputation(
+       [bot_f], {'hp_any': 0, 'challenge_unsolved': 1, 'solved_challenge': 0},
+       clamp) == bot_rep)
+
+ok('peak_bytes reports the heaviest session',
+   reputation_mod.peak_bytes([{'bytes_mean': 1000.0, 'n_req': 10.0},
+                              {'bytes_mean': 5000.0, 'n_req': 100.0}]) == 500000.0)
+ok('peak_bytes is zero without any byte data',
+   reputation_mod.peak_bytes([{'n_req': 100.0}]) == 0.0)
 
 # ---------------------------------------------------------------------------
 section('Reverse DNS verification')
@@ -664,8 +906,8 @@ ok('the report records no divergence when esc equals sc',
 text = report_mod.render_text(report_stats, 7)
 for heading in ('1. Traffic', '2. Decisions', '3. Challenge funnel',
                 '4. Score distribution', '5. Verdict coverage',
-                '6. Holdout comparison', '7. Top offenders',
-                '8. Anomalies worth a look'):
+                '6. Response outcomes', '7. Holdout comparison',
+                '8. Top offenders', '9. Anomalies worth a look'):
     ok('the text report contains section "%s"' % heading, heading in text)
 ok('the text report names the false-negative estimate',
    'false-negative estimate' in text)
@@ -705,6 +947,73 @@ ok('html escaping neutralises markup in an identity',
 
 spiky = {'2026-01-01': {'nonce_bad': 1, 'botv_bad': 0, 'block': 0, 'degraded': 0},
          '2026-01-02': {'nonce_bad': 40, 'botv_bad': 0, 'block': 0, 'degraded': 0}}
+# --- Phase 4 outcomes section ---------------------------------------------
+outcome_report_rows = []
+for i in range(10):
+    r = 'ro%d' % i
+    outcome_report_rows.append(dict(row(6000.0 + i, dev='rephuman', p='/p%d' % i),
+                                    rid=r, _out=orow(r, st=200, by=12000)))
+for i in range(10, 20):
+    r = 'ro%d' % i
+    outcome_report_rows.append(dict(row(6000.0 + i, dev='', ip='198.18.5.5',
+                                        p='/gone%d' % i, hold=1, sh=1),
+                                    rid=r, _out=orow(r, st=404, by=300)))
+outcome_report_rows.append(dict(row(6100.0, dev='repnoout', p='/x'), rid='ro-none',
+                                _out=None))
+out_stats = report_mod.collect(outcome_report_rows, cfg,
+                               {'source': 'defaults', 'holdout_pct': 5})
+ok('the report counts outcome-known rows', out_stats['outcome_known'] == 20)
+ok('the report buckets statuses',
+   out_stats['status'].get('2xx') == 10 and out_stats['status'].get('404') == 10)
+ok('the report splits status by enforced and holdout',
+   out_stats['status_enforced'].get('2xx') == 10
+   and out_stats['status_holdout'].get('404') == 10)
+ok('the report totals bytes served',
+   out_stats['bytes_total'] == 10 * 12000 + 10 * 300)
+ok('the report ranks identities by 404 count',
+   out_stats['top_404'].get('198.18.5.5|aaaaaaaaaaaa') == 10)
+ok('the report collects request durations', len(out_stats['dur']) == 20)
+
+out_text = report_mod.render_text(out_stats, 7)
+ok('the text report contains the outcomes section', '6. Response outcomes' in out_text)
+ok('the outcomes section compares enforced against holdout',
+   'Enforced population vs holdout' in out_text)
+ok('the outcomes section explains what the gap estimates',
+   'what enforcement is currently catching' in out_text)
+ok('the later sections were renumbered',
+   '7. Holdout comparison' in out_text and '8. Top offenders' in out_text
+   and '9. Anomalies worth a look' in out_text)
+
+no_out = report_mod.collect([row(1.0, dev='d1')], cfg,
+                            {'source': 'defaults', 'holdout_pct': 0})
+no_out_text = report_mod.render_text(no_out, 7)
+ok('the report says so when there are no outcome lines',
+   'No outcome lines in this window' in no_out_text)
+ok('low coverage is explained rather than flagged as an error',
+   'Coverage under' in report_mod.render_text(
+       report_mod.collect(outcome_report_rows + [dict(row(7000.0 + i, dev='x'),
+                                                      rid='rq%d' % i, _out=None)
+                                                 for i in range(40)],
+                          cfg, {'source': 'defaults', 'holdout_pct': 5}), 7))
+
+out_html = report_mod.render_html(out_stats, 7)
+ok('the html report contains the outcomes section',
+   '6. Response outcomes' in out_html)
+ok('the html outcomes section is still script-free',
+   '<script' not in out_html.lower() and not re.search(r'(?:src|href)\s*=', out_html))
+
+stale_stats = report_mod.collect(
+    [dict(row(1.0, dev='d1'), rep=5)],
+    dict(cfg, _models={'ml': {'exists': True, 'stale': True,
+                              'error': 'feature order mismatch: bundle has 12 features'},
+                       'clf': {'exists': False, 'stale': False}}),
+    {'source': 'defaults', 'holdout_pct': 0})
+stale_text = report_mod.render_text(stale_stats, 7)
+ok('the report names a stale model in verdict coverage',
+   'STALE ML MODEL' in stale_text)
+ok('the report names a stale model as the likely cause of missing verdicts',
+   'stale model after a feature-set change' in stale_text)
+
 ok('a day-over-day jump is reported',
    any('failed handshakes' in line for line in report_mod.anomalies(spiky)))
 ok('a single day produces no anomaly', report_mod.anomalies(
@@ -729,7 +1038,10 @@ else:
         dur = random.uniform(60, 400)
         return [n_req, dur, dur / n_req, random.uniform(4, 12), random.uniform(1, 4),
                 random.uniform(0.7, 1.0), random.uniform(0.5, 0.9), random.uniform(0, 8),
-                0.0, random.uniform(0, 0.1), random.uniform(0, 0.1), 0.0]
+                0.0, random.uniform(0, 0.1), random.uniform(0, 0.1), 0.0,
+                # Phase 4 outcomes: a person mostly gets pages that exist.
+                random.uniform(0, 0.05), 0.0, 0.0,
+                random.uniform(8000, 60000), random.uniform(0.8, 1.0)]
 
     clean = [normal_vector() for _ in range(400)]
     probe = normal_vector()
@@ -749,7 +1061,8 @@ else:
     normal_level = model_mod.score(bundle, probe)
     # A metronomic 400-request burst: nothing like the training distribution.
     anomalous_level = model_mod.score(bundle, [400.0, 100.0, 0.25, 0.001, 0.2,
-                                               1.0, 1.0, 30.0, 1.0, 1.0, 1.0, 0.0])
+                                               1.0, 1.0, 30.0, 1.0, 1.0, 1.0, 0.0,
+                                               0.6, 0.05, 0.0, 350000.0, 0.95])
     ok('scores are integers inside 0..100',
        isinstance(normal_level, int) and 0 <= normal_level <= 100
        and 0 <= anomalous_level <= 100)
@@ -788,14 +1101,20 @@ else:
         dur = random.uniform(60, 400)
         return [n_req, dur, dur / n_req, random.uniform(4, 12), random.uniform(1, 4),
                 random.uniform(0.7, 1.0), random.uniform(0.4, 0.8), random.uniform(0, 8),
-                0.0, random.uniform(0, 0.1), random.uniform(0, 0.1), 0.0]
+                0.0, random.uniform(0, 0.1), random.uniform(0, 0.1), 0.0,
+                random.uniform(0, 0.05), 0.0, 0.0,
+                random.uniform(8000, 60000), random.uniform(0.8, 1.0)]
 
     def bot_vector():
         n_req = random.uniform(60, 400)
         dur = n_req * random.uniform(0.15, 0.3)
         return [n_req, dur, dur / n_req, random.uniform(0.0, 0.05),
                 random.uniform(0.05, 0.2), 1.0, random.uniform(0.95, 1.0),
-                random.uniform(25, 45), 1.0, 1.0, random.uniform(0.5, 1.0), 0.0]
+                random.uniform(25, 45), 1.0, 1.0, random.uniform(0.5, 1.0), 0.0,
+                # Phase 4 outcomes: a stale URL list walks into 404s and moves
+                # far more bytes than a person reading pages.
+                random.uniform(0.3, 0.7), random.uniform(0, 0.1), 0.0,
+                random.uniform(100000, 400000), random.uniform(0.8, 1.0)]
 
     clf_dir = tempfile.mkdtemp(prefix='gv-selftest-clf-')
     clf_path = os.path.join(clf_dir, 'clf.joblib')
@@ -875,6 +1194,146 @@ else:
     if os.path.isfile(clf_path):
         os.unlink(clf_path)
     os.rmdir(clf_dir)
+
+# ---------------------------------------------------------------------------
+section('Phase 4 candidate models and promotion')
+
+from analyzer import promote as promote_mod
+
+ok('config carries both candidate paths',
+   cfg['model_candidate_path'].endswith('.candidate')
+   and cfg['clf_candidate_path'].endswith('.candidate'))
+ok('a candidate path is not the live path',
+   cfg['model_candidate_path'] != cfg['model_path']
+   and cfg['clf_candidate_path'] != cfg['clf_path'])
+ok('paths_for returns (live, candidate) for each kind',
+   promote_mod.paths_for('ml', cfg) == (cfg['model_path'], cfg['model_candidate_path'])
+   and promote_mod.paths_for('clf', cfg) == (cfg['clf_path'], cfg['clf_candidate_path']))
+try:
+    promote_mod.paths_for('nonsense', cfg)
+    ok('an unknown model kind is rejected', False)
+except ValueError:
+    ok('an unknown model kind is rejected', True)
+
+promo_dir = tempfile.mkdtemp(prefix='gv-selftest-promo-')
+promo_cfg = dict(cfg,
+                 model_path=os.path.join(promo_dir, 'model.joblib'),
+                 model_candidate_path=os.path.join(promo_dir, 'model.joblib.candidate'),
+                 clf_path=os.path.join(promo_dir, 'clf.joblib'),
+                 clf_candidate_path=os.path.join(promo_dir, 'clf.joblib.candidate'))
+
+missing = promote_mod.check('ml', promo_cfg)
+ok('promotion refuses a missing candidate', missing['ok'] is False)
+ok('the refusal names the command that produces one',
+   '--candidate' in missing['reason'])
+ok('promote() on a missing candidate is a no-op refusal',
+   promote_mod.promote('ml', promo_cfg)['ok'] is False)
+
+ok('an absent live model is reported as absent, not stale',
+   model_mod.inspect(promo_cfg['model_path'])['exists'] is False)
+ok('no warning is emitted for an absent model',
+   promote_mod.stale_warning('ml', model_mod.inspect(promo_cfg['model_path'])) == '')
+
+if not model_mod.SKLEARN_AVAILABLE:
+    skip('candidate training and promotion round-trip',
+         'scikit-learn not installed: ' + model_mod.SKLEARN_ERROR)
+else:
+    import random as promo_random
+    promo_random.seed(17)
+
+    def promo_vector():
+        n_req = promo_random.uniform(5, 20)
+        dur = promo_random.uniform(60, 400)
+        return [n_req, dur, dur / n_req, promo_random.uniform(4, 12),
+                promo_random.uniform(1, 4), promo_random.uniform(0.7, 1.0),
+                promo_random.uniform(0.5, 0.9), promo_random.uniform(0, 8),
+                0.0, 0.0, 0.0, 0.0,
+                promo_random.uniform(0, 0.05), 0.0, 0.0,
+                promo_random.uniform(8000, 60000), promo_random.uniform(0.8, 1.0)]
+
+    vectors = [promo_vector() for _ in range(300)]
+
+    # Training to the candidate path must not touch the live path at all.
+    ok('candidate training writes the candidate',
+       model_mod.train(vectors, 0.05, promo_cfg['model_candidate_path'],
+                       min_train=200) is True)
+    ok('candidate training left the live model untouched',
+       not os.path.isfile(promo_cfg['model_path']))
+
+    verdict = promote_mod.check('ml', promo_cfg)
+    ok('a matching candidate passes the check', verdict['ok'] is True)
+
+    result = promote_mod.promote('ml', promo_cfg)
+    ok('promotion moves the candidate into place', result['ok'] is True)
+    ok('the live model now exists', os.path.isfile(promo_cfg['model_path']))
+    ok('the candidate no longer exists after promotion',
+       not os.path.isfile(promo_cfg['model_candidate_path']))
+    ok('the promoted model loads', model_mod.load(promo_cfg['model_path']) is not None)
+
+    # A bundle from before the feature extension must be refused, and must
+    # produce the loud warning that names the fix.
+    stale_bundle = model_mod.load(promo_cfg['model_path'])
+    stale_bundle = dict(stale_bundle)
+    stale_bundle['feature_order'] = list(features_mod.FEATURE_ORDER)[:12]
+    import joblib as promo_joblib
+    promo_joblib.dump(stale_bundle, promo_cfg['model_candidate_path'])
+    stale_check = promote_mod.check('ml', promo_cfg)
+    ok('promotion refuses a feature-order mismatch', stale_check['ok'] is False)
+    ok('the mismatch refusal states both feature counts',
+       '12 features' in stale_check['reason'] and '17' in stale_check['reason'])
+    ok('the stale candidate was not moved into place',
+       os.path.isfile(promo_cfg['model_candidate_path']))
+
+    promo_joblib.dump(stale_bundle, promo_cfg['model_path'])
+    stale_info = model_mod.inspect(promo_cfg['model_path'])
+    ok('a stale live model is detected as stale',
+       stale_info['stale'] is True and stale_info['loadable'] is False)
+    warning = promote_mod.stale_warning('ml', stale_info)
+    ok('a stale live model produces a loud warning', warning.startswith('WARNING'))
+    ok('the warning explains the silent-permissiveness risk',
+       'silently dropped' in warning)
+    ok('the warning names the promotion command',
+       'promote-model ml' in warning and '--candidate' in warning)
+    ok('live_status inspects both kinds',
+       set(promote_mod.live_status(promo_cfg)) == set(['ml', 'clf']))
+
+    # The classifier gate: a candidate below target precision is refused, so a
+    # false-positive problem cannot be promoted into production.
+    def promo_bot_vector():
+        n_req = promo_random.uniform(60, 400)
+        dur = n_req * promo_random.uniform(0.15, 0.3)
+        return [n_req, dur, dur / n_req, promo_random.uniform(0.0, 0.05),
+                promo_random.uniform(0.05, 0.2), 1.0, promo_random.uniform(0.95, 1.0),
+                promo_random.uniform(25, 45), 1.0, 1.0, promo_random.uniform(0.5, 1.0), 0.0,
+                promo_random.uniform(0.3, 0.7), 0.0, 0.0,
+                promo_random.uniform(100000, 400000), promo_random.uniform(0.8, 1.0)]
+
+    clf_X = [promo_vector() for _ in range(300)] + [promo_bot_vector() for _ in range(120)]
+    clf_y = [0] * 300 + [1] * 120
+    ok('a classifier candidate trains to the candidate path',
+       clf_mod.train(clf_X, clf_y, promo_cfg['clf_candidate_path'], min_positive=50) is True)
+    ok('classifier candidate training left the live classifier untouched',
+       not os.path.isfile(promo_cfg['clf_path']))
+    ok('a classifier candidate meeting its target may be promoted',
+       promote_mod.check('clf', promo_cfg)['ok'] is True)
+
+    weak = dict(clf_mod.load(promo_cfg['clf_candidate_path']))
+    weak['metrics'] = dict(weak['metrics'], precision=0.42)
+    promo_joblib.dump(weak, promo_cfg['clf_candidate_path'])
+    weak_check = promote_mod.check('clf', promo_cfg)
+    ok('promotion refuses a classifier below target precision', weak_check['ok'] is False)
+    ok('the precision refusal explains the cost',
+       'restrict real users' in weak_check['reason'])
+
+    no_metrics = dict(clf_mod.load(promo_cfg['clf_candidate_path']))
+    no_metrics['metrics'] = None
+    promo_joblib.dump(no_metrics, promo_cfg['clf_candidate_path'])
+    ok('promotion refuses a classifier carrying no metrics',
+       promote_mod.check('clf', promo_cfg)['ok'] is False)
+
+for name in os.listdir(promo_dir):
+    os.unlink(os.path.join(promo_dir, name))
+os.rmdir(promo_dir)
 
 # ---------------------------------------------------------------------------
 print('')

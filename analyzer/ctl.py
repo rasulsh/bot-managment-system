@@ -30,6 +30,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import config as config_mod
+from analyzer import promote as promote_mod
 from analyzer import redis_io
 
 MAX_TTL = 30 * 86400
@@ -106,6 +107,31 @@ def cmd_list(client, args):
     return 0
 
 
+def cmd_promote_model(client, args):
+    """Move a trained candidate over the live model. Needs no Redis."""
+    cfg = args.cfg
+    live, candidate = promote_mod.paths_for(args.kind, cfg)
+    verdict = promote_mod.check(args.kind, cfg)
+    if not verdict['ok']:
+        print('Refusing to promote the %s model: %s' % (args.kind, verdict['reason']),
+              file=sys.stderr)
+        return 1
+
+    info = verdict['inspection']
+    if args.kind == 'clf' and info.get('metrics'):
+        from analyzer import classifier as clf_mod
+        print('Candidate metrics on held-out data:')
+        print(clf_mod.format_metrics(info['metrics']))
+
+    result = promote_mod.promote(args.kind, cfg)
+    if not result['ok']:
+        print('ERROR: %s' % result['reason'], file=sys.stderr)
+        return 1
+    print('Promoted the %s candidate to %s.' % (args.kind, live))
+    print('The next nightly run will write verdicts from it.')
+    return 0
+
+
 def cmd_clear(client, args):
     removed = redis_io.clear_override(client, args.identity)
     if removed:
@@ -133,6 +159,10 @@ def parse_args(argv):
 
     node = sub.add_parser('list', help='list the overrides currently set')
     node.add_argument('--kind', choices=('allow', 'deny'), default=None)
+
+    node = sub.add_parser('promote-model',
+                          help='move a trained candidate model over the live one')
+    node.add_argument('kind', choices=promote_mod.KINDS)
 
     args = parser.parse_args(argv)
     if not args.command:
@@ -164,6 +194,16 @@ def main(argv=None):
     except Exception as exc:
         print('ERROR: bad configuration: %s' % exc, file=sys.stderr)
         return 2
+    args.cfg = cfg
+
+    handlers = {'show': cmd_show, 'allow': cmd_allow, 'deny': cmd_deny,
+                'list': cmd_list, 'clear': cmd_clear,
+                'promote-model': cmd_promote_model}
+
+    # Promotion moves a file on disk; it has nothing to do with Redis and must
+    # work during an outage, which is exactly when someone is retraining.
+    if args.command == 'promote-model':
+        return handlers[args.command](None, args)
 
     client = redis_io.connect(cfg)
     if client is None:
@@ -171,8 +211,6 @@ def main(argv=None):
               file=sys.stderr)
         return 1
 
-    handlers = {'show': cmd_show, 'allow': cmd_allow, 'deny': cmd_deny,
-                'list': cmd_list, 'clear': cmd_clear}
     return handlers[args.command](client, args)
 
 
