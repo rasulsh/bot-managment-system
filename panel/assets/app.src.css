@@ -63,179 +63,192 @@
 	}
 }
 
-@layer components {
+/* Component classes, deliberately OUTSIDE @layer components.
+ *
+ * Inside a layer they are purgeable, which means a class the panel builds at
+ * runtime - gp-flash-<kind>, gp-bar-fill-<state> - survives only because the
+ * build also scans this file and finds the selector here. That scan is what
+ * used to make Tailwind emit ~180 standalone utility rules the markup never
+ * references, because every argument of every @apply below reads to the
+ * scanner as a used class. Twelve kilobytes of dead CSS to keep ten dynamic
+ * class names alive.
+ *
+ * Outside a layer these are plain CSS: never purged, so the build no longer
+ * has to scan this file, and nothing can silently disappear when someone adds
+ * a class name the scanner cannot see. Every one of them is used - checked -
+ * so purging them was never buying anything.
+ */
 
-	/* --- shell --------------------------------------------------------- */
-	.gp-body { @apply min-h-screen pb-20 lg:pb-0; }
+/* --- shell --------------------------------------------------------- */
+.gp-body { @apply min-h-screen pb-20 lg:pb-0; }
 
-	.gp-topbar { @apply sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur
-		dark:border-slate-800 dark:bg-slate-900/90; }
-	.gp-topbar-inner { @apply mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3; }
-	.gp-brand { @apply flex items-center gap-2 no-underline; }
-	.gp-brand-mark { @apply text-emerald-500 text-lg leading-none; }
-	.gp-brand-text { @apply flex flex-col leading-tight; }
-	.gp-brand-text strong { @apply text-sm font-bold text-slate-900 dark:text-slate-100; }
-	.gp-brand-text small { @apply text-xs text-slate-500 dark:text-slate-400; }
-	.gp-topbar-actions { @apply flex items-center gap-2; }
-	.gp-user { @apply hidden text-xs text-slate-500 sm:inline dark:text-slate-400; }
+.gp-topbar { @apply sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur
+	dark:border-slate-800 dark:bg-slate-900/90; }
+.gp-topbar-inner { @apply mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3; }
+.gp-brand { @apply flex items-center gap-2 no-underline; }
+.gp-brand-mark { @apply text-emerald-500 text-lg leading-none; }
+.gp-brand-text { @apply flex flex-col leading-tight; }
+.gp-brand-text strong { @apply text-sm font-bold text-slate-900 dark:text-slate-100; }
+.gp-brand-text small { @apply text-xs text-slate-500 dark:text-slate-400; }
+.gp-topbar-actions { @apply flex items-center gap-2; }
+.gp-user { @apply hidden text-xs text-slate-500 sm:inline dark:text-slate-400; }
 
-	.gp-shell { @apply mx-auto flex w-full max-w-7xl gap-6 px-4 py-5; }
-	.gp-shell-bare { @apply justify-center; }
-	.gp-main { @apply min-w-0 flex-1 space-y-5; }
-	.gp-main-bare { @apply flex items-center justify-center; }
+.gp-shell { @apply mx-auto flex w-full max-w-7xl gap-6 px-4 py-5; }
+.gp-shell-bare { @apply justify-center; }
+.gp-main { @apply min-w-0 flex-1 space-y-5; }
+.gp-main-bare { @apply flex items-center justify-center; }
 
-	.gp-sidenav { @apply hidden w-56 shrink-0 flex-col gap-1 lg:flex; }
-	.gp-nav-item { @apply flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm
-		text-slate-600 no-underline transition-colors hover:bg-white hover:text-slate-900
-		dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-slate-100; }
-	.gp-nav-active { @apply bg-white font-bold text-slate-900 shadow-sm
-		dark:bg-slate-900 dark:text-slate-100; }
-	.gp-nav-icon { @apply text-base leading-none opacity-70; }
+.gp-sidenav { @apply hidden w-56 shrink-0 flex-col gap-1 lg:flex; }
+.gp-nav-item { @apply flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm
+	text-slate-600 no-underline transition-colors hover:bg-white hover:text-slate-900
+	dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-slate-100; }
+.gp-nav-active { @apply bg-white font-bold text-slate-900 shadow-sm
+	dark:bg-slate-900 dark:text-slate-100; }
+.gp-nav-icon { @apply text-base leading-none opacity-70; }
 
-	.gp-bottomnav { @apply fixed inset-x-0 bottom-0 z-30 flex border-t border-slate-200
-		bg-white/95 backdrop-blur lg:hidden dark:border-slate-800 dark:bg-slate-900/95; }
-	.gp-bottom-item { @apply flex min-h-[56px] flex-1 flex-col items-center justify-center
-		gap-0.5 py-2 text-[11px] text-slate-500 no-underline dark:text-slate-400; }
-	.gp-bottom-item.gp-nav-active { @apply bg-transparent text-emerald-600 shadow-none
-		dark:text-emerald-400; }
-	.gp-bottom-label { @apply leading-none; }
+.gp-bottomnav { @apply fixed inset-x-0 bottom-0 z-30 flex border-t border-slate-200
+	bg-white/95 backdrop-blur lg:hidden dark:border-slate-800 dark:bg-slate-900/95; }
+.gp-bottom-item { @apply flex min-h-[56px] flex-1 flex-col items-center justify-center
+	gap-0.5 py-2 text-[11px] text-slate-500 no-underline dark:text-slate-400; }
+.gp-bottom-item.gp-nav-active { @apply bg-transparent text-emerald-600 shadow-none
+	dark:text-emerald-400; }
+.gp-bottom-label { @apply leading-none; }
 
-	/* --- surfaces ------------------------------------------------------ */
-	.gp-card { @apply rounded-xl border border-slate-200 bg-white p-4 shadow-sm
-		dark:border-slate-800 dark:bg-slate-900; }
-	.gp-card-title { @apply mb-3 flex items-center justify-between gap-2 text-sm
-		font-bold text-slate-900 dark:text-slate-100; }
-	.gp-card-sub { @apply text-xs font-normal text-slate-500 dark:text-slate-400; }
-	.gp-grid { @apply grid gap-4; }
-	.gp-grid-2 { @apply grid gap-4 sm:grid-cols-2; }
-	.gp-grid-3 { @apply grid gap-4 sm:grid-cols-2 lg:grid-cols-3; }
-	.gp-grid-4 { @apply grid gap-4 grid-cols-2 lg:grid-cols-4; }
+/* --- surfaces ------------------------------------------------------ */
+.gp-card { @apply rounded-xl border border-slate-200 bg-white p-4 shadow-sm
+	dark:border-slate-800 dark:bg-slate-900; }
+.gp-card-title { @apply mb-3 flex items-center justify-between gap-2 text-sm
+	font-bold text-slate-900 dark:text-slate-100; }
+.gp-card-sub { @apply text-xs font-normal text-slate-500 dark:text-slate-400; }
+.gp-grid { @apply grid gap-4; }
+.gp-grid-2 { @apply grid gap-4 sm:grid-cols-2; }
+.gp-grid-3 { @apply grid gap-4 sm:grid-cols-2 lg:grid-cols-3; }
+.gp-grid-4 { @apply grid gap-4 grid-cols-2 lg:grid-cols-4; }
 
-	.gp-page-title { @apply text-lg font-bold text-slate-900 dark:text-slate-100; }
-	.gp-page-sub { @apply mt-1 text-xs text-slate-500 dark:text-slate-400; }
-	.gp-section { @apply space-y-3; }
+.gp-page-title { @apply text-lg font-bold text-slate-900 dark:text-slate-100; }
+.gp-page-sub { @apply mt-1 text-xs text-slate-500 dark:text-slate-400; }
+.gp-section { @apply space-y-3; }
 
-	/* --- stats --------------------------------------------------------- */
-	.gp-kpi { @apply rounded-xl border border-slate-200 bg-white p-4
-		dark:border-slate-800 dark:bg-slate-900; }
-	.gp-kpi-label { @apply text-xs text-slate-500 dark:text-slate-400; }
-	.gp-kpi-value { @apply mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100; }
-	.gp-kpi-hint { @apply mt-1 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400; }
+/* --- stats --------------------------------------------------------- */
+.gp-kpi { @apply rounded-xl border border-slate-200 bg-white p-4
+	dark:border-slate-800 dark:bg-slate-900; }
+.gp-kpi-label { @apply text-xs text-slate-500 dark:text-slate-400; }
+.gp-kpi-value { @apply mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100; }
+.gp-kpi-hint { @apply mt-1 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400; }
 
-	.gp-stat-row { @apply flex items-center justify-between gap-3 border-b
-		border-slate-100 py-2 text-sm last:border-0 dark:border-slate-800; }
-	.gp-stat-key { @apply text-slate-500 dark:text-slate-400; }
-	.gp-stat-val { @apply font-bold text-slate-900 dark:text-slate-100; }
+.gp-stat-row { @apply flex items-center justify-between gap-3 border-b
+	border-slate-100 py-2 text-sm last:border-0 dark:border-slate-800; }
+.gp-stat-key { @apply text-slate-500 dark:text-slate-400; }
+.gp-stat-val { @apply font-bold text-slate-900 dark:text-slate-100; }
 
-	/* --- badges -------------------------------------------------------- */
-	.gp-badge { @apply inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px]
-		font-bold leading-none; }
-	.gp-badge-on { @apply bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300; }
-	.gp-badge-off { @apply bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400; }
-	.gp-badge-warn { @apply bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300; }
-	.gp-badge-bad { @apply bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300; }
-	.gp-badge-info { @apply bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300; }
+/* --- badges -------------------------------------------------------- */
+.gp-badge { @apply inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px]
+	font-bold leading-none; }
+.gp-badge-on { @apply bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300; }
+.gp-badge-off { @apply bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400; }
+.gp-badge-warn { @apply bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300; }
+.gp-badge-bad { @apply bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300; }
+.gp-badge-info { @apply bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300; }
 
-	/* --- buttons ------------------------------------------------------- */
-	.gp-btn { @apply inline-flex min-h-[44px] cursor-pointer items-center justify-center
-		gap-2 rounded-lg border border-transparent px-4 py-2 text-sm font-bold
-		no-underline transition-colors; }
-	.gp-btn-primary { @apply bg-emerald-600 text-white hover:bg-emerald-700; }
-	.gp-btn-ghost { @apply border-slate-200 bg-white text-slate-700 hover:bg-slate-50
-		dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800; }
-	.gp-btn-danger { @apply bg-rose-600 text-white hover:bg-rose-700; }
-	.gp-btn-block { @apply w-full; }
-	.gp-btn-sm { @apply min-h-[36px] px-3 py-1.5 text-xs; }
+/* --- buttons ------------------------------------------------------- */
+.gp-btn { @apply inline-flex min-h-[44px] cursor-pointer items-center justify-center
+	gap-2 rounded-lg border border-transparent px-4 py-2 text-sm font-bold
+	no-underline transition-colors; }
+.gp-btn-primary { @apply bg-emerald-600 text-white hover:bg-emerald-700; }
+.gp-btn-ghost { @apply border-slate-200 bg-white text-slate-700 hover:bg-slate-50
+	dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800; }
+.gp-btn-danger { @apply bg-rose-600 text-white hover:bg-rose-700; }
+.gp-btn-block { @apply w-full; }
+.gp-btn-sm { @apply min-h-[36px] px-3 py-1.5 text-xs; }
 
-	/* --- forms --------------------------------------------------------- */
-	.gp-form { @apply space-y-4; }
-	.gp-field { @apply block space-y-1.5; }
-	.gp-label { @apply block text-xs font-bold text-slate-700 dark:text-slate-300; }
-	.gp-help { @apply block text-[11px] leading-relaxed text-slate-500 dark:text-slate-400; }
-	.gp-input { @apply block min-h-[44px] w-full rounded-lg border border-slate-300
-		bg-white px-3 py-2 text-sm text-slate-900 outline-none transition
-		focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20
-		dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100; }
-	.gp-textarea { @apply block w-full rounded-lg border border-slate-300 bg-white px-3
-		py-2 font-mono text-xs text-slate-900 outline-none focus:border-emerald-500
-		dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100; }
-	.gp-check { @apply flex min-h-[44px] items-center gap-3 rounded-lg border
-		border-slate-200 px-3 py-2 dark:border-slate-800; }
-	.gp-check input { @apply h-5 w-5 shrink-0 accent-emerald-600; }
-	.gp-range { @apply h-2 w-full cursor-pointer accent-emerald-600; }
-	.gp-filters { @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-4; }
-	.gp-error { @apply mt-1 block text-[11px] font-bold text-rose-600 dark:text-rose-400; }
+/* --- forms --------------------------------------------------------- */
+.gp-form { @apply space-y-4; }
+.gp-field { @apply block space-y-1.5; }
+.gp-label { @apply block text-xs font-bold text-slate-700 dark:text-slate-300; }
+.gp-help { @apply block text-[11px] leading-relaxed text-slate-500 dark:text-slate-400; }
+.gp-input { @apply block min-h-[44px] w-full rounded-lg border border-slate-300
+	bg-white px-3 py-2 text-sm text-slate-900 outline-none transition
+	focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20
+	dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100; }
+.gp-textarea { @apply block w-full rounded-lg border border-slate-300 bg-white px-3
+	py-2 font-mono text-xs text-slate-900 outline-none focus:border-emerald-500
+	dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100; }
+.gp-check { @apply flex min-h-[44px] items-center gap-3 rounded-lg border
+	border-slate-200 px-3 py-2 dark:border-slate-800; }
+.gp-check input { @apply h-5 w-5 shrink-0 accent-emerald-600; }
+.gp-range { @apply h-2 w-full cursor-pointer accent-emerald-600; }
+.gp-filters { @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-4; }
+.gp-error { @apply mt-1 block text-[11px] font-bold text-rose-600 dark:text-rose-400; }
 
-	/* --- tables that become cards -------------------------------------- */
-	.gp-table { @apply w-full border-collapse text-sm; }
-	.gp-table th { @apply border-b border-slate-200 py-2 text-start text-xs font-bold
-		text-slate-500 dark:border-slate-800 dark:text-slate-400; }
-	.gp-table td { @apply border-b border-slate-100 py-2 align-top text-slate-700
-		dark:border-slate-800 dark:text-slate-300; }
-	.gp-table-wrap { @apply -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0; }
+/* --- tables that become cards -------------------------------------- */
+.gp-table { @apply w-full border-collapse text-sm; }
+.gp-table th { @apply border-b border-slate-200 py-2 text-start text-xs font-bold
+	text-slate-500 dark:border-slate-800 dark:text-slate-400; }
+.gp-table td { @apply border-b border-slate-100 py-2 align-top text-slate-700
+	dark:border-slate-800 dark:text-slate-300; }
+.gp-table-wrap { @apply -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0; }
 
-	.gp-rows { @apply space-y-2; }
-	.gp-row { @apply rounded-lg border border-slate-200 bg-white p-3
-		dark:border-slate-800 dark:bg-slate-900; }
-	.gp-row-head { @apply flex flex-wrap items-center gap-2 text-xs; }
-	.gp-row-main { @apply mt-1 break-all text-sm text-slate-800 dark:text-slate-200; }
-	.gp-row-meta { @apply mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500
-		dark:text-slate-400; }
-	.gp-detail { @apply mt-2 rounded-lg bg-slate-50 p-3 dark:bg-slate-950; }
-	.gp-dl { @apply grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]; }
-	.gp-dl dt { @apply text-slate-500 dark:text-slate-400; }
-	.gp-dl dd { @apply m-0 break-all font-mono text-slate-700 dark:text-slate-300; }
+.gp-rows { @apply space-y-2; }
+.gp-row { @apply rounded-lg border border-slate-200 bg-white p-3
+	dark:border-slate-800 dark:bg-slate-900; }
+.gp-row-head { @apply flex flex-wrap items-center gap-2 text-xs; }
+.gp-row-main { @apply mt-1 break-all text-sm text-slate-800 dark:text-slate-200; }
+.gp-row-meta { @apply mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500
+	dark:text-slate-400; }
+.gp-detail { @apply mt-2 rounded-lg bg-slate-50 p-3 dark:bg-slate-950; }
+.gp-dl { @apply grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]; }
+.gp-dl dt { @apply text-slate-500 dark:text-slate-400; }
+.gp-dl dd { @apply m-0 break-all font-mono text-slate-700 dark:text-slate-300; }
 
-	/* --- flash --------------------------------------------------------- */
-	.gp-flash { @apply rounded-lg border px-4 py-3 text-sm; }
-	.gp-flash-ok { @apply border-emerald-200 bg-emerald-50 text-emerald-900
-		dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200; }
-	.gp-flash-error { @apply border-rose-200 bg-rose-50 text-rose-900
-		dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200; }
-	.gp-flash-warn { @apply border-amber-200 bg-amber-50 text-amber-900
-		dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200; }
+/* --- flash --------------------------------------------------------- */
+.gp-flash { @apply rounded-lg border px-4 py-3 text-sm; }
+.gp-flash-ok { @apply border-emerald-200 bg-emerald-50 text-emerald-900
+	dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200; }
+.gp-flash-error { @apply border-rose-200 bg-rose-50 text-rose-900
+	dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200; }
+.gp-flash-warn { @apply border-amber-200 bg-amber-50 text-amber-900
+	dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200; }
 
-	.gp-note { @apply rounded-lg border border-slate-200 bg-slate-50 px-3 py-2
-		text-[11px] leading-relaxed text-slate-600 dark:border-slate-800
-		dark:bg-slate-950 dark:text-slate-400; }
-	.gp-note-strong { @apply border-amber-300 bg-amber-50 text-amber-900
-		dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200; }
+.gp-note { @apply rounded-lg border border-slate-200 bg-slate-50 px-3 py-2
+	text-[11px] leading-relaxed text-slate-600 dark:border-slate-800
+	dark:bg-slate-950 dark:text-slate-400; }
+.gp-note-strong { @apply border-amber-300 bg-amber-50 text-amber-900
+	dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200; }
 
-	/* --- kill switch: the single most important control here ----------- */
-	.gp-kill { @apply rounded-xl border-2 p-4; }
-	.gp-kill-armed { @apply border-emerald-300 bg-emerald-50 dark:border-emerald-900
-		dark:bg-emerald-950; }
-	.gp-kill-stopped { @apply border-rose-400 bg-rose-50 dark:border-rose-800
-		dark:bg-rose-950; }
-	.gp-kill-title { @apply flex items-center gap-2 text-sm font-bold; }
-	.gp-pulse { @apply inline-block h-2.5 w-2.5 rounded-full; }
-	.gp-pulse-ok { @apply bg-emerald-500; animation: gp-pulse 2.4s ease-in-out infinite; }
-	.gp-pulse-bad { @apply bg-rose-500; animation: gp-pulse 1.2s ease-in-out infinite; }
+/* --- kill switch: the single most important control here ----------- */
+.gp-kill { @apply rounded-xl border-2 p-4; }
+.gp-kill-armed { @apply border-emerald-300 bg-emerald-50 dark:border-emerald-900
+	dark:bg-emerald-950; }
+.gp-kill-stopped { @apply border-rose-400 bg-rose-50 dark:border-rose-800
+	dark:bg-rose-950; }
+.gp-kill-title { @apply flex items-center gap-2 text-sm font-bold; }
+.gp-pulse { @apply inline-block h-2.5 w-2.5 rounded-full; }
+.gp-pulse-ok { @apply bg-emerald-500; animation: gp-pulse 2.4s ease-in-out infinite; }
+.gp-pulse-bad { @apply bg-rose-500; animation: gp-pulse 1.2s ease-in-out infinite; }
 
-	/* --- login --------------------------------------------------------- */
-	.gp-login { @apply flex min-h-[70vh] w-full items-center justify-center; }
-	.gp-login-card { @apply w-full max-w-sm rounded-2xl border border-slate-200 bg-white
-		p-6 shadow-lg dark:border-slate-800 dark:bg-slate-900; }
-	.gp-login-brand { @apply mb-6 flex flex-col items-center gap-1 text-center; }
-	.gp-login-brand strong { @apply text-base font-bold; }
-	.gp-login-brand small { @apply text-xs text-slate-500 dark:text-slate-400; }
+/* --- login --------------------------------------------------------- */
+.gp-login { @apply flex min-h-[70vh] w-full items-center justify-center; }
+.gp-login-card { @apply w-full max-w-sm rounded-2xl border border-slate-200 bg-white
+	p-6 shadow-lg dark:border-slate-800 dark:bg-slate-900; }
+.gp-login-brand { @apply mb-6 flex flex-col items-center gap-1 text-center; }
+.gp-login-brand strong { @apply text-base font-bold; }
+.gp-login-brand small { @apply text-xs text-slate-500 dark:text-slate-400; }
 
-	/* --- charts (inline SVG generated in PHP) -------------------------- */
-	.gp-chart { @apply w-full overflow-hidden; }
-	.gp-chart svg { @apply block h-auto w-full; }
-	.gp-legend { @apply mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500
-		dark:text-slate-400; }
-	.gp-legend-dot { @apply inline-block h-2 w-2 rounded-sm align-middle; }
+/* --- charts (inline SVG generated in PHP) -------------------------- */
+.gp-chart { @apply w-full overflow-hidden; }
+.gp-chart svg { @apply block h-auto w-full; }
+.gp-legend { @apply mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500
+	dark:text-slate-400; }
+.gp-legend-dot { @apply inline-block h-2 w-2 rounded-sm align-middle; }
 
-	.gp-bar-track { @apply h-2 w-full overflow-hidden rounded bg-slate-100 dark:bg-slate-800; }
-	.gp-bar-fill { @apply h-full rounded bg-emerald-500 transition-[width] duration-500; }
-	.gp-bar-fill-warn { @apply bg-amber-500; }
-	.gp-bar-fill-bad { @apply bg-rose-500; }
+.gp-bar-track { @apply h-2 w-full overflow-hidden rounded bg-slate-100 dark:bg-slate-800; }
+.gp-bar-fill { @apply h-full rounded bg-emerald-500 transition-[width] duration-500; }
+.gp-bar-fill-warn { @apply bg-amber-500; }
+.gp-bar-fill-bad { @apply bg-rose-500; }
 
-	.gp-mono { @apply font-mono text-xs; }
-	.gp-ltr { direction: ltr; text-align: start; }
-	.gp-truncate { @apply block max-w-full truncate; }
-}
+.gp-mono { @apply font-mono text-xs; }
+.gp-ltr { direction: ltr; text-align: start; }
+.gp-truncate { @apply block max-w-full truncate; }
 
 @keyframes gp-pulse {
 	0%, 100% { opacity: 1; transform: scale(1); }
