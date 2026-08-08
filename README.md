@@ -458,6 +458,13 @@ It prompts for a username and password, refuses passwords under 12 characters,
 generates a session secret distinct from the guard's, and writes
 `panel/panel.config.php` at mode 0600. Re-run it to rotate credentials. Then:
 
+> **Installs created before the credential file carried a direct-access guard:**
+> the generated file now begins with
+> `if (!defined('GP_BOOT')) { http_response_code(404); exit; }`, the same line
+> every other file under `panel/` has. An older `panel.config.php` keeps working
+> and is unaffected — to pick the guard up, either re-run `setpass.php` or add
+> that one line by hand above the `return`.
+
 1. **Add the panel to `exempt_paths` in `guard/config.php`:**
 
    ```php

@@ -93,10 +93,18 @@ $config = array(
 	'ip_allowlist'   => array(),
 );
 
+// The emitted file carries the same direct-access guard every other file under
+// panel/ has. It was the one that did not, and it is the one that matters most:
+// it holds the password hash and the session secret, so if a server ever serves
+// .php as text - a broken handler, a stray editor backup - this file had no
+// second line of defence behind .htaccess and mode 0600. index.php defines
+// GP_BOOT at line 8, before gp_panel_config() ever requires this, and the panel
+// self-test defines it too, so nothing legitimate is locked out.
 $body = "<?php\n"
 	. "// Bot Guard admin panel credentials. Written by panel/setpass.php.\n"
 	. "// NEVER commit this file. Re-run setpass.php to rotate.\n"
 	. "// ip_allowlist takes IPv4 CIDRs, e.g. array('203.0.113.0/24'); empty disables it.\n"
+	. "if (!defined('GP_BOOT')) { http_response_code(404); exit; }\n"
 	. "return " . var_export($config, true) . ";\n";
 
 $tmp = $gp_target . '.tmp' . bin2hex(random_bytes(4));
