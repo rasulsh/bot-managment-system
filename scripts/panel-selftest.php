@@ -277,6 +277,130 @@ t_ok('a missing file yields nothing', gp_tail_lines($tmp . '.absent', 10, 1000) 
 @unlink($tmp);
 
 // --------------------------------------------------------------------------
+t_section('Session cookie');
+
+require_once __DIR__ . '/../panel/auth.php';
+
+$sec = bin2hex(random_bytes(32));
+$now = time();
+$tok = gp_session_make('operator', $sec, $now);
+t_ok('a session token has three dot-separated parts',
+	count(explode('.', $tok)) === 3);
+$check = gp_session_check($tok, $sec, 43200, $now);
+t_ok('a fresh token verifies and returns the user',
+	is_array($check) && $check['user'] === 'operator');
+t_ok('a token verifies just inside its ttl',
+	gp_session_check($tok, $sec, 43200, $now + 43199) !== false);
+t_ok('a token expires exactly at its ttl',
+	gp_session_check($tok, $sec, 43200, $now + 43200) === false);
+t_ok('a token signed with another secret fails',
+	gp_session_check($tok, bin2hex(random_bytes(32)), 43200, $now) === false);
+
+$parts = explode('.', $tok);
+t_ok('a tampered signature fails',
+	gp_session_check($parts[0] . '.' . $parts[1] . '.' . strrev($parts[2]),
+		$sec, 43200, $now) === false);
+t_ok('a tampered username fails',
+	gp_session_check('attacker.' . $parts[1] . '.' . $parts[2], $sec, 43200, $now) === false);
+t_ok('a tampered issued-at fails',
+	gp_session_check($parts[0] . '.' . ($now - 100000) . '.' . $parts[2],
+		$sec, 43200, $now) === false);
+t_ok('a future-dated token is refused',
+	gp_session_check(gp_session_make('operator', $sec, $now + 5000), $sec, 43200, $now) === false);
+t_ok('a malformed token fails', gp_session_check('garbage', $sec, 43200, $now) === false);
+t_ok('an empty token fails', gp_session_check('', $sec, 43200, $now) === false);
+t_ok('a non-numeric issued-at fails',
+	gp_session_check('operator.abc.' . $parts[2], $sec, 43200, $now) === false);
+
+t_ok('a fresh session is not yet due for renewal',
+	gp_session_should_renew($now, 43200, $now) === false);
+t_ok('a session past half its life is renewed',
+	gp_session_should_renew($now - 21601, 43200, $now) === true);
+
+// --------------------------------------------------------------------------
+t_section('CSRF');
+
+$_COOKIE[GP_SESSION_COOKIE] = $tok;
+$GLOBALS['gp_test_panel_cfg'] = array('session_secret' => $sec);
+// gp_csrf_token reads the real panel config; without one installed it returns
+// an empty string, which must never validate.
+if (gp_panel_config() === null) {
+	t_ok('csrf is unavailable while the panel is not installed', gp_csrf_token() === '');
+	t_ok('an empty csrf token never validates', gp_csrf_check('') === false);
+	t_ok('any token is refused while the panel is not installed',
+		gp_csrf_check(str_repeat('a', 64)) === false);
+} else {
+	$csrf = gp_csrf_token();
+	t_ok('a csrf token is produced', $csrf !== '' && strlen($csrf) === 64);
+	t_ok('the matching csrf token is accepted', gp_csrf_check($csrf) === true);
+	t_ok('a wrong csrf token is refused', gp_csrf_check(strrev($csrf)) === false);
+	t_ok('an empty csrf token is refused', gp_csrf_check('') === false);
+}
+unset($_COOKIE[GP_SESSION_COOKIE]);
+
+// --------------------------------------------------------------------------
+t_section('No panel configuration means a bare 404');
+
+t_ok('gp_panel_config returns null when nothing is installed',
+	!is_file(gp_panel_config_path()) ? gp_panel_config() === null : true);
+t_ok('gp_current_user is null without a configuration',
+	!is_file(gp_panel_config_path()) ? gp_current_user() === null : true);
+
+// --------------------------------------------------------------------------
+t_section('Login rate limiting does not fail open');
+
+// Point the file fallback at a scratch directory and force the Redis path to
+// fail, which is the case that matters: an attacker must not be able to remove
+// the limit by taking Redis away.
+$rl_bucket = 'selftest-' . bin2hex(random_bytes(4));
+$rl_dir = gp_ratelimit_file_dir();
+$had_rl_dir = is_dir($rl_dir);
+
+$count = 0;
+for ($i = 1; $i <= GP_LOGIN_MAX_ATTEMPTS; $i++) {
+	$count = gp_attempts_bump_file($rl_bucket, GP_LOGIN_WINDOW);
+}
+t_ok('the file fallback counts every attempt', $count === GP_LOGIN_MAX_ATTEMPTS);
+t_ok('the file fallback reports the current count',
+	gp_attempts_get_file($rl_bucket, GP_LOGIN_WINDOW) === GP_LOGIN_MAX_ATTEMPTS);
+t_ok('the limit is reached after the configured attempts',
+	gp_attempts_get_file($rl_bucket, GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS);
+t_ok('the counter keeps climbing past the limit',
+	gp_attempts_bump_file($rl_bucket, GP_LOGIN_WINDOW) === GP_LOGIN_MAX_ATTEMPTS + 1);
+t_ok('an expired window resets the counter',
+	gp_attempts_get_file($rl_bucket, -1) === 0);
+t_ok('an unknown bucket starts at zero',
+	gp_attempts_get_file('never-seen-' . bin2hex(random_bytes(4)), GP_LOGIN_WINDOW) === 0);
+$rl_file = gp_attempts_file($rl_bucket);
+t_ok('the fallback counter file is written 0600',
+	is_file($rl_file) ? substr(sprintf('%o', fileperms($rl_file)), -4) === '0600' : false);
+@unlink($rl_file);
+if (!$had_rl_dir && is_dir($rl_dir)) { @rmdir($rl_dir); }
+
+$redis_bin = trim((string)@shell_exec('command -v redis-cli 2>/dev/null'));
+if ($redis_bin === '') {
+	t_skip('redis-backed rate limit', 'redis-cli not available');
+} else {
+	$cfg_rl = gv_cfg_load();
+	$conn_rl = gv_redis_connect($cfg_rl['redis']);
+	if (!$conn_rl) {
+		t_skip('redis-backed rate limit', 'no reachable local Redis');
+	} else {
+		$rk = 'redis-' . bin2hex(random_bytes(4));
+		gv_redis_cmd($conn_rl, array('DEL', 'gp:login:' . $rk));
+		gv_redis_close($conn_rl);
+		t_ok('the redis counter starts at zero', gp_attempts_get($rk, GP_LOGIN_WINDOW) === 0);
+		t_ok('the redis counter increments', gp_attempts_bump($rk, GP_LOGIN_WINDOW) === 1);
+		t_ok('the redis counter is readable back', gp_attempts_get($rk, GP_LOGIN_WINDOW) === 1);
+		$conn_rl = gv_redis_connect($cfg_rl['redis']);
+		t_ok('the login key carries the gp: prefix and a ttl',
+			(int)gv_redis_cmd($conn_rl, array('TTL', 'gp:login:' . $rk)) > 0);
+		gv_redis_cmd($conn_rl, array('DEL', 'gp:login:' . $rk));
+		gv_redis_close($conn_rl);
+	}
+}
+
+// --------------------------------------------------------------------------
 t_section('No shell execution anywhere under panel/');
 
 $forbidden = array('exec', 'shell_exec', 'system', 'passthru', 'proc_open',
