@@ -168,7 +168,11 @@ def main(argv=None):
 
     # --candidate never implies training: it only redirects where training
     # writes. Without --train it would otherwise silently start writing a
-    # candidate on every nightly run.
+    # candidate on every nightly run. The second clause is the ONLY path that
+    # writes a LIVE model without an explicit --candidate: a genuinely fresh
+    # install with no model file yet, where training a first live model is
+    # acceptable. Every other training route (panel jobs, the weekly cron) passes
+    # --candidate and must be promoted explicitly.
     want_train = args.train or (not args.candidate
                                 and not os.path.isfile(cfg['model_path']))
     if not model_mod.SKLEARN_AVAILABLE:

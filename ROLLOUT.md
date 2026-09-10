@@ -166,7 +166,10 @@ and enforced populations tells you what enforcement is actually catching.
 
 - Weekly: read the dashboard, or the report. Three numbers matter — challenge
   success rate, false-positive proxy, and the holdout gap.
-- Monthly: `--train` refresh; re-check classifier precision before relying on it.
+- Monthly: refresh the model by training a **candidate** (`run_nightly.py
+  --train --candidate`, which is also what the weekly `train` cron now does) and
+  **promote** it after re-checking classifier precision. Promotion is the
+  explicit step that puts a new model in force; the cron never does it for you.
 - After any site change that alters URLs: raise `NOTFOUND_RATIO` temporarily,
   since genuine broken links produce human 404s.
 - Never tune a threshold without running replay first.

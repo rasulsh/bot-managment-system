@@ -3,8 +3,13 @@
 #
 #   scripts/analyzer-cron.sh verify     fast reverse-DNS loop
 #   scripts/analyzer-cron.sh nightly    behavioural scoring + anomaly levels
-#   scripts/analyzer-cron.sh train      nightly run that also retrains the model
-#   scripts/analyzer-cron.sh train-clf  nightly run that also retrains the classifier
+#   scripts/analyzer-cron.sh train      nightly run that trains a CANDIDATE model
+#   scripts/analyzer-cron.sh train-clf  nightly run that trains a CANDIDATE classifier
+#
+# train / train-clf produce a candidate for review, never the live model: like
+# the panel's train jobs they pass --candidate, so a weekly cron cannot silently
+# replace the live model. Promotion is a separate, explicit step (panel
+# "promote" or analyzer/ctl.py promote).
 #   scripts/analyzer-cron.sh report     period report, useful as a weekly mail
 #   scripts/analyzer-cron.sh snapshot   dashboard snapshot for the admin panel
 #   scripts/analyzer-cron.sh worker     drain the panel's job queue
@@ -32,8 +37,8 @@ MODE="${1:-}"
 case "$MODE" in
 	verify)    SCRIPT="analyzer/run_verify.py";  ARGS=() ;;
 	nightly)   SCRIPT="analyzer/run_nightly.py"; ARGS=() ;;
-	train)     SCRIPT="analyzer/run_nightly.py"; ARGS=(--train) ;;
-	train-clf) SCRIPT="analyzer/run_nightly.py"; ARGS=(--train-clf) ;;
+	train)     SCRIPT="analyzer/run_nightly.py"; ARGS=(--train --candidate) ;;
+	train-clf) SCRIPT="analyzer/run_nightly.py"; ARGS=(--train-clf --candidate) ;;
 	snapshot)  SCRIPT="analyzer/snapshot.py";    ARGS=() ;;
 	worker)    SCRIPT="analyzer/worker.py";      ARGS=() ;;
 	report)

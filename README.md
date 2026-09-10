@@ -190,7 +190,9 @@ scored like any other client, not summarily blocked.
 ```
 
 Each mode takes its own `flock`, so overlapping firings skip cleanly rather than
-writing partial verdicts.
+writing partial verdicts. The weekly `train` run trains a **candidate** model,
+never the live one; promote it explicitly (panel "promote" or `ctl.py promote`)
+to put it in force.
 
 ## New log fields
 

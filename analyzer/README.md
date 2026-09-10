@@ -35,8 +35,13 @@ Without scikit-learn everything except the anomaly model works.
 ```bash
 scripts/analyzer-cron.sh verify     # fast reverse-DNS loop
 scripts/analyzer-cron.sh nightly    # reputation + anomaly levels
-scripts/analyzer-cron.sh train      # nightly run that also retrains the model
+scripts/analyzer-cron.sh train      # nightly run that trains a CANDIDATE model
 ```
+
+`train` (and `train-clf`) train a candidate, never the live model: like the
+panel's train jobs they pass `--candidate`, so the weekly cron cannot silently
+replace the live model. Promotion is a separate, explicit step (panel "promote"
+or `analyzer/ctl.py promote`).
 
 The wrapper takes a per-mode `flock`, so an overlapping cron firing skips
 cleanly instead of writing partial verdicts. Both entry points also accept

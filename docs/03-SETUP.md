@@ -158,7 +158,7 @@ overlapping firings skip cleanly. A complete crontab (adjust the absolute path):
 */10 * * * * /home/youruser/bot-guard/scripts/analyzer-cron.sh verify    >/dev/null 2>&1
 # nightly behavioural scoring + anomaly levels
 17 4   * * * /home/youruser/bot-guard/scripts/analyzer-cron.sh nightly   >/dev/null 2>&1
-# weekly model retrain
+# weekly candidate retrain (trains a candidate; promote it explicitly to go live)
 41 5   * * 0 /home/youruser/bot-guard/scripts/analyzer-cron.sh train     >/dev/null 2>&1
 11 6   * * 0 /home/youruser/bot-guard/scripts/analyzer-cron.sh train-clf >/dev/null 2>&1
 # dashboard snapshot for the panel (do NOT forget this one)
