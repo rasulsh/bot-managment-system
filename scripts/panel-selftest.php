@@ -425,6 +425,35 @@ if (gp_panel_config() === null) {
 unset($_COOKIE[GP_SESSION_COOKIE]);
 
 // --------------------------------------------------------------------------
+t_section('Flash messages survive a redirect (signed cookie)');
+
+$flash_secret = bin2hex(random_bytes(32));
+$flashes = array(
+	array('kind' => 'ok', 'message' => 'override added'),
+	array('kind' => 'error', 'message' => 'train with Redis down failed'),
+);
+$flash_cookie = gp_flash_encode($flashes, $flash_secret);
+t_ok('encoding pending flashes yields a non-empty signed value',
+	is_string($flash_cookie) && $flash_cookie !== '');
+t_ok('a saved flash cookie round-trips to the same messages',
+	gp_flash_decode($flash_cookie, $flash_secret) === $flashes);
+t_ok('a tampered flash cookie yields no messages',
+	gp_flash_decode($flash_cookie . 'x', $flash_secret) === array());
+t_ok('a flash cookie signed with another secret yields no messages',
+	gp_flash_decode($flash_cookie, bin2hex(random_bytes(32))) === array());
+t_ok('a garbage flash cookie yields no messages',
+	gp_flash_decode('not-a-flash-cookie', $flash_secret) === array());
+t_ok('an empty flash list encodes to nothing to store',
+	gp_flash_encode(array(), $flash_secret) === '');
+$flash_big = array();
+for ($i = 0; $i < 200; $i++) { $flash_big[] = array('kind' => 'ok', 'message' => str_repeat('x', 40)); }
+t_ok('an oversize flash set is refused rather than bloating headers',
+	gp_flash_encode($flash_big, $flash_secret) === '');
+$flash_poison = gp_flash_encode(array(array('kind' => 'ok')), $flash_secret);
+t_ok('an entry of the wrong shape is dropped on load',
+	$flash_poison !== '' && gp_flash_decode($flash_poison, $flash_secret) === array());
+
+// --------------------------------------------------------------------------
 t_section('No panel configuration means a bare 404');
 
 t_ok('gp_panel_config returns null when nothing is installed',

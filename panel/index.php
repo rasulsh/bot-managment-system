@@ -72,6 +72,7 @@ if (!gp_ip_allowed($gp_cfg)) {
 $gp_route = isset($_GET['r']) ? (string)$_GET['r'] : 'dashboard';
 $gp_user = gp_current_user();
 $gp_flash = array();          // array of array(kind, message)
+gp_flash_load_from_cookie();  // pick up any flash left by the previous redirect
 $gp_post = ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST';
 
 function gp_flash($kind, $message) {
@@ -79,9 +80,52 @@ function gp_flash($kind, $message) {
 	$gp_flash[] = array('kind' => $kind, 'message' => $message);
 }
 
+// Persist any pending flashes into a short-lived signed cookie (gp_flash_encode
+// lives in auth.php). SameSite=Strict like the session and csrf cookies, so it
+// rides the same-site 303 and is never sent cross-site.
+function gp_flash_save_to_cookie() {
+	global $gp_flash, $gp_cfg;
+	if (headers_sent() || empty($gp_flash)) { return; }
+	$secret = isset($gp_cfg['session_secret']) ? (string)$gp_cfg['session_secret'] : '';
+	$value = gp_flash_encode($gp_flash, $secret);
+	if ($value === '') { return; }
+	setcookie(GP_FLASH_COOKIE, $value, array(
+		'expires'  => time() + 30,
+		'path'     => gp_cookie_path(),
+		'secure'   => gp_is_https(),
+		'httponly' => true,
+		'samesite' => 'Strict',
+	));
+}
+
+// Merge flashes left by the previous request, then expire the cookie at once so
+// a message is shown exactly once. Any verification failure is ignored silently.
+function gp_flash_load_from_cookie() {
+	global $gp_flash, $gp_cfg;
+	$raw = isset($_COOKIE[GP_FLASH_COOKIE]) ? (string)$_COOKIE[GP_FLASH_COOKIE] : '';
+	if ($raw === '') { return; }
+	gp_flash_clear_cookie();
+	$secret = isset($gp_cfg['session_secret']) ? (string)$gp_cfg['session_secret'] : '';
+	foreach (gp_flash_decode($raw, $secret) as $entry) {
+		$gp_flash[] = $entry;
+	}
+}
+
+function gp_flash_clear_cookie() {
+	if (headers_sent()) { return; }
+	setcookie(GP_FLASH_COOKIE, '', array(
+		'expires'  => time() - 3600,
+		'path'     => gp_cookie_path(),
+		'secure'   => gp_is_https(),
+		'httponly' => true,
+		'samesite' => 'Strict',
+	));
+}
+
 function gp_redirect($route, $extra = array()) {
 	$query = array_merge(array('r' => $route), $extra);
 	$url = 'index.php?' . http_build_query($query);
+	gp_flash_save_to_cookie();                 // carry any pending flash across the 303
 	if (!headers_sent()) { header('Location: ' . $url, true, 303); }
 	exit;
 }

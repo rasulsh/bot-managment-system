@@ -25,6 +25,8 @@ define('GP_LOGIN_MAX_ATTEMPTS', 5);
 define('GP_LOGIN_WINDOW', 900);          // 15 minutes
 define('GP_LOGIN_LOCKOUT', 900);         // 15 minutes
 define('GP_SESSION_COOKIE', 'gp_sess');
+define('GP_FLASH_COOKIE', 'gp_flash');
+define('GP_FLASH_MAX', 1024);            // cap on the stored flash JSON, in bytes
 
 function gp_panel_config_path() {
 	return __DIR__ . '/panel.config.php';
@@ -194,6 +196,56 @@ function gp_csrf_check($submitted) {
 	$expected = gp_csrf_token();
 	if ($expected === '' || !is_string($submitted) || $submitted === '') { return false; }
 	return hash_equals($expected, $submitted);
+}
+
+// --------------------------------------------------------------------------
+// Flash messages that survive a redirect
+// --------------------------------------------------------------------------
+//
+// gp_flash() collects messages per request, but gp_redirect() 303s and exits,
+// so "override added", "job enqueued" and "settings saved" were never shown.
+// These two pure functions serialize the pending flashes into a short-lived
+// signed cookie and read them back on the next request. Signed with the panel
+// session_secret so the value cannot be forged; JSON only, never unserialize.
+// The reader keeps only the known {kind, message} string shape, and the views
+// re-escape every value through gp_e at render time.
+
+// Encode flashes to the signed cookie value, or '' when there is nothing to
+// store, no secret, or the payload would exceed the size cap.
+function gp_flash_encode(array $flashes, $secret) {
+	$secret = (string)$secret;
+	if (!$flashes || $secret === '') { return ''; }
+	$json = json_encode(array_values($flashes));
+	if (!is_string($json) || strlen($json) > GP_FLASH_MAX) { return ''; }
+	$payload = rtrim(strtr(base64_encode($json), '+/', '-_'), '=');
+	return $payload . '.' . hash_hmac('sha256', $json, $secret);
+}
+
+// Decode and verify a cookie value into a list of array(kind, message).
+// Returns an empty array on any failure: missing/oversize, bad base64, a
+// signature mismatch, malformed JSON, or an entry of the wrong shape.
+function gp_flash_decode($raw, $secret) {
+	$raw = (string)$raw;
+	$secret = (string)$secret;
+	if ($raw === '' || $secret === '' || strlen($raw) > GP_FLASH_MAX + 128) {
+		return array();
+	}
+	$dot = strrpos($raw, '.');
+	if ($dot === false) { return array(); }
+	$payload = substr($raw, 0, $dot);
+	$mac = substr($raw, $dot + 1);
+	$json = base64_decode(strtr($payload, '-_', '+/'), true);
+	if ($json === false) { return array(); }
+	if (!hash_equals(hash_hmac('sha256', $json, $secret), $mac)) { return array(); }
+	$data = json_decode($json, true);
+	if (!is_array($data)) { return array(); }
+	$out = array();
+	foreach ($data as $entry) {
+		if (!is_array($entry) || !isset($entry['kind'], $entry['message'])) { continue; }
+		if (!is_string($entry['kind']) || !is_string($entry['message'])) { continue; }
+		$out[] = array('kind' => $entry['kind'], 'message' => $entry['message']);
+	}
+	return $out;
 }
 
 // --------------------------------------------------------------------------
