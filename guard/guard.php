@@ -655,6 +655,18 @@ function gv_decide($esc, $over, $nav, $tok, $hard_block_score, $ovr) {
 	return 'allow';
 }
 
+// Whether the holdout slice should suppress enforcement of the intended action.
+// The holdout measures the guard's own classifier decisions without bias, so a
+// held-out 403/challenge is recorded but not enforced. Two things are never
+// suppressed: a 429 (resource protection, not a classification) and an explicit
+// operator deny (an action, not a classification, and the documented manual
+// block). Pure, so the gate stays testable in isolation.
+function gv_holdout_suppresses($hold, $ovr, $intended) {
+	if ((int)$hold !== 1) { return false; }
+	if ($ovr === 'deny') { return false; }
+	return $intended === '403' || $intended === 'challenge';
+}
+
 // --------------------------------------------------------------------------
 // Responses
 // --------------------------------------------------------------------------
@@ -863,9 +875,11 @@ function gv_run($t0) {
 	// Applied at the gate, so the intended action is still computed and logged.
 	$st['hold'] = gv_is_holdout(($st['dev'] !== '' ? $st['dev'] : $f['ip']),
 		$cfg['holdout_salt'], $cfg['holdout_pct']) ? 1 : 0;
-	if ($st['hold'] === 1 && ($intended === '403' || $intended === 'challenge')) {
-		// 429 is never held out: rate limiting is resource protection, not
-		// classification, and the holdout must not become a way to hammer a site.
+	if (gv_holdout_suppresses($st['hold'], $st['ovr'], $intended)) {
+		// Recorded as would-have-happened and allowed: the holdout measures the
+		// guard's own classifier decisions without enforcing them. An operator
+		// deny is exempt (see gv_holdout_suppresses) and still enforces, subject
+		// only to enforce.block, already applied above.
 		$enforced = false;
 	}
 

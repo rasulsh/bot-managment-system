@@ -612,6 +612,27 @@ t_ok('the clamped rate stays near 5 percent (' . number_format(100.0 * $clamped 
 	abs(100.0 * $clamped / 5000 - 5.0) < 1.0);
 
 // --------------------------------------------------------------------------
+t_section('Holdout enforcement gate (FIX #12 pt1)');
+
+// The holdout suppresses the guard's own classifier decisions only; an operator
+// deny is an action, not a classification, and a 429 is resource protection -
+// neither is ever held out.
+t_ok('a held-out classifier 403 is suppressed',
+	gv_holdout_suppresses(1, '', '403') === true);
+t_ok('a held-out challenge is suppressed',
+	gv_holdout_suppresses(1, '', 'challenge') === true);
+t_ok('a held-out operator deny is NOT suppressed, so it still enforces',
+	gv_holdout_suppresses(1, 'deny', '403') === false);
+t_ok('a held-out 429 is never suppressed',
+	gv_holdout_suppresses(1, '', '429') === false);
+t_ok('outside the holdout nothing is suppressed',
+	gv_holdout_suppresses(0, '', '403') === false
+	&& gv_holdout_suppresses(0, 'deny', '403') === false);
+t_ok('an identity in the holdout slice with ovr=deny produces an enforced 403',
+	gv_decide(0, false, true, 'v', 60, 'deny') === '403'
+	&& gv_holdout_suppresses(1, 'deny', gv_decide(0, false, true, 'v', 60, 'deny')) === false);
+
+// --------------------------------------------------------------------------
 t_section('Phase 2 decision engine');
 
 t_ok('a clean tokened navigation is allowed', gv_decide(0, false, true, 'v', 60, '') === 'allow');
