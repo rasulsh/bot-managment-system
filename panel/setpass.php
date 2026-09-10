@@ -35,6 +35,13 @@ function gp_prompt_hidden($label) {
 		$value = '';
 		readline_callback_handler_install('', function () {});
 		while (true) {
+			// KNOWN FRAGILITY (#22): mixing readline_callback_handler_install with
+			// raw stream_get_contents(STDIN, 1) reads is build-dependent and may
+			// misbehave on some readline builds. It is left as is because this is
+			// interactive one-time setup with a working visible fallback below;
+			// the robust alternative, if it ever needs hardening, is to read with
+			// readline_callback_read_char() here - but only after verifying it on
+			// the target readline-enabled build.
 			$char = stream_get_contents(STDIN, 1);
 			if ($char === "\n" || $char === "\r" || $char === '' || $char === false) { break; }
 			if ($char === chr(127) || $char === chr(8)) {

@@ -746,6 +746,12 @@ function gv_run($t0) {
 	// 5. Known bots. Still no live reverse DNS: DNS latency does not belong in
 	// the request path. The Phase 2 analyzer verifies out of band and leaves a
 	// verdict here, so this step costs one cheap GET.
+	//
+	// This pass runs BEFORE the honeypot check (step 6) by design: a UA claiming
+	// a known bot takes the pass and is never honeypot-labelled until run_verify
+	// writes a 'bad' verdict out of band. So the honeypot is not a defense
+	// against fake-bot UAs - reordering it ahead of this would instead risk
+	// honeypot-labelling real crawlers, which is the worse failure. See #17.
 	$bot      = gv_match_bot($f['ua'], $cfg['known_bots']);
 	$bot_over = false;
 	$bot_fake = false;
