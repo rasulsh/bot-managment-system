@@ -366,7 +366,7 @@ def render_text(stats, days):
             if count:
                 A('   %-8s %10d %7.1f%%' % (name, count, _pct(count, known)))
         A('')
-        A('   Enforced population vs holdout')
+        A('   Non-holdout population vs holdout')
         enf = stats['status_enforced']
         held = stats['status_holdout']
         enf_n = sum(enf.values())
@@ -374,13 +374,13 @@ def render_text(stats, days):
         if held_n == 0:
             A('   No holdout outcomes yet, so there is nothing to compare against.')
         else:
-            A('   %-8s %12s %12s' % ('status', 'enforced', 'holdout'))
+            A('   %-8s %12s %12s' % ('status', 'non-holdout', 'holdout'))
             for name in STATUS_ORDER:
                 if enf.get(name, 0) or held.get(name, 0):
                     A('   %-8s %11.1f%% %11.1f%%'
                       % (name, _pct(enf.get(name, 0), enf_n), _pct(held.get(name, 0), held_n)))
-            A('   A 404 rate several times higher in the unenforced slice is a direct')
-            A('   estimate of what enforcement is currently catching.')
+            A('   A 404 rate higher in the holdout slice than in the rest estimates')
+            A('   what the guard\'s decisions catch, or would catch in monitor mode.')
         A('')
         A('   total bytes served      %.1f MB' % (stats['bytes_total'] / (1024.0 * 1024.0)))
         A('   request time median     %.1f ms' % _percentile(stats['dur'], 0.5))
@@ -398,7 +398,7 @@ def render_text(stats, days):
     else:
         held_n = stats['holdout_requests']
         enf_n = stats['enforced_requests']
-        A('   %-22s %12s %12s' % ('', 'enforced', 'holdout'))
+        A('   %-22s %12s %12s' % ('', 'non-holdout', 'holdout'))
         A('   %-22s %12d %12d' % ('requests', enf_n, held_n))
         A('   %-22s %12d %12d' % ('identities', len(stats['enforced_identities']),
                                   len(stats['holdout_identities'])))
@@ -413,8 +413,8 @@ def render_text(stats, days):
                                       if stats['enforced_identities'] else 0.0,
                                       (float(held_n) / len(stats['holdout_identities']))
                                       if stats['holdout_identities'] else 0.0))
-        A('   The gap between these columns is the false-negative estimate: whatever the')
-        A('   holdout shows and the enforced population does not is what enforcement hides.')
+        A('   The gap between these columns is the false-negative estimate: what the holdout')
+        A('   shows and the non-holdout population does not is the guard\'s effect.')
     A('')
 
     A('8. Top offenders')
@@ -572,16 +572,17 @@ def render_html(stats, days):
         enf_n = sum(enf.values())
         held_n = sum(held_st.values())
         if held_n:
-            A('<p class="sub">Enforced population vs holdout</p><table>')
-            A('<tr><th>status</th><td class="n">enforced</td><td class="n">holdout</td></tr>')
+            A('<p class="sub">Non-holdout population vs holdout</p><table>')
+            A('<tr><th>status</th><td class="n">non-holdout</td><td class="n">holdout</td></tr>')
             for name in STATUS_ORDER:
                 if enf.get(name, 0) or held_st.get(name, 0):
                     A('<tr><th>%s</th><td class="n">%.1f%%</td><td class="n">%.1f%%</td></tr>'
                       % (_esc_html(name), _pct(enf.get(name, 0), enf_n),
                          _pct(held_st.get(name, 0), held_n)))
             A('</table>')
-            A('<p class="sub">A 404 rate several times higher in the unenforced slice '
-              'is a direct estimate of what enforcement is currently catching.</p>')
+            A('<p class="sub">A 404 rate higher in the holdout slice than in the rest '
+              'estimates what the guard\'s decisions catch, or would catch in monitor '
+              'mode.</p>')
         A('<table>')
         A('<tr><th>total bytes served</th><td class="n">%.1f MB</td><td></td></tr>'
           % (stats['bytes_total'] / (1024.0 * 1024.0)))
@@ -608,7 +609,7 @@ def render_html(stats, days):
     else:
         enf_n = stats['enforced_requests']
         held_n = stats['holdout_requests']
-        A('<table><tr><th></th><td class="n">enforced</td><td class="n">holdout</td></tr>')
+        A('<table><tr><th></th><td class="n">non-holdout</td><td class="n">holdout</td></tr>')
         A('<tr><th>requests</th><td class="n">%d</td><td class="n">%d</td></tr>'
           % (enf_n, held_n))
         A('<tr><th>identities</th><td class="n">%d</td><td class="n">%d</td></tr>'

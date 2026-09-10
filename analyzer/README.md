@@ -223,7 +223,7 @@ scripts/analyzer-cron.sh report | mail -s "Bot Guard weekly" you@example.com
 
 Eight sections: traffic, decisions split enforced versus shadow, the challenge
 funnel judged against the target rate in words, `sc` and `esc` histograms,
-verdict coverage, the enforced-versus-holdout comparison, top offenders, and
+verdict coverage, the non-holdout-versus-holdout comparison, top offenders, and
 day-over-day anomalies.
 
 `--html` writes **one self-contained static file**: inline CSS, no JavaScript,

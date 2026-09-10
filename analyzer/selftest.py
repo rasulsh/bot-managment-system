@@ -1086,10 +1086,11 @@ ok('the report collects request durations', len(out_stats['dur']) == 20)
 
 out_text = report_mod.render_text(out_stats, 7)
 ok('the text report contains the outcomes section', '6. Response outcomes' in out_text)
-ok('the outcomes section compares enforced against holdout',
-   'Enforced population vs holdout' in out_text)
-ok('the outcomes section explains what the gap estimates',
-   'what enforcement is currently catching' in out_text)
+ok('the outcomes section compares the non-holdout population against holdout',
+   'Non-holdout population vs holdout' in out_text
+   and 'Enforced population vs holdout' not in out_text)
+ok('the outcomes section label reads correctly in monitor mode, not "enforced"',
+   'would catch in monitor mode' in out_text)
 ok('the later sections were renumbered',
    '7. Holdout comparison' in out_text and '8. Top offenders' in out_text
    and '9. Anomalies worth a look' in out_text)
