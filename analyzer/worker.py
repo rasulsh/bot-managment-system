@@ -10,6 +10,10 @@ The panel already refuses to enqueue an unknown type; the worker refuses it
 again independently, so a queue entry written by anything other than the panel
 is still rejected.
 
+Every job runs under the worker's own effective config: the --config the worker
+was started with (or env/default resolution when it had none) is threaded into
+each child entry point, so a job never silently re-resolves a different config.
+
 A crashed job is marked failed with its traceback. Nothing is ever left running
 forever - an operator staring at a job stuck in "running" learns nothing.
 """
@@ -57,29 +61,38 @@ class Captured(object):
 
 # --------------------------------------------------------------------------
 # Job handlers. Each takes (cfg, params) and returns an exit-style int.
+#
+# Every handler that shells into another entry point runs it under the SAME
+# config the worker loaded. main() stashes that path in cfg['_config_path'];
+# _cfg_argv turns it into the --config flag to forward. None means the worker
+# used env/default resolution, so the child should too - and no flag is passed.
 # --------------------------------------------------------------------------
 
+def _cfg_argv(config_path):
+    return ['--config', config_path] if config_path else []
+
+
 def job_verify(cfg, params):
-    return run_verify.main([])
+    return run_verify.main(_cfg_argv(cfg.get('_config_path')))
 
 
 def job_nightly(cfg, params):
-    return run_nightly.main([])
+    return run_nightly.main(_cfg_argv(cfg.get('_config_path')))
 
 
 def job_train(cfg, params):
     # --candidate is the documented default for a migration: it never touches
     # the live model, so a queued training run cannot make the guard more
     # permissive while nobody is watching.
-    return run_nightly.main(['--train', '--candidate'])
+    return run_nightly.main(_cfg_argv(cfg.get('_config_path')) + ['--train', '--candidate'])
 
 
 def job_train_clf(cfg, params):
-    return run_nightly.main(['--train-clf', '--candidate'])
+    return run_nightly.main(_cfg_argv(cfg.get('_config_path')) + ['--train-clf', '--candidate'])
 
 
 def job_replay_full(cfg, params):
-    argv = ['--mode', 'full']
+    argv = _cfg_argv(cfg.get('_config_path')) + ['--mode', 'full']
     days = params.get('days')
     if days:
         argv += ['--days', str(int(days))]
@@ -99,7 +112,7 @@ def job_promote(kind):
 
 
 def job_snapshot(cfg, params):
-    return snapshot_mod.main([])
+    return snapshot_mod.main(_cfg_argv(cfg.get('_config_path')))
 
 
 HANDLERS = {
@@ -220,6 +233,15 @@ def main(argv=None):
     except Exception as exc:
         print('ERROR: bad configuration: %s' % exc, file=sys.stderr)
         return 2
+
+    # Jobs shell into other entry points in-process; without the worker's own
+    # config path they would re-resolve config from GV_ANALYZER_CONFIG/defaults
+    # and run under a different config than the worker loaded. Stash the path
+    # the worker actually used (possibly None) so every handler forwards it.
+    # config.validate already ran inside load(), and this private key is never
+    # serialized into Redis job status (handlers never put cfg there), so it is
+    # safe to carry on the plain cfg dict.
+    cfg['_config_path'] = args.config
 
     client = redis_io.connect(cfg)
     if client is None:

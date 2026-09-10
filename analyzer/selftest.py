@@ -1367,6 +1367,88 @@ for name in os.listdir(promo_dir):
 os.rmdir(promo_dir)
 
 # ---------------------------------------------------------------------------
+section('Worker forwards the config path to child jobs')
+
+from analyzer import worker as worker_mod
+
+# Capture the argv each child entry point is called with, without running it.
+_captured_argv = {}
+
+
+def _capturing(name):
+    def fake(argv=None):
+        _captured_argv[name] = list(argv or [])
+        return 0
+    return fake
+
+
+_worker_orig = {
+    'run_verify': worker_mod.run_verify.main,
+    'run_nightly': worker_mod.run_nightly.main,
+    'replay': worker_mod.replay_mod.main,
+    'snapshot': worker_mod.snapshot_mod.main,
+}
+try:
+    worker_mod.run_verify.main = _capturing('run_verify')
+    worker_mod.run_nightly.main = _capturing('run_nightly')
+    worker_mod.replay_mod.main = _capturing('replay')
+    worker_mod.snapshot_mod.main = _capturing('snapshot')
+
+    CFG_PATH = '/etc/guard/analyzer.json'
+    cfg_with_path = {'_config_path': CFG_PATH}
+    worker_mod.HANDLERS['verify'](cfg_with_path, {})
+    ok('job_verify forwards --config to run_verify',
+       _captured_argv['run_verify'] == ['--config', CFG_PATH])
+    worker_mod.HANDLERS['nightly'](cfg_with_path, {})
+    ok('job_nightly forwards --config to run_nightly',
+       _captured_argv['run_nightly'] == ['--config', CFG_PATH])
+    worker_mod.HANDLERS['train'](cfg_with_path, {})
+    ok('job_train forwards --config before its own flags',
+       _captured_argv['run_nightly'] == ['--config', CFG_PATH, '--train', '--candidate'])
+    worker_mod.HANDLERS['train_clf'](cfg_with_path, {})
+    ok('job_train_clf forwards --config before its own flags',
+       _captured_argv['run_nightly'] == ['--config', CFG_PATH, '--train-clf', '--candidate'])
+    worker_mod.HANDLERS['replay_full'](cfg_with_path, {'days': 3})
+    ok('job_replay_full forwards --config ahead of the mode flags',
+       _captured_argv['replay'] == ['--config', CFG_PATH, '--mode', 'full', '--days', '3'])
+    worker_mod.HANDLERS['snapshot'](cfg_with_path, {})
+    ok('job_snapshot forwards --config to snapshot',
+       _captured_argv['snapshot'] == ['--config', CFG_PATH])
+
+    # With no config path, no --config flag is injected: the child re-resolves
+    # from env/defaults exactly as the worker did.
+    _captured_argv.clear()
+    cfg_no_path = {'_config_path': None}
+    worker_mod.HANDLERS['nightly'](cfg_no_path, {})
+    ok('a worker without a config path passes no --config to the child',
+       _captured_argv['run_nightly'] == [])
+    worker_mod.HANDLERS['train'](cfg_no_path, {})
+    ok('job_train with no config path passes only its own flags',
+       _captured_argv['run_nightly'] == ['--train', '--candidate'])
+finally:
+    worker_mod.run_verify.main = _worker_orig['run_verify']
+    worker_mod.run_nightly.main = _worker_orig['run_nightly']
+    worker_mod.replay_mod.main = _worker_orig['replay']
+    worker_mod.snapshot_mod.main = _worker_orig['snapshot']
+
+# job_promote reads paths from cfg rather than shelling out, so it is left as
+# is: confirm it passes the cfg straight through to promote() and never builds
+# an argv from _config_path.
+_promo_seen = {}
+_promo_orig = worker_mod.promote_mod.promote
+try:
+    def _fake_promote(kind, cfg):
+        _promo_seen['kind'] = kind
+        _promo_seen['cfg'] = cfg
+        return {'ok': True, 'reason': 'stub'}
+    worker_mod.promote_mod.promote = _fake_promote
+    worker_mod.HANDLERS['promote_ml']({'_config_path': CFG_PATH}, {})
+    ok('job_promote passes cfg straight to promote() (no argv shelling)',
+       _promo_seen.get('kind') == 'ml' and _promo_seen.get('cfg') == {'_config_path': CFG_PATH})
+finally:
+    worker_mod.promote_mod.promote = _promo_orig
+
+# ---------------------------------------------------------------------------
 print('')
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)
