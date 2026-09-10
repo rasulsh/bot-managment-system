@@ -69,6 +69,16 @@ def dump_config(php='php', script=None, config_path=None, timeout=15):
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # communicate(timeout=) does not kill the child; reap it or a hung PHP
+        # binary leaks a process on the cron host for every timeout.
+        proc.kill()
+        try:
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        _warn_once('config dump timed out after %ss (%s)' % (timeout, ' '.join(cmd)))
+        return None
     except Exception as exc:
         _warn_once('could not run the config dump (%s): %s' % (' '.join(cmd), exc))
         return None

@@ -776,6 +776,34 @@ fallback = bridge.guard_config(cfg, php='/nonexistent/php-binary')
 ok('a missing php falls back instead of raising',
    fallback.get('source') == 'defaults' and fallback['hard_block_score'] == 60)
 
+# FIX #15: a timed-out config dump must kill and reap the child, not leak it.
+# A fake Popen times out on the first communicate(), then returns on the reap.
+class _FakeTimeoutProc(object):
+    def __init__(self):
+        self.killed = False
+        self._calls = 0
+
+    def communicate(self, timeout=None):
+        self._calls += 1
+        if self._calls == 1:
+            raise subprocess_mod.TimeoutExpired(cmd='php', timeout=timeout)
+        return (b'', b'')           # the post-kill reap
+
+    def kill(self):
+        self.killed = True
+
+import subprocess as subprocess_mod
+_fake_proc = _FakeTimeoutProc()
+_orig_popen = bridge.subprocess.Popen
+try:
+    bridge.subprocess.Popen = lambda *a, **k: _fake_proc
+    _timeout_result = bridge.dump_config(php='php', timeout=1)
+finally:
+    bridge.subprocess.Popen = _orig_popen
+ok('a timed-out config dump returns None', _timeout_result is None)
+ok('a timed-out config dump kills the child rather than leaking it',
+   _fake_proc.killed is True)
+
 dcfg = bridge.decision_config(bridged, {'hard_block_score': 45, 'signals.clf': True,
                                         'ml_weight': 0.9})
 ok('dotted overrides are applied to the decision config',
