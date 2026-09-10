@@ -366,6 +366,13 @@ function gp_attempts_get_file($bucket, $window) {
 }
 
 // True when this address or username is currently locked out.
+// The lock is checked here and the counter bumped only after a failed attempt
+// (gp_login_record_failure), so this is check-then-record, not atomic: a burst
+// of concurrent attempts can each pass the check before any of them records,
+// letting a few extra tries through per window. The impact is bounded - the
+// window is short, the per-IP and single global 'user' counters both still
+// trip, and password_verify runs on every attempt - so this is left as a
+// documented bound rather than adding decrement/compare-and-set complexity.
 function gp_login_locked($username) {
 	$ip = gp_client_ip();
 	if (gp_attempts_get($ip, GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS) { return true; }

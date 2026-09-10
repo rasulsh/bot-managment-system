@@ -26,9 +26,10 @@ function gp_t($key) {
 // Headers
 // --------------------------------------------------------------------------
 
-function gp_send_headers() {
+// The hardening headers shared by every panel response, minus Content-Type so
+// each caller sets its own (text/html for pages, text/csv for the log export).
+function gp_hardening_headers() {
 	if (headers_sent()) { return; }
-	header('Content-Type: text/html; charset=utf-8');
 	header('X-Content-Type-Options: nosniff');
 	header('Referrer-Policy: no-referrer');
 	header('X-Frame-Options: DENY');
@@ -38,6 +39,12 @@ function gp_send_headers() {
 	header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; "
 		. "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
 		. "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+}
+
+function gp_send_headers() {
+	if (headers_sent()) { return; }
+	header('Content-Type: text/html; charset=utf-8');
+	gp_hardening_headers();
 }
 
 // A bare 404 with no body. Used when the panel is not installed, so nothing
@@ -306,13 +313,16 @@ switch ($gp_route) {
 		gp_render('jobs', array('jobs' => gp_job_list(), 'redis_up' => gp_redis_up()));
 }
 
-// Unknown route.
+// Unknown route: a small, honest 404. Rendering the dashboard under a 404
+// status both masked the status and did work the request never asked for.
 gp_send_headers();
 http_response_code(404);
-gp_render('dashboard', array(
-	'snapshot' => gp_snapshot(), 'cfg' => gv_cfg_load(),
-	'kill' => gp_killswitch_on(), 'redis_up' => gp_redis_up(),
-));
+echo '<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8">'
+	. '<title>404</title><body style="font-family:sans-serif;padding:2rem">'
+	. gp_e(gp_t('err_notfound')) . ' '
+	. '<a href="index.php?r=dashboard">' . gp_e(gp_t('nav_dashboard')) . '</a>'
+	. '</body></html>';
+exit;
 
 // --------------------------------------------------------------------------
 // Request helpers
@@ -344,7 +354,10 @@ function gp_logs_export_csv(array $rows) {
 	if (!headers_sent()) {
 		header('Content-Type: text/csv; charset=utf-8');
 		header('Content-Disposition: attachment; filename="guard-logs.csv"');
-		header('X-Content-Type-Options: nosniff');
+		// The same hardening headers as every other panel response (nosniff,
+		// X-Frame-Options, Referrer-Policy, Cache-Control, CSP); the CSV
+		// Content-Type set above is preserved because the helper never sets one.
+		gp_hardening_headers();
 	}
 	$out = fopen('php://output', 'w');
 	fwrite($out, "\xEF\xBB\xBF");     // BOM so spreadsheets read UTF-8
