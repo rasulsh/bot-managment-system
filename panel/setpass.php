@@ -70,6 +70,15 @@ if ($username === '' || strlen($username) > 64) {
 	fwrite(STDERR, "ERROR: the username must be between 1 and 64 characters.\n");
 	exit(2);
 }
+// The session token is user.issued.hmac; a dot or whitespace in the username
+// would break parsing and lock the account out. Restrict to a delimiter-safe
+// charset at creation. (gp_session_check also parses defensively, but the
+// cleaner guarantee is to never write a username that can collide.)
+if (!preg_match('/^[A-Za-z0-9_-]+$/', $username)) {
+	fwrite(STDERR, "ERROR: the username may contain only letters, digits, "
+		. "'-' and '_' (no dots, spaces or other punctuation).\n");
+	exit(2);
+}
 
 $password = gp_prompt_hidden("Password (at least " . GP_MIN_PASSWORD . " characters): ");
 if (strlen($password) < GP_MIN_PASSWORD) {

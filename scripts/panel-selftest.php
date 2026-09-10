@@ -388,6 +388,16 @@ t_ok('an empty token fails', gp_session_check('', $sec, 43200, $now) === false);
 t_ok('a non-numeric issued-at fails',
 	gp_session_check('operator.abc.' . $parts[2], $sec, 43200, $now) === false);
 
+// A username containing a dot must round-trip: the token is user.issued.hmac,
+// and parsing from the right keeps the dotted user intact (FIX #3).
+$dotted_tok = gp_session_make('admin.site', $sec, $now);
+$dotted = gp_session_check($dotted_tok, $sec, 43200, $now);
+t_ok('a dotted username round-trips through make/check',
+	is_array($dotted) && $dotted['user'] === 'admin.site' && $dotted['issued'] === $now);
+t_ok('a dotted-username token with a tampered signature still fails',
+	gp_session_check('admin.site.' . $now . '.' . strrev(gp_session_sign('admin.site', $now, $sec)),
+		$sec, 43200, $now) === false);
+
 t_ok('a fresh session is not yet due for renewal',
 	gp_session_should_renew($now, 43200, $now) === false);
 t_ok('a session past half its life is renewed',

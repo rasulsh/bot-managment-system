@@ -93,18 +93,31 @@ function gp_session_make($user, $secret, $issued = null) {
 
 // Verify a session token. Returns array(user, issued) or false.
 // Pure, so the self-test can exercise tamper and expiry without a browser.
+//
+// The token has a fixed three-field shape user.issued.hmac, but user is the
+// only field that can itself contain a dot (a username like "admin.site").
+// Splitting on '.' and demanding exactly three parts turned such a username
+// into a token that never verified, bouncing login with no error. Parse from
+// the right instead: the last field is the hmac, the one before it the issued
+// timestamp, and everything before that is the user. The security properties
+// are unchanged - the hmac still covers user.issued.
 function gp_session_check($token, $secret, $ttl, $now = null) {
 	$now = $now === null ? time() : (int)$now;
-	$parts = explode('.', (string)$token);
-	if (count($parts) !== 3) { return false; }
-	if ($parts[0] === '' || !ctype_digit($parts[1])) { return false; }
-	$issued = (int)$parts[1];
-	if (!hash_equals(gp_session_sign($parts[0], $issued, $secret), $parts[2])) {
-		return false;
-	}
+	$token = (string)$token;
+	$last_dot = strrpos($token, '.');
+	if ($last_dot === false) { return false; }
+	$hmac = substr($token, $last_dot + 1);
+	$head = substr($token, 0, $last_dot);
+	$mid_dot = strrpos($head, '.');
+	if ($mid_dot === false) { return false; }
+	$user   = substr($head, 0, $mid_dot);
+	$issued = substr($head, $mid_dot + 1);
+	if ($user === '' || !ctype_digit($issued)) { return false; }
+	$issued = (int)$issued;
+	if (!hash_equals(gp_session_sign($user, $issued, $secret), $hmac)) { return false; }
 	if ($issued > $now + 60) { return false; }          // clock skew, not a future session
 	if (($now - $issued) >= (int)$ttl) { return false; }
-	return array('user' => $parts[0], 'issued' => $issued);
+	return array('user' => $user, 'issued' => $issued);
 }
 
 // True when the session is past half its life and should be renewed.
