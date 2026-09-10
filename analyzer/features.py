@@ -112,7 +112,7 @@ def outcome_features(rows):
     total = len(rows)
     if total == 0:
         return {'notfound_ratio': 0.0, 'err_ratio': 0.0, 'srv_err_ratio': 0.0,
-                'bytes_mean': 0.0, 'outcome_cov': 0.0}
+                'bytes_mean': 0.0, 'bytes_n': 0.0, 'outcome_cov': 0.0}
 
     known = 0
     notfound = 0
@@ -142,13 +142,18 @@ def outcome_features(rows):
 
     if known == 0:
         return {'notfound_ratio': 0.0, 'err_ratio': 0.0, 'srv_err_ratio': 0.0,
-                'bytes_mean': 0.0, 'outcome_cov': 0.0}
+                'bytes_mean': 0.0, 'bytes_n': 0.0, 'outcome_cov': 0.0}
 
     return {
         'notfound_ratio': float(notfound) / known,
         'err_ratio': float(other_4xx) / known,
         'srv_err_ratio': float(server_err) / known,
         'bytes_mean': _mean(byte_values),
+        # Count of byte-known rows. bytes_mean is the mean over THESE rows, so
+        # bytes_mean * bytes_n is the exact total bytes moved; peak_bytes used
+        # n_req (all rows) and so over-estimated under partial coverage. Not in
+        # FEATURE_ORDER, so this does not change any serialized feature vector.
+        'bytes_n': float(len(byte_values)),
         'outcome_cov': float(known) / total,
     }
 
@@ -158,7 +163,9 @@ def session_features(session, path_listing=None, path_detail=None):
     rows = session.get('rows') or []
     n_req = len(rows)
     if n_req == 0:
-        return dict((name, 0.0) for name in FEATURE_ORDER)
+        base = dict((name, 0.0) for name in FEATURE_ORDER)
+        base['bytes_n'] = 0.0     # not a FEATURE_ORDER column; kept for peak_bytes
+        return base
 
     stamps = []
     for row in rows:

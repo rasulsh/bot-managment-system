@@ -437,6 +437,9 @@ def out_feats(**over):
             'notfound_ratio': 0.0, 'err_ratio': 0.0, 'srv_err_ratio': 0.0,
             'bytes_mean': 10000.0, 'outcome_cov': 1.0}
     base.update(over)
+    # Fully byte-covered unless a test says otherwise: bytes_n tracks the count
+    # of byte-known rows that bytes_mean is averaged over (FIX #16).
+    base.setdefault('bytes_n', base['n_req'])
     return base
 
 
@@ -481,6 +484,21 @@ ok('sparse coverage suppresses the bulk rule too',
    reputation_mod.device_reputation(
        [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, path_uniq_ratio=0.9,
                   outcome_cov=0.2)], NEUTRAL_LABELS, clamp) == spread_baseline)
+# FIX #16: bytes_mean is the mean over byte-known rows only. With partial byte
+# coverage the true bytes moved is bytes_mean * bytes_n, not bytes_mean * n_req.
+# Here 2 MiB * 10 rows = 20 MiB is under BULK_BYTES even though 2 MiB * 40 rows
+# (the old estimate) would exceed it, so W_BULK must NOT fire.
+ok('partial byte coverage does not over-estimate the bulk rule (FIX #16)',
+   reputation_mod.device_reputation(
+       [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, bytes_n=10.0,
+                  path_uniq_ratio=0.9)], NEUTRAL_LABELS, clamp) == spread_baseline)
+# The same bytes_mean fully covered (bytes_n == n_req) does fire, confirming it
+# is the coverage-corrected total and not the rule itself that changed.
+ok('fully byte-covered bulk transfer still fires W_BULK',
+   reputation_mod.device_reputation(
+       [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, bytes_n=40.0,
+                  path_uniq_ratio=0.9)], NEUTRAL_LABELS, clamp) - spread_baseline
+   == reputation_mod.W_BULK)
 
 srv_rep = reputation_mod.device_reputation(
     [out_feats(srv_err_ratio=0.4)], NEUTRAL_LABELS, clamp)
@@ -519,6 +537,12 @@ ok('peak_bytes reports the heaviest session',
                               {'bytes_mean': 5000.0, 'n_req': 100.0}]) == 500000.0)
 ok('peak_bytes is zero without any byte data',
    reputation_mod.peak_bytes([{'n_req': 100.0}]) == 0.0)
+ok('peak_bytes multiplies the mean by the byte-known count, not all requests',
+   reputation_mod.peak_bytes(
+       [{'bytes_mean': 2.0 * 1024 * 1024, 'n_req': 40.0, 'bytes_n': 10.0}])
+   == 2.0 * 1024 * 1024 * 10.0)
+ok('peak_bytes falls back to n_req when bytes_n is absent',
+   reputation_mod.peak_bytes([{'bytes_mean': 1000.0, 'n_req': 10.0}]) == 10000.0)
 
 # ---------------------------------------------------------------------------
 section('Per-device holdout exclusion keys off sh, not hold (FIX #12 pt2)')

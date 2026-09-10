@@ -317,6 +317,13 @@ vector rather than being treated as metadata.
 Every one is `0.0` for a session recorded before capture was enabled, so old
 sessions stay usable and score exactly as they did before.
 
+`outcome_features` also returns `bytes_n`, the count of rows whose byte size was
+known — the rows `bytes_mean` is averaged over. It is **not** in `FEATURE_ORDER`
+and never enters a model vector; `peak_bytes` uses it so the content moved in a
+session is `bytes_mean * bytes_n` (the exact total) rather than `bytes_mean *
+n_req`, which over-estimated transfer — up to ~2× at the coverage gate — when
+only some rows carried a size.
+
 ## Three new reputation rules
 
 | constant | default | fires when |
