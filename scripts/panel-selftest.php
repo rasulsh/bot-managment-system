@@ -291,6 +291,68 @@ t_ok('a missing file yields nothing', gp_tail_lines($tmp . '.absent', 10, 1000) 
 @unlink($tmp);
 
 // --------------------------------------------------------------------------
+t_section('Log explorer pagination is gap-free and duplicate-free');
+
+require_once __DIR__ . '/../panel/data.php';
+
+// gp_log_query reads gp_log_dir()/guard-<date>.jsonl. Build a dense multi-chunk
+// daily file under a sentinel date and walk it page by page, following
+// next_cursor, asserting the union of returned ids is the full set with no
+// duplicates - the same shape as the simulation that proved the bug.
+$pg_dir  = gp_log_dir();
+$pg_date = '19990102';
+$pg_file = rtrim($pg_dir, '/\\') . '/guard-' . $pg_date . '.jsonl';
+if (is_file($pg_file)) {
+	t_skip('log pagination round-trip', 'sentinel log file already present');
+} elseif (!is_dir($pg_dir) || !is_writable($pg_dir)) {
+	t_skip('log pagination round-trip', 'log dir is not writable');
+} else {
+	$pg_n = 2000;
+	$pg_fh = fopen($pg_file, 'w');
+	for ($i = 0; $i < $pg_n; $i++) {
+		// Pad each line so the file spans several 64 KiB chunks.
+		fwrite($pg_fh, json_encode(array('v' => 4, 'rid' => sprintf('%012x', $i),
+			'ts' => 1700000000 + $i, 'ip' => '203.0.113.5', 'ua' => 'ua',
+			'm' => 'GET', 'p' => '/p/' . $i . '/' . str_repeat('a', 60),
+			'act' => 'allow', 'sh' => 0, 'hold' => 0, 'ovr' => '', 'tok' => 'v',
+			'dev' => 'seq' . $i, 'sc' => 0, 'esc' => 0, 'rs' => array())) . "\n");
+	}
+	fclose($pg_fh);
+	$pg_bytes = filesize($pg_file);
+	t_ok('the paginated fixture spans several chunks (' . $pg_bytes . ' bytes)',
+		$pg_bytes > 200000);
+
+	$pg_seen = array();
+	$pg_dups = 0;
+	$pg_cursor = 0;
+	$pg_pages = 0;
+	$pg_prev = null;
+	$pg_monotone = true;
+	do {
+		list($pg_rows, $pg_meta) = gp_log_query(array('date' => $pg_date), $pg_cursor, 50);
+		foreach ($pg_rows as $pg_row) {
+			$pg_id = (string)$pg_row['rid'];
+			if (isset($pg_seen[$pg_id])) { $pg_dups++; }
+			$pg_seen[$pg_id] = true;
+			$pg_num = (int)hexdec($pg_id);
+			if ($pg_prev !== null && $pg_num >= $pg_prev) { $pg_monotone = false; }
+			$pg_prev = $pg_num;
+		}
+		$pg_cursor = isset($pg_meta['next_cursor']) ? (int)$pg_meta['next_cursor'] : 0;
+		$pg_pages++;
+	} while ($pg_cursor > 0 && $pg_pages < 10000);
+
+	t_ok('pagination follows the cursor to the end without looping', $pg_pages < 10000);
+	t_ok('pagination returns every row exactly once (no duplicates)', $pg_dups === 0);
+	t_ok('pagination returns the full set with no gaps (' . count($pg_seen) . '/' . $pg_n . ')',
+		count($pg_seen) === $pg_n);
+	t_ok('the newest and oldest rows are both reachable',
+		isset($pg_seen[sprintf('%012x', 0)]) && isset($pg_seen[sprintf('%012x', $pg_n - 1)]));
+	t_ok('rows are returned strictly newest-first across page boundaries', $pg_monotone);
+	@unlink($pg_file);
+}
+
+// --------------------------------------------------------------------------
 t_section('Session cookie');
 
 require_once __DIR__ . '/../panel/auth.php';

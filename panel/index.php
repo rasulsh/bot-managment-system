@@ -291,8 +291,11 @@ function gp_logs_filter_from_request() {
 	return $out;
 }
 
-// Stream the current page as CSV. Values are quoted and CSV-escaped by
-// fputcsv; nothing here is interpolated into HTML.
+// Stream the current page as CSV - only the rows the log view is showing, not
+// the whole filter. The export link label and its title say so (logs_export /
+// logs_export_hint); a full-filter streaming export is out of scope under the
+// existing scan-byte caps. Values are quoted and CSV-escaped by fputcsv;
+// nothing here is interpolated into HTML.
 function gp_logs_export_csv(array $rows) {
 	if (!headers_sent()) {
 		header('Content-Type: text/csv; charset=utf-8');

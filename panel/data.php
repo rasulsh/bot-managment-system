@@ -284,12 +284,16 @@ function gp_log_query(array $filter, $cursor = 0, $limit = 50) {
 	if ($size === false) { fclose($fh); return array(array(), $meta); }
 
 	// The cursor is a byte offset from the end of the file, so paging forward
-	// is a seek rather than a re-scan.
+	// is a seek rather than a re-scan. The next page resumes at the exact byte
+	// where the oldest row of this page began ($last_row_start below), which is
+	// what keeps pages contiguous: no boundary row is skipped and none returned
+	// twice. Resuming at a chunk boundary instead dropped every not-yet-iterated
+	// row in the current chunk - roughly a page's worth per page.
 	$pos = max(0, $size - (int)$cursor);
 	$buffer = '';
 	$rows = array();
 	$outcomes = array();
-	$pending = array();
+	$last_row_start = 0;                       // absolute byte offset of the oldest returned row
 	$chunk = 65536;
 
 	while ($pos > 0 && count($rows) < $limit
@@ -303,8 +307,27 @@ function gp_log_query(array $filter, $cursor = 0, $limit = 50) {
 		if ($data === false) { break; }
 		$meta['scanned_bytes'] += strlen($data);
 		$buffer = $data . $buffer;
+		// $buffer now maps to file bytes [$pos, $pos + strlen($buffer)).
 		$parts = explode("\n", $buffer);
-		$buffer = array_shift($parts);
+		if ($pos > 0) {
+			// The first element straddles this chunk's lower edge; carry it to
+			// the next (older) read to be completed there. The first complete
+			// line begins just past it and its stripped separator.
+			$buffer = array_shift($parts);
+			$base = $pos + strlen($buffer) + 1;
+		} else {
+			// The chunk starts at the head of the file, so the first element is a
+			// complete line beginning at byte 0 and nothing older remains to read.
+			$buffer = '';
+			$base = 0;
+		}
+		// Absolute start byte offset of every element in $parts, in file order.
+		$starts = array();
+		$acc = $base;
+		foreach ($parts as $k => $p) {
+			$starts[$k] = $acc;
+			$acc += strlen($p) + 1;            // +1 for the stripped "\n"
+		}
 		// Walk newest-first within this chunk.
 		for ($i = count($parts) - 1; $i >= 0; $i--) {
 			$line = trim($parts[$i]);
@@ -319,14 +342,18 @@ function gp_log_query(array $filter, $cursor = 0, $limit = 50) {
 			if (!gp_log_match($row, $filter)) { continue; }
 			$rid = isset($row['rid']) ? (string)$row['rid'] : '';
 			$row['_out'] = ($rid !== '' && isset($outcomes[$rid])) ? $outcomes[$rid] : null;
-			$pending[] = array($row, $pos + strlen($data));
 			$rows[] = $row;
+			$last_row_start = $starts[$i];     // decreases as we accept older rows
 			if (count($rows) >= $limit) { break; }
 		}
 	}
 
-	if (count($rows) >= $limit && $pos > 0) {
-		$meta['next_cursor'] = $size - $pos;
+	// Resume at the start of the oldest row returned, so the next scan re-enters
+	// the file exactly one row older: contiguous, with no gap at the chunk
+	// boundary and no duplicate of the last row shown. A row starting at byte 0
+	// is the head of the file, so nothing older follows it.
+	if (count($rows) >= $limit && $last_row_start > 0) {
+		$meta['next_cursor'] = $size - $last_row_start;
 	}
 	if ($meta['scanned_bytes'] >= GP_MAX_SCAN_BYTES
 		|| $meta['scanned_lines'] >= GP_MAX_SCAN_LINES) {
