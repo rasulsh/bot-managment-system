@@ -31,6 +31,14 @@ function gv_nonce_make($secret) {
 }
 
 // Verify a nonce. A replay inside nonce_ttl only re-issues a token; accepted.
+//
+// TODO(#11): the nonce is deliberately stateless so the handshake still works
+// with Redis down, and at the point it is checked (gv_run step 2) Redis is not
+// yet open (step 4), so it is not single-use. A client that parses the page and
+// issues one POST can mint a token; the defense against automated minting is the
+// per-IP rate limit (gv:ri:{ip}), not the nonce. Making it single-use needs a
+// Redis-aware handshake (open Redis earlier or reorder), a scoped change left
+// for a future iteration rather than bolted on here.
 function gv_nonce_check($n, $secret, $ttl) {
 	$x = explode('.', (string)$n);
 	if (count($x) !== 3) return false;

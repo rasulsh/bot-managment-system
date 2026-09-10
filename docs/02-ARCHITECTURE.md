@@ -132,10 +132,13 @@ their own timestamp and signature, so no server-side storage is needed and the
 handshake works identically with or without Redis. The interstitial is a single
 inline HTML document with no external assets: it waits a fraction of a second,
 `fetch()`es a `POST` back to the same URL carrying the nonce, and reloads when the
-guard answers `204`. A real browser sails through; a script that does not run
-JavaScript never completes it. The token is deliberately **not** bound to the
-client IP, so CGNAT and mobile carrier IP rotation do not re-challenge real users
-on every network change.
+guard answers `204`. A real browser sails through transparently. This is **not** a
+JavaScript proof-of-work, though: a client that parses the page and issues the one
+POST — no JavaScript required — completes the handshake just as well, so the nonce
+filters naive fetchers rather than determined ones. The real brake on automated
+token minting is the per-IP request rate limit (`gv:ri:{ip}`), not the handshake
+itself. The token is deliberately **not** bound to the client IP, so CGNAT and
+mobile carrier IP rotation do not re-challenge real users on every network change.
 
 ### Outcome capture
 
