@@ -415,8 +415,16 @@ function gp_identity_rows($identity, $limit = 60) {
 // Redis reads
 // --------------------------------------------------------------------------
 
-function gp_redis() {
+function gp_redis($reset = false) {
 	static $conn = false;
+	if ($reset) {
+		// Drop the shared connection so the next call reopens a clean one. Used
+		// when a SCAN fails mid-reply and may have left unread bytes in the
+		// socket, which would otherwise be misread as later commands' replies.
+		if ($conn && is_resource($conn)) { gv_redis_close($conn); }
+		$conn = false;
+		return false;
+	}
 	if ($conn !== false) { return $conn; }
 	$cfg = gv_cfg_load();
 	$conn = gv_redis_connect($cfg['redis']);
@@ -490,23 +498,27 @@ function gp_overrides_list($limit = 200) {
 // does not parse. Read it here with a small dedicated parser rather than
 // widening the guard's request-path client for the panel's benefit.
 function gp_scan($conn, $cursor, $pattern) {
-	if (!$conn) { return null; }
+	if (!$conn) { return null; }                  // no connection: nothing to poison
 	$payload = gv_resp_encode(array('SCAN', (string)$cursor, 'MATCH', $pattern, 'COUNT', '200'));
-	if (@fwrite($conn, $payload) === false) { return null; }
+	// Every failure below happens after the command was written, so the socket
+	// may hold a partial or unread reply. Drop the shared connection before
+	// returning (gp_redis(true)) so the next gp_redis() reopens a clean one and
+	// no later command reads leftover bytes as its own reply.
+	if (@fwrite($conn, $payload) === false) { gp_redis(true); return null; }
 	$line = @fgets($conn);
-	if ($line === false) { return null; }
+	if ($line === false) { gp_redis(true); return null; }
 	$line = rtrim($line, "\r\n");
-	if (substr($line, 0, 1) !== '*') { return null; }
-	if ((int)substr($line, 1) !== 2) { return null; }
+	if (substr($line, 0, 1) !== '*') { gp_redis(true); return null; }
+	if ((int)substr($line, 1) !== 2) { gp_redis(true); return null; }
 	$next = gp_scan_bulk($conn);
-	if ($next === null) { return null; }
+	if ($next === null) { return null; }          // gp_scan_bulk already reset the socket
 	$head = @fgets($conn);
-	if ($head === false || substr($head, 0, 1) !== '*') { return null; }
+	if ($head === false || substr($head, 0, 1) !== '*') { gp_redis(true); return null; }
 	$count = (int)substr(rtrim($head, "\r\n"), 1);
 	$keys = array();
 	for ($i = 0; $i < $count; $i++) {
 		$key = gp_scan_bulk($conn);
-		if ($key === null) { return null; }
+		if ($key === null) { return null; }       // gp_scan_bulk already reset the socket
 		$keys[] = $key;
 	}
 	return array($next, $keys);
@@ -514,16 +526,16 @@ function gp_scan($conn, $cursor, $pattern) {
 
 function gp_scan_bulk($conn) {
 	$head = @fgets($conn);
-	if ($head === false) { return null; }
+	if ($head === false) { gp_redis(true); return null; }
 	$head = rtrim($head, "\r\n");
-	if (substr($head, 0, 1) !== '$') { return null; }
+	if (substr($head, 0, 1) !== '$') { gp_redis(true); return null; }
 	$len = (int)substr($head, 1);
 	if ($len < 0) { return ''; }
 	$need = $len + 2;
 	$data = '';
 	while (strlen($data) < $need) {
 		$part = @fread($conn, $need - strlen($data));
-		if ($part === false || $part === '') { return null; }
+		if ($part === false || $part === '') { gp_redis(true); return null; }
 		$data .= $part;
 	}
 	return substr($data, 0, $len);
