@@ -521,6 +521,33 @@ ok('peak_bytes is zero without any byte data',
    reputation_mod.peak_bytes([{'n_req': 100.0}]) == 0.0)
 
 # ---------------------------------------------------------------------------
+section('Per-device holdout exclusion keys off sh, not hold (FIX #12 pt2)')
+
+from analyzer import run_nightly as run_nightly_mod
+
+# hold marks holdout membership for every request, but an enforced 429 logs
+# hold=1 with sh=0. A device is only truly held out when a row was actually
+# suppressed (hold=1 AND sh=1); a rate-limited device must keep its reputation.
+enforced_rows = [row(3000.0 + i, dev='enfdev', act='429', hold=1, sh=0) for i in range(3)]
+enforced_sessions = logs_mod.sessionize(enforced_rows, 1800)
+enforced_view = run_nightly_mod.build_device_view(enforced_sessions, cfg)
+ok('a device with only hold=1,sh=0 (enforced 429) rows is not marked holdout',
+   enforced_view[enforced_sessions[0]['key']]['holdout'] is False)
+
+shadow_rows = [row(4000.0 + i, dev='shaddev', act='403', hold=1, sh=1) for i in range(3)]
+shadow_sessions = logs_mod.sessionize(shadow_rows, 1800)
+shadow_view = run_nightly_mod.build_device_view(shadow_sessions, cfg)
+ok('a device with a hold=1,sh=1 (shadowed) row is still marked holdout',
+   shadow_view[shadow_sessions[0]['key']]['holdout'] is True)
+
+mixed_rows = ([row(5000.0 + i, dev='mixdev', act='429', hold=1, sh=0) for i in range(3)]
+              + [row(5100.0, dev='mixdev', act='403', hold=1, sh=1)])
+mixed_sessions = logs_mod.sessionize(mixed_rows, 1800)
+mixed_view = run_nightly_mod.build_device_view(mixed_sessions, cfg)
+ok('a device with any shadowed row among enforced ones is marked holdout',
+   mixed_view[mixed_sessions[0]['key']]['holdout'] is True)
+
+# ---------------------------------------------------------------------------
 section('Reverse DNS verification')
 
 
