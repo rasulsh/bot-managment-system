@@ -1394,6 +1394,18 @@ else:
     ok('the stale candidate was not moved into place',
        os.path.isfile(promo_cfg['model_candidate_path']))
 
+    # FIX #19: a bundle with a correct feature_order and model but NO scaler
+    # loads as None, so inspect() must report it not loadable and promotion must
+    # refuse it - otherwise a candidate promotes and then yields no ML verdicts.
+    scalerless = dict(model_mod.load(promo_cfg['model_path']))
+    scalerless.pop('scaler', None)
+    promo_joblib.dump(scalerless, promo_cfg['model_candidate_path'])
+    scalerless_info = model_mod.inspect(promo_cfg['model_candidate_path'])
+    ok('a scaler-less bundle is reported not loadable', scalerless_info['loadable'] is False)
+    ok('a scaler-less bundle indeed loads as None', model_mod.load(promo_cfg['model_candidate_path']) is None)
+    ok('promotion refuses a scaler-less candidate',
+       promote_mod.check('ml', promo_cfg)['ok'] is False)
+
     promo_joblib.dump(stale_bundle, promo_cfg['model_path'])
     stale_info = model_mod.inspect(promo_cfg['model_path'])
     ok('a stale live model is detected as stale',

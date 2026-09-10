@@ -115,7 +115,11 @@ def inspect(model_path):
     except Exception as exc:
         out['error'] = 'unreadable: %s' % exc
         return out
-    if not isinstance(bundle, dict) or 'model' not in bundle:
+    if not isinstance(bundle, dict) or 'model' not in bundle or 'scaler' not in bundle:
+        # Require exactly what load() requires: a bundle missing its scaler
+        # loads as None, so inspect() must not report it loadable - otherwise
+        # promote.check() passes a candidate that then yields no ML verdicts,
+        # silently making the guard more permissive.
         out['error'] = 'not a model bundle'
         return out
     out['feature_order'] = bundle.get('feature_order')
