@@ -457,13 +457,21 @@ function gv_match_bot($ua, array $known_bots) {
 }
 
 // Fixed-window counter. Returns the current count, or 0 in degraded mode.
+//
+// The first write uses SET key 1 EX window NX, which sets the value and the
+// expiry atomically: the key can never exist without a TTL. The old
+// INCR-then-EXPIRE sequence left a TTL-less key behind if the process died or
+// EXPIRE failed between the two commands, and once such a key crossed the limit
+// the identity was 429'd forever. Subsequent hits INCR the key that already
+// carries its TTL. Counting is unchanged (first hit 1, then 2, 3, ...) and a
+// failed read still folds to 0 (fail-open).
 function gv_bump($conn, $key, $window) {
 	if (!$conn) { return 0; }
-	$n = gv_r_incr($conn, $key);
+	$set = gv_r_set_nx_ex($conn, $key, $window, 1);
+	if ($set === 'OK') { return 1; }              // created with a TTL in one command
+	$n = gv_r_incr($conn, $key);                  // already existed
 	if ($n === false || $n === null) { return 0; }
-	$n = (int)$n;
-	if ($n === 1) { gv_r_expire($conn, $key, $window); }
-	return $n;
+	return (int)$n;
 }
 
 // --------------------------------------------------------------------------

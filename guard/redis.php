@@ -83,3 +83,11 @@ function gv_r_incr($conn, $key) {
 function gv_r_expire($conn, $key, $ttl) {
 	return gv_redis_cmd($conn, array('EXPIRE', $key, (string)(int)$ttl));
 }
+
+// SET key value EX ttl NX. Sets value and expiry in one atomic command, so the
+// key can never exist without a TTL. Returns 'OK' when the key was created,
+// null when it already existed, false on error.
+function gv_r_set_nx_ex($conn, $key, $ttl, $value) {
+	return gv_redis_cmd($conn, array('SET', $key, (string)$value,
+		'EX', (string)(int)$ttl, 'NX'));
+}

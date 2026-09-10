@@ -211,11 +211,20 @@ function gp_attempts_bump($bucket, $window) {
 	$cfg = gv_cfg_load();
 	$conn = gv_redis_connect($cfg['redis']);
 	if ($conn) {
-		$n = gv_r_incr($conn, $key);
-		if ($n !== false && $n !== null) {
-			if ((int)$n === 1) { gv_r_expire($conn, $key, $window); }
+		// SET NX EX creates the counter with its TTL in one atomic command, so
+		// the first write can never leave a TTL-less key that would lock the
+		// bucket out forever (the old INCR-then-EXPIRE had that window).
+		$set = gv_r_set_nx_ex($conn, $key, $window, 1);
+		if ($set === 'OK') {
 			gv_redis_close($conn);
-			return (int)$n;
+			return 1;
+		}
+		if ($set === null) {                  // key already exists and carries a TTL
+			$n = gv_r_incr($conn, $key);
+			if ($n !== false && $n !== null) {
+				gv_redis_close($conn);
+				return (int)$n;
+			}
 		}
 		gv_redis_close($conn);
 	}

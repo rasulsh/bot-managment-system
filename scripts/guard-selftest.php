@@ -675,6 +675,25 @@ if ($redis_bin === '') {
 		t_ok('counter bump against live redis counts up', gv_bump($conn, $key . ':b', 60) === 1
 			&& gv_bump($conn, $key . ':b', 60) === 2);
 
+		// FIX #10: a counter is created with its TTL in one atomic command, so a
+		// key can never exist without an expiry (which became a permanent 429
+		// once it crossed the limit).
+		$nxk = $key . ':nx';
+		gv_redis_cmd($conn, array('DEL', $nxk));
+		t_ok('gv_r_set_nx_ex creates a fresh key and returns OK',
+			gv_r_set_nx_ex($conn, $nxk, 60, 1) === 'OK');
+		t_ok('the created key already carries a ttl',
+			(int)gv_redis_cmd($conn, array('TTL', $nxk)) > 0);
+		t_ok('gv_r_set_nx_ex on an existing key returns null and leaves it intact',
+			gv_r_set_nx_ex($conn, $nxk, 60, 99) === null && gv_r_get($conn, $nxk) === '1');
+		$bk = $key . ':bump';
+		gv_redis_cmd($conn, array('DEL', $bk));
+		t_ok('gv_bump sets a ttl on the very first hit',
+			gv_bump($conn, $bk, 60) === 1 && (int)gv_redis_cmd($conn, array('TTL', $bk)) > 0);
+		t_ok('gv_bump keeps counting at the same threshold past the first hit',
+			gv_bump($conn, $bk, 60) === 2 && gv_bump($conn, $bk, 60) === 3);
+		gv_redis_cmd($conn, array('DEL', $nxk, $bk));
+
 		// --- Phase 2 verdict reads against a live keyspace -----------------
 		$vip = '203.0.113.77';
 		t_ok('no verdict reads as an empty string', gv_bot_verdict($conn, $vip) === '');
