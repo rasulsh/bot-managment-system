@@ -719,6 +719,18 @@ if ($redis_bin === '') {
 		t_ok('device keys are not read for an empty device id',
 			gv_override($conn, $oip, '') === '');
 
+		// A stuck customer who never completed the handshake has only an ip, so
+		// gv:allow:{ip} must be honoured and must beat gv:deny:{ip}.
+		gv_r_setex($conn, 'gv:allow:' . $oip, 60, '1');
+		t_ok('an ip allow is read even without a device',
+			gv_override($conn, $oip, '') === 'allow');
+		gv_r_setex($conn, 'gv:deny:' . $oip, 60, '1');
+		t_ok('an ip allow beats an ip deny',
+			gv_override($conn, $oip, '') === 'allow');
+		t_ok('an ip allow still applies when a device id is present',
+			gv_override($conn, $oip, $odev) === 'allow');
+		gv_redis_cmd($conn, array('DEL', 'gv:allow:' . $oip, 'gv:deny:' . $oip));
+
 		$vdev = 'selftestdev';
 		gv_r_setex($conn, 'gv:rep:' . $vdev, 60, '-20');
 		gv_r_setex($conn, 'gv:ml:' . $vdev, 60, '75');

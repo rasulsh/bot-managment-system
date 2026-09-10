@@ -620,9 +620,16 @@ function gv_effective_score($sc, $rep, $ml, $clf, array $cfg) {
 // Allow wins over deny: the operator's most specific intent is assumed to be
 // the rescue, and a permissive override is the five-second fix when a real
 // customer is stuck. Every read uses === '1' so a failed read is no signal.
+//
+// Both allow-by-device and allow-by-ip are honoured: a stuck customer who never
+// completed the handshake has only an IP (no device id), and allow-by-ip is the
+// documented rescue for that case. The per-device allow is checked first so a
+// device allow still overrides an IP deny for the same client, and the IP allow
+// is checked before the IP deny so allow-wins holds for IP identities too.
 function gv_override($conn, $ip, $dev) {
 	if (!$conn) { return ''; }
 	if ($dev !== '' && gv_r_get($conn, 'gv:allow:' . $dev) === '1') { return 'allow'; }
+	if ($ip  !== '' && gv_r_get($conn, 'gv:allow:' . $ip)  === '1') { return 'allow'; }
 	if ($dev !== '' && gv_r_get($conn, 'gv:deny:' . $dev) === '1') { return 'deny'; }
 	if (gv_r_get($conn, 'gv:deny:' . $ip) === '1') { return 'deny'; }
 	return '';
