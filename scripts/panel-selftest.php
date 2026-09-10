@@ -291,6 +291,44 @@ t_ok('a missing file yields nothing', gp_tail_lines($tmp . '.absent', 10, 1000) 
 @unlink($tmp);
 
 // --------------------------------------------------------------------------
+t_section('Audit trail renders newest-first past 64 KiB');
+
+// Build a >128 KB audit.jsonl with sequential ids and confirm gp_audit_read
+// returns strictly newest-first with no gaps - the multi-chunk case the old
+// chunk-forward accumulation scrambled.
+$au_path = gp_audit_path();
+$au_backup = is_file($au_path) ? file_get_contents($au_path) : null;
+$au_n = 2000;
+$au_fh = fopen($au_path, 'w');
+for ($i = 0; $i < $au_n; $i++) {
+	fwrite($au_fh, json_encode(array('ts' => 1700000000 + $i, 'id' => $i,
+		'event' => 'config_save', 'actor' => 'tester', 'ip' => '203.0.113.9',
+		'key' => 'hard_block_score', 'old' => 40, 'new' => 50,
+		'pad' => str_repeat('x', 48))) . "\n");
+}
+fclose($au_fh);
+t_ok('the audit fixture exceeds 128 KiB (' . filesize($au_path) . ' bytes)',
+	filesize($au_path) > 131072);
+$au_rows = gp_audit_read($au_n);
+$au_ids = array();
+foreach ($au_rows as $au_row) { $au_ids[] = (int)$au_row['id']; }
+$au_desc = count($au_ids) === $au_n;
+for ($k = 1; $k < count($au_ids); $k++) {
+	if ($au_ids[$k] !== $au_ids[$k - 1] - 1) { $au_desc = false; break; }
+}
+t_ok('gp_audit_read returns every entry strictly newest-first with no gaps', $au_desc);
+t_ok('the newest audit entry is read first and the oldest last',
+	$au_ids && $au_ids[0] === $au_n - 1 && $au_ids[count($au_ids) - 1] === 0);
+$au_tail = gp_tail_lines($au_path, $au_n, 4194304);
+$au_first = $au_tail ? json_decode($au_tail[0], true) : null;
+$au_last = $au_tail ? json_decode($au_tail[count($au_tail) - 1], true) : null;
+t_ok('the shared producer gp_tail_lines is oldest-first across chunks',
+	count($au_tail) === $au_n && is_array($au_first) && is_array($au_last)
+	&& (int)$au_first['id'] === 0 && (int)$au_last['id'] === $au_n - 1);
+if ($au_backup !== null) { file_put_contents($au_path, $au_backup); }
+elseif (is_file($au_path)) { @unlink($au_path); }
+
+// --------------------------------------------------------------------------
 t_section('Log explorer pagination is gap-free and duplicate-free');
 
 require_once __DIR__ . '/../panel/data.php';
