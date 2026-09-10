@@ -437,6 +437,9 @@ def out_feats(**over):
             'notfound_ratio': 0.0, 'err_ratio': 0.0, 'srv_err_ratio': 0.0,
             'bytes_mean': 10000.0, 'outcome_cov': 1.0}
     base.update(over)
+    # Fully byte-covered unless a test says otherwise: bytes_n tracks the count
+    # of byte-known rows that bytes_mean is averaged over (FIX #16).
+    base.setdefault('bytes_n', base['n_req'])
     return base
 
 
@@ -481,6 +484,21 @@ ok('sparse coverage suppresses the bulk rule too',
    reputation_mod.device_reputation(
        [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, path_uniq_ratio=0.9,
                   outcome_cov=0.2)], NEUTRAL_LABELS, clamp) == spread_baseline)
+# FIX #16: bytes_mean is the mean over byte-known rows only. With partial byte
+# coverage the true bytes moved is bytes_mean * bytes_n, not bytes_mean * n_req.
+# Here 2 MiB * 10 rows = 20 MiB is under BULK_BYTES even though 2 MiB * 40 rows
+# (the old estimate) would exceed it, so W_BULK must NOT fire.
+ok('partial byte coverage does not over-estimate the bulk rule (FIX #16)',
+   reputation_mod.device_reputation(
+       [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, bytes_n=10.0,
+                  path_uniq_ratio=0.9)], NEUTRAL_LABELS, clamp) == spread_baseline)
+# The same bytes_mean fully covered (bytes_n == n_req) does fire, confirming it
+# is the coverage-corrected total and not the rule itself that changed.
+ok('fully byte-covered bulk transfer still fires W_BULK',
+   reputation_mod.device_reputation(
+       [out_feats(bytes_mean=2 * 1024 * 1024, n_req=40.0, bytes_n=40.0,
+                  path_uniq_ratio=0.9)], NEUTRAL_LABELS, clamp) - spread_baseline
+   == reputation_mod.W_BULK)
 
 srv_rep = reputation_mod.device_reputation(
     [out_feats(srv_err_ratio=0.4)], NEUTRAL_LABELS, clamp)
@@ -519,6 +537,39 @@ ok('peak_bytes reports the heaviest session',
                               {'bytes_mean': 5000.0, 'n_req': 100.0}]) == 500000.0)
 ok('peak_bytes is zero without any byte data',
    reputation_mod.peak_bytes([{'n_req': 100.0}]) == 0.0)
+ok('peak_bytes multiplies the mean by the byte-known count, not all requests',
+   reputation_mod.peak_bytes(
+       [{'bytes_mean': 2.0 * 1024 * 1024, 'n_req': 40.0, 'bytes_n': 10.0}])
+   == 2.0 * 1024 * 1024 * 10.0)
+ok('peak_bytes falls back to n_req when bytes_n is absent',
+   reputation_mod.peak_bytes([{'bytes_mean': 1000.0, 'n_req': 10.0}]) == 10000.0)
+
+# ---------------------------------------------------------------------------
+section('Per-device holdout exclusion keys off sh, not hold (FIX #12 pt2)')
+
+from analyzer import run_nightly as run_nightly_mod
+
+# hold marks holdout membership for every request, but an enforced 429 logs
+# hold=1 with sh=0. A device is only truly held out when a row was actually
+# suppressed (hold=1 AND sh=1); a rate-limited device must keep its reputation.
+enforced_rows = [row(3000.0 + i, dev='enfdev', act='429', hold=1, sh=0) for i in range(3)]
+enforced_sessions = logs_mod.sessionize(enforced_rows, 1800)
+enforced_view = run_nightly_mod.build_device_view(enforced_sessions, cfg)
+ok('a device with only hold=1,sh=0 (enforced 429) rows is not marked holdout',
+   enforced_view[enforced_sessions[0]['key']]['holdout'] is False)
+
+shadow_rows = [row(4000.0 + i, dev='shaddev', act='403', hold=1, sh=1) for i in range(3)]
+shadow_sessions = logs_mod.sessionize(shadow_rows, 1800)
+shadow_view = run_nightly_mod.build_device_view(shadow_sessions, cfg)
+ok('a device with a hold=1,sh=1 (shadowed) row is still marked holdout',
+   shadow_view[shadow_sessions[0]['key']]['holdout'] is True)
+
+mixed_rows = ([row(5000.0 + i, dev='mixdev', act='429', hold=1, sh=0) for i in range(3)]
+              + [row(5100.0, dev='mixdev', act='403', hold=1, sh=1)])
+mixed_sessions = logs_mod.sessionize(mixed_rows, 1800)
+mixed_view = run_nightly_mod.build_device_view(mixed_sessions, cfg)
+ok('a device with any shadowed row among enforced ones is marked holdout',
+   mixed_view[mixed_sessions[0]['key']]['holdout'] is True)
 
 # ---------------------------------------------------------------------------
 section('Reverse DNS verification')
@@ -584,6 +635,37 @@ ok('bingbot verifies against its own suffix',
    botverify.verify_ip('40.77.1.1', 'bingbot', suffixes, bing) == 'ok')
 ok('a trailing dot in a PTR name is tolerated',
    botverify.matches_suffix('crawl.googlebot.com.', ['.googlebot.com']) is True)
+
+# FIX #5: IPv6 crawlers. verify_ip compares the original ip against the
+# forward-resolved set as strings, so an injected resolver returning the IPv6
+# address confirms the claim end to end for both families.
+V6_IP = '2001:4860:4860::1'
+v6 = StubResolver({V6_IP: ['crawl-v6.googlebot.com']},
+                  {'crawl-v6.googlebot.com': [V6_IP]})
+ok('an IPv6 googlebot forward-confirms ok',
+   botverify.verify_ip(V6_IP, 'googlebot', suffixes, v6) == 'ok')
+v6_mixed = StubResolver({V6_IP: ['crawl-v6.googlebot.com']},
+                        {'crawl-v6.googlebot.com': ['66.249.66.2', V6_IP]})
+ok('an IPv6 address confirms even when IPv4 addresses are also returned',
+   botverify.verify_ip(V6_IP, 'googlebot', suffixes, v6_mixed) == 'ok')
+ok('IPv4 verification is unchanged by the widened forward lookup',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, happy) == 'ok')
+
+# The real DefaultResolver.forward now resolves both families. Monkeypatch
+# getaddrinfo so the test needs no DNS, and assert both families survive,
+# de-duplicated and in order - gethostbyname_ex used to drop the IPv6 entry.
+_orig_gai = botverify.socket.getaddrinfo
+try:
+    botverify.socket.getaddrinfo = lambda host, port: [
+        (botverify.socket.AF_INET, 0, 0, '', ('66.249.66.1', 0)),
+        (botverify.socket.AF_INET6, 0, 0, '', ('2001:4860:4860::8888', 0, 0, 0)),
+        (botverify.socket.AF_INET, 0, 0, '', ('66.249.66.1', 0)),
+    ]
+    _resolved = botverify.DefaultResolver().forward('crawl.googlebot.com')
+finally:
+    botverify.socket.getaddrinfo = _orig_gai
+ok('DefaultResolver.forward returns both v4 and v6 addresses, de-duplicated',
+   _resolved == ['66.249.66.1', '2001:4860:4860::8888'])
 
 # ---------------------------------------------------------------------------
 section('Redis verdict round-trip')
@@ -693,6 +775,34 @@ else:
 fallback = bridge.guard_config(cfg, php='/nonexistent/php-binary')
 ok('a missing php falls back instead of raising',
    fallback.get('source') == 'defaults' and fallback['hard_block_score'] == 60)
+
+# FIX #15: a timed-out config dump must kill and reap the child, not leak it.
+# A fake Popen times out on the first communicate(), then returns on the reap.
+class _FakeTimeoutProc(object):
+    def __init__(self):
+        self.killed = False
+        self._calls = 0
+
+    def communicate(self, timeout=None):
+        self._calls += 1
+        if self._calls == 1:
+            raise subprocess_mod.TimeoutExpired(cmd='php', timeout=timeout)
+        return (b'', b'')           # the post-kill reap
+
+    def kill(self):
+        self.killed = True
+
+import subprocess as subprocess_mod
+_fake_proc = _FakeTimeoutProc()
+_orig_popen = bridge.subprocess.Popen
+try:
+    bridge.subprocess.Popen = lambda *a, **k: _fake_proc
+    _timeout_result = bridge.dump_config(php='php', timeout=1)
+finally:
+    bridge.subprocess.Popen = _orig_popen
+ok('a timed-out config dump returns None', _timeout_result is None)
+ok('a timed-out config dump kills the child rather than leaking it',
+   _fake_proc.killed is True)
 
 dcfg = bridge.decision_config(bridged, {'hard_block_score': 45, 'signals.clf': True,
                                         'ml_weight': 0.9})
@@ -976,10 +1086,11 @@ ok('the report collects request durations', len(out_stats['dur']) == 20)
 
 out_text = report_mod.render_text(out_stats, 7)
 ok('the text report contains the outcomes section', '6. Response outcomes' in out_text)
-ok('the outcomes section compares enforced against holdout',
-   'Enforced population vs holdout' in out_text)
-ok('the outcomes section explains what the gap estimates',
-   'what enforcement is currently catching' in out_text)
+ok('the outcomes section compares the non-holdout population against holdout',
+   'Non-holdout population vs holdout' in out_text
+   and 'Enforced population vs holdout' not in out_text)
+ok('the outcomes section label reads correctly in monitor mode, not "enforced"',
+   'would catch in monitor mode' in out_text)
 ok('the later sections were renumbered',
    '7. Holdout comparison' in out_text and '8. Top offenders' in out_text
    and '9. Anomalies worth a look' in out_text)
@@ -1284,6 +1395,18 @@ else:
     ok('the stale candidate was not moved into place',
        os.path.isfile(promo_cfg['model_candidate_path']))
 
+    # FIX #19: a bundle with a correct feature_order and model but NO scaler
+    # loads as None, so inspect() must report it not loadable and promotion must
+    # refuse it - otherwise a candidate promotes and then yields no ML verdicts.
+    scalerless = dict(model_mod.load(promo_cfg['model_path']))
+    scalerless.pop('scaler', None)
+    promo_joblib.dump(scalerless, promo_cfg['model_candidate_path'])
+    scalerless_info = model_mod.inspect(promo_cfg['model_candidate_path'])
+    ok('a scaler-less bundle is reported not loadable', scalerless_info['loadable'] is False)
+    ok('a scaler-less bundle indeed loads as None', model_mod.load(promo_cfg['model_candidate_path']) is None)
+    ok('promotion refuses a scaler-less candidate',
+       promote_mod.check('ml', promo_cfg)['ok'] is False)
+
     promo_joblib.dump(stale_bundle, promo_cfg['model_path'])
     stale_info = model_mod.inspect(promo_cfg['model_path'])
     ok('a stale live model is detected as stale',
@@ -1334,6 +1457,88 @@ else:
 for name in os.listdir(promo_dir):
     os.unlink(os.path.join(promo_dir, name))
 os.rmdir(promo_dir)
+
+# ---------------------------------------------------------------------------
+section('Worker forwards the config path to child jobs')
+
+from analyzer import worker as worker_mod
+
+# Capture the argv each child entry point is called with, without running it.
+_captured_argv = {}
+
+
+def _capturing(name):
+    def fake(argv=None):
+        _captured_argv[name] = list(argv or [])
+        return 0
+    return fake
+
+
+_worker_orig = {
+    'run_verify': worker_mod.run_verify.main,
+    'run_nightly': worker_mod.run_nightly.main,
+    'replay': worker_mod.replay_mod.main,
+    'snapshot': worker_mod.snapshot_mod.main,
+}
+try:
+    worker_mod.run_verify.main = _capturing('run_verify')
+    worker_mod.run_nightly.main = _capturing('run_nightly')
+    worker_mod.replay_mod.main = _capturing('replay')
+    worker_mod.snapshot_mod.main = _capturing('snapshot')
+
+    CFG_PATH = '/etc/guard/analyzer.json'
+    cfg_with_path = {'_config_path': CFG_PATH}
+    worker_mod.HANDLERS['verify'](cfg_with_path, {})
+    ok('job_verify forwards --config to run_verify',
+       _captured_argv['run_verify'] == ['--config', CFG_PATH])
+    worker_mod.HANDLERS['nightly'](cfg_with_path, {})
+    ok('job_nightly forwards --config to run_nightly',
+       _captured_argv['run_nightly'] == ['--config', CFG_PATH])
+    worker_mod.HANDLERS['train'](cfg_with_path, {})
+    ok('job_train forwards --config before its own flags',
+       _captured_argv['run_nightly'] == ['--config', CFG_PATH, '--train', '--candidate'])
+    worker_mod.HANDLERS['train_clf'](cfg_with_path, {})
+    ok('job_train_clf forwards --config before its own flags',
+       _captured_argv['run_nightly'] == ['--config', CFG_PATH, '--train-clf', '--candidate'])
+    worker_mod.HANDLERS['replay_full'](cfg_with_path, {'days': 3})
+    ok('job_replay_full forwards --config ahead of the mode flags',
+       _captured_argv['replay'] == ['--config', CFG_PATH, '--mode', 'full', '--days', '3'])
+    worker_mod.HANDLERS['snapshot'](cfg_with_path, {})
+    ok('job_snapshot forwards --config to snapshot',
+       _captured_argv['snapshot'] == ['--config', CFG_PATH])
+
+    # With no config path, no --config flag is injected: the child re-resolves
+    # from env/defaults exactly as the worker did.
+    _captured_argv.clear()
+    cfg_no_path = {'_config_path': None}
+    worker_mod.HANDLERS['nightly'](cfg_no_path, {})
+    ok('a worker without a config path passes no --config to the child',
+       _captured_argv['run_nightly'] == [])
+    worker_mod.HANDLERS['train'](cfg_no_path, {})
+    ok('job_train with no config path passes only its own flags',
+       _captured_argv['run_nightly'] == ['--train', '--candidate'])
+finally:
+    worker_mod.run_verify.main = _worker_orig['run_verify']
+    worker_mod.run_nightly.main = _worker_orig['run_nightly']
+    worker_mod.replay_mod.main = _worker_orig['replay']
+    worker_mod.snapshot_mod.main = _worker_orig['snapshot']
+
+# job_promote reads paths from cfg rather than shelling out, so it is left as
+# is: confirm it passes the cfg straight through to promote() and never builds
+# an argv from _config_path.
+_promo_seen = {}
+_promo_orig = worker_mod.promote_mod.promote
+try:
+    def _fake_promote(kind, cfg):
+        _promo_seen['kind'] = kind
+        _promo_seen['cfg'] = cfg
+        return {'ok': True, 'reason': 'stub'}
+    worker_mod.promote_mod.promote = _fake_promote
+    worker_mod.HANDLERS['promote_ml']({'_config_path': CFG_PATH}, {})
+    ok('job_promote passes cfg straight to promote() (no argv shelling)',
+       _promo_seen.get('kind') == 'ml' and _promo_seen.get('cfg') == {'_config_path': CFG_PATH})
+finally:
+    worker_mod.promote_mod.promote = _promo_orig
 
 # ---------------------------------------------------------------------------
 print('')

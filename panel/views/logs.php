@@ -114,7 +114,8 @@ $reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR'
 	<div class="gp-row-head">
 		<button class="gp-btn gp-btn-primary" type="submit"><?= gp_e(gp_t('filter')) ?></button>
 		<a class="gp-btn gp-btn-ghost" href="index.php?r=logs"><?= gp_e(gp_t('reset')) ?></a>
-		<a class="gp-btn gp-btn-ghost" href="<?= gp_e(gp_logs_qs($f, array('export' => 'csv'))) ?>">
+		<a class="gp-btn gp-btn-ghost" href="<?= gp_e(gp_logs_qs($f, array('export' => 'csv'))) ?>"
+			title="<?= gp_e(gp_t('logs_export_hint')) ?>">
 			<?= gp_e(gp_t('logs_export')) ?></a>
 	</div>
 </form>

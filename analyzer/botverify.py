@@ -19,9 +19,21 @@ class DefaultResolver(object):
         return [hostname] + list(aliases)
 
     def forward(self, hostname):
-        """Forward lookup: return every address the hostname resolves to."""
-        _name, _aliases, addresses = socket.gethostbyname_ex(hostname)
-        return list(addresses)
+        """Forward lookup: return every address the hostname resolves to (v4 and v6).
+
+        gethostbyname_ex() returns IPv4 addresses only, so a genuine IPv6
+        Googlebot/Bingbot whose PTR matched would never forward-confirm and was
+        always flagged 'bad'. getaddrinfo() covers both families; like
+        gethostbyname_ex it may raise on failure, which verify_ip already
+        catches (fail-closed on the verification only).
+        """
+        infos = socket.getaddrinfo(hostname, None)
+        out = []
+        for info in infos:
+            addr = info[4][0]          # sockaddr; [0] is the address string
+            if addr not in out:
+                out.append(addr)
+        return out
 
 
 default_resolver = DefaultResolver()

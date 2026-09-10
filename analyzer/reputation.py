@@ -84,7 +84,13 @@ def peak_bytes(sessions):
     """
     best = 0.0
     for features in sessions:
-        moved = float(features.get('bytes_mean', 0.0)) * float(features.get('n_req', 0.0))
+        # bytes_mean is the mean over byte-known rows, so multiply by the count
+        # of those rows (bytes_mean * bytes_n = exact total). Multiplying by
+        # n_req (all rows) over-estimated when only some rows carried a byte
+        # size - up to ~2x at the MIN_COVERAGE gate. Fall back to n_req for old
+        # callers/tests that predate bytes_n.
+        n = float(features.get('bytes_n', features.get('n_req', 0.0)))
+        moved = float(features.get('bytes_mean', 0.0)) * n
         if moved > best:
             best = moved
     return best

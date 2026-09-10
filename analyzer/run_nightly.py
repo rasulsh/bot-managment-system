@@ -45,10 +45,13 @@ def build_device_view(sessions, cfg):
         entry['features'].append(feats)
         entry['labels'].append(labels)
         entry['sessions'].append(session)
-        # A holdout identity is never challenged, so it never gets a token and
-        # has no stable device id. Its data is sound in aggregate only, so no
-        # per-device verdict is ever written from it.
-        if any(int(r.get('hold') or 0) == 1 for r in (session.get('rows') or [])):
+        # A row only counts as holdout when it was actually suppressed (sh == 1):
+        # hold marks holdout membership for every request, but an enforced 429
+        # carries hold=1 with sh=0, and rate limiting is never held out. Keying
+        # off hold alone excluded devices whose traffic was in fact fully
+        # enforced from their own per-device reputation.
+        if any(int(r.get('hold') or 0) == 1 and int(r.get('sh') or 0) == 1
+               for r in (session.get('rows') or [])):
             entry['holdout'] = True
     return devices
 
@@ -165,7 +168,11 @@ def main(argv=None):
 
     # --candidate never implies training: it only redirects where training
     # writes. Without --train it would otherwise silently start writing a
-    # candidate on every nightly run.
+    # candidate on every nightly run. The second clause is the ONLY path that
+    # writes a LIVE model without an explicit --candidate: a genuinely fresh
+    # install with no model file yet, where training a first live model is
+    # acceptable. Every other training route (panel jobs, the weekly cron) passes
+    # --candidate and must be promoted explicitly.
     want_train = args.train or (not args.candidate
                                 and not os.path.isfile(cfg['model_path']))
     if not model_mod.SKLEARN_AVAILABLE:

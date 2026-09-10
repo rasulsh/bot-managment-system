@@ -291,6 +291,106 @@ t_ok('a missing file yields nothing', gp_tail_lines($tmp . '.absent', 10, 1000) 
 @unlink($tmp);
 
 // --------------------------------------------------------------------------
+t_section('Audit trail renders newest-first past 64 KiB');
+
+// Build a >128 KB audit.jsonl with sequential ids and confirm gp_audit_read
+// returns strictly newest-first with no gaps - the multi-chunk case the old
+// chunk-forward accumulation scrambled.
+$au_path = gp_audit_path();
+$au_backup = is_file($au_path) ? file_get_contents($au_path) : null;
+$au_n = 2000;
+$au_fh = fopen($au_path, 'w');
+for ($i = 0; $i < $au_n; $i++) {
+	fwrite($au_fh, json_encode(array('ts' => 1700000000 + $i, 'id' => $i,
+		'event' => 'config_save', 'actor' => 'tester', 'ip' => '203.0.113.9',
+		'key' => 'hard_block_score', 'old' => 40, 'new' => 50,
+		'pad' => str_repeat('x', 48))) . "\n");
+}
+fclose($au_fh);
+t_ok('the audit fixture exceeds 128 KiB (' . filesize($au_path) . ' bytes)',
+	filesize($au_path) > 131072);
+$au_rows = gp_audit_read($au_n);
+$au_ids = array();
+foreach ($au_rows as $au_row) { $au_ids[] = (int)$au_row['id']; }
+$au_desc = count($au_ids) === $au_n;
+for ($k = 1; $k < count($au_ids); $k++) {
+	if ($au_ids[$k] !== $au_ids[$k - 1] - 1) { $au_desc = false; break; }
+}
+t_ok('gp_audit_read returns every entry strictly newest-first with no gaps', $au_desc);
+t_ok('the newest audit entry is read first and the oldest last',
+	$au_ids && $au_ids[0] === $au_n - 1 && $au_ids[count($au_ids) - 1] === 0);
+$au_tail = gp_tail_lines($au_path, $au_n, 4194304);
+$au_first = $au_tail ? json_decode($au_tail[0], true) : null;
+$au_last = $au_tail ? json_decode($au_tail[count($au_tail) - 1], true) : null;
+t_ok('the shared producer gp_tail_lines is oldest-first across chunks',
+	count($au_tail) === $au_n && is_array($au_first) && is_array($au_last)
+	&& (int)$au_first['id'] === 0 && (int)$au_last['id'] === $au_n - 1);
+if ($au_backup !== null) { file_put_contents($au_path, $au_backup); }
+elseif (is_file($au_path)) { @unlink($au_path); }
+
+// --------------------------------------------------------------------------
+t_section('Log explorer pagination is gap-free and duplicate-free');
+
+require_once __DIR__ . '/../panel/data.php';
+
+// gp_log_query reads gp_log_dir()/guard-<date>.jsonl. Build a dense multi-chunk
+// daily file under a sentinel date and walk it page by page, following
+// next_cursor, asserting the union of returned ids is the full set with no
+// duplicates - the same shape as the simulation that proved the bug.
+$pg_dir  = gp_log_dir();
+$pg_date = '19990102';
+$pg_file = rtrim($pg_dir, '/\\') . '/guard-' . $pg_date . '.jsonl';
+if (is_file($pg_file)) {
+	t_skip('log pagination round-trip', 'sentinel log file already present');
+} elseif (!is_dir($pg_dir) || !is_writable($pg_dir)) {
+	t_skip('log pagination round-trip', 'log dir is not writable');
+} else {
+	$pg_n = 2000;
+	$pg_fh = fopen($pg_file, 'w');
+	for ($i = 0; $i < $pg_n; $i++) {
+		// Pad each line so the file spans several 64 KiB chunks.
+		fwrite($pg_fh, json_encode(array('v' => 4, 'rid' => sprintf('%012x', $i),
+			'ts' => 1700000000 + $i, 'ip' => '203.0.113.5', 'ua' => 'ua',
+			'm' => 'GET', 'p' => '/p/' . $i . '/' . str_repeat('a', 60),
+			'act' => 'allow', 'sh' => 0, 'hold' => 0, 'ovr' => '', 'tok' => 'v',
+			'dev' => 'seq' . $i, 'sc' => 0, 'esc' => 0, 'rs' => array())) . "\n");
+	}
+	fclose($pg_fh);
+	$pg_bytes = filesize($pg_file);
+	t_ok('the paginated fixture spans several chunks (' . $pg_bytes . ' bytes)',
+		$pg_bytes > 200000);
+
+	$pg_seen = array();
+	$pg_dups = 0;
+	$pg_cursor = 0;
+	$pg_pages = 0;
+	$pg_prev = null;
+	$pg_monotone = true;
+	do {
+		list($pg_rows, $pg_meta) = gp_log_query(array('date' => $pg_date), $pg_cursor, 50);
+		foreach ($pg_rows as $pg_row) {
+			$pg_id = (string)$pg_row['rid'];
+			if (isset($pg_seen[$pg_id])) { $pg_dups++; }
+			$pg_seen[$pg_id] = true;
+			$pg_num = (int)hexdec($pg_id);
+			if ($pg_prev !== null && $pg_num >= $pg_prev) { $pg_monotone = false; }
+			$pg_prev = $pg_num;
+		}
+		$pg_cursor = isset($pg_meta['next_cursor']) ? (int)$pg_meta['next_cursor'] : 0;
+		$pg_pages++;
+	} while ($pg_cursor > 0 && $pg_pages < 10000);
+
+	t_ok('pagination follows the cursor to the end without looping', $pg_pages < 10000);
+	t_ok('pagination returns every row exactly once (no duplicates)', $pg_dups === 0);
+	t_ok('pagination returns the full set with no gaps (' . count($pg_seen) . '/' . $pg_n . ')',
+		count($pg_seen) === $pg_n);
+	t_ok('the newest and oldest rows are both reachable',
+		isset($pg_seen[sprintf('%012x', 0)]) && isset($pg_seen[sprintf('%012x', $pg_n - 1)]));
+	t_ok('rows are returned strictly newest-first across page boundaries', $pg_monotone);
+	@unlink($pg_file);
+}
+
+// --------------------------------------------------------------------------
 t_section('Session cookie');
 
 require_once __DIR__ . '/../panel/auth.php';
@@ -326,6 +426,16 @@ t_ok('an empty token fails', gp_session_check('', $sec, 43200, $now) === false);
 t_ok('a non-numeric issued-at fails',
 	gp_session_check('operator.abc.' . $parts[2], $sec, 43200, $now) === false);
 
+// A username containing a dot must round-trip: the token is user.issued.hmac,
+// and parsing from the right keeps the dotted user intact (FIX #3).
+$dotted_tok = gp_session_make('admin.site', $sec, $now);
+$dotted = gp_session_check($dotted_tok, $sec, 43200, $now);
+t_ok('a dotted username round-trips through make/check',
+	is_array($dotted) && $dotted['user'] === 'admin.site' && $dotted['issued'] === $now);
+t_ok('a dotted-username token with a tampered signature still fails',
+	gp_session_check('admin.site.' . $now . '.' . strrev(gp_session_sign('admin.site', $now, $sec)),
+		$sec, 43200, $now) === false);
+
 t_ok('a fresh session is not yet due for renewal',
 	gp_session_should_renew($now, 43200, $now) === false);
 t_ok('a session past half its life is renewed',
@@ -335,9 +445,9 @@ t_ok('a session past half its life is renewed',
 t_section('CSRF');
 
 $_COOKIE[GP_SESSION_COOKIE] = $tok;
+// The GP_SELFTEST seam in gp_panel_config() injects this config, so the real
+// CSRF path is exercised here rather than only the not-installed guard.
 $GLOBALS['gp_test_panel_cfg'] = array('session_secret' => $sec);
-// gp_csrf_token reads the real panel config; without one installed it returns
-// an empty string, which must never validate.
 if (gp_panel_config() === null) {
 	t_ok('csrf is unavailable while the panel is not installed', gp_csrf_token() === '');
 	t_ok('an empty csrf token never validates', gp_csrf_check('') === false);
@@ -351,6 +461,64 @@ if (gp_panel_config() === null) {
 	t_ok('an empty csrf token is refused', gp_csrf_check('') === false);
 }
 unset($_COOKIE[GP_SESSION_COOKIE]);
+
+// --------------------------------------------------------------------------
+t_section('Sliding session renewal keeps the CSRF token valid');
+
+// A session past half its TTL is renewed in place: gp_current_user() issues a
+// new cookie. gp_csrf_token() must bind the form it renders to that renewed
+// token, not the stale cookie, or the next submit fails err_csrf once.
+$GLOBALS['gp_test_panel_cfg'] = array(
+	'username' => 'operator', 'session_secret' => $sec, 'session_ttl' => 43200);
+$old_issued = time() - 30000;                  // past half of 43200
+$old_tok = gp_session_make('operator', $sec, $old_issued);
+$_COOKIE[GP_SESSION_COOKIE] = $old_tok;
+
+t_ok('before renewal csrf is bound to the cookie token',
+	gp_effective_session_token() === null
+	&& gp_csrf_token() === hash_hmac('sha256', 'csrf.' . $old_tok, $sec));
+
+$renewed_user = gp_current_user();
+t_ok('the half-expired session still authenticates', $renewed_user === 'operator');
+$renewed_tok = gp_effective_session_token();
+t_ok('renewal recorded a fresh effective token',
+	is_string($renewed_tok) && $renewed_tok !== '' && $renewed_tok !== $old_tok);
+t_ok('after renewal csrf is bound to the renewed token, not the stale cookie',
+	gp_csrf_token() === hash_hmac('sha256', 'csrf.' . $renewed_tok, $sec));
+t_ok('the renewed csrf validates on the next submit (no one-request failure)',
+	gp_csrf_check(gp_csrf_token()) === true);
+
+unset($_COOKIE[GP_SESSION_COOKIE]);
+unset($GLOBALS['gp_test_panel_cfg']);
+
+// --------------------------------------------------------------------------
+t_section('Flash messages survive a redirect (signed cookie)');
+
+$flash_secret = bin2hex(random_bytes(32));
+$flashes = array(
+	array('kind' => 'ok', 'message' => 'override added'),
+	array('kind' => 'error', 'message' => 'train with Redis down failed'),
+);
+$flash_cookie = gp_flash_encode($flashes, $flash_secret);
+t_ok('encoding pending flashes yields a non-empty signed value',
+	is_string($flash_cookie) && $flash_cookie !== '');
+t_ok('a saved flash cookie round-trips to the same messages',
+	gp_flash_decode($flash_cookie, $flash_secret) === $flashes);
+t_ok('a tampered flash cookie yields no messages',
+	gp_flash_decode($flash_cookie . 'x', $flash_secret) === array());
+t_ok('a flash cookie signed with another secret yields no messages',
+	gp_flash_decode($flash_cookie, bin2hex(random_bytes(32))) === array());
+t_ok('a garbage flash cookie yields no messages',
+	gp_flash_decode('not-a-flash-cookie', $flash_secret) === array());
+t_ok('an empty flash list encodes to nothing to store',
+	gp_flash_encode(array(), $flash_secret) === '');
+$flash_big = array();
+for ($i = 0; $i < 200; $i++) { $flash_big[] = array('kind' => 'ok', 'message' => str_repeat('x', 40)); }
+t_ok('an oversize flash set is refused rather than bloating headers',
+	gp_flash_encode($flash_big, $flash_secret) === '');
+$flash_poison = gp_flash_encode(array(array('kind' => 'ok')), $flash_secret);
+t_ok('an entry of the wrong shape is dropped on load',
+	$flash_poison !== '' && gp_flash_decode($flash_poison, $flash_secret) === array());
 
 // --------------------------------------------------------------------------
 t_section('No panel configuration means a bare 404');

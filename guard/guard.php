@@ -457,13 +457,21 @@ function gv_match_bot($ua, array $known_bots) {
 }
 
 // Fixed-window counter. Returns the current count, or 0 in degraded mode.
+//
+// The first write uses SET key 1 EX window NX, which sets the value and the
+// expiry atomically: the key can never exist without a TTL. The old
+// INCR-then-EXPIRE sequence left a TTL-less key behind if the process died or
+// EXPIRE failed between the two commands, and once such a key crossed the limit
+// the identity was 429'd forever. Subsequent hits INCR the key that already
+// carries its TTL. Counting is unchanged (first hit 1, then 2, 3, ...) and a
+// failed read still folds to 0 (fail-open).
 function gv_bump($conn, $key, $window) {
 	if (!$conn) { return 0; }
-	$n = gv_r_incr($conn, $key);
+	$set = gv_r_set_nx_ex($conn, $key, $window, 1);
+	if ($set === 'OK') { return 1; }              // created with a TTL in one command
+	$n = gv_r_incr($conn, $key);                  // already existed
 	if ($n === false || $n === null) { return 0; }
-	$n = (int)$n;
-	if ($n === 1) { gv_r_expire($conn, $key, $window); }
-	return $n;
+	return (int)$n;
 }
 
 // --------------------------------------------------------------------------
@@ -620,9 +628,16 @@ function gv_effective_score($sc, $rep, $ml, $clf, array $cfg) {
 // Allow wins over deny: the operator's most specific intent is assumed to be
 // the rescue, and a permissive override is the five-second fix when a real
 // customer is stuck. Every read uses === '1' so a failed read is no signal.
+//
+// Both allow-by-device and allow-by-ip are honoured: a stuck customer who never
+// completed the handshake has only an IP (no device id), and allow-by-ip is the
+// documented rescue for that case. The per-device allow is checked first so a
+// device allow still overrides an IP deny for the same client, and the IP allow
+// is checked before the IP deny so allow-wins holds for IP identities too.
 function gv_override($conn, $ip, $dev) {
 	if (!$conn) { return ''; }
 	if ($dev !== '' && gv_r_get($conn, 'gv:allow:' . $dev) === '1') { return 'allow'; }
+	if ($ip  !== '' && gv_r_get($conn, 'gv:allow:' . $ip)  === '1') { return 'allow'; }
 	if ($dev !== '' && gv_r_get($conn, 'gv:deny:' . $dev) === '1') { return 'deny'; }
 	if (gv_r_get($conn, 'gv:deny:' . $ip) === '1') { return 'deny'; }
 	return '';
@@ -638,6 +653,18 @@ function gv_decide($esc, $over, $nav, $tok, $hard_block_score, $ovr) {
 	// never challenged: payment callbacks and webhooks stay untouched.
 	if ($nav && $tok !== 'v') { return 'challenge'; }
 	return 'allow';
+}
+
+// Whether the holdout slice should suppress enforcement of the intended action.
+// The holdout measures the guard's own classifier decisions without bias, so a
+// held-out 403/challenge is recorded but not enforced. Two things are never
+// suppressed: a 429 (resource protection, not a classification) and an explicit
+// operator deny (an action, not a classification, and the documented manual
+// block). Pure, so the gate stays testable in isolation.
+function gv_holdout_suppresses($hold, $ovr, $intended) {
+	if ((int)$hold !== 1) { return false; }
+	if ($ovr === 'deny') { return false; }
+	return $intended === '403' || $intended === 'challenge';
 }
 
 // --------------------------------------------------------------------------
@@ -719,6 +746,12 @@ function gv_run($t0) {
 	// 5. Known bots. Still no live reverse DNS: DNS latency does not belong in
 	// the request path. The Phase 2 analyzer verifies out of band and leaves a
 	// verdict here, so this step costs one cheap GET.
+	//
+	// This pass runs BEFORE the honeypot check (step 6) by design: a UA claiming
+	// a known bot takes the pass and is never honeypot-labelled until run_verify
+	// writes a 'bad' verdict out of band. So the honeypot is not a defense
+	// against fake-bot UAs - reordering it ahead of this would instead risk
+	// honeypot-labelling real crawlers, which is the worse failure. See #17.
 	$bot      = gv_match_bot($f['ua'], $cfg['known_bots']);
 	$bot_over = false;
 	$bot_fake = false;
@@ -848,9 +881,11 @@ function gv_run($t0) {
 	// Applied at the gate, so the intended action is still computed and logged.
 	$st['hold'] = gv_is_holdout(($st['dev'] !== '' ? $st['dev'] : $f['ip']),
 		$cfg['holdout_salt'], $cfg['holdout_pct']) ? 1 : 0;
-	if ($st['hold'] === 1 && ($intended === '403' || $intended === 'challenge')) {
-		// 429 is never held out: rate limiting is resource protection, not
-		// classification, and the holdout must not become a way to hammer a site.
+	if (gv_holdout_suppresses($st['hold'], $st['ovr'], $intended)) {
+		// Recorded as would-have-happened and allowed: the holdout measures the
+		// guard's own classifier decisions without enforcing them. An operator
+		// deny is exempt (see gv_holdout_suppresses) and still enforces, subject
+		// only to enforce.block, already applied above.
 		$enforced = false;
 	}
 

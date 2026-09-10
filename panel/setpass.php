@@ -35,6 +35,13 @@ function gp_prompt_hidden($label) {
 		$value = '';
 		readline_callback_handler_install('', function () {});
 		while (true) {
+			// KNOWN FRAGILITY (#22): mixing readline_callback_handler_install with
+			// raw stream_get_contents(STDIN, 1) reads is build-dependent and may
+			// misbehave on some readline builds. It is left as is because this is
+			// interactive one-time setup with a working visible fallback below;
+			// the robust alternative, if it ever needs hardening, is to read with
+			// readline_callback_read_char() here - but only after verifying it on
+			// the target readline-enabled build.
 			$char = stream_get_contents(STDIN, 1);
 			if ($char === "\n" || $char === "\r" || $char === '' || $char === false) { break; }
 			if ($char === chr(127) || $char === chr(8)) {
@@ -68,6 +75,15 @@ if (is_file($gp_target)) {
 $username = gp_prompt("Username: ");
 if ($username === '' || strlen($username) > 64) {
 	fwrite(STDERR, "ERROR: the username must be between 1 and 64 characters.\n");
+	exit(2);
+}
+// The session token is user.issued.hmac; a dot or whitespace in the username
+// would break parsing and lock the account out. Restrict to a delimiter-safe
+// charset at creation. (gp_session_check also parses defensively, but the
+// cleaner guarantee is to never write a username that can collide.)
+if (!preg_match('/^[A-Za-z0-9_-]+$/', $username)) {
+	fwrite(STDERR, "ERROR: the username may contain only letters, digits, "
+		. "'-' and '_' (no dots, spaces or other punctuation).\n");
 	exit(2);
 }
 

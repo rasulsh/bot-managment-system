@@ -26,9 +26,10 @@ function gp_t($key) {
 // Headers
 // --------------------------------------------------------------------------
 
-function gp_send_headers() {
+// The hardening headers shared by every panel response, minus Content-Type so
+// each caller sets its own (text/html for pages, text/csv for the log export).
+function gp_hardening_headers() {
 	if (headers_sent()) { return; }
-	header('Content-Type: text/html; charset=utf-8');
 	header('X-Content-Type-Options: nosniff');
 	header('Referrer-Policy: no-referrer');
 	header('X-Frame-Options: DENY');
@@ -38,6 +39,12 @@ function gp_send_headers() {
 	header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; "
 		. "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
 		. "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+}
+
+function gp_send_headers() {
+	if (headers_sent()) { return; }
+	header('Content-Type: text/html; charset=utf-8');
+	gp_hardening_headers();
 }
 
 // A bare 404 with no body. Used when the panel is not installed, so nothing
@@ -72,6 +79,7 @@ if (!gp_ip_allowed($gp_cfg)) {
 $gp_route = isset($_GET['r']) ? (string)$_GET['r'] : 'dashboard';
 $gp_user = gp_current_user();
 $gp_flash = array();          // array of array(kind, message)
+gp_flash_load_from_cookie();  // pick up any flash left by the previous redirect
 $gp_post = ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST';
 
 function gp_flash($kind, $message) {
@@ -79,9 +87,52 @@ function gp_flash($kind, $message) {
 	$gp_flash[] = array('kind' => $kind, 'message' => $message);
 }
 
+// Persist any pending flashes into a short-lived signed cookie (gp_flash_encode
+// lives in auth.php). SameSite=Strict like the session and csrf cookies, so it
+// rides the same-site 303 and is never sent cross-site.
+function gp_flash_save_to_cookie() {
+	global $gp_flash, $gp_cfg;
+	if (headers_sent() || empty($gp_flash)) { return; }
+	$secret = isset($gp_cfg['session_secret']) ? (string)$gp_cfg['session_secret'] : '';
+	$value = gp_flash_encode($gp_flash, $secret);
+	if ($value === '') { return; }
+	setcookie(GP_FLASH_COOKIE, $value, array(
+		'expires'  => time() + 30,
+		'path'     => gp_cookie_path(),
+		'secure'   => gp_is_https(),
+		'httponly' => true,
+		'samesite' => 'Strict',
+	));
+}
+
+// Merge flashes left by the previous request, then expire the cookie at once so
+// a message is shown exactly once. Any verification failure is ignored silently.
+function gp_flash_load_from_cookie() {
+	global $gp_flash, $gp_cfg;
+	$raw = isset($_COOKIE[GP_FLASH_COOKIE]) ? (string)$_COOKIE[GP_FLASH_COOKIE] : '';
+	if ($raw === '') { return; }
+	gp_flash_clear_cookie();
+	$secret = isset($gp_cfg['session_secret']) ? (string)$gp_cfg['session_secret'] : '';
+	foreach (gp_flash_decode($raw, $secret) as $entry) {
+		$gp_flash[] = $entry;
+	}
+}
+
+function gp_flash_clear_cookie() {
+	if (headers_sent()) { return; }
+	setcookie(GP_FLASH_COOKIE, '', array(
+		'expires'  => time() - 3600,
+		'path'     => gp_cookie_path(),
+		'secure'   => gp_is_https(),
+		'httponly' => true,
+		'samesite' => 'Strict',
+	));
+}
+
 function gp_redirect($route, $extra = array()) {
 	$query = array_merge(array('r' => $route), $extra);
 	$url = 'index.php?' . http_build_query($query);
+	gp_flash_save_to_cookie();                 // carry any pending flash across the 303
 	if (!headers_sent()) { header('Location: ' . $url, true, 303); }
 	exit;
 }
@@ -262,13 +313,16 @@ switch ($gp_route) {
 		gp_render('jobs', array('jobs' => gp_job_list(), 'redis_up' => gp_redis_up()));
 }
 
-// Unknown route.
+// Unknown route: a small, honest 404. Rendering the dashboard under a 404
+// status both masked the status and did work the request never asked for.
 gp_send_headers();
 http_response_code(404);
-gp_render('dashboard', array(
-	'snapshot' => gp_snapshot(), 'cfg' => gv_cfg_load(),
-	'kill' => gp_killswitch_on(), 'redis_up' => gp_redis_up(),
-));
+echo '<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8">'
+	. '<title>404</title><body style="font-family:sans-serif;padding:2rem">'
+	. gp_e(gp_t('err_notfound')) . ' '
+	. '<a href="index.php?r=dashboard">' . gp_e(gp_t('nav_dashboard')) . '</a>'
+	. '</body></html>';
+exit;
 
 // --------------------------------------------------------------------------
 // Request helpers
@@ -291,13 +345,19 @@ function gp_logs_filter_from_request() {
 	return $out;
 }
 
-// Stream the current page as CSV. Values are quoted and CSV-escaped by
-// fputcsv; nothing here is interpolated into HTML.
+// Stream the current page as CSV - only the rows the log view is showing, not
+// the whole filter. The export link label and its title say so (logs_export /
+// logs_export_hint); a full-filter streaming export is out of scope under the
+// existing scan-byte caps. Values are quoted and CSV-escaped by fputcsv;
+// nothing here is interpolated into HTML.
 function gp_logs_export_csv(array $rows) {
 	if (!headers_sent()) {
 		header('Content-Type: text/csv; charset=utf-8');
 		header('Content-Disposition: attachment; filename="guard-logs.csv"');
-		header('X-Content-Type-Options: nosniff');
+		// The same hardening headers as every other panel response (nosniff,
+		// X-Frame-Options, Referrer-Policy, Cache-Control, CSP); the CSV
+		// Content-Type set above is preserved because the helper never sets one.
+		gp_hardening_headers();
 	}
 	$out = fopen('php://output', 'w');
 	fwrite($out, "\xEF\xBB\xBF");     // BOM so spreadsheets read UTF-8

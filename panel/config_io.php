@@ -91,20 +91,30 @@ function gp_tail_lines($path, $max_lines, $max_bytes) {
 			$buffer = $data . $buffer;
 			$parts = explode("\n", $buffer);
 			$buffer = array_shift($parts);       // possibly partial first line
+			// Lines within this chunk, oldest-first. The outer loop walks from
+			// newer bytes to older, so this whole block is older than anything
+			// already in $out - prepend it. Appending each block instead left a
+			// multi-chunk result scrambled by chunk (only a single-chunk window
+			// came out ordered), which array_reverse in gp_audit_read then turned
+			// into a wrong newest-first order once audit.jsonl passed 64 KiB.
+			$chunk_lines = array();
 			foreach ($parts as $line) {
 				$line = trim($line);
-				if ($line !== '') { $out[] = $line; }
+				if ($line !== '') { $chunk_lines[] = $line; }
 			}
+			$out = array_merge($chunk_lines, $out);
 			if (count($out) >= $max_lines) { break; }
 		}
 		if ($pos === 0 && trim($buffer) !== '' && count($out) < $max_lines) {
+			// The final leftover is the oldest line of all; prepend it so the
+			// whole result stays oldest-first.
 			array_unshift($out, trim($buffer));
 		}
 	} catch (\Throwable $e) {
 		// fall through with whatever was read
 	}
 	fclose($fh);
-	// gp_tail_lines returns oldest-first within the scanned window.
+	// gp_tail_lines returns oldest-first across any number of chunks.
 	return $out;
 }
 

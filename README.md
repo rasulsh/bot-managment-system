@@ -2,8 +2,9 @@
 
 A drop-in request guard for any PHP application. One `require` (or one
 `auto_prepend_file` line) in front of WordPress, OpenCart, Laravel or plain PHP:
-every top-level HTML navigation from a client that cannot run JavaScript and
-keep a cookie is challenged, every request is written to a JSONL log, and an
+every top-level HTML navigation without a valid token is challenged to complete
+a small cookie handshake before it reaches the app, every request is written to
+a JSONL log, and an
 instant kill switch is one `touch` away. Redis is **optional** — without it the
 guard runs in degraded mode where rate limiting and honeypot history are off but
 logging, static scoring and the whole token/challenge handshake keep working
@@ -190,7 +191,9 @@ scored like any other client, not summarily blocked.
 ```
 
 Each mode takes its own `flock`, so overlapping firings skip cleanly rather than
-writing partial verdicts.
+writing partial verdicts. The weekly `train` run trains a **candidate** model,
+never the live one; promote it explicitly (panel "promote" or `ctl.py promote`)
+to put it in force.
 
 ## New log fields
 

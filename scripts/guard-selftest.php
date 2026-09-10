@@ -612,6 +612,27 @@ t_ok('the clamped rate stays near 5 percent (' . number_format(100.0 * $clamped 
 	abs(100.0 * $clamped / 5000 - 5.0) < 1.0);
 
 // --------------------------------------------------------------------------
+t_section('Holdout enforcement gate (FIX #12 pt1)');
+
+// The holdout suppresses the guard's own classifier decisions only; an operator
+// deny is an action, not a classification, and a 429 is resource protection -
+// neither is ever held out.
+t_ok('a held-out classifier 403 is suppressed',
+	gv_holdout_suppresses(1, '', '403') === true);
+t_ok('a held-out challenge is suppressed',
+	gv_holdout_suppresses(1, '', 'challenge') === true);
+t_ok('a held-out operator deny is NOT suppressed, so it still enforces',
+	gv_holdout_suppresses(1, 'deny', '403') === false);
+t_ok('a held-out 429 is never suppressed',
+	gv_holdout_suppresses(1, '', '429') === false);
+t_ok('outside the holdout nothing is suppressed',
+	gv_holdout_suppresses(0, '', '403') === false
+	&& gv_holdout_suppresses(0, 'deny', '403') === false);
+t_ok('an identity in the holdout slice with ovr=deny produces an enforced 403',
+	gv_decide(0, false, true, 'v', 60, 'deny') === '403'
+	&& gv_holdout_suppresses(1, 'deny', gv_decide(0, false, true, 'v', 60, 'deny')) === false);
+
+// --------------------------------------------------------------------------
 t_section('Phase 2 decision engine');
 
 t_ok('a clean tokened navigation is allowed', gv_decide(0, false, true, 'v', 60, '') === 'allow');
@@ -675,6 +696,25 @@ if ($redis_bin === '') {
 		t_ok('counter bump against live redis counts up', gv_bump($conn, $key . ':b', 60) === 1
 			&& gv_bump($conn, $key . ':b', 60) === 2);
 
+		// FIX #10: a counter is created with its TTL in one atomic command, so a
+		// key can never exist without an expiry (which became a permanent 429
+		// once it crossed the limit).
+		$nxk = $key . ':nx';
+		gv_redis_cmd($conn, array('DEL', $nxk));
+		t_ok('gv_r_set_nx_ex creates a fresh key and returns OK',
+			gv_r_set_nx_ex($conn, $nxk, 60, 1) === 'OK');
+		t_ok('the created key already carries a ttl',
+			(int)gv_redis_cmd($conn, array('TTL', $nxk)) > 0);
+		t_ok('gv_r_set_nx_ex on an existing key returns null and leaves it intact',
+			gv_r_set_nx_ex($conn, $nxk, 60, 99) === null && gv_r_get($conn, $nxk) === '1');
+		$bk = $key . ':bump';
+		gv_redis_cmd($conn, array('DEL', $bk));
+		t_ok('gv_bump sets a ttl on the very first hit',
+			gv_bump($conn, $bk, 60) === 1 && (int)gv_redis_cmd($conn, array('TTL', $bk)) > 0);
+		t_ok('gv_bump keeps counting at the same threshold past the first hit',
+			gv_bump($conn, $bk, 60) === 2 && gv_bump($conn, $bk, 60) === 3);
+		gv_redis_cmd($conn, array('DEL', $nxk, $bk));
+
 		// --- Phase 2 verdict reads against a live keyspace -----------------
 		$vip = '203.0.113.77';
 		t_ok('no verdict reads as an empty string', gv_bot_verdict($conn, $vip) === '');
@@ -718,6 +758,18 @@ if ($redis_bin === '') {
 		gv_redis_cmd($conn, array('DEL', 'gv:deny:' . $odev, 'gv:deny:' . $oip));
 		t_ok('device keys are not read for an empty device id',
 			gv_override($conn, $oip, '') === '');
+
+		// A stuck customer who never completed the handshake has only an ip, so
+		// gv:allow:{ip} must be honoured and must beat gv:deny:{ip}.
+		gv_r_setex($conn, 'gv:allow:' . $oip, 60, '1');
+		t_ok('an ip allow is read even without a device',
+			gv_override($conn, $oip, '') === 'allow');
+		gv_r_setex($conn, 'gv:deny:' . $oip, 60, '1');
+		t_ok('an ip allow beats an ip deny',
+			gv_override($conn, $oip, '') === 'allow');
+		t_ok('an ip allow still applies when a device id is present',
+			gv_override($conn, $oip, $odev) === 'allow');
+		gv_redis_cmd($conn, array('DEL', 'gv:allow:' . $oip, 'gv:deny:' . $oip));
 
 		$vdev = 'selftestdev';
 		gv_r_setex($conn, 'gv:rep:' . $vdev, 60, '-20');

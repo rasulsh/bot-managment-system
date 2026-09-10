@@ -84,6 +84,10 @@ function gp_job_enqueue($type, array $params, $actor) {
 	if ($pushed === false) {
 		return array('ok' => false, 'id' => null, 'error' => 'queue_failed');
 	}
+	// Refresh the whole list's TTL on every enqueue. This is intentional (#14):
+	// the list expires 24h after the LAST enqueue, which bounds growth if the
+	// worker is permanently down. The worker normally drains it every minute, so
+	// in practice the TTL is never reached; removing it risks unbounded growth.
 	gv_redis_cmd($conn, array('EXPIRE', GP_JOB_LIST, (string)GP_JOB_TTL));
 
 	gp_audit_append(array('event' => 'job', 'actor' => (string)$actor,
@@ -107,6 +111,11 @@ function gp_job_list($limit = 50) {
 	$cursor = '0';
 	$guard = 0;
 	do {
+		// The glob 'gp:job:*' requires the trailing colon, so it matches the
+		// per-job status keys (gp:job:<id>) but NOT the list key GP_JOB_LIST
+		// ('gp:jobs', no colon). A GET on the list key would fail and be skipped
+		// anyway, so this is doubly safe (#21d: the reviewer's collision claim is
+		// incorrect).
 		$reply = gp_scan($conn, $cursor, 'gp:job:*');
 		if ($reply === null) { break; }
 		list($cursor, $keys) = $reply;
