@@ -35,6 +35,14 @@ function gp_panel_config_path() {
 // Load the panel credentials, or null when the panel is not installed.
 // Null is the signal for a bare 404: never a wizard, never an explanation.
 function gp_panel_config() {
+	// Test seam: panel-selftest (which defines GP_SELFTEST) injects a config so
+	// the session, CSRF and renewal paths can be exercised without an installed
+	// panel. Never reachable in production - index.php does not define
+	// GP_SELFTEST - and it returns before the static cache, so a test that sets
+	// and later unsets the global leaves the real resolution untouched.
+	if (defined('GP_SELFTEST') && isset($GLOBALS['gp_test_panel_cfg'])) {
+		return $GLOBALS['gp_test_panel_cfg'];
+	}
 	static $cache = false;
 	if ($cache !== false) { return $cache; }
 	$cache = null;
@@ -164,6 +172,21 @@ function gp_session_clear() {
 	));
 }
 
+// The session token this request should derive from: the freshly issued token
+// when the session was renewed below, otherwise the raw cookie. Request-scoped.
+//
+// On the request that crosses half the TTL, gp_current_user() sets a new cookie
+// (new issued-at) but gp_csrf_token() used to read the stale $_COOKIE value, so
+// a form rendered in that response carried a token bound to the old cookie;
+// once the browser adopted the new cookie the next submit failed err_csrf once.
+// Remembering the renewed token here lets gp_csrf_token() bind the form to the
+// cookie the browser is about to adopt.
+function gp_effective_session_token($set = null) {
+	static $tok = null;
+	if ($set !== null) { $tok = (string)$set; }
+	return $tok;
+}
+
 // The current logged-in user, or null. Renews a half-expired session in place.
 function gp_current_user() {
 	$cfg = gp_panel_config();
@@ -174,8 +197,11 @@ function gp_current_user() {
 	if ($session === false) { return null; }
 	if (!hash_equals($cfg['username'], $session['user'])) { return null; }
 	if (gp_session_should_renew($session['issued'], $cfg['session_ttl'])) {
-		gp_session_set_cookie(gp_session_make($session['user'], $cfg['session_secret']),
-			$cfg['session_ttl']);
+		// Build the renewed token once and use it for both the cookie and the
+		// request-scoped holder, so CSRF tokens rendered this request match it.
+		$new = gp_session_make($session['user'], $cfg['session_secret']);
+		gp_session_set_cookie($new, $cfg['session_ttl']);
+		gp_effective_session_token($new);
 	}
 	return $session['user'];
 }
@@ -188,7 +214,13 @@ function gp_current_user() {
 function gp_csrf_token() {
 	$cfg = gp_panel_config();
 	if ($cfg === null) { return ''; }
-	$token = isset($_COOKIE[GP_SESSION_COOKIE]) ? (string)$_COOKIE[GP_SESSION_COOKIE] : '';
+	// Prefer the renewed token when this request renewed the session, so the
+	// rendered form is bound to the cookie the browser is about to adopt; fall
+	// back to the raw cookie otherwise.
+	$token = gp_effective_session_token();
+	if ($token === null || $token === '') {
+		$token = isset($_COOKIE[GP_SESSION_COOKIE]) ? (string)$_COOKIE[GP_SESSION_COOKIE] : '';
+	}
 	return hash_hmac('sha256', 'csrf.' . $token, $cfg['session_secret']);
 }
 

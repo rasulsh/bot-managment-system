@@ -445,9 +445,9 @@ t_ok('a session past half its life is renewed',
 t_section('CSRF');
 
 $_COOKIE[GP_SESSION_COOKIE] = $tok;
+// The GP_SELFTEST seam in gp_panel_config() injects this config, so the real
+// CSRF path is exercised here rather than only the not-installed guard.
 $GLOBALS['gp_test_panel_cfg'] = array('session_secret' => $sec);
-// gp_csrf_token reads the real panel config; without one installed it returns
-// an empty string, which must never validate.
 if (gp_panel_config() === null) {
 	t_ok('csrf is unavailable while the panel is not installed', gp_csrf_token() === '');
 	t_ok('an empty csrf token never validates', gp_csrf_check('') === false);
@@ -461,6 +461,35 @@ if (gp_panel_config() === null) {
 	t_ok('an empty csrf token is refused', gp_csrf_check('') === false);
 }
 unset($_COOKIE[GP_SESSION_COOKIE]);
+
+// --------------------------------------------------------------------------
+t_section('Sliding session renewal keeps the CSRF token valid');
+
+// A session past half its TTL is renewed in place: gp_current_user() issues a
+// new cookie. gp_csrf_token() must bind the form it renders to that renewed
+// token, not the stale cookie, or the next submit fails err_csrf once.
+$GLOBALS['gp_test_panel_cfg'] = array(
+	'username' => 'operator', 'session_secret' => $sec, 'session_ttl' => 43200);
+$old_issued = time() - 30000;                  // past half of 43200
+$old_tok = gp_session_make('operator', $sec, $old_issued);
+$_COOKIE[GP_SESSION_COOKIE] = $old_tok;
+
+t_ok('before renewal csrf is bound to the cookie token',
+	gp_effective_session_token() === null
+	&& gp_csrf_token() === hash_hmac('sha256', 'csrf.' . $old_tok, $sec));
+
+$renewed_user = gp_current_user();
+t_ok('the half-expired session still authenticates', $renewed_user === 'operator');
+$renewed_tok = gp_effective_session_token();
+t_ok('renewal recorded a fresh effective token',
+	is_string($renewed_tok) && $renewed_tok !== '' && $renewed_tok !== $old_tok);
+t_ok('after renewal csrf is bound to the renewed token, not the stale cookie',
+	gp_csrf_token() === hash_hmac('sha256', 'csrf.' . $renewed_tok, $sec));
+t_ok('the renewed csrf validates on the next submit (no one-request failure)',
+	gp_csrf_check(gp_csrf_token()) === true);
+
+unset($_COOKIE[GP_SESSION_COOKIE]);
+unset($GLOBALS['gp_test_panel_cfg']);
 
 // --------------------------------------------------------------------------
 t_section('Flash messages survive a redirect (signed cookie)');
