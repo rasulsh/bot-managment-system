@@ -585,6 +585,37 @@ ok('bingbot verifies against its own suffix',
 ok('a trailing dot in a PTR name is tolerated',
    botverify.matches_suffix('crawl.googlebot.com.', ['.googlebot.com']) is True)
 
+# FIX #5: IPv6 crawlers. verify_ip compares the original ip against the
+# forward-resolved set as strings, so an injected resolver returning the IPv6
+# address confirms the claim end to end for both families.
+V6_IP = '2001:4860:4860::1'
+v6 = StubResolver({V6_IP: ['crawl-v6.googlebot.com']},
+                  {'crawl-v6.googlebot.com': [V6_IP]})
+ok('an IPv6 googlebot forward-confirms ok',
+   botverify.verify_ip(V6_IP, 'googlebot', suffixes, v6) == 'ok')
+v6_mixed = StubResolver({V6_IP: ['crawl-v6.googlebot.com']},
+                        {'crawl-v6.googlebot.com': ['66.249.66.2', V6_IP]})
+ok('an IPv6 address confirms even when IPv4 addresses are also returned',
+   botverify.verify_ip(V6_IP, 'googlebot', suffixes, v6_mixed) == 'ok')
+ok('IPv4 verification is unchanged by the widened forward lookup',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, happy) == 'ok')
+
+# The real DefaultResolver.forward now resolves both families. Monkeypatch
+# getaddrinfo so the test needs no DNS, and assert both families survive,
+# de-duplicated and in order - gethostbyname_ex used to drop the IPv6 entry.
+_orig_gai = botverify.socket.getaddrinfo
+try:
+    botverify.socket.getaddrinfo = lambda host, port: [
+        (botverify.socket.AF_INET, 0, 0, '', ('66.249.66.1', 0)),
+        (botverify.socket.AF_INET6, 0, 0, '', ('2001:4860:4860::8888', 0, 0, 0)),
+        (botverify.socket.AF_INET, 0, 0, '', ('66.249.66.1', 0)),
+    ]
+    _resolved = botverify.DefaultResolver().forward('crawl.googlebot.com')
+finally:
+    botverify.socket.getaddrinfo = _orig_gai
+ok('DefaultResolver.forward returns both v4 and v6 addresses, de-duplicated',
+   _resolved == ['66.249.66.1', '2001:4860:4860::8888'])
+
 # ---------------------------------------------------------------------------
 section('Redis verdict round-trip')
 
