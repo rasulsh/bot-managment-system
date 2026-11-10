@@ -63,9 +63,33 @@ stop_server() {
 	if [ "$SERVER" = apache ]; then
 		[ -f "$WORK/apache.pid" ] && apache2 -f "$WORK/httpd.conf" -k stop >/dev/null 2>&1 || true
 	else
+		# The package starts OpenLiteSpeed (default config, user nobody) as a service
+		# when it is installed, and its lsphp children outlive "lswsctrl stop". A stale
+		# lsphp running as another user would keep answering and could neither read
+		# panel/panel.config.php (0600) nor write logs/. Stop everything, for real.
+		systemctl stop lsws lshttpd >/dev/null 2>&1 || true
 		"$LSWS/bin/lswsctrl" stop >/dev/null 2>&1 </dev/null || true
+		sleep 1
+		for n in openlitespeed lshttpd lscgid lsphp; do pkill -9 -x "$n" >/dev/null 2>&1 || true; done
+		rm -rf /tmp/lshttpd/* 2>/dev/null || true
 	fi
 	sleep 2
+}
+
+# OpenLiteSpeed only: the PHP worker must run as the web user, or the panel and the
+# guard cannot read their 0600 config / write logs. Fail with evidence, not a mystery.
+assert_php_user() {   # <path that makes PHP run>
+	[ "$SERVER" = ols ] || return 0
+	curl -s -o /dev/null "http://127.0.0.1:$PORT$1" || true
+	local users; users="$(ps -C lsphp -o user= | sort -u | tr '\n' ' ')"
+	echo "lsphp runs as: ${users:-<none>}"
+	if [ "$users" != "www-data " ]; then
+		echo "FAIL  lsphp is not running as www-data"
+		ps -eo user,pid,args | grep -E 'litespeed|lsphp|lscgid' | grep -v grep || true
+		grep -nE '^(user|group)' "$LSWS/conf/httpd_config.conf" || true
+		tail -n 20 "$LSWS/gv/logs/error.log" 2>/dev/null || true
+		fail=1
+	fi
 }
 
 start_apache() {   # <docroot> <extra-config-file or ''>
@@ -175,12 +199,21 @@ $( [ -n "${2:-}" ] && echo "  php_admin_value auto_prepend_file $2/prepend.php" 
 CONF
 	chown -R www-data:www-data "$LSWS/gv" "$LSWS/conf/vhosts/gv" /tmp/lshttpd
 	"$LSWS/bin/lswsctrl" start >/dev/null 2>&1 </dev/null
-	sleep 5
+	wait_http
+}
+
+wait_http() {   # until the listener answers (any status), at most ~40 s
+	for _ in $(seq 1 40); do
+		curl -s -o /dev/null -m 2 "http://127.0.0.1:$PORT/" && return 0
+		sleep 1
+	done
+	echo "WARN: nothing answered on port $PORT"
 }
 
 start_server() { if [ "$SERVER" = apache ]; then start_apache "$@"; else start_ols "$@"; fi; }
 
 run_checks() {   # <label> <panel path>
+	assert_php_user "$2/index.php"
 	log "$SERVER / $1: exposure-check.sh"
 	bash "$REPO/scripts/exposure-check.sh" "http://127.0.0.1:$PORT" "$2" || fail=1
 	log "$SERVER / $1: panel-smoke.sh"
