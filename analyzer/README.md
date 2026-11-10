@@ -405,3 +405,18 @@ are not.
   `redis` override in the analyzer config. All keys go through `redis_io.key()/gp_key()`,
   honouring `redis.prefix`; AUTH, ACL user, db and unix socket are supported. The client
   speaks RESP2 so Redis 5 works with redis-py 5+.
+
+## `php_bin` and the bridge (read this before cron)
+
+The analyzer learns the guard's Redis host, credentials, db and **key prefix** by running
+`php scripts/config-dump.php --redis-credentials`. Cron has a minimal `PATH`, so set
+`"php_bin": "/usr/bin/php"` (full path) in the analyzer config, and `guard_config_path` if the guard
+config is not the default.
+
+If the bridge fails the analyzer says so on stderr **on every run**
+(`WARN: could not read the guard's Redis settings via PHP ...`), the settings are marked
+unconfirmed, and every command that writes (`ctl.py allow|deny|clear`, `run_verify`, `run_nightly`
+without `--dry-run`, `worker`) refuses with `ERROR: the Redis settings are not confirmed`
+instead of writing into the wrong namespace. Read-only commands still run. To work without PHP,
+state the namespace yourself: an explicit `redis` block with a `prefix` key (even `""`) in the
+analyzer config counts as confirmed.

@@ -80,7 +80,7 @@ def main(argv=None, resolver=None):
     rows = logs_mod.read_lines(cfg['log_dir'], cfg['window_days'])
     claims = collect_bot_ips(rows, cfg['known_bots'])
 
-    client = redis_io.connect(cfg)
+    client = redis_io.connect(cfg, write=not args.dry_run)
     verified = 0
     flagged = 0
     unknown = 0

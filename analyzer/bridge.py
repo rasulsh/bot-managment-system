@@ -46,6 +46,7 @@ FALLBACK = {
 }
 
 _warned = False
+last_error = ''          # why the most recent dump_config() failed ('' = it did not)
 
 
 def _warn_once(message):
@@ -64,7 +65,11 @@ def dump_config(php='php', script=None, config_path=None, timeout=15, extra=None
     stay silent on failure; used where a missing bridge is an ordinary state.
     """
     script = script or DUMP_SCRIPT
-    warn = (lambda message: None) if quiet else _warn_once
+    def warn(message):
+        global last_error
+        last_error = str(message)
+        if not quiet:
+            _warn_once(message)
     if not os.path.isfile(script):
         warn('config dump script not found: %s' % script)
         return None
@@ -118,13 +123,28 @@ def redis_block(php='php', config_path=None):
     the default config dump (guard_config, the CLI) strips it. Cached per
     process so the PHP bridge is spawned once, not once per config load.
     """
+    return dict(redis_block_status(php, config_path)[0])
+
+
+def redis_block_status(php='php', config_path=None):
+    """(block, error): the guard's redis block and, when it could not be read, why.
+
+    A failure must never look like "the guard has default settings": the caller
+    (config.resolve_redis) reports it loudly and refuses to write.
+    """
     key = (php, config_path or '')
     if key not in _REDIS_CACHE:
+        global last_error
+        last_error = ''
         data = dump_config(php=php, config_path=config_path,
                            extra=['--redis-credentials'], quiet=True)
         block = data.get('redis') if isinstance(data, dict) else None
-        _REDIS_CACHE[key] = dict(block) if isinstance(block, dict) else {}
-    return dict(_REDIS_CACHE[key])
+        if isinstance(block, dict):
+            _REDIS_CACHE[key] = (dict(block), '')
+        else:
+            _REDIS_CACHE[key] = ({}, last_error or 'the config dump produced no redis block')
+    block, err = _REDIS_CACHE[key]
+    return dict(block), err
 
 
 def guard_config(cfg=None, php=None, config_path=None):

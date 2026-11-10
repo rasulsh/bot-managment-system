@@ -242,7 +242,7 @@ def main(argv=None):
     # safe to carry on the plain cfg dict.
     cfg['_config_path'] = args.config
 
-    client = redis_io.connect(cfg)
+    client = redis_io.connect(cfg, write=True)
     if client is None:
         print('Redis unavailable: no jobs can be drained.')
         return 0

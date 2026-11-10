@@ -52,8 +52,13 @@ def warn(message):
     print('WARN: ' + text, file=sys.stderr)
 
 
-def connect(cfg):
+def connect(cfg, write=False):
     """Return a live client, or None when Redis is unavailable.
+
+    write=True is for callers that change Redis: they get None (and an explicit
+    ERROR) unless the Redis settings were confirmed - read from the guard's config
+    or stated explicitly - because writing under guessed settings means writing
+    into the wrong namespace and reporting success.
 
     Settings come from cfg['redis'], which config.load() already resolved
     (defaults < the guard's redis block < an explicit analyzer override).
@@ -63,6 +68,10 @@ def connect(cfg):
         warn('redis-py not installed: ' + REDIS_ERROR)
         return None
     settings = (cfg or {}).get('redis') or {}
+    if write and (cfg or {}).get('redis_confirmed') is False:
+        print('ERROR: the Redis settings are not confirmed (the guard\'s config could not be read), '
+              'so nothing is written.', file=sys.stderr)
+        return None
     prefix = str(settings.get('prefix') or '')
     if not PREFIX_RE.match(prefix):
         # Same rule as the guard: an invalid prefix is a configuration error,

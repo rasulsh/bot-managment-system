@@ -2028,6 +2028,59 @@ else:
     shutil.rmtree(_rtmp, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
+section('A failed PHP bridge is loud and nothing is written against unconfirmed settings')
+
+from analyzer import ctl as ctl_mod
+if not (redis_io.REDIS_AVAILABLE and shutil.which('php')):
+    skip('bridge failure handling', 'redis-py or php missing')
+else:
+    bf_dir = tempfile.mkdtemp(prefix='gv-selftest-bridge-')
+    bf_guard = os.path.join(bf_dir, 'guard.php')
+    with open(bf_guard, 'w') as fh:
+        fh.write('<?php if (!defined("GV_BOOT")) { exit; } return array("secret" => "x", '
+                 '"redis" => array("prefix" => "shopA:"));')
+    bf_cfg = os.path.join(bf_dir, 'an.json')
+    with open(bf_cfg, 'w') as fh:
+        json_x2.dump({'guard_config_path': bf_guard, 'php_bin': '/nonexistent/php', 'log_dir': bf_dir,
+                      'model_path': os.path.join(bf_dir, 'model.joblib')}, fh)
+    probe = redis_io.connect(config_mod.DEFAULTS)
+    if probe is None:
+        skip('bridge failure handling', 'no local Redis on 6379')
+    else:
+        for k in list(probe.scan_iter(match='*203.0.113.77*')):
+            probe.delete(k)
+        err = io_mod.StringIO()
+        with contextlib.redirect_stderr(err):
+            bf = config_mod.load(bf_cfg)
+        ok('a failed bridge is reported on stderr, not swallowed',
+           'could not read the guard' in err.getvalue() and '/nonexistent/php' in err.getvalue())
+        ok('...and the settings are marked unconfirmed', bf.get('redis_confirmed') is False)
+        out, err = io_mod.StringIO(), io_mod.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ctl_mod.main(['--config', bf_cfg, 'allow', '203.0.113.77', '--ttl', '600'])
+        ok('ctl allow refuses to write against unconfirmed settings (non-zero exit, no success claim)',
+           code != 0 and 'Allow override set' not in out.getvalue() and 'not confirmed' in err.getvalue())
+        ok('...and no key at all was written (neither prefixed nor legacy)',
+           not list(probe.scan_iter(match='*203.0.113.77*')))
+        err = io_mod.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = ctl_mod.main(['--config', bf_cfg, 'list'])
+        ok('a read-only command still runs but warns again on every run', code == 0 and 'could not read the guard' in err.getvalue())
+        # An explicit, complete redis override is an operator decision: no bridge, no warning, writes allowed.
+        with open(bf_cfg, 'w') as fh:
+            json_x2.dump({'guard_config_path': bf_guard, 'php_bin': '/nonexistent/php', 'log_dir': bf_dir,
+                          'model_path': os.path.join(bf_dir, 'model.joblib'),
+                          'redis': {'host': '127.0.0.1', 'port': 6379, 'prefix': 'shopA:'}}, fh)
+        err = io_mod.StringIO()
+        with contextlib.redirect_stdout(io_mod.StringIO()), contextlib.redirect_stderr(err):
+            code = ctl_mod.main(['--config', bf_cfg, 'allow', '203.0.113.77', '--ttl', '600'])
+        ok('an explicit redis override incl. prefix is confirmed: writes work, under the prefix',
+           code == 0 and probe.get('shopA:gv:allow:203.0.113.77') == '1' and probe.get('gv:allow:203.0.113.77') is None
+           and 'could not read' not in err.getvalue())
+        probe.delete('shopA:gv:allow:203.0.113.77')
+    shutil.rmtree(bf_dir, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
 section('Source audit: Redis keys go through redis_io.key()/gp_key()')
 
 _audit_bad = []

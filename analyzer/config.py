@@ -12,6 +12,7 @@ the analyzer decides which IPs are impersonators, the guard honours the verdict.
 import copy
 import json
 import os
+import sys
 
 from analyzer import bridge
 
@@ -197,8 +198,22 @@ def resolve_redis(cfg, explicit):
     lives only in this dict - it is never printed or written anywhere.
     """
     out = dict(DEFAULTS['redis'])
-    guard = bridge.redis_block(php=cfg.get('php_bin') or 'php',
-                               config_path=cfg.get('guard_config_path') or None)
+    guard = {}
+    # The operator states the namespace explicitly (even as ''): that is a decision,
+    # not a guess, so the bridge is not needed to know it.
+    confirmed = 'prefix' in (explicit or {})
+    php = cfg.get('php_bin') or 'php'
+    guard, err = bridge.redis_block_status(php=php, config_path=cfg.get('guard_config_path') or None)
+    if not err:
+        confirmed = True
+    elif not confirmed:
+        # Loud, on EVERY run: connecting with defaults would silently write
+        # un-prefixed keys into the wrong namespace.
+        print('WARN: could not read the guard\'s Redis settings via PHP (%s): %s\n'
+              'WARN: connecting with analyzer defaults / explicit overrides; settings are NOT confirmed, so '
+              'commands that write will refuse. Fix php_bin (full path, cron has a minimal PATH) '
+              'or set redis.prefix explicitly in the analyzer config.' % (php, err), file=sys.stderr)
+    cfg['redis_confirmed'] = confirmed
     for key in REDIS_GUARD_KEYS:
         if key in guard:
             out[key] = guard[key]
