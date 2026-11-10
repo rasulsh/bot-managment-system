@@ -7,6 +7,15 @@ if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newe
 define('GV_BOOT', 1);
 require __DIR__ . '/../guard/guard.php';
 
+// Nothing in this suite may touch the repository's logs/ directory: the guard's error
+// logger falls back to it when no log_dir is known, so point it at a temp dir.
+$GV_TMP_LOGS = sys_get_temp_dir() . '/gv-guard-selftest-logs-' . getmypid();
+gv_redis_ctx(array('log_dir' => $GV_TMP_LOGS));
+register_shutdown_function(function () use ($GV_TMP_LOGS) {
+	foreach ((array)glob($GV_TMP_LOGS . '/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+	@rmdir($GV_TMP_LOGS);
+});
+
 $GV_PASS = 0;
 $GV_FAIL = 0;
 $GV_SKIP = 0;
@@ -251,7 +260,7 @@ t_ok('gv_resp_encode handles three arguments',
 t_section('Redis degraded mode');
 
 $t = microtime(true);
-$conn = gv_redis_connect(array('host' => '127.0.0.1', 'port' => 63999, 'timeout' => 0.05));
+$conn = gv_redis_connect(array('host' => '127.0.0.1', 'port' => 63999, 'timeout' => 0.05, 'breaker_ttl' => 0));
 $took = microtime(true) - $t;
 t_ok('connect to a closed port returns false', $conn === false);
 t_ok('connect to a closed port fails in under 0.2 s (took '
@@ -593,7 +602,7 @@ if (!$stall) {
 } else {
 	$stall_name = stream_socket_get_name($stall, false);
 	$stall_port = (int)substr($stall_name, strrpos($stall_name, ':') + 1);
-	$stall_conn = gv_redis_connect(array('host' => '127.0.0.1', 'port' => $stall_port,
+	$stall_conn = gv_redis_connect(array('host' => '127.0.0.1', 'port' => $stall_port, 'breaker_ttl' => 0,
 		'timeout' => 0.05));
 	t_ok('connecting to a silent server succeeds', $stall_conn !== false);
 	if ($stall_conn) {

@@ -215,13 +215,16 @@ function gv_redis_connect_do($cfg, $log_dir, $breaker) {
 		// A configuration error, never silently altered: Redis is treated as
 		// unavailable (degraded mode) and the mistake is reported.
 		gv_redis_prefix('');
-		gv_redis_ctx(array('log_dir' => (string)$log_dir, 'breaker' => false));
+		if ((string)$log_dir !== '') { gv_redis_ctx(array('log_dir' => (string)$log_dir)); }
+		gv_redis_ctx(array('breaker' => false));
 		gv_errlog('redis_prefix', 'redis.prefix is invalid (allowed: [A-Za-z0-9_.:-], max 32)');
 		return false;
 	}
 	gv_redis_prefix($prefix);
-	gv_redis_ctx(array('log_dir' => (string)$log_dir, 'breaker' => (bool)$breaker,
-		'breaker_ttl' => $ttl, 'probe' => false));
+	gv_redis_ctx(array('breaker' => (bool)$breaker, 'breaker_ttl' => $ttl, 'probe' => false));
+	// A caller that names no log directory keeps the one already in force (gv_run sets
+	// it from the config; tests point it at a temp dir) instead of resetting it.
+	if ((string)$log_dir !== '') { gv_redis_ctx(array('log_dir' => (string)$log_dir)); }
 
 	if (gv_breaker_skip()) { return false; }
 

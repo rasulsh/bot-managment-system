@@ -66,6 +66,11 @@ jobs:
         run: php -d display_errors=1 -d error_reporting=-1 scripts/panel-selftest.php
       - name: redis self-test (round trips, fail-fast, breaker, auth, prefix, handshake)
         run: php -d display_errors=1 -d error_reporting=-1 scripts/redis-selftest.php
+      - name: the suites left the working tree clean (nothing tracked or logged into the repo)
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain)"
+          test -z "$(git status --porcelain --ignored -- logs)"
 
   # --------------------------------------- Python tests + PHP/Python parity
   python-tests:
@@ -90,6 +95,11 @@ jobs:
       # PHP decision with analyzer/decision.py case by case.
       - name: analyzer self-test (includes the PHP/Python decision parity check)
         run: python analyzer/selftest.py
+      - name: the suites left the working tree clean (nothing tracked or logged into the repo)
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain)"
+          test -z "$(git status --porcelain --ignored -- logs)"
 
   # -------------------------------------------- Redis versions and auth modes
   redis-matrix:
