@@ -138,7 +138,7 @@ def collect(rows, cfg, guard_cfg):
                 stats['nav_challenged'] += 1
         if act == 'challenge' and not shadow:
             stats['challenge_served'] += 1
-        if act == 'token_issued':
+        if logs_mod.token_was_issued(r):
             stats['token_issued'] += 1
 
         try:
@@ -225,8 +225,8 @@ def collect(rows, cfg, guard_cfg):
         bucket = stats['by_day'].setdefault(day, {'requests': 0, 'nonce_bad': 0,
                                                   'botv_bad': 0, 'block': 0, 'degraded': 0})
         bucket['requests'] += 1
-        if act == 'nonce_bad':
-            bucket['nonce_bad'] += 1
+        if logs_mod.handshake_rejected(r):
+            bucket['nonce_bad'] += 1             # every refused handshake (key kept for the anomaly table)
         if botv == 'bad':
             bucket['botv_bad'] += 1
         if act == '403':

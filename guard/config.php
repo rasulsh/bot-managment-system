@@ -45,6 +45,14 @@ return array(
 		'ip_ua'  => 400,
 		'ip'     => 1200,                     // deliberately generous: CGNAT reality
 		'bot'    => 600,
+		'mint'   => 60,                       // tokens minted per IP per window (see challenge)
+	),
+	'challenge'        => array(
+		'pow_bits' => 16,                     // proof-of-work difficulty, 0-24; 0 disables
+		                                      // (~65k SHA-256 attempts at 16, well under a
+		                                      // second in a current browser)
+		'bind_ip'  => true,                   // tie a nonce to the IP it was issued to; set
+		                                      // false on networks that rotate IPs mid-page-load
 	),
 	'honeypot_path'    => '/old-archive',     // change per site; must 404 today
 	'exempt_paths'     => array(),            // URI prefixes, e.g. '/wp-cron.php', '/wp-json/'
@@ -71,5 +79,7 @@ return array(
 		'title'    => 'لطفاً چند لحظه صبر کنید…',
 		'sub'      => 'در حال بررسی مرورگر شما هستیم.',
 		'noscript' => 'برای ادامه، لطفاً JavaScript و Cookie مرورگر را فعال کنید.',
+		'failed'   => 'بررسی مرورگر شما انجام نشد.',
+		'retry'    => 'تلاش دوباره',
 	),
 );

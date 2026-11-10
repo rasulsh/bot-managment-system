@@ -424,7 +424,7 @@ function gp_settings_from_request() {
 		$out[$key] = !empty($post['f'][$key]);
 	}
 	$ints = array('hard_block_score', 'limits.window', 'limits.device', 'limits.ip_ua',
-		'limits.ip', 'limits.bot', 'holdout_pct');
+		'limits.ip', 'limits.bot', 'limits.mint', 'challenge.pow_bits', 'holdout_pct');
 	foreach ($ints as $key) {
 		if (!isset($post['f'][$key]) || $post['f'][$key] === '') { continue; }
 		$raw = trim((string)$post['f'][$key]);

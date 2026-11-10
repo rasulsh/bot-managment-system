@@ -42,7 +42,9 @@ return array(
 		'ip_ua'  => 15,
 		'ip'     => 25,
 		'bot'    => 10,
+		'mint'   => 60,
 	),
+	'challenge'        => array('pow_bits' => 16, 'bind_ip' => true),
 	'honeypot_path'    => '/old-archive',
 	'exempt_paths'     => array('/exempt-me'),
 	'exempt_params'    => array(),
@@ -57,5 +59,7 @@ return array(
 		'title'    => 'Please wait a moment...',
 		'sub'      => 'We are checking your browser.',
 		'noscript' => 'Please enable JavaScript and cookies to continue.',
+		'failed'   => 'We could not verify your browser.',
+		'retry'    => 'Try again',
 	),
 );

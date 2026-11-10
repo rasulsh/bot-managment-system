@@ -64,6 +64,7 @@ def build(rows, cfg, guard_cfg=None):
     timeline = {}
     challenge_served = 0
     token_issued = 0
+    handshake_rejected = 0
     has = {'rep': 0, 'ml': 0, 'clf': 0}
     holdout = {'requests': 0, 'challenge': 0, 'honeypot': 0}
     enforced = {'requests': 0, 'challenge': 0, 'honeypot': 0}
@@ -86,8 +87,10 @@ def build(rows, cfg, guard_cfg=None):
         decisions[act] = decisions.get(act, 0) + 1
         if act == 'challenge' and not shadow:
             challenge_served += 1
-        if act == 'token_issued':
+        if logs_mod.token_was_issued(row):
             token_issued += 1
+        if logs_mod.handshake_rejected(row):
+            handshake_rejected += 1
 
         for reason in (row.get('rs') or []):
             if isinstance(reason, str):
@@ -152,6 +155,7 @@ def build(rows, cfg, guard_cfg=None):
         'funnel': {
             'challenge_served': challenge_served,
             'token_issued': token_issued,
+            'handshake_rejected': handshake_rejected,
             'success_rate': (100.0 * token_issued / challenge_served)
                             if challenge_served else None,
             'target': float(cfg.get('challenge_success_target', 0.95)) * 100.0,

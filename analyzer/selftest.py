@@ -1177,6 +1177,48 @@ ok('replay never opens a file for writing',
    "'w'" not in replay_source and '"w"' not in replay_source)
 
 # ---------------------------------------------------------------------------
+section('Handshake acts: funnel, replay and old logs')
+
+from analyzer import snapshot as snapshot_hs
+from analyzer import replay as replay_hs
+from analyzer import report as report_hs
+
+hs_rows = [
+    row(100.0, dev='', ip='10.9.9.1', act='challenge'),
+    row(100.5, dev='h1', ip='10.9.9.1', act='token_issued'),
+    row(101.0, dev='', ip='10.9.9.2', act='challenge'),
+    row(101.2, dev='', ip='10.9.9.2', act='pow_bad', sh=0),          # refused
+    row(102.0, dev='', ip='10.9.9.3', act='challenge'),
+    row(102.2, dev='', ip='10.9.9.3', act='nonce_replay', sh=0),     # refused
+    row(103.0, dev='', ip='10.9.9.4', act='challenge'),
+    row(103.2, dev='h4', ip='10.9.9.4', act='mint_limited', sh=1),   # shadow: token WAS issued
+    row(104.0, dev='', ip='10.9.9.5', act='mint_limited', sh=0),     # refused (429)
+    row(105.0, dev='', ip='10.9.9.6', act='nonce_bad'),              # refused
+    row(106.0, dev='h7', ip='10.9.9.7', act='pow_bad', sh=1),        # shadow: token issued
+]
+ok('token_was_issued: issued and shadowed rows count',
+   [logs_mod.token_was_issued(r) for r in hs_rows if r['act'] in ('token_issued', 'mint_limited', 'pow_bad')]
+   == [True, False, True, False, True])
+ok('handshake_rejected: only non-shadow rejections count',
+   [logs_mod.handshake_rejected(r) for r in hs_rows if r['act'] in
+    ('pow_bad', 'nonce_replay', 'mint_limited', 'nonce_bad')] == [True, True, False, True, True, False])
+hs_snap = snapshot_hs.build(hs_rows, cfg, {'source': 'defaults'})
+ok('the snapshot funnel counts shadow-issued tokens as issued (3) and rejections (4)',
+   hs_snap['funnel']['token_issued'] == 3 and hs_snap['funnel']['handshake_rejected'] == 4)
+hs_stats = report_hs.collect(hs_rows, cfg, {'source': 'defaults'})
+ok('the report funnel agrees with the snapshot', hs_stats['token_issued'] == 3)
+ok('the report counts every refused handshake in its day bucket',
+   sum(b['nonce_bad'] for b in hs_stats['by_day'].values()) == 4)
+ok('the report renders with the new acts (text and html)',
+   bool(report_hs.render_text(hs_stats, 7)) and bool(report_hs.render_html(hs_stats, 7)))
+ok('replay treats the new handshake acts as non-decisions',
+   all(a in replay_hs.NON_DECISION_ACTS for a in ('nonce_replay', 'pow_bad', 'mint_limited')))
+old_rows = [row(1.0, dev='o1', act='token_issued'), row(2.0, dev='', act='nonce_bad'),
+            row(3.0, dev='o2', act='allow'), {'act': 'challenge', 'ts': 4.0, 'v': 2}]
+ok('pre-change rows (old action names, missing fields) still aggregate',
+   snapshot_hs.build(old_rows, cfg, {'source': 'defaults'})['funnel']['token_issued'] == 1)
+
+# ---------------------------------------------------------------------------
 section('Period report')
 
 from analyzer import report as report_mod

@@ -1,0 +1,20 @@
+<?php
+// Test helper: solve the challenge's proof of work from the command line.
+//
+//   php scripts/pow-solve.php <nonce>
+//
+// Prints the counter for X-GV-P, using the difficulty carried in the nonce.
+// This is what a bot would have to implement - and it is the point: a client
+// that only regex-parses the page cannot get a token without doing this work.
+if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+define('GV_BOOT', 1);
+require __DIR__ . '/../guard/challenge.php';
+
+$nonce = isset($argv[1]) ? (string)$argv[1] : '';
+$parsed = gv_nonce_parse($nonce);
+if ($parsed === false) { fwrite(STDERR, "bad nonce\n"); exit(2); }
+for ($c = 0; $c < 100000000; $c++) {
+	if (gv_pow_ok($nonce, (string)$c, $parsed[1])) { echo $c . "\n"; exit(0); }
+}
+fwrite(STDERR, "no solution\n");
+exit(1);

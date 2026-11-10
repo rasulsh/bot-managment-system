@@ -18,7 +18,7 @@ require_once __DIR__ . '/data.php';
 // before the decision step, exactly as in analyzer/replay.py.
 function gp_replay_non_decision() {
 	return array('exempt', 'allow_bot', '404_hp', 'token_issued', 'nonce_bad',
-		'allow_override');
+		'nonce_replay', 'pow_bad', 'mint_limited', 'allow_override');
 }
 
 function gp_replay_actions() {
@@ -175,7 +175,7 @@ function gp_replay_scan_day($date, array $baseline, array $candidate, $base_hard
 		if ($key === '') { continue; }
 		if ((int)($row['hp'] ?? 0) === 1 || (string)($row['botv'] ?? '') === 'bad') {
 			$labels[$key] = 1;
-		} elseif ((string)($row['act'] ?? '') === 'token_issued'
+		} elseif ((string)($row['act'] ?? '') === 'token_issued'     // not the shadowed handshake acts
 			&& !isset($labels[$key])) {
 			$labels[$key] = 0;
 		}

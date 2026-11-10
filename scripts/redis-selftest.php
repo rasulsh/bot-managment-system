@@ -32,7 +32,9 @@ function t_cleanup() {
 	// put it back exactly as it was.
 	$audit = __DIR__ . '/../panel/audit.jsonl';
 	if ($T_AUDIT_BACKUP === null) { @unlink($audit); } else { @file_put_contents($audit, $T_AUDIT_BACKUP); }
-	foreach ($T_PIDS as $pid) { @posix_kill($pid, 15); }
+	foreach ((array)@glob($T_DIR . '/redis-*.pid') as $pf) { $T_PIDS[] = (int)trim((string)@file_get_contents($pf)); }
+	foreach ($T_PIDS as $pid) { if ($pid > 1) { @posix_kill($pid, 15); } }
+	usleep(200000);
 	$files = @glob($T_DIR . '/{,.}*', GLOB_BRACE);
 	foreach ((array)$files as $f) { if (is_file($f)) { @unlink($f); } }
 	foreach ((array)@glob($T_DIR . '/*', GLOB_ONLYDIR) as $d) {
@@ -575,6 +577,138 @@ foreach (array('guard', 'panel') as $dir) {
 	}
 }
 t_ok('nothing opens Redis except the shared connect function' . ($conns ? ' (' . implode(', ', $conns) . ')' : ''), !$conns);
+
+
+// ==========================================================================
+// Work item 4: the handshake (single use, bound, proof of work, metered)
+// ==========================================================================
+
+function t_solve($nonce) {
+	$p = gv_nonce_parse($nonce);
+	for ($c = 0; $c < 50000000; $c++) { if (gv_pow_ok($nonce, (string)$c, $p[1])) { return (string)$c; } }
+	return '0';
+}
+function t_post(array $cfg, $nonce, $counter, $ua, $ip = '198.51.100.9') {
+	return t_probe($cfg, array('REQUEST_METHOD' => 'POST', 'HTTP_USER_AGENT' => $ua, 'HTTP_X_GV' => $nonce,
+		'HTTP_X_GV_P' => (string)$counter, 'REMOTE_ADDR' => $ip));
+}
+function t_rows(array $cfg) {
+	$out = array();
+	foreach ((array)glob($cfg['log_dir'] . '/guard-*.jsonl') as $f) {
+		foreach (file($f, FILE_IGNORE_NEW_LINES) as $l) { $out[] = json_decode($l, true); }
+	}
+	return $out;
+}
+$UA = 'Mozilla/5.0 (X11; Linux x86_64) Chrome/126.0 Safari/537.36';
+
+t_section('Handshake: single use, binding, proof of work');
+
+gv_redis_cmd($cx, array('FLUSHALL'));
+$cfgH = t_cfg(array(), array('log_dir' => t_mkdir_log('hs1'), 'challenge' => array('pow_bits' => 10),
+	'limits' => array('mint' => 100000, 'ip' => 100000, 'ip_ua' => 100000)));
+$n = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
+$c = t_solve($n);
+$codes = array();
+for ($i = 0; $i < 300; $i++) { $codes[] = t_post($cfgH, $n, $c, $UA)['code']; }
+$rows = t_rows($cfgH);
+$acts = array_count_values(array_column($rows, 'act'));
+t_ok('one nonce replayed 300 times yields exactly 1 token',
+	count(array_keys($codes, 204, true)) === 1 && ($acts['token_issued'] ?? 0) === 1);
+t_ok('...and 299 logged nonce_replay rejections (403)', ($acts['nonce_replay'] ?? 0) === 299 && count(array_keys($codes, 403, true)) === 299);
+
+$n2 = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
+$c2 = t_solve($n2);
+$p = t_post($cfgH, $n2, $c2, 'curl/8.0');
+t_ok('a nonce issued to UA A is rejected from UA B', $p['code'] === 403 && end(t_rows($cfgH))['act'] === 'nonce_bad');
+$p = t_post($cfgH, $n2, $c2, $UA, '203.0.113.77');
+t_ok('a nonce issued to IP A is rejected from IP B', $p['code'] === 403 && end(t_rows($cfgH))['act'] === 'nonce_bad');
+$p = t_post($cfgH, $n2, $c2, $UA);
+t_ok('the rejected attempts did not burn the nonce for its rightful owner', $p['code'] === 204);
+
+$n3 = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
+$p = t_post($cfgH, $n3, '', $UA);
+t_ok('no proof of work: rejected (pow_bad)', $p['code'] === 403 && end(t_rows($cfgH))['act'] === 'pow_bad');
+$p = t_post($cfgH, $n3, '0123', $UA);
+t_ok('a nonce that failed its proof is burned: a later correct proof cannot reuse it',
+	$p['code'] === 403 && end(t_rows($cfgH))['act'] === 'nonce_replay');
+$n4 = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
+$wrong = '1';
+while (gv_pow_ok($n4, $wrong, 10)) { $wrong = (string)((int)$wrong + 1); }
+t_ok('a wrong counter is rejected', t_post($cfgH, $n4, $wrong, $UA)['code'] === 403);
+
+$cfgB = t_cfg(array(), array('log_dir' => t_mkdir_log('hs-bind'), 'challenge' => array('pow_bits' => 0, 'bind_ip' => false)));
+$nb = gv_nonce_make('rt-secret', $UA, '', 0);
+t_ok('bind_ip = false: the same nonce works from another address', t_post($cfgB, $nb, '', $UA, '203.0.113.200')['code'] === 204);
+
+// Monitor mode: nothing new may block, whatever is wrong with the request.
+$cfgM = t_cfg(array(), array('log_dir' => t_mkdir_log('hs-mon'), 'challenge' => array('pow_bits' => 10),
+	'enforce' => array('block' => false, 'challenge' => false, 'ratelimit' => false)));
+$nm = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
+$p1 = t_post($cfgM, $nm, '', $UA);
+$r1 = end(t_rows($cfgM));
+$p2 = t_post($cfgM, $nm, '', $UA);
+$r2 = end(t_rows($cfgM));
+t_ok('monitor mode: a missing proof is logged (pow_bad, sh=1) but the token is still issued',
+	$p1['code'] === 204 && $r1['act'] === 'pow_bad' && $r1['sh'] === 1);
+t_ok('monitor mode: a replay is logged (nonce_replay, sh=1) but not refused',
+	$p2['code'] === 204 && $r2['act'] === 'nonce_replay' && $r2['sh'] === 1);
+$cfgC = t_cfg(array(), array('log_dir' => t_mkdir_log('hs-chg'), 'secret' => 'CHANGE_ME', 'challenge' => array('pow_bits' => 10)));
+$nc = gv_nonce_make('CHANGE_ME', $UA, '198.51.100.9', 10);
+$p = t_post($cfgC, $nc, '', $UA);
+t_ok('secret = CHANGE_ME forces monitor mode for the new checks too', $p['code'] === 204 && end(t_rows($cfgC))['sh'] === 1);
+
+t_section('Handshake: minting is metered');
+
+gv_redis_cmd($cx, array('FLUSHALL'));
+$cfgL = t_cfg(array(), array('log_dir' => t_mkdir_log('mint'), 'challenge' => array('pow_bits' => 0),
+	'limits' => array('mint' => 5, 'ip' => 100000, 'ip_ua' => 100000)));
+$codes = array();
+for ($i = 0; $i < 8; $i++) { $codes[] = t_post($cfgL, gv_nonce_make('rt-secret', $UA, '198.51.100.9', 0), '', $UA)['code']; }
+t_ok('more than limits.mint mints per window are refused with 429 when enforce.ratelimit is on',
+	array_slice($codes, 0, 5) === array(204, 204, 204, 204, 204) && array_slice($codes, 5) === array(429, 429, 429));
+$last = end(t_rows($cfgL));
+t_ok('...logged as mint_limited with sh=0', $last['act'] === 'mint_limited' && $last['sh'] === 0);
+t_ok('another IP is unaffected', t_post($cfgL, gv_nonce_make('rt-secret', $UA, '198.51.100.55', 0), '', $UA, '198.51.100.55')['code'] === 204);
+gv_redis_cmd($cx, array('SET', 'gv:allow:198.51.100.9', '1', 'EX', '60'));
+t_ok('an allow-listed IP is never refused a token', t_post($cfgL, gv_nonce_make('rt-secret', $UA, '198.51.100.9', 0), '', $UA)['code'] === 204);
+gv_redis_cmd($cx, array('DEL', 'gv:allow:198.51.100.9'));
+t_ok('handshake POSTs bump the ordinary ip and ip_ua counters',
+	(int)gv_redis_cmd($cx, array('GET', 'gv:ri:198.51.100.9')) >= 9);
+
+gv_redis_cmd($cx, array('FLUSHALL'));
+$cfgS = t_cfg(array(), array('log_dir' => t_mkdir_log('mint-shadow'), 'challenge' => array('pow_bits' => 0),
+	'enforce' => array('block' => true, 'challenge' => true, 'ratelimit' => false),
+	'limits' => array('mint' => 3, 'ip' => 100000, 'ip_ua' => 100000)));
+$codes = array();
+for ($i = 0; $i < 6; $i++) { $codes[] = t_post($cfgS, gv_nonce_make('rt-secret', $UA, '198.51.100.9', 0), '', $UA)['code']; }
+$rows = t_rows($cfgS);
+t_ok('with enforce.ratelimit off the mint limit only logs (sh=1) and every token is still issued',
+	$codes === array(204, 204, 204, 204, 204, 204) && end($rows)['act'] === 'mint_limited' && end($rows)['sh'] === 1);
+
+t_section('Handshake: Redis down');
+
+$cfgD2 = t_cfg(array('port' => 63997), array('log_dir' => t_mkdir_log('hs-down'), 'challenge' => array('pow_bits' => 10)));
+$nd = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
+$cd = t_solve($nd);
+$p1 = t_post($cfgD2, $nd, $cd, $UA);
+$row = end(t_rows($cfgD2));
+t_ok('Redis down: a human still passes the challenge (204, rd=1)', $p1['code'] === 204 && $row['rd'] === 1 && $row['act'] === 'token_issued');
+t_ok('Redis down: proof of work and binding still apply',
+	t_post($cfgD2, gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10), '', $UA)['code'] === 403
+	&& t_post($cfgD2, $nd, $cd, 'curl/8')['code'] === 403);
+$hole2 = @stream_socket_server('tcp://127.0.0.1:0', $en, $es);
+$hn2 = stream_socket_get_name($hole2, false);
+$cfgH2 = t_cfg(array('port' => (int)substr($hn2, strrpos($hn2, ':') + 1)), array('log_dir' => t_mkdir_log('hs-hole'), 'challenge' => array('pow_bits' => 0)));
+$ph = t_post($cfgH2, gv_nonce_make('rt-secret', $UA, '198.51.100.9', 0), '', $UA);
+t_ok('Redis stalled: the handshake pays one timeout, then succeeds', $ph['code'] === 204 && $ph['ms'] < 400);
+fclose($hole2);
+
+t_section('Handshake: round trips');
+
+gv_redis_cmd($cx, array('FLUSHALL'));
+$cfgR = t_cfg(array(), array('log_dir' => t_mkdir_log('hs-rt'), 'challenge' => array('pow_bits' => 0)));
+$pr = t_post($cfgR, gv_nonce_make('rt-secret', $UA, '198.51.100.9', 0), '', $UA);
+t_ok('a handshake costs one round trip (' . $pr['rt'] . ')', $pr['rt'] === 1 && $pr['code'] === 204);
 
 echo "\nPASS $GV_PASS  FAIL $GV_FAIL  SKIP $GV_SKIP\n";
 exit($GV_FAIL === 0 ? 0 : 1);

@@ -230,8 +230,8 @@ def session_labels(session, device_history=None):
             hp_any = 1
         act = str(row.get('act') or '')
         shadow = int(row.get('sh') or 0) == 1
-        if act == 'token_issued':
-            solved = 1
+        if act == 'token_issued':      # deliberately NOT token_was_issued(): a shadowed
+            solved = 1                 # handshake (proof of work skipped) is no human evidence
         elif act in ('challenge', '403') and not shadow:
             served_gate = 1
 

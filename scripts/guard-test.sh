@@ -34,6 +34,15 @@ browser() {
 		"$@"
 }
 
+# The handshake needs the nonce's binding (same User-Agent) and its proof of
+# work. This is what a bot would have to implement.
+handshake() {   # $1 nonce, $2 cookie jar, [$3 user agent] -> prints the HTTP status
+	local n="$1" jar="$2" ua="${3:-$CHROME_UA}" c
+	c=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$n" 2>/dev/null)
+	curl -sk -o /dev/null -w '%{http_code}' -X POST -H "User-Agent: $ua" \
+		-H "X-GV: $n" -H "X-GV-P: $c" -c "$jar" "$BASE_URL/"
+}
+
 row() {
 	printf '%-44s | %-6s | %-18s | %s\n' "$1" "$2" "$3" "$4"
 }
@@ -58,19 +67,53 @@ row '3 GET / as a browser, no cookie' "$got" '200' '503'
 # 4. Full handshake: challenge -> POST X-GV -> token cookie -> allowed.
 jar=$(mktemp)
 body=$(browser "$BASE_URL/")
-nonce=$(printf '%s' "$body" | sed -n "s/.*'X-GV': '\([0-9a-f.]*\)'.*/\1/p" | head -1)
+nonce=$(printf '%s' "$body" | sed -n "s/.*var N = '\([0-9a-f.]*\)'.*/\1/p" | head -1)
 if [ -z "$nonce" ]; then
 	row '4a extract nonce from challenge body' 'none' 'n/a (no challenge)' 'nonce found'
 	row '4b POST handshake with X-GV' 'SKIP' 'n/a' '204'
 	row '4c GET / with the issued cookie' 'SKIP' 'n/a' '200'
 else
 	row '4a extract nonce from challenge body' 'ok' 'n/a (no challenge)' 'nonce found'
-	got=$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H "X-GV: $nonce" -c "$jar" "$BASE_URL/")
+	got=$(handshake "$nonce" "$jar")
 	row '4b POST handshake with X-GV' "$got" '204' '204'
 	got=$(browser -o /dev/null -w '%{http_code}' -b "$jar" "$BASE_URL/")
 	row '4c GET / with the issued cookie' "$got" '200' '200'
 fi
 rm -f "$jar"
+
+# 4d-4h. Challenge hardening. Each case fetches its own nonce.
+fresh_nonce() {   # $1 = optional extra curl args (e.g. another User-Agent)
+	browser "$BASE_URL/?gv=n$RANDOM" | sed -n "s/.*var N = '\([0-9a-f.]*\)'.*/\1/p" | head -1
+}
+n1=$(fresh_nonce)
+if [ -n "$n1" ]; then
+	pow=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$n1")
+	# Same nonce, replayed 6 times with a valid proof: exactly one token.
+	ok_count=0
+	for i in $(seq 1 6); do
+		c=$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H "User-Agent: $CHROME_UA" \
+			-H "X-GV: $n1" -H "X-GV-P: $pow" "$BASE_URL/")
+		[ "$c" = '204' ] && ok_count=$((ok_count + 1))
+	done
+	row '4d one nonce replayed 6x yields tokens' "$ok_count" '6 (no Redis state)' '1'
+	n2=$(fresh_nonce)
+	got=$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H "User-Agent: $CHROME_UA" -H "X-GV: $n2" "$BASE_URL/")
+	row '4e handshake without a proof of work' "$got" '204 (shadow)' '403'
+	n3=$(fresh_nonce)
+	pow3=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$n3")
+	got=$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: python-requests/2.31' \
+		-H "X-GV: $n3" -H "X-GV-P: $pow3" "$BASE_URL/")
+	row '4f nonce used with another User-Agent' "$got" '403' '403'
+else
+	row '4d-4f challenge hardening' 'SKIP' 'n/a' 'no challenge served'
+fi
+# The tiny dev limits would otherwise carry these extra requests into case 5+.
+if command -v "${REDIS_CLI:-redis-cli}" >/dev/null 2>&1; then
+	for pattern in 'gv:ri:*' 'gv:riu:*' 'gv:rd:*' 'gv:mint:*'; do
+		keys=$("${REDIS_CLI:-redis-cli}" ${REDIS_ARGS:--h 127.0.0.1 -p 6379} --scan --pattern "$pattern" 2>/dev/null)
+		[ -n "$keys" ] && echo "$keys" | xargs -r "${REDIS_CLI:-redis-cli}" ${REDIS_ARGS:--h 127.0.0.1 -p 6379} del >/dev/null 2>&1
+	done
+fi
 
 # 5. Honeypot fires regardless of the enforce toggles.
 got=$(browser -o /dev/null -w '%{http_code}' "$BASE_URL/old-archive")
@@ -167,10 +210,10 @@ else
 	# handshake first: the device_id is the leading field of the token cookie.
 	jar=$(mktemp)
 	body=$(browser "$BASE_URL/?gv=seed")
-	nonce=$(printf '%s' "$body" | sed -n "s/.*'X-GV': '\([0-9a-f.]*\)'.*/\1/p" | head -1)
+	nonce=$(printf '%s' "$body" | sed -n "s/.*var N = '\([0-9a-f.]*\)'.*/\1/p" | head -1)
 	dev=''
 	if [ -n "$nonce" ]; then
-		curl -sk -o /dev/null -X POST -H "X-GV: $nonce" -c "$jar" "$BASE_URL/" >/dev/null 2>&1
+		handshake "$nonce" "$jar" >/dev/null 2>&1
 		dev=$(awk '$6 == "_gv" {print $7}' "$jar" | head -1 | cut -d. -f1)
 	fi
 
@@ -287,9 +330,9 @@ if ! command -v "$JQ_BIN" >/dev/null 2>&1 || [ ! -r "$LOG_FILE" ]; then
 else
 	jar4=$(mktemp)
 	body=$(browser "$BASE_URL/?gv=p4seed")
-	nonce=$(printf '%s' "$body" | sed -n "s/.*'X-GV': '\([0-9a-f.]*\)'.*/\1/p" | head -1)
+	nonce=$(printf '%s' "$body" | sed -n "s/.*var N = '\([0-9a-f.]*\)'.*/\1/p" | head -1)
 	if [ -n "$nonce" ]; then
-		curl -sk -o /dev/null -X POST -H "X-GV: $nonce" -c "$jar4" "$BASE_URL/" >/dev/null 2>&1
+		handshake "$nonce" "$jar4" >/dev/null 2>&1
 	fi
 
 	# 17. An allowed request the application 404s: the status the guard never

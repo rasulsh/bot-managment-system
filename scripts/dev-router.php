@@ -5,7 +5,10 @@
 //
 // Every request passes through the full guard first, so the whole flow can be
 // exercised without any host platform. Test use only.
-putenv('GV_CONFIG=' . __DIR__ . '/config.dev.php');
+// GV_DEV_CONFIG lets a test harness swap in a variant of the dev config (for
+// example with roomier rate limits for a browser run).
+$gv_dev_config = getenv('GV_DEV_CONFIG');
+putenv('GV_CONFIG=' . (is_string($gv_dev_config) && $gv_dev_config !== '' ? $gv_dev_config : __DIR__ . '/config.dev.php'));
 require __DIR__ . '/../prepend.php';
 
 // Reached only when the guard allowed the request. Everything below stands in

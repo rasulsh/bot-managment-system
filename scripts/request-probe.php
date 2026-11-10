@@ -23,7 +23,7 @@ $gv_start = microtime(true);
 ob_start();
 register_shutdown_function(function () use ($gv_start) {
 	$out = (string)ob_get_clean();
-	echo json_encode(array('rt' => gv_redis_rt(), 'bytes' => strlen($out),
+	echo json_encode(array('rt' => gv_redis_rt(), 'bytes' => strlen($out), 'code' => http_response_code(),
 		'ms' => round((microtime(true) - $gv_start) * 1000, 2))) . "\n";
 });
 try {

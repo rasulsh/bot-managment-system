@@ -88,6 +88,56 @@ t_ok('nonce with tampered signature fails', gv_nonce_check($nonce . 'x', $secret
 t_ok('malformed nonce fails', gv_nonce_check('abc', $secret, 120) === false);
 
 // --------------------------------------------------------------------------
+t_section('Nonce binding, difficulty and proof of work');
+
+$UA_A = 'Mozilla/5.0 UA-A';
+$UA_B = 'curl/8.0';
+$nb = gv_nonce_make($secret, $UA_A, '203.0.113.5', 8);
+t_ok('a nonce carries id and difficulty', gv_nonce_parse($nb) !== false && gv_nonce_parse($nb)[1] === 8
+	&& strlen(gv_nonce_parse($nb)[0]) === 16);
+t_ok('a nonce verifies for the client it was issued to', gv_nonce_check($nb, $secret, 120, $UA_A, '203.0.113.5') === true);
+t_ok('a nonce is rejected for another User-Agent', gv_nonce_check($nb, $secret, 120, $UA_B, '203.0.113.5') === false);
+t_ok('a nonce is rejected for another IP', gv_nonce_check($nb, $secret, 120, $UA_A, '203.0.113.6') === false);
+$nu = gv_nonce_make($secret, $UA_A, '', 8);
+t_ok('with IP binding off the IP is ignored but the UA still counts',
+	gv_nonce_check($nu, $secret, 120, $UA_A, '') === true && gv_nonce_check($nu, $secret, 120, $UA_B, '') === false);
+t_ok('the difficulty cannot be edited without breaking the signature',
+	gv_nonce_check(preg_replace('/\.8\./', '.0.', $nb, 1), $secret, 120, $UA_A, '203.0.113.5') === false);
+t_ok('the old three-part nonce format is refused', gv_nonce_check(time() . '.abcdef0123456789.' . hash_hmac('sha256', 'x', $secret), $secret, 120) === false);
+t_ok('an out-of-range difficulty is refused', gv_nonce_parse(time() . '.0123456789abcdef.25.' . str_repeat('0', 64)) === false);
+t_ok('two nonces never share an id', gv_nonce_parse(gv_nonce_make($secret))[0] !== gv_nonce_parse(gv_nonce_make($secret))[0]);
+
+$pw = gv_nonce_make($secret, $UA_A, '203.0.113.5', 12);
+$solved = -1;
+for ($c = 0; $c < 2000000; $c++) { if (gv_pow_ok($pw, (string)$c, 12)) { $solved = $c; break; } }
+t_ok('a counter satisfying 12 bits is found and verifies', $solved >= 0 && gv_pow_ok($pw, (string)$solved, 12));
+// Fixed strings, so the result is deterministic: a counter solved for one nonce
+// does not (for these inputs) satisfy another.
+$fx1 = 'fixed-nonce-one';
+$fx2 = 'fixed-nonce-two';
+$fxc = -1;
+for ($c = 0; $c < 2000000; $c++) { if (gv_pow_ok($fx1, (string)$c, 16)) { $fxc = $c; break; } }
+t_ok('a counter solved for one nonce does not satisfy another', $fxc >= 0 && !gv_pow_ok($fx2, (string)$fxc, 16));
+t_ok('the counter just below the solution does not satisfy the nonce either',
+	$fxc === 0 || !gv_pow_ok($fx1, (string)($fxc - 1), 16));
+t_ok('difficulty 0 needs no proof', gv_pow_ok($pw, '', 0) === true && gv_pow_ok($pw, 'junk', 0) === true);
+t_ok('a missing proof fails when work is required', gv_pow_ok($pw, '', 12) === false);
+t_ok('a non-numeric counter fails', gv_pow_ok($pw, '1e3', 12) === false && gv_pow_ok($pw, '-5', 12) === false
+	&& gv_pow_ok($pw, str_repeat('9', 13), 12) === false);
+$ref = function ($nonce, $c, $bits) {
+	$h = hash('sha256', $nonce . ':' . $c, true);
+	$bin = '';
+	for ($i = 0; $i < 4; $i++) { $bin .= str_pad(decbin(ord($h[$i])), 8, '0', STR_PAD_LEFT); }
+	return substr($bin, 0, $bits) === str_repeat('0', $bits);
+};
+$agree = true;
+for ($bits = 1; $bits <= 24; $bits += 3) {
+	for ($c = 0; $c < 300; $c++) {
+		if (gv_pow_ok($pw, (string)$c, $bits) !== $ref($pw, $c, $bits)) { $agree = false; }
+	}
+}
+t_ok('gv_pow_ok agrees with a bit-string reference for difficulties 1-24', $agree);
+
 t_section('CIDR matcher');
 
 t_ok('ip inside /24 matches', gv_cidr_match('192.168.1.55', '192.168.1.0/24') === true);
