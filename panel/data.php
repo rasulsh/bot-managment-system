@@ -459,6 +459,31 @@ function gp_guard_health() {
 	return $out;
 }
 
+// Is the guard's data reachable by an ordinary web request? True when the
+// repository root or the log directory sits inside the document root, which is
+// the layout docs/03-SETUP.md warns against (the .htaccess files are a safety
+// net, not the plan). Cheap, filesystem-only, no outbound request. Returns the
+// list of offending paths (empty = fine or unknown).
+function gp_exposure_paths($docroot, array $paths) {
+	$root = $docroot !== '' ? @realpath($docroot) : false;
+	if ($root === false || $root === '') { return array(); }
+	$root = rtrim(str_replace('\\', '/', $root), '/');
+	$out = array();
+	foreach ($paths as $path) {
+		$real = @realpath((string)$path);
+		if ($real === false) { continue; }
+		$real = str_replace('\\', '/', $real);
+		if ($real === $root || strncmp($real, $root . '/', strlen($root) + 1) === 0) { $out[] = $real; }
+	}
+	return $out;
+}
+
+function gp_exposure_warning() {
+	$cfg = gv_cfg_load();
+	$docroot = isset($_SERVER['DOCUMENT_ROOT']) ? (string)$_SERVER['DOCUMENT_ROOT'] : '';
+	return gp_exposure_paths($docroot, array(dirname(__DIR__), (string)$cfg['log_dir']));
+}
+
 // Read-only description of how the guard reaches Redis, for the dashboard.
 // Deliberately built field by field: the password and username are NEVER part
 // of this array, only whether authentication is configured.

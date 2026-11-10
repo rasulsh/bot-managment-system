@@ -68,6 +68,8 @@ return array(
 	'dash_redis_up'     => 'در دسترس',
 	'dash_redis_down'   => 'در دسترس نیست',
 	'dash_redis_endpoint' => 'نشانی ردیس',
+	'dash_exposed'      => 'داده‌های نگهبان داخل ریشهٔ وب‌سایت هستند',
+	'dash_exposed_help' => 'مخزن یا پوشهٔ لاگ داخل DocumentRoot قرار دارد. فایل‌های .htaccess فقط یک لایهٔ پشتیبان‌اند؛ چیدمان پیشنهادی را از docs/03-SETUP.md اجرا کنید و scripts/exposure-check.sh را اجرا کنید.',
 	'dash_breaker'      => 'قطع‌کنندهٔ ردیس',
 	'dash_breaker_open' => 'ردیس موقتاً نادیده گرفته می‌شود',
 	'dash_last_error'   => 'آخرین خطای نگهبان',

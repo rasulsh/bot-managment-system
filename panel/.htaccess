@@ -47,6 +47,23 @@
 	</IfModule>
 </FilesMatch>
 
+# Second, independent mechanism for servers that do not honour the authorization
+# directives in .htaccess: only the entry point and the static assets may be
+# served; everything else answers 403. The empty alternative is the directory
+# request (/panel/), which DirectoryIndex then maps to index.php. This file lists
+# the complete set on its own: a parent directory's deny-all rewrite rule is not
+# applied here (verified on Apache 2.4 and OpenLiteSpeed 1.9).
+#
+# Apache only evaluates RewriteRule where Options FollowSymLinks or
+# SymLinksIfOwnerMatch is on; with neither (for example "Options None" in an
+# Alias block) every panel request would answer 403. docs/03-SETUP.md shows the
+# Alias block with Options FollowSymLinks.
+<IfModule mod_rewrite.c>
+	RewriteEngine On
+	RewriteRule ^(|index\.php|assets/[A-Za-z0-9._-]+\.(css|woff2))$ - [L]
+	RewriteRule ^ - [F,L]
+</IfModule>
+
 <IfModule mod_headers.c>
 	Header set X-Content-Type-Options "nosniff"
 	Header set Referrer-Policy "no-referrer"

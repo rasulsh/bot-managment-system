@@ -1,0 +1,22 @@
+# Bot Guard repository root: deny EVERYTHING by default.
+#
+# Anything without a more specific rule - .git/, .venv/, docs/, analyzer/,
+# guard.off, dotfiles, *.md, *.json, *.jsonl, *.gz, *.joblib, *.log - is
+# unreachable from the web. panel/.htaccess is the only place that re-grants
+# access (to index.php and the static assets). The supported layout keeps this
+# whole tree OUTSIDE the document root (docs/03-SETUP.md); this file is the
+# safety net for installs that ended up inside it.
+<IfModule mod_authz_core.c>
+	Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+	Order allow,deny
+	Deny from all
+</IfModule>
+# Second, independent mechanism: servers differ in which directive family they
+# honour inside .htaccess (Apache 2.4 reads both; LiteSpeed's support for the
+# authorization family varies by edition), so a rewrite rule answers 403 as well.
+<IfModule mod_rewrite.c>
+	RewriteEngine On
+	RewriteRule ^ - [F,L]
+</IfModule>

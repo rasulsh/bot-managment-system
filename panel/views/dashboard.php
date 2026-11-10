@@ -27,6 +27,14 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 	</p>
 </div>
 
+<?php if (!empty($exposed)): ?>
+<div class="gp-card" style="border-color:#c0392b">
+	<span class="gp-badge gp-badge-bad"><?= gp_e(gp_t('dash_exposed')) ?></span>
+	<p class="gp-help"><?= gp_e(gp_t('dash_exposed_help')) ?></p>
+	<p class="gp-mono" dir="ltr"><?= gp_e(implode('  ', $exposed)) ?></p>
+</div>
+<?php endif; ?>
+
 <!-- The kill switch: the single most important control in this panel. -->
 <div class="gp-kill <?= $kill ? 'gp-kill-stopped' : 'gp-kill-armed' ?>">
 	<div class="gp-card-title" style="margin-bottom:.5rem">

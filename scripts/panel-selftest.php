@@ -749,6 +749,24 @@ $dash_src = file_get_contents(__DIR__ . '/../panel/views/dashboard.php') . file_
 t_ok('no panel view reads redis.password', strpos($dash_src, "['password']") === false);
 
 // --------------------------------------------------------------------------
+t_section('Exposure warning (data under the document root)');
+
+$ex_base = sys_get_temp_dir() . '/gp-expo-' . getmypid();
+@mkdir($ex_base . '/site/sub', 0775, true);
+@mkdir($ex_base . '/outside', 0775, true);
+t_ok('a path inside the document root is flagged',
+	count(gp_exposure_paths($ex_base . '/site', array($ex_base . '/site/sub'))) === 1);
+t_ok('a path outside the document root is not',
+	gp_exposure_paths($ex_base . '/site', array($ex_base . '/outside')) === array());
+t_ok('a sibling with the same name prefix is not mistaken for a child',
+	gp_exposure_paths($ex_base . '/site', array($ex_base . '/outside')) === array()
+	&& gp_exposure_paths($ex_base . '/site', array($ex_base)) === array());
+t_ok('the document root itself is flagged', count(gp_exposure_paths($ex_base . '/site', array($ex_base . '/site'))) === 1);
+t_ok('an unknown document root warns about nothing', gp_exposure_paths('', array($ex_base . '/site')) === array());
+t_ok('a missing path is ignored', gp_exposure_paths($ex_base . '/site', array($ex_base . '/site/none')) === array());
+@rmdir($ex_base . '/site/sub'); @rmdir($ex_base . '/site'); @rmdir($ex_base . '/outside'); @rmdir($ex_base);
+
+// --------------------------------------------------------------------------
 t_section('No shell execution anywhere under panel/');
 
 $forbidden = array('exec', 'shell_exec', 'system', 'passthru', 'proc_open',

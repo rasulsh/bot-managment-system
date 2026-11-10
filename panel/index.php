@@ -209,6 +209,7 @@ switch ($gp_route) {
 			'redis_up' => gp_redis_up(),
 			'health'   => gp_guard_health(),
 			'rinfo'    => gp_redis_info(),
+			'exposed'  => gp_exposure_warning(),
 		));
 
 	case 'logs':
