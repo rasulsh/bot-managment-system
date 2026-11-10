@@ -5,6 +5,13 @@
 // there is no dynamic include of a path derived from the request.
 declare(strict_types=0);
 
+if (PHP_VERSION_ID < 80000) {
+	http_response_code(500);
+	header('Content-Type: text/plain; charset=utf-8');
+	echo 'Bot Guard panel requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n";
+	exit;
+}
+
 define('GP_BOOT', 1);
 
 require_once __DIR__ . '/config_io.php';
@@ -207,6 +214,9 @@ switch ($gp_route) {
 			'cfg'      => gv_cfg_load(),
 			'kill'     => gp_killswitch_on(),
 			'redis_up' => gp_redis_up(),
+			'health'   => gp_guard_health(),
+			'rinfo'    => gp_redis_info(),
+			'exposed'  => gp_exposure_warning(),
 		));
 
 	case 'logs':
@@ -422,7 +432,7 @@ function gp_settings_from_request() {
 		$out[$key] = !empty($post['f'][$key]);
 	}
 	$ints = array('hard_block_score', 'limits.window', 'limits.device', 'limits.ip_ua',
-		'limits.ip', 'limits.bot', 'holdout_pct');
+		'limits.ip', 'limits.bot', 'limits.mint', 'challenge.pow_bits', 'holdout_pct');
 	foreach ($ints as $key) {
 		if (!isset($post['f'][$key]) || $post['f'][$key] === '') { continue; }
 		$raw = trim((string)$post['f'][$key]);

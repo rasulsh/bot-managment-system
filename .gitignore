@@ -31,3 +31,13 @@ guard/config.local.json.tmp*
 analyzer/snapshot.json
 analyzer/snapshot.json.tmp
 analyzer/.lastrun-*
+
+# Runtime files the guard writes into logs/ (error log, throttle markers, circuit-breaker marker).
+logs/guard-errors.log
+logs/guard-errors-*.log
+logs/guard-errors-*.log.gz
+logs/.err-*
+logs/.redis-down
+# Analyzer run statistics (next to the model).
+analyzer/.laststats-*
+analyzer/*.tmp

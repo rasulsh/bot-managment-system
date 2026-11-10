@@ -46,6 +46,7 @@ FALLBACK = {
 }
 
 _warned = False
+last_error = ''          # why the most recent dump_config() failed ('' = it did not)
 
 
 def _warn_once(message):
@@ -57,13 +58,22 @@ def _warn_once(message):
         _warned = True
 
 
-def dump_config(php='php', script=None, config_path=None, timeout=15):
-    """Run config-dump.php and return the parsed dict, or None on any failure."""
+def dump_config(php='php', script=None, config_path=None, timeout=15, extra=None, quiet=False):
+    """Run config-dump.php and return the parsed dict, or None on any failure.
+
+    extra: additional argv for the script (the Redis credentials mode). quiet:
+    stay silent on failure; used where a missing bridge is an ordinary state.
+    """
     script = script or DUMP_SCRIPT
+    def warn(message):
+        global last_error
+        last_error = str(message)
+        if not quiet:
+            _warn_once(message)
     if not os.path.isfile(script):
-        _warn_once('config dump script not found: %s' % script)
+        warn('config dump script not found: %s' % script)
         return None
-    cmd = [php, script]
+    cmd = [php, script] + list(extra or [])
     if config_path:
         cmd += ['--config', config_path]
     try:
@@ -77,28 +87,64 @@ def dump_config(php='php', script=None, config_path=None, timeout=15):
             proc.communicate(timeout=5)
         except Exception:
             pass
-        _warn_once('config dump timed out after %ss (%s)' % (timeout, ' '.join(cmd)))
+        warn('config dump timed out after %ss (%s)' % (timeout, ' '.join(cmd)))
         return None
     except Exception as exc:
-        _warn_once('could not run the config dump (%s): %s' % (' '.join(cmd), exc))
+        warn('could not run the config dump (%s): %s' % (' '.join(cmd), exc))
         return None
     if proc.returncode != 0:
         detail = (err or b'').decode('utf-8', 'replace').strip()
-        _warn_once('config dump exited %d: %s' % (proc.returncode, detail))
+        warn('config dump exited %d: %s' % (proc.returncode, detail))
         return None
     try:
         data = json.loads((out or b'').decode('utf-8', 'replace'))
     except Exception as exc:
-        _warn_once('config dump did not produce valid JSON: %s' % exc)
+        warn('config dump did not produce valid JSON: %s' % exc)
         return None
     if not isinstance(data, dict):
-        _warn_once('config dump did not produce a JSON object')
+        warn('config dump did not produce a JSON object')
         return None
     # Defence in depth: the dump strips these, and we refuse to carry them even
     # if a future edit forgets to.
     data.pop('secret', None)
     data.pop('holdout_salt', None)
     return data
+
+
+_REDIS_CACHE = {}
+
+
+def redis_block(php='php', config_path=None):
+    """The guard's redis block INCLUDING credentials, or {} when unavailable.
+
+    This is the one place the password crosses from PHP to Python: it is read
+    from the dump process's stdout pipe, held in memory and handed to
+    redis-py. It is never logged, never printed and never put in a snapshot;
+    the default config dump (guard_config, the CLI) strips it. Cached per
+    process so the PHP bridge is spawned once, not once per config load.
+    """
+    return dict(redis_block_status(php, config_path)[0])
+
+
+def redis_block_status(php='php', config_path=None):
+    """(block, error): the guard's redis block and, when it could not be read, why.
+
+    A failure must never look like "the guard has default settings": the caller
+    (config.resolve_redis) reports it loudly and refuses to write.
+    """
+    key = (php, config_path or '')
+    if key not in _REDIS_CACHE:
+        global last_error
+        last_error = ''
+        data = dump_config(php=php, config_path=config_path,
+                           extra=['--redis-credentials'], quiet=True)
+        block = data.get('redis') if isinstance(data, dict) else None
+        if isinstance(block, dict):
+            _REDIS_CACHE[key] = (dict(block), '')
+        else:
+            _REDIS_CACHE[key] = ({}, last_error or 'the config dump produced no redis block')
+    block, err = _REDIS_CACHE[key]
+    return dict(block), err
 
 
 def guard_config(cfg=None, php=None, config_path=None):

@@ -15,6 +15,36 @@ import os
 from analyzer import outcomes as outcomes_mod
 
 
+# Handshake outcomes. The guard logs exactly one line per handshake POST:
+#   token_issued                                   a token was issued
+#   nonce_bad / nonce_replay / pow_bad (sh=0)      refused with 403
+#   mint_limited (sh=0)                            refused with 429
+#   nonce_replay / pow_bad / mint_limited (sh=1)   would have been refused, but
+#       enforcement is off, so the token WAS issued (shadow-first).
+# The challenge funnel therefore counts a shadowed rejection as an issued token
+# and a non-shadow rejection as a failed handshake. Shadowed rejections are NOT
+# human evidence (see features.py / labels): a token that skipped its proof of
+# work proves nothing about who asked for it.
+HANDSHAKE_REJECTIONS = ('nonce_bad', 'nonce_replay', 'pow_bad', 'mint_limited')
+HANDSHAKE_SHADOW_ACTS = ('nonce_replay', 'pow_bad', 'mint_limited')
+
+
+def token_was_issued(row):
+    """True when this handshake line ended with a token in the client's hands."""
+    act = str(row.get('act') or '')
+    if act == 'token_issued':
+        return True
+    return act in HANDSHAKE_SHADOW_ACTS and int(row.get('sh') or 0) == 1
+
+
+def handshake_rejected(row):
+    """True when this handshake line ended with a refusal."""
+    act = str(row.get('act') or '')
+    if act == 'nonce_bad':
+        return True
+    return act in HANDSHAKE_REJECTIONS and int(row.get('sh') or 0) == 0
+
+
 def _read_file(path, opener):
     """Read one log file into a row list. A corrupt line is skipped, never fatal."""
     rows = []

@@ -45,6 +45,14 @@ return array(
 		'ip_ua'  => 400,
 		'ip'     => 1200,                     // deliberately generous: CGNAT reality
 		'bot'    => 600,
+		'mint'   => 60,                       // tokens minted per IP per window (see challenge)
+	),
+	'challenge'        => array(
+		'pow_bits' => 16,                     // proof-of-work difficulty, 0-24; 0 disables
+		                                      // (~65k SHA-256 attempts at 16, well under a
+		                                      // second in a current browser)
+		'bind_ip'  => true,                   // tie a nonce to the IP it was issued to; set
+		                                      // false on networks that rotate IPs mid-page-load
 	),
 	'honeypot_path'    => '/old-archive',     // change per site; must 404 today
 	'exempt_paths'     => array(),            // URI prefixes, e.g. '/wp-cron.php', '/wp-json/'
@@ -53,8 +61,17 @@ return array(
 	'known_bots'       => array('googlebot', 'bingbot'),  // lowercase UA substrings
 	'cdn_ranges'       => array(),            // v4 CIDRs; XFF trusted only when
 	                                          // REMOTE_ADDR is inside one of these
-	'redis'            => array('host' => '127.0.0.1', 'port' => 6379,
-	                            'timeout' => 0.05),
+	'redis'            => array(              // shared by the guard, the panel AND the analyzer
+		'host'        => '127.0.0.1',
+		'port'        => 6379,
+		'socket'      => '',                  // unix socket path; when set, host/port are ignored
+		'username'    => '',                  // optional (Redis 6+ ACL); empty = default user
+		'password'    => '',                  // optional; empty = no AUTH is sent
+		'db'          => 0,                   // optional; 0 = no SELECT is sent
+		'prefix'      => '',                  // optional key namespace, e.g. 'shop1:'
+		'timeout'     => 0.05,                // seconds, per read in the request path
+		'breaker_ttl' => 5,                   // seconds to skip Redis after a failure; 0 = off
+	),
 	'log_dir'          => dirname(__DIR__) . '/logs',
 	'strings'          => array(              // user-facing, operator-localizable
 		'lang'     => 'fa',
@@ -62,5 +79,8 @@ return array(
 		'title'    => 'لطفاً چند لحظه صبر کنید…',
 		'sub'      => 'در حال بررسی مرورگر شما هستیم.',
 		'noscript' => 'برای ادامه، لطفاً JavaScript و Cookie مرورگر را فعال کنید.',
+		'failed'   => 'بررسی مرورگر شما انجام نشد.',
+		'retry'    => 'تلاش دوباره',
+		'nocookie' => 'مرورگر شما کوکی را نگه نمی‌دارد. لطفاً کوکی‌ها را برای این سایت فعال کنید و دوباره تلاش کنید.',
 	),
 );

@@ -10,6 +10,7 @@
 // self-test runs this command and asserts an exact match on every case, so the
 // two can never drift silently.
 if (PHP_SAPI !== 'cli') { exit; }
+if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n"); exit(1); }
 
 define('GV_BOOT', 1);
 require __DIR__ . '/../guard/guard.php';

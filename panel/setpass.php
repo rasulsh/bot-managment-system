@@ -11,6 +11,7 @@
 // whoever finds the URL first is how admin panels get taken over. Until this
 // command has been run, every panel route returns a bare 404.
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n"); exit(1); }
 
 define('GP_MIN_PASSWORD', 12);
 

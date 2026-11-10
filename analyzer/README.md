@@ -390,3 +390,33 @@ are not.
 |-----|---------|
 | `model_candidate_path` | Where `--candidate` writes the anomaly model. Defaults to `model_path` + `.candidate`, so relocating the model takes its candidate with it. Git-ignored. |
 | `clf_candidate_path` | Where `--candidate` writes the classifier. Defaults to `clf_path` + `.candidate`. Git-ignored. |
+
+
+## Bot verification (three-state) and Redis settings
+
+* `verify_ip()` returns `ok`, `bad` or `unknown`. Only a definitive refutation is `bad`;
+  transient DNS errors, a dead resolver (detected with the `dns_canary` lookup) and a bot
+  without a `bot_suffixes` entry are `unknown`: `run_verify` writes and deletes nothing and
+  retries next run. The run summary (`unknown N`) reaches the snapshot, report and panel.
+* TTLs: `botv_ttl` (86400) for `ok`, `botbad_ttl` (3600) for `bad`. `--recheck` re-resolves
+  addresses that already have a verdict.
+* Redis settings resolve as: defaults < the guard's `redis` block (read via
+  `scripts/config-dump.php --redis-credentials` over a pipe, never logged) < an explicit
+  `redis` override in the analyzer config. All keys go through `redis_io.key()/gp_key()`,
+  honouring `redis.prefix`; AUTH, ACL user, db and unix socket are supported. The client
+  speaks RESP2 so Redis 5 works with redis-py 5+.
+
+## `php_bin` and the bridge (read this before cron)
+
+The analyzer learns the guard's Redis host, credentials, db and **key prefix** by running
+`php scripts/config-dump.php --redis-credentials`. Cron has a minimal `PATH`, so set
+`"php_bin": "/usr/bin/php"` (full path) in the analyzer config, and `guard_config_path` if the guard
+config is not the default.
+
+If the bridge fails the analyzer says so on stderr **on every run**
+(`WARN: could not read the guard's Redis settings via PHP ...`), the settings are marked
+unconfirmed, and every command that writes (`ctl.py allow|deny|clear`, `run_verify`, `run_nightly`
+without `--dry-run`, `worker`) refuses with `ERROR: the Redis settings are not confirmed`
+instead of writing into the wrong namespace. Read-only commands still run. To work without PHP,
+state the namespace yourself: an explicit `redis` block with a `prefix` key (even `""`) in the
+analyzer config counts as confirmed.

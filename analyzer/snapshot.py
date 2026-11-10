@@ -64,6 +64,7 @@ def build(rows, cfg, guard_cfg=None):
     timeline = {}
     challenge_served = 0
     token_issued = 0
+    handshake_rejected = 0
     has = {'rep': 0, 'ml': 0, 'clf': 0}
     holdout = {'requests': 0, 'challenge': 0, 'honeypot': 0}
     enforced = {'requests': 0, 'challenge': 0, 'honeypot': 0}
@@ -86,8 +87,10 @@ def build(rows, cfg, guard_cfg=None):
         decisions[act] = decisions.get(act, 0) + 1
         if act == 'challenge' and not shadow:
             challenge_served += 1
-        if act == 'token_issued':
+        if logs_mod.token_was_issued(row):
             token_issued += 1
+        if logs_mod.handshake_rejected(row):
+            handshake_rejected += 1
 
         for reason in (row.get('rs') or []):
             if isinstance(reason, str):
@@ -152,6 +155,7 @@ def build(rows, cfg, guard_cfg=None):
         'funnel': {
             'challenge_served': challenge_served,
             'token_issued': token_issued,
+            'handshake_rejected': handshake_rejected,
             'success_rate': (100.0 * token_issued / challenge_served)
                             if challenge_served else None,
             'target': float(cfg.get('challenge_success_target', 0.95)) * 100.0,
@@ -177,6 +181,7 @@ def build(rows, cfg, guard_cfg=None):
         },
         'models': model_metadata(cfg),
         'last_runs': read_last_runs(cfg),
+        'bot_verify': read_stats(cfg, 'run_verify'),
     }
     if guard_cfg:
         payload['guard'] = guard_cfg
@@ -228,6 +233,33 @@ def touch_run(cfg, name):
             handle.write(str(round(time.time(), 3)))
     except Exception:
         pass
+
+
+def stats_path(cfg, name):
+    return os.path.join(os.path.dirname(os.path.abspath(cfg['model_path'])),
+                        '.laststats-' + name)
+
+
+def record_stats(cfg, name, stats):
+    """Persist a small JSON summary of the last run, for the panel and report."""
+    try:
+        payload = dict(stats)
+        payload['at'] = round(time.time(), 3)
+        tmp = stats_path(cfg, name) + '.tmp'
+        with open(tmp, 'w') as handle:
+            json.dump(payload, handle)
+        os.replace(tmp, stats_path(cfg, name))
+    except Exception:
+        pass
+
+
+def read_stats(cfg, name):
+    try:
+        with open(stats_path(cfg, name), 'r') as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def read_last_runs(cfg):

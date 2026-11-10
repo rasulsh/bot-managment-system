@@ -2,6 +2,7 @@
 // Bot Guard admin panel self-test. Run: php scripts/panel-selftest.php
 // Exit code 0 when every non-SKIP assertion passes, 1 otherwise.
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n"); exit(1); }
 
 define('GV_BOOT', 1);
 define('GP_BOOT', 1);
@@ -174,6 +175,16 @@ $cases = array(
 	array('limits.ip_ua', 500, true),
 	array('limits.ip', 1200, true),
 	array('limits.bot', 600, true),
+	array('limits.mint', 60, true),
+	array('limits.mint', 0, false),
+	array('limits.mint', 100001, false),
+	array('challenge.pow_bits', 16, true),
+	array('challenge.pow_bits', 0, true),
+	array('challenge.pow_bits', 24, true),
+	array('challenge.pow_bits', 25, false),
+	array('challenge.pow_bits', -1, false),
+	array('challenge.pow_bits', '16', false),
+	array('challenge.bind_ip', false, false),
 	array('holdout_pct', 0, true),
 	array('holdout_pct', 5, true),
 	array('holdout_pct', 6, false),
@@ -715,6 +726,46 @@ t_dom_ok('the audit view escapes a poisoned entry',
 	&& !isset($dom_audit['tags']['img']));
 t_ok('the audit search box escapes the query it echoes back',
 	strpos($rendered_audit, 'value="&lt;script&gt;') !== false);
+
+// --------------------------------------------------------------------------
+t_section('Redis settings are file-only and never displayed');
+
+foreach (array('redis.password', 'redis.username', 'redis.prefix', 'redis.host', 'redis.socket', 'redis.db') as $rk) {
+	$chk = gv_overlay_validate($rk, 'x');
+	t_ok("$rk is not in the overlay whitelist (file-only, like secret)", $chk[0] === false && $chk[1] === 'unknown_key');
+}
+$rf = tempnam(sys_get_temp_dir(), 'gvrcfg');
+file_put_contents($rf, '<?php if (!defined("GV_BOOT")) { exit; } return array("secret" => "x",'
+	. ' "redis" => array("host" => "10.1.2.3", "port" => 6380, "username" => "uSeRnAmE", "password" => "p4ssw0rd-LEAK",'
+	. ' "db" => 3, "prefix" => "shop1:"));');
+putenv('GV_CONFIG=' . $rf);
+$ri = gp_redis_info();
+putenv('GV_CONFIG');
+@unlink($rf);
+t_ok('gp_redis_info reports endpoint, db, prefix and auth on/off',
+	$ri['endpoint'] === '10.1.2.3:6380' && $ri['db'] === 3 && $ri['prefix'] === 'shop1:' && $ri['auth'] === true);
+t_ok('gp_redis_info never carries the password or username',
+	strpos(json_encode($ri), 'p4ssw0rd') === false && strpos(json_encode($ri), 'uSeRnAmE') === false);
+$dash_src = file_get_contents(__DIR__ . '/../panel/views/dashboard.php') . file_get_contents(__DIR__ . '/../panel/views/settings.php');
+t_ok('no panel view reads redis.password', strpos($dash_src, "['password']") === false);
+
+// --------------------------------------------------------------------------
+t_section('Exposure warning (data under the document root)');
+
+$ex_base = sys_get_temp_dir() . '/gp-expo-' . getmypid();
+@mkdir($ex_base . '/site/sub', 0775, true);
+@mkdir($ex_base . '/outside', 0775, true);
+t_ok('a path inside the document root is flagged',
+	count(gp_exposure_paths($ex_base . '/site', array($ex_base . '/site/sub'))) === 1);
+t_ok('a path outside the document root is not',
+	gp_exposure_paths($ex_base . '/site', array($ex_base . '/outside')) === array());
+t_ok('a sibling with the same name prefix is not mistaken for a child',
+	gp_exposure_paths($ex_base . '/site', array($ex_base . '/outside')) === array()
+	&& gp_exposure_paths($ex_base . '/site', array($ex_base)) === array());
+t_ok('the document root itself is flagged', count(gp_exposure_paths($ex_base . '/site', array($ex_base . '/site'))) === 1);
+t_ok('an unknown document root warns about nothing', gp_exposure_paths('', array($ex_base . '/site')) === array());
+t_ok('a missing path is ignored', gp_exposure_paths($ex_base . '/site', array($ex_base . '/site/none')) === array());
+@rmdir($ex_base . '/site/sub'); @rmdir($ex_base . '/site'); @rmdir($ex_base . '/outside'); @rmdir($ex_base);
 
 // --------------------------------------------------------------------------
 t_section('No shell execution anywhere under panel/');

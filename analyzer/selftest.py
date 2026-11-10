@@ -576,21 +576,35 @@ section('Reverse DNS verification')
 
 
 class StubResolver(object):
-    def __init__(self, ptr_map, forward_map, raise_on_ptr=False, raise_on_forward=False):
+    """raise_on_* take True (an unclassified OSError, i.e. transient) or an
+    exception class/instance to raise (DnsNotFound, DnsTransient, ...)."""
+
+    def __init__(self, ptr_map, forward_map, raise_on_ptr=False, raise_on_forward=False,
+                 healthy=True):
         self.ptr_map = ptr_map
         self.forward_map = forward_map
         self.raise_on_ptr = raise_on_ptr
         self.raise_on_forward = raise_on_forward
+        self._healthy = healthy
+
+    @staticmethod
+    def _raise(spec, text):
+        if spec is True:
+            raise OSError(text)
+        raise spec
 
     def ptr(self, ip):
         if self.raise_on_ptr:
-            raise OSError('simulated PTR failure')
+            self._raise(self.raise_on_ptr, 'simulated PTR failure')
         return self.ptr_map.get(ip, [])
 
     def forward(self, hostname):
         if self.raise_on_forward:
-            raise OSError('simulated forward failure')
+            self._raise(self.raise_on_forward, 'simulated forward failure')
         return self.forward_map.get(hostname, [])
+
+    def healthy(self):
+        return self._healthy
 
 
 suffixes = cfg['bot_suffixes']
@@ -611,18 +625,40 @@ forged_ptr = StubResolver({GOOD_IP: ['fake.googlebot.com']},
 ok('a forged PTR that does not forward-confirm is bad',
    botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, forged_ptr) == 'bad')
 
-ok('a PTR resolver exception is bad',
+ok('a transient PTR failure is unknown, not bad',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, StubResolver({}, {}, raise_on_ptr=True)) == 'unknown')
+ok('a PTR TRY_AGAIN / timeout (DnsTransient) is unknown',
    botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
-                       StubResolver({}, {}, raise_on_ptr=True)) == 'bad')
-ok('a forward resolver exception is bad',
+                       StubResolver({}, {}, raise_on_ptr=botverify.DnsTransient('servfail'))) == 'unknown')
+ok('an address with no PTR record (NXDOMAIN, working resolver) is bad',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
+                       StubResolver({}, {}, raise_on_ptr=botverify.DnsNotFound('nx'))) == 'bad')
+ok('a negative PTR answer from a resolver that fails its canary is unknown',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
+                       StubResolver({}, {}, raise_on_ptr=botverify.DnsNotFound('nx'),
+                                    healthy=False)) == 'unknown')
+ok('PTR ok but forward lookup transiently failing is unknown',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
+                       StubResolver({GOOD_IP: ['x.googlebot.com']}, {}, raise_on_forward=True)) == 'unknown')
+ok('PTR ok but forward lookup failing with TRY_AGAIN is unknown',
    botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
                        StubResolver({GOOD_IP: ['x.googlebot.com']}, {},
-                                    raise_on_forward=True)) == 'bad')
-ok('an empty PTR result is bad',
+                                    raise_on_forward=botverify.DnsTransient('again'))) == 'unknown')
+ok('PTR ok but the forward name does not exist is bad (working resolver)',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
+                       StubResolver({GOOD_IP: ['x.googlebot.com']}, {},
+                                    raise_on_forward=botverify.DnsNotFound('nx'))) == 'bad')
+ok('an empty PTR result from a working resolver is bad',
    botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, StubResolver({}, {})) == 'bad')
-ok('an unknown claimed bot is bad',
-   botverify.verify_ip(GOOD_IP, 'notabot', suffixes, happy) == 'bad')
-ok('an empty ip is bad', botverify.verify_ip('', 'googlebot', suffixes, happy) == 'bad')
+ok('a claimed bot with no suffix list is unknown, never bad',
+   botverify.verify_ip(GOOD_IP, 'notabot', suffixes, happy) == 'unknown')
+ok('a bot whose suffix list is empty is unknown, never bad',
+   botverify.verify_ip(GOOD_IP, 'googlebot', {'googlebot': []}, happy) == 'unknown')
+ok('an empty ip is unknown', botverify.verify_ip('', 'googlebot', suffixes, happy) == 'unknown')
+ok('one transient forward failure does not hide a later confirming hostname',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
+                       StubResolver({GOOD_IP: ['a.googlebot.com', 'crawl.googlebot.com']},
+                                    {'crawl.googlebot.com': [GOOD_IP]})) == 'ok')
 
 multi = StubResolver({GOOD_IP: ['other.example.com', 'crawl.googlebot.com']},
                      {'crawl.googlebot.com': ['198.51.100.1', GOOD_IP]})
@@ -666,6 +702,159 @@ finally:
     botverify.socket.getaddrinfo = _orig_gai
 ok('DefaultResolver.forward returns both v4 and v6 addresses, de-duplicated',
    _resolved == ['66.249.66.1', '2001:4860:4860::8888'])
+
+# Map the real stdlib errors (codes verified on Linux/glibc).
+def _raises(exc):
+    def thrower(*args, **kwargs):
+        raise exc
+    return thrower
+
+
+_orig_gha = botverify.socket.gethostbyaddr
+_orig_gai2 = botverify.socket.getaddrinfo
+dr = botverify.DefaultResolver()
+try:
+    def ptr_outcome(exc):
+        botverify.socket.gethostbyaddr = _raises(exc)
+        try:
+            dr.ptr('192.0.2.1')
+        except botverify.DnsNotFound:
+            return 'notfound'
+        except botverify.DnsTransient:
+            return 'transient'
+        return 'returned'
+
+    def fwd_outcome(exc):
+        botverify.socket.getaddrinfo = _raises(exc)
+        try:
+            dr.forward('x.googlebot.com')
+        except botverify.DnsNotFound:
+            return 'notfound'
+        except botverify.DnsTransient:
+            return 'transient'
+        return 'returned'
+
+    ok('herror HOST_NOT_FOUND maps to NotFound', ptr_outcome(botverify.socket.herror(1, 'Unknown host')) == 'notfound')
+    ok('herror NO_DATA maps to NotFound', ptr_outcome(botverify.socket.herror(4, 'No data')) == 'notfound')
+    ok('herror TRY_AGAIN maps to Transient', ptr_outcome(botverify.socket.herror(2, 'again')) == 'transient')
+    ok('herror NO_RECOVERY maps to Transient', ptr_outcome(botverify.socket.herror(3, 'fail')) == 'transient')
+    ok('a PTR socket.timeout maps to Transient', ptr_outcome(botverify.socket.timeout('t')) == 'transient')
+    ok('a PTR OSError maps to Transient', ptr_outcome(OSError('x')) == 'transient')
+    ok('a PTR gaierror maps to Transient',
+       ptr_outcome(botverify.socket.gaierror(botverify.socket.EAI_NONAME, 'x')) == 'transient')
+    ok('gaierror EAI_NONAME maps to NotFound',
+       fwd_outcome(botverify.socket.gaierror(botverify.socket.EAI_NONAME, 'x')) == 'notfound')
+    ok('gaierror EAI_AGAIN maps to Transient',
+       fwd_outcome(botverify.socket.gaierror(botverify.socket.EAI_AGAIN, 'x')) == 'transient')
+    ok('gaierror EAI_FAIL maps to Transient',
+       fwd_outcome(botverify.socket.gaierror(botverify.socket.EAI_FAIL, 'x')) == 'transient')
+    ok('a forward socket.timeout maps to Transient', fwd_outcome(botverify.socket.timeout('t')) == 'transient')
+
+    # glibc reports an unreachable resolver as HOST_NOT_FOUND: without the canary
+    # that would be an instant false 'bad'.
+    botverify.socket.gethostbyaddr = _raises(botverify.socket.herror(1, 'Unknown host'))
+    botverify.socket.getaddrinfo = _raises(botverify.socket.gaierror(-3, 'again'))
+    ok('NXDOMAIN while the canary cannot resolve is unknown (resolver down)',
+       botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, botverify.DefaultResolver()) == 'unknown')
+    botverify.socket.getaddrinfo = lambda host, port: [(botverify.socket.AF_INET, 0, 0, '', ('1.2.3.4', 0))]
+    ok('NXDOMAIN while the canary resolves is bad',
+       botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, botverify.DefaultResolver()) == 'bad')
+finally:
+    botverify.socket.gethostbyaddr = _orig_gha
+    botverify.socket.getaddrinfo = _orig_gai2
+
+v6_alt = StubResolver({V6_IP: ['crawl-v6.googlebot.com']},
+                      {'crawl-v6.googlebot.com': ['2001:4860:4860:0:0:0:0:1']})
+ok('IPv6 spelling differences do not defeat confirmation',
+   botverify.verify_ip(V6_IP, 'googlebot', suffixes, v6_alt) == 'ok')
+v6_forged = StubResolver({V6_IP: ['crawl-v6.googlebot.com']}, {'crawl-v6.googlebot.com': ['2001:db8::1']})
+ok('an IPv6 forward mismatch is bad', botverify.verify_ip(V6_IP, 'googlebot', suffixes, v6_forged) == 'bad')
+
+# ---------------------------------------------------------------------------
+section('run_verify: unknown writes nothing, bad is still caught')
+
+from analyzer import run_verify as run_verify_mod
+import contextlib
+import io as io_mod
+import json as json_rv
+
+rv_client = redis_io.connect(cfg) if redis_io.REDIS_AVAILABLE else None
+if rv_client is None:
+    skip('run_verify end to end', 'no reachable local Redis')
+else:
+    rv_dir = tempfile.mkdtemp(prefix='gv-selftest-rv-')
+    rv_logs = os.path.join(rv_dir, 'logs')
+    os.makedirs(rv_logs)
+    rv_ip = '198.51.100.%d' % (os.getpid() % 100 + 100)
+    rv_row = {'ts': 1.0, 'ip': rv_ip, 'bot': 'googlebot', 'ua': 'Googlebot', 'act': 'allow_bot'}
+    with open(os.path.join(rv_logs, 'guard-%s.jsonl' % datetime.date.today().strftime('%Y%m%d')), 'w') as fh:
+        fh.write(json_rv.dumps(rv_row) + '\n')
+    rv_cfg = os.path.join(rv_dir, 'cfg.json')
+    with open(rv_cfg, 'w') as fh:
+        json_rv.dump({'log_dir': rv_logs, 'model_path': os.path.join(rv_dir, 'model.joblib'),
+                      'redis': cfg['redis']}, fh)
+    run_verify_mod.DNS_SLEEP_S = 0
+
+    def run_rv(resolver, *extra):
+        out, err = io_mod.StringIO(), io_mod.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = run_verify_mod.main(['--config', rv_cfg] + list(extra), resolver=resolver)
+        return code, out.getvalue(), err.getvalue()
+
+    def rv_clear():
+        rv_client.delete('gv:botok:' + rv_ip, 'gv:botbad:' + rv_ip)
+
+    def rv_botbad_keys():
+        return list(rv_client.scan_iter(match='gv:botbad:*', count=500))
+
+    rv_clear()
+    before = set(rv_botbad_keys())
+    outage = StubResolver({}, {}, raise_on_ptr=botverify.DnsTransient('resolver outage'))
+    code, out, _err = run_rv(outage)
+    ok('a simulated resolver outage writes zero gv:botbad keys',
+       code == 0 and set(rv_botbad_keys()) == before and rv_client.get('gv:botok:' + rv_ip) is None)
+    ok('the outage run reports the address as unknown', 'unknown 1' in out and 'could not be verified' in out)
+    ok('the outage is recorded for the panel and report',
+       run_verify_mod.snapshot_mod.read_stats(config_mod.load(rv_cfg), 'run_verify').get('unknown') == 1)
+
+    # An existing ok verdict survives an outage even when the address is re-checked.
+    redis_io.set_botv(rv_client, rv_ip, 'ok', 600)
+    run_rv(outage, '--recheck')
+    ok('an existing ok verdict stays ok through a transient failure',
+       rv_client.get('gv:botok:' + rv_ip) == '1' and rv_client.get('gv:botbad:' + rv_ip) is None)
+
+    # A forged claim: PTR resolves under googlebot.com but forward does not confirm.
+    forged = StubResolver({rv_ip: ['fake.googlebot.com']}, {'fake.googlebot.com': ['203.0.113.250']})
+    run_rv(forged, '--recheck')
+    ok('a definitive mismatch still flips ok to bad', rv_client.get('gv:botbad:' + rv_ip) == '1'
+       and rv_client.get('gv:botok:' + rv_ip) is None)
+    ok('a bad verdict uses the short botbad_ttl so it self-heals',
+       0 < rv_client.ttl('gv:botbad:' + rv_ip) <= 3600)
+    genuine = StubResolver({rv_ip: ['crawl.googlebot.com']}, {'crawl.googlebot.com': [rv_ip]})
+    run_rv(genuine, '--recheck')
+    ok('a confirmed address flips bad back to ok with the long TTL',
+       rv_client.get('gv:botok:' + rv_ip) == '1' and rv_client.get('gv:botbad:' + rv_ip) is None
+       and rv_client.ttl('gv:botok:' + rv_ip) > 3600)
+    rv_clear()
+    run_rv(forged, '--dry-run')
+    ok('--dry-run writes nothing', rv_client.get('gv:botbad:' + rv_ip) is None)
+    rv_clear()
+    # Without --recheck a fresh verdict is not re-resolved.
+    redis_io.set_botv(rv_client, rv_ip, 'ok', 600)
+    run_rv(forged)
+    ok('a fresh verdict is not re-resolved without --recheck', rv_client.get('gv:botok:' + rv_ip) == '1')
+    rv_clear()
+
+    # A known bot with no suffix list: one warning, never bad.
+    with open(rv_cfg, 'w') as fh:
+        json_rv.dump({'log_dir': rv_logs, 'model_path': os.path.join(rv_dir, 'model.joblib'),
+                      'redis': cfg['redis'], 'bot_suffixes': {'googlebot': []}}, fh)
+    code, out, err = run_rv(forged)
+    ok('a bot without a suffix list warns by name and writes nothing',
+       "'googlebot'" in err and 'no entry in bot_suffixes' in err
+       and rv_client.get('gv:botbad:' + rv_ip) is None and 'unknown 1' in out)
+    rv_clear()
+    shutil.rmtree(rv_dir, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
 section('Redis verdict round-trip')
@@ -986,6 +1175,87 @@ replay_source = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 ok('replay never imports redis_io', 'redis_io' not in replay_source)
 ok('replay never opens a file for writing',
    "'w'" not in replay_source and '"w"' not in replay_source)
+
+# ---------------------------------------------------------------------------
+section('Handshake acts: funnel, replay and old logs')
+
+from analyzer import snapshot as snapshot_hs
+from analyzer import replay as replay_hs
+from analyzer import report as report_hs
+
+hs_rows = [
+    row(100.0, dev='', ip='10.9.9.1', act='challenge'),
+    row(100.5, dev='h1', ip='10.9.9.1', act='token_issued'),
+    row(101.0, dev='', ip='10.9.9.2', act='challenge'),
+    row(101.2, dev='', ip='10.9.9.2', act='pow_bad', sh=0),          # refused
+    row(102.0, dev='', ip='10.9.9.3', act='challenge'),
+    row(102.2, dev='', ip='10.9.9.3', act='nonce_replay', sh=0),     # refused
+    row(103.0, dev='', ip='10.9.9.4', act='challenge'),
+    row(103.2, dev='h4', ip='10.9.9.4', act='mint_limited', sh=1),   # shadow: token WAS issued
+    row(104.0, dev='', ip='10.9.9.5', act='mint_limited', sh=0),     # refused (429)
+    row(105.0, dev='', ip='10.9.9.6', act='nonce_bad'),              # refused
+    row(106.0, dev='h7', ip='10.9.9.7', act='pow_bad', sh=1),        # shadow: token issued
+]
+ok('token_was_issued: issued and shadowed rows count',
+   [logs_mod.token_was_issued(r) for r in hs_rows if r['act'] in ('token_issued', 'mint_limited', 'pow_bad')]
+   == [True, False, True, False, True])
+ok('handshake_rejected: only non-shadow rejections count',
+   [logs_mod.handshake_rejected(r) for r in hs_rows if r['act'] in
+    ('pow_bad', 'nonce_replay', 'mint_limited', 'nonce_bad')] == [True, True, False, True, True, False])
+hs_snap = snapshot_hs.build(hs_rows, cfg, {'source': 'defaults'})
+ok('the snapshot funnel counts shadow-issued tokens as issued (3) and rejections (4)',
+   hs_snap['funnel']['token_issued'] == 3 and hs_snap['funnel']['handshake_rejected'] == 4)
+hs_stats = report_hs.collect(hs_rows, cfg, {'source': 'defaults'})
+ok('the report funnel agrees with the snapshot', hs_stats['token_issued'] == 3)
+ok('the report counts every refused handshake in its day bucket',
+   sum(b['nonce_bad'] for b in hs_stats['by_day'].values()) == 4)
+ok('the report renders with the new acts (text and html)',
+   bool(report_hs.render_text(hs_stats, 7)) and bool(report_hs.render_html(hs_stats, 7)))
+ok('replay treats the new handshake acts as non-decisions',
+   all(a in replay_hs.NON_DECISION_ACTS for a in ('nonce_replay', 'pow_bad', 'mint_limited')))
+old_rows = [row(1.0, dev='o1', act='token_issued'), row(2.0, dev='', act='nonce_bad'),
+            row(3.0, dev='o2', act='allow'), {'act': 'challenge', 'ts': 4.0, 'v': 2}]
+ok('pre-change rows (old action names, missing fields) still aggregate',
+   snapshot_hs.build(old_rows, cfg, {'source': 'defaults'})['funnel']['token_issued'] == 1)
+
+# ---------------------------------------------------------------------------
+section('Panel replay and analyzer replay agree (including the new acts)')
+
+import json as json_rp
+
+rp_dir = tempfile.mkdtemp(prefix='gv-selftest-replay-parity-')
+rp_acts = ['allow', 'challenge', '403', '429', 'exempt', 'allow_bot', '404_hp', 'token_issued',
+           'nonce_bad', 'nonce_replay', 'pow_bad', 'mint_limited', 'allow_override', 'allow']
+rp_rows = []
+for i in range(84):
+    act = rp_acts[i % len(rp_acts)]
+    rp_rows.append(row(1000.0 + i, dev=('d%d' % (i % 7)), ip='10.7.0.%d' % (i % 5), sc=(i * 7) % 90,
+                       act=act, sh=(i % 3 == 0 and act in ('nonce_replay', 'pow_bad', 'mint_limited')) and 1 or 0,
+                       rep=(i % 5) * 6 - 6, ml=(i * 11) % 100 if i % 4 else -1, clf=(i * 13) % 100 if i % 6 else -1,
+                       nav=1 if i % 3 else 0, ovr='deny' if act == '403' and i % 2 else ''))
+with open(os.path.join(rp_dir, 'guard-%s.jsonl' % datetime.date.today().strftime('%Y%m%d')), 'w') as fh:
+    for r in rp_rows:
+        fh.write(json_rp.dumps(r) + '\n')
+rp_php = shutil.which('php')
+if not rp_php:
+    skip('panel/analyzer replay parity', 'php not available')
+else:
+    rp_script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts', 'replay-parity.php')
+    rp_out = json_rp.loads(subprocess.check_output([rp_php, rp_script, rp_dir, '45', 'reputation,ml']).decode())
+    rp_base = {'hard_block_score': 60, 'signals': {'reputation': False, 'ml': False, 'clf': False},
+               'ml_weight': 0.4, 'clf_weight': 0.5}
+    rp_cand = {'hard_block_score': 45, 'signals': {'reputation': True, 'ml': True, 'clf': False},
+               'ml_weight': 0.4, 'clf_weight': 0.5}
+    rp_py = replay_hs.replay_rows(rp_rows, rp_base, rp_cand)
+    ok('both replays consider the same rows (%d) and skip the same non-decisions (%d)'
+       % (rp_py['considered'], rp_py['skipped_non_decision']),
+       rp_out['considered'] == rp_py['considered'] and rp_out['skipped'] == rp_py['skipped_non_decision'])
+    ok('...and every handshake act is a non-decision on both sides',
+       rp_py['skipped_non_decision'] >= 4 * 6)
+    ok('both replays agree on the baseline and candidate action counts',
+       rp_out['baseline'] == rp_py['baseline'] and rp_out['candidate'] == rp_py['candidate'])
+    ok('...and on how many rows changed score', rp_out['esc_changed'] == rp_py['esc_changed'])
+shutil.rmtree(rp_dir, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
 section('Period report')
@@ -1539,6 +1809,294 @@ try:
        _promo_seen.get('kind') == 'ml' and _promo_seen.get('cfg') == {'_config_path': CFG_PATH})
 finally:
     worker_mod.promote_mod.promote = _promo_orig
+
+# ---------------------------------------------------------------------------
+section('Redis auth, db, socket and key prefix (Python side)')
+
+import hmac as hmac_mod
+import hashlib
+import json as json_x2
+import subprocess as sp_x
+import time as time_x
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_redis_bin = os.environ.get('GV_REDIS_BIN') or shutil.which('redis-server')
+_rtmp = tempfile.mkdtemp(prefix='gv-selftest-redis-matrix-')
+_started = []
+
+
+def start_redis(port, extra=(), sock=''):
+    cmd = [_redis_bin, '--port', str(port), '--bind', '127.0.0.1', '--save', '', '--appendonly', 'no',
+           '--daemonize', 'yes', '--pidfile', os.path.join(_rtmp, 'r%d.pid' % port), '--dir', _rtmp]
+    if sock:
+        cmd += ['--unixsocket', sock, '--unixsocketperm', '700']
+    cmd += list(extra)
+    sp_x.call(cmd, stdout=sp_x.DEVNULL, stderr=sp_x.DEVNULL)
+    import socket as socket_x
+    for _ in range(50):
+        try:
+            probe = socket_x.create_connection(('127.0.0.1', port), 0.2)
+            probe.close()
+            _started.append(port)
+            return True
+        except OSError:
+            time_x.sleep(0.1)
+    return False
+
+
+def raw_client(**kw):
+    # Same RESP2 choice as redis_io.connect(): redis-py 8 would send HELLO 3,
+    # which Redis 5 rejects.
+    try:
+        return redis_io.redis_py.Redis(protocol=2, **kw)
+    except TypeError:
+        return redis_io.redis_py.Redis(**kw)
+
+
+def rcfg(**redis_over):
+    c = {'redis': dict(config_mod.DEFAULTS['redis'])}
+    c['redis'].update(redis_over)
+    return c
+
+
+if not _redis_bin or not redis_io.REDIS_AVAILABLE:
+    skip('python redis matrix', 'redis-server or redis-py not available')
+else:
+    P_PLAIN, P_AUTH, P_ACL, P_UNIX = 63810, 63811, 63812, 63813
+    sock_path = os.path.join(_rtmp, 'py.sock')
+    up = [start_redis(P_PLAIN), start_redis(P_AUTH, ['--requirepass', 's3cret']),
+          start_redis(P_ACL), start_redis(P_UNIX, sock=sock_path)]
+    ok('the throwaway redis servers started', all(up))
+    admin = raw_client(port=P_PLAIN, decode_responses=True)
+    acl_ok = True
+    try:
+        raw_client(port=P_ACL).execute_command('ACL', 'SETUSER', 'gvuser', 'on', '>aclpass', '~*', '+@all')
+    except Exception:
+        acl_ok = False
+
+    c = redis_io.connect(rcfg(port=P_PLAIN))
+    ok('no auth server, no password: connects', c is not None)
+    ok('...and an empty prefix keeps the legacy key names',
+       redis_io.key('rep:abc') == 'gv:rep:abc' and redis_io.gp_key('jobs') == 'gp:jobs')
+    c = redis_io.connect(rcfg(port=P_AUTH, password='s3cret'))
+    ok('requirepass + correct password: connects', c is not None and c.ping())
+    _err = io_mod.StringIO()
+    with contextlib.redirect_stderr(_err):
+        c = redis_io.connect(rcfg(port=P_AUTH, password='WRONG-PW-XYZ'))
+    ok('requirepass + wrong password: no client, and the password is never printed',
+       c is None and 'WRONG-PW-XYZ' not in _err.getvalue())
+    with contextlib.redirect_stderr(io_mod.StringIO()):
+        c = redis_io.connect(rcfg(port=P_AUTH))
+    ok('requirepass + no password: no client', c is None)
+    with contextlib.redirect_stderr(io_mod.StringIO()) as _e2:
+        c = redis_io.connect(rcfg(port=P_PLAIN, password='unneeded'))
+    ok('no auth server + a password configured: still connects', c is not None and c.ping())
+    if acl_ok:
+        c = redis_io.connect(rcfg(port=P_ACL, username='gvuser', password='aclpass'))
+        ok('ACL user + password: connects and writes', c is not None and c.set('acl:k', '1'))
+        with contextlib.redirect_stderr(io_mod.StringIO()):
+            ok('ACL user + wrong password: no client',
+               redis_io.connect(rcfg(port=P_ACL, username='gvuser', password='bad')) is None)
+    else:
+        skip('python ACL user', 'Redis < 6')
+    c = redis_io.connect(rcfg(socket=sock_path, port=1))
+    ok('unix socket: connects (host/port ignored)', c is not None and c.ping())
+    c1 = redis_io.connect(rcfg(port=P_PLAIN, db=1))
+    redis_io.set_rep(c1, 'dbdev', 5, 60)
+    c0 = redis_io.connect(rcfg(port=P_PLAIN))
+    ok('db = 1: keys land in db 1 and not in db 0',
+       redis_io.get_rep(c1, 'dbdev') == 5 and redis_io.get_rep(c0, 'dbdev') is None)
+    with contextlib.redirect_stderr(io_mod.StringIO()):
+        ok('an invalid prefix disables Redis instead of being altered',
+           redis_io.connect(rcfg(port=P_PLAIN, prefix='bad prefix')) is None
+           and redis_io.connect(rcfg(port=P_PLAIN, prefix='x*')) is None)
+
+    # Prefix isolation across every family the analyzer touches.
+    admin.flushall()
+    a = redis_io.connect(rcfg(port=P_PLAIN, prefix='shop1:'))
+    redis_io.set_rep(a, 'd1', 11, 60)
+    redis_io.set_ml(a, 'd1', 22, 60)
+    redis_io.set_clf(a, 'd1', 33, 60)
+    redis_io.set_botv(a, '198.51.100.7', 'ok', 60)
+    redis_io.set_override(a, 'allow', 'ident1', 600)
+    ok('a prefixed write lands under the prefix',
+       admin.get('shop1:gv:rep:d1') == '11' and admin.get('shop1:gv:botok:198.51.100.7') == '1'
+       and admin.get('gv:rep:d1') is None)
+    b = redis_io.connect(rcfg(port=P_PLAIN, prefix='shop2:'))
+    ok('another prefix sees nothing of it',
+       redis_io.get_rep(b, 'd1') is None and redis_io.get_botv(b, '198.51.100.7') is None
+       and redis_io.list_overrides(b) == [])
+    a = redis_io.connect(rcfg(port=P_PLAIN, prefix='shop1:'))
+    ok('list_overrides strips the prefix from what it shows',
+       redis_io.list_overrides(a)[0][:2] == ('allow', 'ident1'))
+    ok('clear_override removes only its own namespace',
+       redis_io.clear_override(a, 'ident1') == 1)
+    ok('the job queue key is namespaced', redis_io.gp_key('jobs') == 'shop1:gp:jobs')
+    # ctl.py show / identity_verdicts read every family back through key().
+    redis_io.set_override(a, 'allow', 'ident9', 600)
+    redis_io.set_rep(a, 'ident9', 7, 60)
+    iv = redis_io.identity_verdicts(a, 'ident9')
+    ok('identity_verdicts reads overrides and verdicts back under the prefix',
+       iv['reputation'] == 7 and iv['overrides']['allow'] is not None and iv['overrides']['deny'] is None)
+    ok('get_override reports the remaining ttl', 0 < redis_io.get_override(a, 'ident9')['allow'] <= 600)
+
+    # PHP guard <-> Python analyzer under one non-empty prefix.
+    php_bin_x = shutil.which('php')
+    if not php_bin_x:
+        skip('PHP/Python cross-language prefix check', 'php not available')
+    else:
+        admin.flushall()
+        secret = 'xl-secret'
+        guard_cfg_path = os.path.join(_rtmp, 'guard-cfg.php')
+        guard_log = os.path.join(_rtmp, 'guardlogs')
+        guard_cfg = {
+            'secret': secret, 'enforce': {'block': False, 'challenge': False, 'ratelimit': False},
+            'signals': {'reputation': True, 'ml': True, 'clf': True},
+            'redis': {'host': '127.0.0.1', 'port': P_AUTH, 'password': 's3cret', 'prefix': 'xl:',
+                      'db': 2, 'timeout': 0.25},
+            'log_dir': guard_log, 'known_bots': ['googlebot'],
+        }
+        _escaped = json_x2.dumps(guard_cfg).replace("\\", "\\\\").replace("'", "\\'")
+        with open(guard_cfg_path, 'w') as fh:
+            fh.write('<?php if (!defined("GV_BOOT")) { exit; } return json_decode(\'' + _escaped + '\', true);')
+
+        # (1) The analyzer resolves its Redis settings from the GUARD's config,
+        # credentials included, through the bridge - and prints none of it.
+        an_cfg_path = os.path.join(_rtmp, 'an.json')
+        with open(an_cfg_path, 'w') as fh:
+            json_x2.dump({'guard_config_path': guard_cfg_path, 'log_dir': guard_log,
+                          'model_path': os.path.join(_rtmp, 'model.joblib')}, fh)
+        an = config_mod.load(an_cfg_path)
+        ok('the analyzer takes host/port/db/prefix/password from the guard block',
+           an['redis']['port'] == P_AUTH and an['redis']['password'] == 's3cret'
+           and an['redis']['prefix'] == 'xl:' and an['redis']['db'] == 2
+           and an['redis']['socket_timeout'] >= 0.25)
+        an_override = os.path.join(_rtmp, 'an2.json')
+        with open(an_override, 'w') as fh:
+            json_x2.dump({'guard_config_path': guard_cfg_path, 'log_dir': guard_log,
+                          'model_path': os.path.join(_rtmp, 'model.joblib'),
+                          'redis': {'prefix': 'override:'}}, fh)
+        an2 = config_mod.load(an_override)
+        ok('an explicit analyzer override beats the guard block, key by key',
+           an2['redis']['prefix'] == 'override:' and an2['redis']['port'] == P_AUTH)
+        dump_default = sp_x.check_output([php_bin_x, os.path.join(REPO, 'scripts', 'config-dump.php'),
+                                          '--config', guard_cfg_path]).decode()
+        ok('the default config dump never prints the Redis password or username',
+           's3cret' not in dump_default and '"password"' not in dump_default)
+        ok('...but still shows the safe parts (host, db, prefix)',
+           '"prefix": "xl:"' in dump_default and '"db": 2' in dump_default)
+
+        # (2) Python writes a reputation; the PHP guard reads it under the prefix.
+        pc = redis_io.connect(an)
+        ok('the analyzer connects with the guard\'s credentials', pc is not None)
+        devid = 'cafe' * 6
+        redis_io.set_rep(pc, devid, 42, 120)
+        issued = str(int(time_x.time()))
+        sig = hmac_mod.new(secret.encode(), ('%s.%s' % (devid, issued)).encode(), hashlib.sha256).hexdigest()
+        token = '%s.%s.%s' % (devid, issued, sig)
+        probe_in = json_x2.dumps({'config': guard_cfg_path, 'cookie': {'_gv': token},
+                                  'server': {'HTTP_USER_AGENT': 'Mozilla/5.0 Chrome/126.0', 'HTTP_ACCEPT': 'text/html',
+                                             'HTTP_ACCEPT_LANGUAGE': 'en', 'HTTP_SEC_FETCH_MODE': 'navigate',
+                                             'HTTP_A': '1', 'HTTP_B': '2', 'HTTP_C': '3', 'HTTP_D': '4'}})
+        proc = sp_x.run([php_bin_x, os.path.join(REPO, 'scripts', 'request-probe.php')],
+                        input=probe_in.encode(), stdout=sp_x.PIPE, stderr=sp_x.PIPE)
+        rows = []
+        for fn in sorted(os.listdir(guard_log)) if os.path.isdir(guard_log) else []:
+            if fn.endswith('.jsonl'):
+                with open(os.path.join(guard_log, fn)) as fh:
+                    rows = [json_x2.loads(line) for line in fh if line.strip()]
+        ok('a rep written from Python is read by the PHP guard under the same prefix/db/auth',
+           bool(rows) and rows[-1].get('rep') == 42 and rows[-1].get('rd') == 0)
+
+        # (3) A panel-style override (PHP) is visible to ctl.py (Python).
+        php_code = ("define('GV_BOOT',1);define('GP_BOOT',1);putenv('GV_CONFIG=%s');"
+                    "require '%s/guard/guard.php';require '%s/panel/config_io.php';require '%s/panel/data.php';"
+                    "echo gp_override_set('deny','xl-ident',600) ? 'set' : 'fail';" % (guard_cfg_path, REPO, REPO, REPO))
+        out = sp_x.check_output([php_bin_x, '-d', 'display_errors=0', '-r', php_code]).decode()
+        listed = sp_x.check_output([sys.executable, os.path.join(REPO, 'analyzer', 'ctl.py'),
+                                    '--config', an_cfg_path, 'list']).decode()
+        ok('a panel override is listed by ctl.py (prefix stripped, credentials from the bridge)',
+           out == 'set' and 'xl-ident' in listed and 'xl:' not in listed)
+        redis_io.connect(rcfg(port=P_PLAIN))      # reset the module prefix for later tests
+
+    for port in _started:
+        try:
+            with open(os.path.join(_rtmp, 'r%d.pid' % port)) as pid_fh:
+                os.kill(int(pid_fh.read().strip()), 15)
+        except Exception:
+            pass
+    shutil.rmtree(_rtmp, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+section('A failed PHP bridge is loud and nothing is written against unconfirmed settings')
+
+from analyzer import ctl as ctl_mod
+if not (redis_io.REDIS_AVAILABLE and shutil.which('php')):
+    skip('bridge failure handling', 'redis-py or php missing')
+else:
+    bf_dir = tempfile.mkdtemp(prefix='gv-selftest-bridge-')
+    bf_guard = os.path.join(bf_dir, 'guard.php')
+    with open(bf_guard, 'w') as fh:
+        fh.write('<?php if (!defined("GV_BOOT")) { exit; } return array("secret" => "x", '
+                 '"redis" => array("prefix" => "shopA:"));')
+    bf_cfg = os.path.join(bf_dir, 'an.json')
+    with open(bf_cfg, 'w') as fh:
+        json_x2.dump({'guard_config_path': bf_guard, 'php_bin': '/nonexistent/php', 'log_dir': bf_dir,
+                      'model_path': os.path.join(bf_dir, 'model.joblib')}, fh)
+    probe = redis_io.connect(config_mod.DEFAULTS)
+    if probe is None:
+        skip('bridge failure handling', 'no local Redis on 6379')
+    else:
+        for k in list(probe.scan_iter(match='*203.0.113.77*')):
+            probe.delete(k)
+        err = io_mod.StringIO()
+        with contextlib.redirect_stderr(err):
+            bf = config_mod.load(bf_cfg)
+        ok('a failed bridge is reported on stderr, not swallowed',
+           'could not read the guard' in err.getvalue() and '/nonexistent/php' in err.getvalue())
+        ok('...and the settings are marked unconfirmed', bf.get('redis_confirmed') is False)
+        out, err = io_mod.StringIO(), io_mod.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ctl_mod.main(['--config', bf_cfg, 'allow', '203.0.113.77', '--ttl', '600'])
+        ok('ctl allow refuses to write against unconfirmed settings (non-zero exit, no success claim)',
+           code != 0 and 'Allow override set' not in out.getvalue() and 'not confirmed' in err.getvalue())
+        ok('...and no key at all was written (neither prefixed nor legacy)',
+           not list(probe.scan_iter(match='*203.0.113.77*')))
+        err = io_mod.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = ctl_mod.main(['--config', bf_cfg, 'list'])
+        ok('a read-only command still runs but warns again on every run', code == 0 and 'could not read the guard' in err.getvalue())
+        # An explicit, complete redis override is an operator decision: no bridge, no warning, writes allowed.
+        with open(bf_cfg, 'w') as fh:
+            json_x2.dump({'guard_config_path': bf_guard, 'php_bin': '/nonexistent/php', 'log_dir': bf_dir,
+                          'model_path': os.path.join(bf_dir, 'model.joblib'),
+                          'redis': {'host': '127.0.0.1', 'port': 6379, 'prefix': 'shopA:'}}, fh)
+        err = io_mod.StringIO()
+        with contextlib.redirect_stdout(io_mod.StringIO()), contextlib.redirect_stderr(err):
+            code = ctl_mod.main(['--config', bf_cfg, 'allow', '203.0.113.77', '--ttl', '600'])
+        ok('an explicit redis override incl. prefix is confirmed: writes work, under the prefix',
+           code == 0 and probe.get('shopA:gv:allow:203.0.113.77') == '1' and probe.get('gv:allow:203.0.113.77') is None
+           and 'could not read' not in err.getvalue())
+        probe.delete('shopA:gv:allow:203.0.113.77')
+    shutil.rmtree(bf_dir, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+section('Source audit: Redis keys go through redis_io.key()/gp_key()')
+
+_audit_bad = []
+for _dir, _dirs, _files in os.walk(os.path.join(REPO, 'analyzer')):
+    for _fn in _files:
+        if _fn.endswith('.py') and _fn not in ('selftest.py', 'redis_io.py'):
+            with open(os.path.join(_dir, _fn)) as _fh:
+                for _n, _line in enumerate(_fh, 1):
+                    if re.search(r"""['"]g[vp]:""", _line):
+                        _audit_bad.append('%s:%d' % (_fn, _n))
+ok('no raw gv:/gp: key literal in analyzer/ outside redis_io.py %s' % _audit_bad, not _audit_bad)
+ok('every Redis consumer connects through redis_io.connect()',
+   not [fn for fn in os.listdir(os.path.join(REPO, 'analyzer'))
+        if fn.endswith('.py') and fn not in ('selftest.py', 'redis_io.py')
+        and re.search(r'redis_py\.Redis\(|redis\.Redis\(|redis\.StrictRedis\(',
+                      open(os.path.join(REPO, 'analyzer', fn)).read())])
 
 # ---------------------------------------------------------------------------
 print('')

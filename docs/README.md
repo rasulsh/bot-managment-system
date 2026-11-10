@@ -272,8 +272,8 @@ Python (`analyzer/decision.py`); the parity test fails until they agree exactly
 
 ## Requirements
 
-- **PHP 7.x / 8.x** for the guard and panel. No PHP extensions required (the Redis
-  client is a raw socket). `apcu` recommended for an optional config-cache.
+- **PHP 8.0+** for the guard and panel. No PHP extensions required (the Redis
+  client is a raw socket).
 - **Redis** reachable from PHP (default `127.0.0.1:6379`). The guard runs without
   it, degraded to allow-only.
 - **Python 3.8+** with `redis`, `scikit-learn`, `numpy` for the analyzer (it

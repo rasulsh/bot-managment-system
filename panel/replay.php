@@ -18,7 +18,7 @@ require_once __DIR__ . '/data.php';
 // before the decision step, exactly as in analyzer/replay.py.
 function gp_replay_non_decision() {
 	return array('exempt', 'allow_bot', '404_hp', 'token_issued', 'nonce_bad',
-		'allow_override');
+		'nonce_replay', 'pow_bad', 'mint_limited', 'allow_override');
 }
 
 function gp_replay_actions() {
@@ -165,6 +165,15 @@ function gp_replay_scan_day($date, array $baseline, array $candidate, $base_hard
 		}
 	}
 	fclose($fh);
+	// The loop above keeps the oldest, possibly partial, line in $buffer. Once the
+	// whole file has been read ($pos reached 0) that line is complete - the file's
+	// first row - and used to be dropped, so the panel's replay saw one row fewer
+	// per day than analyzer/replay.py (found by the replay parity test).
+	if ($pos <= 0 && trim($buffer) !== '' && $result['scanned_lines'] < GP_MAX_SCAN_LINES) {
+		$result['scanned_lines']++;
+		$row = json_decode(trim($buffer), true);
+		if (is_array($row) && !(isset($row['o']) && $row['o'] === 1)) { $rows[] = $row; }
+	}
 	if ($scanned >= GP_MAX_SCAN_BYTES || $result['scanned_lines'] >= GP_MAX_SCAN_LINES) {
 		$result['capped'] = true;
 	}
@@ -175,7 +184,7 @@ function gp_replay_scan_day($date, array $baseline, array $candidate, $base_hard
 		if ($key === '') { continue; }
 		if ((int)($row['hp'] ?? 0) === 1 || (string)($row['botv'] ?? '') === 'bad') {
 			$labels[$key] = 1;
-		} elseif ((string)($row['act'] ?? '') === 'token_issued'
+		} elseif ((string)($row['act'] ?? '') === 'token_issued'     // not the shadowed handshake acts
 			&& !isset($labels[$key])) {
 			$labels[$key] = 0;
 		}

@@ -12,13 +12,21 @@ the analyzer decides which IPs are impersonators, the guard honours the verdict.
 import copy
 import json
 import os
+import sys
+
+from analyzer import bridge
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULTS = {
     # Where the Phase 1 guard writes its JSONL.
     'log_dir': os.path.join(REPO_ROOT, 'logs'),
-    'redis': {'host': '127.0.0.1', 'port': 6379, 'db': 0, 'socket_timeout': 0.2},
+    # Resolved by load(): these defaults < the guard's own redis block (read through
+    # the PHP bridge) < an explicit 'redis' override in the analyzer config file.
+    # The analyzer is not in the request path, so socket_timeout keeps its 0.2 s
+    # default unless the guard's redis.timeout is larger.
+    'redis': {'host': '127.0.0.1', 'port': 6379, 'socket': '', 'username': '',
+              'password': '', 'db': 0, 'prefix': '', 'socket_timeout': 0.2},
     # How far back to read logs, and the idle gap that starts a new session.
     'window_days': 7,
     'session_gap_s': 1800,
@@ -26,7 +34,14 @@ DEFAULTS = {
     # pin a stale verdict forever.
     'rep_ttl': 2592000,
     'ml_ttl': 86400,
+    # TTL of a bot verdict. 'ok' is a positive, forward-confirmed fact and keeps
+    # the long TTL. 'bad' revokes a crawler's pass, so a wrong one must heal
+    # quickly: it is retried within the hour. 'unknown' is never stored.
     'botv_ttl': 86400,
+    'botbad_ttl': 3600,
+    # A name that must resolve on a working resolver; a negative DNS answer only
+    # counts as a refutation while this resolves (see botverify.healthy()).
+    'dns_canary': 'www.google.com',
     # Reputation is clamped so no single device can dominate the score.
     'rep_clamp': [-50, 80],
     # Below this many clean sessions the "normal" manifold is meaningless.
@@ -85,7 +100,6 @@ DEFAULTS = {
     'snapshot_days': 1,
     # The panel's job queue. The worker calls a Python function in-process for
     # each allowed type and never builds a command line.
-    'queue_key': 'gp:jobs',
     'job_ttl': 86400,
     'worker_max_jobs': 4,
 }
@@ -172,18 +186,62 @@ def validate(cfg):
     return cfg
 
 
+REDIS_GUARD_KEYS = ('host', 'port', 'socket', 'username', 'password', 'db', 'prefix')
+
+
+def resolve_redis(cfg, explicit):
+    """Effective Redis settings: defaults < guard config < explicit override.
+
+    The guard's redis block is the single source of truth for host, socket,
+    credentials, db and key prefix; the analyzer only overrides what its own
+    config file names. The password travels from PHP to here over a pipe and
+    lives only in this dict - it is never printed or written anywhere.
+    """
+    out = dict(DEFAULTS['redis'])
+    guard = {}
+    # The operator states the namespace explicitly (even as ''): that is a decision,
+    # not a guess, so the bridge is not needed to know it.
+    confirmed = 'prefix' in (explicit or {})
+    php = cfg.get('php_bin') or 'php'
+    guard, err = bridge.redis_block_status(php=php, config_path=cfg.get('guard_config_path') or None)
+    if not err:
+        confirmed = True
+    elif not confirmed:
+        # Loud, on EVERY run: connecting with defaults would silently write
+        # un-prefixed keys into the wrong namespace.
+        print('WARN: could not read the guard\'s Redis settings via PHP (%s): %s\n'
+              'WARN: connecting with analyzer defaults / explicit overrides; settings are NOT confirmed, so '
+              'commands that write will refuse. Fix php_bin (full path, cron has a minimal PATH) '
+              'or set redis.prefix explicitly in the analyzer config.' % (php, err), file=sys.stderr)
+    cfg['redis_confirmed'] = confirmed
+    for key in REDIS_GUARD_KEYS:
+        if key in guard:
+            out[key] = guard[key]
+    try:
+        if float(guard.get('timeout', 0)) > float(out['socket_timeout']):
+            out['socket_timeout'] = float(guard['timeout'])
+    except (TypeError, ValueError):
+        pass
+    out.update(explicit or {})
+    return out
+
+
 def load(path=None):
     """Return the effective configuration dict."""
     cfg = copy.deepcopy(DEFAULTS)
     if path is None:
         path = os.environ.get('GV_ANALYZER_CONFIG', '')
     explicit = set()
+    explicit_redis = {}
     if path:
         if not os.path.isfile(path):
             raise ValueError('config file not found: ' + path)
         overrides = _read_overrides(path)
         explicit = set(overrides)
+        if isinstance(overrides.get('redis'), dict):
+            explicit_redis = dict(overrides['redis'])
         cfg = _merge(cfg, overrides)
     # After the merge, so a relocated model_path takes its candidate with it.
     cfg = _derive_candidate_paths(cfg, explicit)
+    cfg['redis'] = resolve_redis(cfg, explicit_redis)
     return validate(cfg)

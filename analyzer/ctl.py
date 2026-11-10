@@ -205,7 +205,7 @@ def main(argv=None):
     if args.command == 'promote-model':
         return handlers[args.command](None, args)
 
-    client = redis_io.connect(cfg)
+    client = redis_io.connect(cfg, write=args.command in ('allow', 'deny', 'clear'))
     if client is None:
         print('ERROR: Redis is unreachable, so no verdict can be read or written.',
               file=sys.stderr)

@@ -223,3 +223,9 @@ by host. If sites need different thresholds, run separate installs with separate
 `prepend.php`, or set the `GV_CONFIG` environment variable per vhost to a different
 `config.php`). The config loader honors `GV_CONFIG` before falling back to the
 shipped `guard/config.php`.
+
+## Note: the challenge handshake and exemptions
+
+The handshake POST (`X-GV`, `X-GV-P` headers) goes to the same URL as the page and is handled
+before exemptions, is metered per IP (`limits.mint`) and needs Redis only for single use.
+Exempt paths are unaffected. Add your panel's URL prefix (e.g. `/gv-admin/`) to `exempt_paths`.

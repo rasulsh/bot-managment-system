@@ -27,6 +27,14 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 	</p>
 </div>
 
+<?php if (!empty($exposed)): ?>
+<div class="gp-card" style="border-color:#c0392b">
+	<span class="gp-badge gp-badge-bad"><?= gp_e(gp_t('dash_exposed')) ?></span>
+	<p class="gp-help"><?= gp_e(gp_t('dash_exposed_help')) ?></p>
+	<p class="gp-mono" dir="ltr"><?= gp_e(implode('  ', $exposed)) ?></p>
+</div>
+<?php endif; ?>
+
 <!-- The kill switch: the single most important control in this panel. -->
 <div class="gp-kill <?= $kill ? 'gp-kill-stopped' : 'gp-kill-armed' ?>">
 	<div class="gp-card-title" style="margin-bottom:.5rem">
@@ -81,6 +89,28 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 				<?= gp_e($redis_up ? gp_t('dash_redis_up') : gp_t('dash_redis_down')) ?></span>
 		</div>
 		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('dash_redis_endpoint')) ?></span>
+			<span class="gp-stat-val gp-mono" dir="ltr"><?= gp_e($rinfo['endpoint']) ?></span>
+		</div>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key">db / prefix / auth</span>
+			<span class="gp-stat-val gp-mono" dir="ltr"><?= gp_e($rinfo['db']) ?> /
+				<?= gp_e($rinfo['prefix'] === '' ? '-' : $rinfo['prefix']) ?> /
+				<?= gp_e($rinfo['auth'] ? 'on' : 'off') ?></span>
+		</div>
+		<?php if (!empty($health['breaker'])): ?>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('dash_breaker')) ?></span>
+			<span class="gp-badge gp-badge-warn"><?= gp_e(gp_t('dash_breaker_open')) ?></span>
+		</div>
+		<?php endif; ?>
+		<?php if (!empty($health['last_error'])): ?>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('dash_last_error')) ?></span>
+			<span class="gp-stat-val gp-mono" dir="ltr"><?= gp_e($health['last_error']) ?></span>
+		</div>
+		<?php endif; ?>
+		<div class="gp-stat-row">
 			<span class="gp-stat-key"><?= gp_e(gp_t('dash_capture')) ?></span>
 			<span class="gp-badge <?= !empty($cfg['capture_outcomes']) ? 'gp-badge-on' : 'gp-badge-off' ?>">
 				<?= gp_e(!empty($cfg['capture_outcomes']) ? gp_t('on') : gp_t('off')) ?></span>
@@ -91,6 +121,15 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 		</div>
 	</div>
 </div>
+
+<?php $bv = isset($s['bot_verify']) && is_array($s['bot_verify']) ? $s['bot_verify'] : array();
+if (!empty($bv['unknown'])): ?>
+<div class="gp-card">
+	<span class="gp-badge gp-badge-warn"><?= gp_e(gp_t('dash_verify_unknown')) ?></span>
+	<span class="gp-stat-val"><?= gp_num((int)$bv['unknown']) ?></span>
+	<p class="gp-help"><?= gp_e(gp_t('dash_verify_unknown_help')) ?></p>
+</div>
+<?php endif; ?>
 
 <!-- Analyzer freshness -->
 <div class="gp-card">

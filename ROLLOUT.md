@@ -18,6 +18,11 @@ python3 -m pip install -r analyzer/requirements.txt
 php panel/setpass.php         # admin panel credentials (optional, recommended)
 ```
 
+- **Required:** run `bash scripts/exposure-check.sh https://your-site/ /your-panel-path` and
+  get `OK` before anything else. It is GET-only and safe on production.
+- `redis`: if the server needs a password / db / socket / prefix, set them in the `redis`
+  block of `guard/config.php`; the analyzer and panel pick them up from there.
+
 - Wire the guard: `auto_prepend_file=/full/path/bot-guard/prepend.php` in
   `.user.ini` / `.htaccess` / `php.ini`.
 - Set `exempt_paths` / `exempt_params` for every server-to-server endpoint on
@@ -80,8 +85,9 @@ challenged. The **log explorer** filtered to `sh=1` is the same query as the
 shadow-action `jq` line, and its CSV export feeds a spreadsheet if you want one.
 
 **Pass:** two weeks of logs; `botv` verdicts appearing; no `botv=bad` on
-addresses that genuinely belong to Google or Bing (if you see any, fix DNS on the
-server before going further).
+addresses that genuinely belong to Google or Bing. A resolver outage can no longer
+cause one (it yields `unknown`, which writes nothing); if you still see any, check
+`run_verify` output for `flagged` and fix DNS before going further.
 
 ---
 

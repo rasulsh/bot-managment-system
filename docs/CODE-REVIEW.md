@@ -28,6 +28,9 @@ Each item lists the file, why it matters under load, and a concrete fix.
 
 ### P1-1. A new Redis TCP connection is opened on every request
 
+> **Addressed (differently).** Persistent sockets were rejected (dirty reply stream, stale AUTH/SELECT state). Pipelining leaves two round trips, and a unix socket (`redis.socket`) removes the TCP handshake.
+
+
 `guard/redis.php` → `gv_redis_connect()` uses `stream_socket_client('tcp://…')`
 with no persistence. Every single request that is not exempt pays a full TCP
 handshake to Redis, then closes it at the end of `gv_run()`.
@@ -59,6 +62,8 @@ a modest but real win; on a networked Redis it is large.
 ---
 
 ### P1-2. 8–14 sequential Redis round trips per navigation, none pipelined
+
+> **Addressed.** Reads and counters are pipelined (two round trips), fail-fast plus a circuit breaker bound a stalled Redis to one timeout. See docs/02-ARCHITECTURE.md, "Redis contract".
 
 This is the big one. Trace a normal logged-in visitor loading an HTML page
 (`gv_run()` in `guard/guard.php`, steps 7b–9):
@@ -289,6 +294,8 @@ just needs RAM proportional to the window).
 ## P3 — Cleanup and hardening
 
 ### P3-1. `prepend.php` fatal-swallowing can hide a broken install indefinitely
+
+> **Addressed.** Swallowed exceptions in `prepend.php` and `guard.php` (and every Redis failure) now write a throttled line to `logs/guard-errors.log`, shown on the panel dashboard.
 
 `prepend.php` and the bottom of `guard.php` both wrap `gv_run()` in
 `catch (\Throwable)` and do nothing — fail-open, which is the correct safety

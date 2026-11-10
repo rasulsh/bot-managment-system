@@ -140,7 +140,7 @@ def main(argv=None):
     sessions = logs_mod.sessionize(rows, cfg['session_gap_s'])
     devices = build_device_view(sessions, cfg)
 
-    client = redis_io.connect(cfg)
+    client = redis_io.connect(cfg, write=not args.dry_run)
 
     # --- reputation -------------------------------------------------------
     rep_written = 0

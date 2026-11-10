@@ -134,9 +134,16 @@ function gp_reset_button($key) {
 		<div class="gp-card-title"><?= gp_e(gp_t('set_group_limits')) ?></div>
 		<div class="gp-grid-3">
 			<?php foreach (array('limits.window', 'limits.device', 'limits.ip_ua',
-				'limits.ip', 'limits.bot') as $k) {
+				'limits.ip', 'limits.bot', 'limits.mint') as $k) {
 				gp_field_num($k, $cfg, $overlay, $errors);
 			} ?>
+		</div>
+	</div>
+
+	<div class="gp-card">
+		<div class="gp-card-title"><?= gp_e(gp_t('set_group_challenge')) ?></div>
+		<div class="gp-grid-3">
+			<?php gp_field_num('challenge.pow_bits', $cfg, $overlay, $errors); ?>
 		</div>
 	</div>
 

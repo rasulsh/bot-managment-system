@@ -51,10 +51,18 @@ function gv_cfg_defaults(array $cfg) {
 	$signals = array('reputation' => false, 'ml' => false, 'clf' => false);
 	if (!isset($cfg['signals']) || !is_array($cfg['signals'])) { $cfg['signals'] = array(); }
 	$cfg['signals'] = array_merge($signals, $cfg['signals']);
-	$limits = array('window' => 300, 'device' => 150, 'ip_ua' => 400, 'ip' => 1200, 'bot' => 600);
+	$limits = array('window' => 300, 'device' => 150, 'ip_ua' => 400, 'ip' => 1200, 'bot' => 600,
+		'mint' => 60);
 	if (!isset($cfg['limits']) || !is_array($cfg['limits'])) { $cfg['limits'] = array(); }
 	$cfg['limits'] = array_merge($limits, $cfg['limits']);
-	$redis = array('host' => '127.0.0.1', 'port' => 6379, 'timeout' => 0.05);
+	// Challenge hardening. pow_bits is the proof-of-work difficulty (0 disables it);
+	// bind_ip ties a nonce to the IP it was issued to.
+	$challenge = array('pow_bits' => 16, 'bind_ip' => true);
+	if (!isset($cfg['challenge']) || !is_array($cfg['challenge'])) { $cfg['challenge'] = array(); }
+	$cfg['challenge'] = array_merge($challenge, $cfg['challenge']);
+	$redis = array('host' => '127.0.0.1', 'port' => 6379, 'socket' => '',
+		'username' => '', 'password' => '', 'db' => 0, 'prefix' => '',
+		'timeout' => 0.05, 'breaker_ttl' => 5);
 	if (!isset($cfg['redis']) || !is_array($cfg['redis'])) { $cfg['redis'] = array(); }
 	$cfg['redis'] = array_merge($redis, $cfg['redis']);
 	$strings = array(
@@ -63,6 +71,9 @@ function gv_cfg_defaults(array $cfg) {
 		'title'    => 'Please wait a moment...',
 		'sub'      => 'We are checking your browser.',
 		'noscript' => 'Please enable JavaScript and cookies to continue.',
+		'failed'   => 'We could not verify your browser.',
+		'retry'    => 'Try again',
+		'nocookie' => 'Your browser is not keeping cookies. Please enable cookies for this site and try again.',
 	);
 	if (!isset($cfg['strings']) || !is_array($cfg['strings'])) { $cfg['strings'] = array(); }
 	$cfg['strings'] = array_merge($strings, $cfg['strings']);
@@ -103,6 +114,8 @@ function gv_overlay_whitelist() {
 		'limits.ip_ua'       => array('int', 1, 100000),
 		'limits.ip'          => array('int', 1, 100000),
 		'limits.bot'         => array('int', 1, 100000),
+		'limits.mint'        => array('int', 1, 100000),
+		'challenge.pow_bits' => array('int', 0, 24),
 		'holdout_pct'        => array('int', 0, 5),
 		'capture_outcomes'   => array('bool'),
 		'exempt_paths'       => array('paths'),
@@ -355,6 +368,7 @@ function gv_facts(array $server, array $get, array $cookie, array $cfg) {
 		'sf'      => isset($server['HTTP_SEC_FETCH_MODE']) ? (string)$server['HTTP_SEC_FETCH_MODE'] : '',
 		'xrw'     => isset($server['HTTP_X_REQUESTED_WITH']) ? (string)$server['HTTP_X_REQUESTED_WITH'] : '',
 		'xgv'     => isset($server['HTTP_X_GV']) ? (string)$server['HTTP_X_GV'] : '',
+		'xgvp'    => isset($server['HTTP_X_GV_P']) ? (string)$server['HTTP_X_GV_P'] : '',
 		'referer' => isset($server['HTTP_REFERER']) ? (string)$server['HTTP_REFERER'] : '',
 		'hc'      => gv_header_count($server),
 		'https'   => $https,
@@ -456,22 +470,43 @@ function gv_match_bot($ua, array $known_bots) {
 	return '';
 }
 
-// Fixed-window counter. Returns the current count, or 0 in degraded mode.
+// Fixed-window counters, any number in ONE round trip. $items is a list of
+// array(key, window); returns the matching list of counts (0 in degraded mode).
 //
-// The first write uses SET key 1 EX window NX, which sets the value and the
-// expiry atomically: the key can never exist without a TTL. The old
-// INCR-then-EXPIRE sequence left a TTL-less key behind if the process died or
-// EXPIRE failed between the two commands, and once such a key crossed the limit
-// the identity was 429'd forever. Subsequent hits INCR the key that already
-// carries its TTL. Counting is unchanged (first hit 1, then 2, 3, ...) and a
-// failed read still folds to 0 (fail-open).
+// Per counter the pipeline is SET key 0 EX window NX, INCR key, TTL key. The SET
+// creates the key WITH its TTL, so a counter normally cannot exist without one.
+// The one remaining race - the key expires between SET NX and INCR, so INCR
+// re-creates it bare - is caught by the TTL reply (-1) and repaired with an
+// EXPIRE. Counting is unchanged (first hit 1, then 2, 3, ...) and a failed read
+// still folds to 0 (fail-open).
+function gv_bump_many($conn, array $items, array $extra = array(), &$extra_out = null) {
+	$counts = array_fill(0, count($items), 0);
+	$extra_out = array_fill(0, count($extra), false);
+	if (!gv_redis_alive($conn) || (!$items && !$extra)) { return $counts; }
+	// $extra commands ride in the same write (and the same round trip) ahead of
+	// the counters; their replies come back in $extra_out.
+	$cmds = array_values($extra);
+	$n0 = count($cmds);
+	foreach ($items as $it) {
+		foreach (gv_bump_cmds($it[0], $it[1]) as $c) { $cmds[] = $c; }
+	}
+	$r = gv_redis_pipeline($conn, $cmds);
+	if ($r === false) { return $counts; }
+	for ($i = 0; $i < $n0; $i++) { $extra_out[$i] = $r[$i]; }
+	$repair = array();
+	foreach ($items as $i => $it) {
+		$res = gv_bump_result($r[$n0 + $i * 3 + 1], $r[$n0 + $i * 3 + 2]);
+		$counts[$i] = $res[0];
+		if ($res[1]) { $repair[] = array('EXPIRE', $it[0], (string)(int)$it[1]); }
+	}
+	if ($repair) { gv_redis_pipeline($conn, $repair); }
+	return $counts;
+}
+
+// One counter. Returns the current count, or 0 in degraded mode.
 function gv_bump($conn, $key, $window) {
-	if (!$conn) { return 0; }
-	$set = gv_r_set_nx_ex($conn, $key, $window, 1);
-	if ($set === 'OK') { return 1; }              // created with a TTL in one command
-	$n = gv_r_incr($conn, $key);                  // already existed
-	if ($n === false || $n === null) { return 0; }
-	return (int)$n;
+	$n = gv_bump_many($conn, array(array($key, $window)));
+	return $n[0];
 }
 
 // --------------------------------------------------------------------------
@@ -542,6 +577,14 @@ function gv_arm_outcome(array $cfg, array $f, $log_dir) {
 	gv_capture_outcome(isset($f['rid']) ? $f['rid'] : '', $log_dir);
 }
 
+// Last Redis step of a request: record degraded mode (rd=1) when the
+// connection was never opened or died on the way (fail-fast closes it), then
+// release it. Call it BEFORE the log line, which reads $st['rd'].
+function gv_finish($conn, array &$st) {
+	if (!gv_redis_alive($conn)) { $st['rd'] = 1; }
+	gv_redis_close($conn);
+}
+
 // Default per-request state, filled in as the flow progresses.
 // botv/rep/ml/clf carry the offline verdicts: '' means no bot verdict was read,
 // 0 is a neutral reputation, and -1 means no level was available.
@@ -560,19 +603,29 @@ function gv_state_new() {
 // Phase 2 verdicts
 // --------------------------------------------------------------------------
 
-// Read the offline bot verification verdict for an address.
-// Returns 'bad', 'ok' or '' (no verdict / degraded mode). A bad verdict wins.
+// Fold the two bot verdict reads into 'bad', 'ok' or '' (no verdict). Pure.
+// A bad verdict wins.
 //
-// The === '1' comparison is load-bearing: gv_r_get returns the string on a hit,
+// The === '1' comparison is load-bearing: a read returns the string on a hit,
 // null on a miss and FALSE on a command error or read timeout. Comparing
 // against null treated a stalled Redis as a bad verdict, which stamped
 // BOT_FAKE (+35) on a real crawler that will never solve a challenge. A read
 // that failed is no signal at all.
-function gv_bot_verdict($conn, $ip) {
-	if (!$conn) { return ''; }
-	if (gv_r_get($conn, 'gv:botbad:' . $ip) === '1') { return 'bad'; }
-	if (gv_r_get($conn, 'gv:botok:' . $ip) === '1') { return 'ok'; }
+function gv_bot_verdict_from($botbad, $botok) {
+	if ($botbad === '1') { return 'bad'; }
+	if ($botok === '1') { return 'ok'; }
 	return '';
+}
+
+// Read the offline bot verification verdict for an address (one round trip).
+function gv_bot_verdict($conn, $ip) {
+	if (!gv_redis_alive($conn)) { return ''; }
+	$r = gv_redis_pipeline($conn, array(
+		array('GET', gv_key('botbad:' . $ip)),
+		array('GET', gv_key('botok:' . $ip)),
+	));
+	if ($r === false) { return ''; }
+	return gv_bot_verdict_from($r[0], $r[1]);
 }
 
 // --------------------------------------------------------------------------
@@ -623,24 +676,42 @@ function gv_effective_score($sc, $rep, $ml, $clf, array $cfg) {
 	return $esc;
 }
 
-// Read an operator override. Returns 'allow', 'deny' or ''.
+// Fold the override reads into 'allow', 'deny' or ''. Pure.
 //
 // Allow wins over deny: the operator's most specific intent is assumed to be
 // the rescue, and a permissive override is the five-second fix when a real
-// customer is stuck. Every read uses === '1' so a failed read is no signal.
+// customer is stuck. Every comparison uses === '1' so a failed read is no signal.
 //
 // Both allow-by-device and allow-by-ip are honoured: a stuck customer who never
 // completed the handshake has only an IP (no device id), and allow-by-ip is the
 // documented rescue for that case. The per-device allow is checked first so a
 // device allow still overrides an IP deny for the same client, and the IP allow
 // is checked before the IP deny so allow-wins holds for IP identities too.
-function gv_override($conn, $ip, $dev) {
-	if (!$conn) { return ''; }
-	if ($dev !== '' && gv_r_get($conn, 'gv:allow:' . $dev) === '1') { return 'allow'; }
-	if ($ip  !== '' && gv_r_get($conn, 'gv:allow:' . $ip)  === '1') { return 'allow'; }
-	if ($dev !== '' && gv_r_get($conn, 'gv:deny:' . $dev) === '1') { return 'deny'; }
-	if (gv_r_get($conn, 'gv:deny:' . $ip) === '1') { return 'deny'; }
+// A key that was not read (no device id) is passed as null.
+function gv_override_from($allow_dev, $allow_ip, $deny_dev, $deny_ip) {
+	if ($allow_dev === '1') { return 'allow'; }
+	if ($allow_ip  === '1') { return 'allow'; }
+	if ($deny_dev  === '1') { return 'deny'; }
+	if ($deny_ip   === '1') { return 'deny'; }
 	return '';
+}
+
+// Read an operator override (one round trip). Returns 'allow', 'deny' or ''.
+function gv_override($conn, $ip, $dev) {
+	if (!gv_redis_alive($conn)) { return ''; }
+	$cmds = array(
+		'allow_dev' => ($dev !== '') ? array('GET', gv_key('allow:' . $dev)) : null,
+		'allow_ip'  => ($ip  !== '') ? array('GET', gv_key('allow:' . $ip))  : null,
+		'deny_dev'  => ($dev !== '') ? array('GET', gv_key('deny:' . $dev))  : null,
+		'deny_ip'   => array('GET', gv_key('deny:' . $ip)),
+	);
+	$send = array_values(array_filter($cmds));
+	$r = gv_redis_pipeline($conn, $send);
+	if ($r === false) { return ''; }
+	$v = array();
+	$i = 0;
+	foreach ($cmds as $label => $cmd) { $v[$label] = ($cmd === null) ? null : $r[$i++]; }
+	return gv_override_from($v['allow_dev'], $v['allow_ip'], $v['deny_dev'], $v['deny_ip']);
 }
 
 // The Phase 1 decision, unchanged except that it now judges the effective
@@ -713,22 +784,106 @@ function gv_run($t0) {
 	$f   = gv_facts($_SERVER, $_GET, $_COOKIE, $cfg);
 	$log = (string)$cfg['log_dir'];
 	$st  = gv_state_new();
+	gv_redis_ctx(array('log_dir' => $log));       // where swallowed errors are reported
 
 	// 2. Verify handshake intercept. Runs before exemptions so the challenge
 	// page can always complete its own POST back to the same URL.
+	//
+	// The handshake is metered and single-use. Everything that needs no storage
+	// (signature, binding to UA and IP, age, proof of work) is checked first; then
+	// ONE Redis round trip claims the nonce id (SET NX = single use), reads the
+	// IP's allow override and bumps the ip, ip_ua and mint counters. Redis down:
+	// the handshake stays open (fail-open) and only the stateless checks apply.
 	if ($f['method'] === 'POST' && $f['xgv'] !== '') {
-		if (gv_nonce_check($f['xgv'], $cfg['secret'], $cfg['nonce_ttl'])) {
-			$token = gv_tok_make($cfg['secret']);
-			$dev   = gv_tok_check($token, $cfg['secret'], $cfg['token_ttl']);
-			gv_set_token_cookie($cfg, $token, $f['https']);
-			$st['tok'] = 'v';
-			$st['dev'] = ($dev === false) ? '' : $dev;
-			gv_emit($f, $st, 'token_issued', 0, $t0, $log);
-			if (!headers_sent()) { http_response_code(204); }
+		$bind_ip = !empty($cfg['challenge']['bind_ip']);
+		$valid   = gv_nonce_check($f['xgv'], $cfg['secret'], $cfg['nonce_ttl'], $f['ua'],
+			$bind_ip ? $f['ip'] : '');
+		$parsed  = $valid ? gv_nonce_parse($f['xgv']) : false;
+		// Proof of work is one hash and needs no storage: check it BEFORE Redis so a
+		// request that cannot become a token never touches the mint counter.
+		$pow_ok  = $parsed ? gv_pow_ok($f['xgv'], $f['xgvp'], $parsed[1]) : false;
+		$window  = $cfg['limits']['window'];
+
+		$conn  = gv_redis_connect($cfg['redis'], $log);
+		$extra = array(array('GET', gv_key('allow:' . $f['ip'])));
+		if ($parsed) {
+			$extra[] = array('SET', gv_key('nonce:' . $parsed[0]), '1', 'EX',
+				(string)max(1, (int)$cfg['nonce_ttl']), 'NX');
+		}
+		$items = array(
+			array(gv_key('riu:' . md5($f['ip'] . '|' . substr(md5((string)$f['ua']), 0, 12))), $window),
+			array(gv_key('ri:' . $f['ip']), $window),
+		);
+		$mint_at = -1;                                // only a request that could become a token counts
+		if ($parsed && $pow_ok) {
+			$mint_at = count($items);
+			$items[] = array(gv_key('mint:' . $f['ip']), $window);
+		}
+		$counts = gv_bump_many($conn, $items, $extra, $reads);
+		$st['ciu'] = $counts[0];
+		$st['ci']  = $counts[1];
+		$allowed_ip = ($reads[0] === '1');
+		$replay     = ($parsed && $reads[1] === null);      // false (error) is no verdict
+		$mint_n     = ($mint_at >= 0) ? $counts[$mint_at] : 0;
+		// limits.mint counts tokens ISSUED. The bump rode in the same round trip as
+		// the nonce claim, so give it back when this turns out to be a replay or a
+		// refusal (the counter must not grow for requests that got no token).
+		$mint_refused = ($mint_n > (int)$cfg['limits']['mint']) && !$allowed_ip
+			&& !empty($cfg['enforce']['ratelimit']);
+		if ($mint_at >= 0 && ($replay || $mint_refused) && gv_redis_alive($conn)) {
+			gv_redis_cmd($conn, array('DECR', gv_key('mint:' . $f['ip'])));
+		}
+		gv_finish($conn, $st);
+
+		if (!$valid) {
+			gv_emit($f, $st, 'nonce_bad', 0, $t0, $log);
+			if (!headers_sent()) { http_response_code(403); }
 			exit;
 		}
-		gv_emit($f, $st, 'nonce_bad', 0, $t0, $log);
-		if (!headers_sent()) { http_response_code(403); }
+
+		// New rejections are shadow-first like every other enforcement: with
+		// enforce.challenge off they are logged (sh=1) and the token is still
+		// issued, so monitor mode can never lock anybody out of anything.
+		$reject = '';
+		if ($replay) {
+			$reject = 'nonce_replay';
+		} elseif (!$pow_ok) {
+			$reject = 'pow_bad';
+		}
+		$act = 'token_issued';
+		$sh  = 0;
+		if ($reject !== '') {
+			if (!empty($cfg['enforce']['challenge'])) {
+				gv_emit($f, $st, $reject, 0, $t0, $log);
+				if (!headers_sent()) { http_response_code(403); }
+				exit;
+			}
+			$act = $reject;                       // shadow: logged, token still issued
+			$sh  = 1;
+		} else {
+			// Mint metering. An allow-listed IP is never refused a token.
+			$over = ($mint_n > (int)$cfg['limits']['mint'])
+				|| ($st['ci'] > (int)$cfg['limits']['ip'])
+				|| ($st['ciu'] > (int)$cfg['limits']['ip_ua']);
+			if ($over && !$allowed_ip) {
+				if (!empty($cfg['enforce']['ratelimit'])) {
+					gv_emit($f, $st, 'mint_limited', 0, $t0, $log);
+					gv_send_429();
+					exit;
+				}
+				$act = 'mint_limited';            // shadow: logged, token still issued
+				$sh  = 1;
+			}
+		}
+		$token = gv_tok_make($cfg['secret']);
+		$dev   = gv_tok_check($token, $cfg['secret'], $cfg['token_ttl']);
+		gv_set_token_cookie($cfg, $token, $f['https']);
+		$st['tok'] = 'v';
+		$st['dev'] = ($dev === false) ? '' : $dev;
+		// One log line per request. A shadowed rejection still issues the token,
+		// so its act is the would-be action with sh=1 (consumers count it as issued).
+		gv_emit($f, $st, $act, $sh, $t0, $log);
+		if (!headers_sent()) { http_response_code(204); }
 		exit;
 	}
 
@@ -739,25 +894,69 @@ function gv_run($t0) {
 		return;
 	}
 
-	// 4. Redis. A failed connect means degraded mode, never a bypass.
-	$conn = gv_redis_connect($cfg['redis']);
-	if (!$conn) { $st['rd'] = 1; }
+	// 4. Token. A pure HMAC check, so it can run before Redis is opened: the
+	// device id is needed to build the batched reads below. The result stays in
+	// locals and reaches $st at the point it always did (step 7), so the logged
+	// row of a bot pass or a honeypot hit is unchanged.
+	$tok = 'm';
+	$dev = '';
+	if ($f['cookie'] !== '') {
+		$d = gv_tok_check($f['cookie'], $cfg['secret'], $cfg['token_ttl']);
+		if ($d === false) {
+			$tok = 'b';
+		} else {
+			$tok = 'v';
+			$dev = $d;
+		}
+	}
 
-	// 5. Known bots. Still no live reverse DNS: DNS latency does not belong in
+	// 5. Redis. A failed connect means degraded mode, never a bypass. At most
+	// two round trips follow: ONE pipeline of every GET this request can need,
+	// then (only on the paths that count) ONE pipeline of counters. A transport
+	// failure closes the connection (fail-fast), so a stalled Redis costs one
+	// timeout, and the breaker makes the next requests skip it altogether.
+	$conn = gv_redis_connect($cfg['redis'], $log);
+	$bot   = gv_match_bot($f['ua'], $cfg['known_bots']);
+	$is_hp = ($f['path'] === (string)$cfg['honeypot_path']);
+
+	$reads = array();
+	if ($bot !== '') {
+		$reads['botbad'] = array('GET', gv_key('botbad:' . $f['ip']));
+		$reads['botok']  = array('GET', gv_key('botok:' . $f['ip']));
+	}
+	if (!$is_hp) {
+		if ($dev !== '') {
+			$reads['rep']       = array('GET', gv_key('rep:' . $dev));
+			$reads['ml']        = array('GET', gv_key('ml:' . $dev));
+			$reads['clf']       = array('GET', gv_key('clf:' . $dev));
+			$reads['allow_dev'] = array('GET', gv_key('allow:' . $dev));
+			$reads['deny_dev']  = array('GET', gv_key('deny:' . $dev));
+		}
+		if ($f['ip'] !== '') { $reads['allow_ip'] = array('GET', gv_key('allow:' . $f['ip'])); }
+		$reads['deny_ip'] = array('GET', gv_key('deny:' . $f['ip']));
+		$reads['hp']      = array('GET', gv_key('hp:' . $f['ip']));
+	}
+	$val = array();                               // label => reply; empty = no signal
+	if ($reads && gv_redis_alive($conn)) {
+		$r = gv_redis_pipeline($conn, array_values($reads));
+		if ($r !== false) { $val = array_combine(array_keys($reads), $r); }
+	}
+	$rv = function ($label) use ($val) { return isset($val[$label]) ? $val[$label] : false; };
+
+	// Known bots. Still no live reverse DNS: DNS latency does not belong in
 	// the request path. The Phase 2 analyzer verifies out of band and leaves a
-	// verdict here, so this step costs one cheap GET.
+	// verdict here, so this step costs nothing beyond the batched GETs above.
 	//
-	// This pass runs BEFORE the honeypot check (step 6) by design: a UA claiming
+	// This pass runs BEFORE the honeypot check by design: a UA claiming
 	// a known bot takes the pass and is never honeypot-labelled until run_verify
 	// writes a 'bad' verdict out of band. So the honeypot is not a defense
 	// against fake-bot UAs - reordering it ahead of this would instead risk
 	// honeypot-labelling real crawlers, which is the worse failure. See #17.
-	$bot      = gv_match_bot($f['ua'], $cfg['known_bots']);
 	$bot_over = false;
 	$bot_fake = false;
 	if ($bot !== '') {
 		$st['bot'] = $bot;
-		$verdict = gv_bot_verdict($conn, $f['ip']);
+		$verdict = gv_bot_verdict_from($rv('botbad'), $rv('botok'));
 		if ($verdict === 'bad') {
 			// An impersonator must be judged, not trusted. Revoke the pass and
 			// fall through into normal scoring like any other client.
@@ -765,13 +964,14 @@ function gv_run($t0) {
 			$bot_fake   = true;
 		} else {
 			if ($verdict === 'ok') { $st['botv'] = 'ok'; }
-			if ($conn) {
-				$n = gv_bump($conn, 'gv:rb:' . $f['ip'], $cfg['limits']['window']);
+			// The pass bumps only its own counter (rb), never rd/riu/ri.
+			if (gv_redis_alive($conn)) {
+				$n = gv_bump($conn, gv_key('rb:' . $f['ip']), $cfg['limits']['window']);
 				if ($n > (int)$cfg['limits']['bot']) { $bot_over = true; }
 			}
 			if (!$bot_over) {
+				gv_finish($conn, $st);
 				gv_emit($f, $st, 'allow_bot', 0, $t0, $log);
-				gv_redis_close($conn);
 				gv_arm_outcome($cfg, $f, $log);
 				return;
 			}
@@ -779,36 +979,29 @@ function gv_run($t0) {
 	}
 
 	// 6. Honeypot. Fires regardless of the enforce toggles: it is labelling data.
-	if ($f['path'] === (string)$cfg['honeypot_path']) {
-		if ($conn) { gv_r_setex($conn, 'gv:hp:' . $f['ip'], 604800, '1'); }
+	if ($is_hp) {
+		if (gv_redis_alive($conn)) { gv_r_setex($conn, gv_key('hp:' . $f['ip']), 604800, '1'); }
 		$st['hp'] = 1;
+		gv_finish($conn, $st);
 		gv_emit($f, $st, '404_hp', 0, $t0, $log);
-		gv_redis_close($conn);
 		gv_send_404();
 		exit;
 	}
 
-	// 7. Token.
-	if ($f['cookie'] !== '') {
-		$dev = gv_tok_check($f['cookie'], $cfg['secret'], $cfg['token_ttl']);
-		if ($dev === false) {
-			$st['tok'] = 'b';
-		} else {
-			$st['tok'] = 'v';
-			$st['dev'] = $dev;
-		}
-	}
+	// 7. Token (verified in step 4).
+	$st['tok'] = $tok;
+	$st['dev'] = $dev;
 
 	// 7b. Offline verdicts for real users. All three are per device, because
 	// they describe a browsing identity rather than an address. is_numeric()
 	// rejects both a miss (null) and a failed read (false), so a stalled Redis
 	// leaves the neutral sentinels in place.
-	if ($st['dev'] !== '' && $conn) {
-		$rep = gv_r_get($conn, 'gv:rep:' . $st['dev']);
+	if ($st['dev'] !== '') {
+		$rep = $rv('rep');
 		$st['rep'] = is_numeric($rep) ? (int)$rep : 0;
-		$ml = gv_r_get($conn, 'gv:ml:' . $st['dev']);
+		$ml = $rv('ml');
 		$st['ml'] = is_numeric($ml) ? (int)$ml : -1;
-		$clf = gv_r_get($conn, 'gv:clf:' . $st['dev']);
+		$clf = $rv('clf');
 		$st['clf'] = is_numeric($clf) ? (int)$clf : -1;
 	}
 
@@ -816,20 +1009,19 @@ function gv_run($t0) {
 	// scoring, no counters, no challenge. It is deliberately not gated by any
 	// enforce toggle, because a permissive override can only ever make the
 	// guard less strict and must work the instant it is set.
-	if ($conn) {
-		$st['ovr'] = gv_override($conn, $f['ip'], $st['dev']);
-		if ($st['ovr'] === 'allow') {
-			gv_emit($f, $st, 'allow_override', 0, $t0, $log);
-			gv_redis_close($conn);
-			gv_arm_outcome($cfg, $f, $log);
-			return;                               // zero bytes of output
-		}
+	$st['ovr'] = gv_override_from(
+		($st['dev'] !== '') ? $rv('allow_dev') : null, $rv('allow_ip'),
+		($st['dev'] !== '') ? $rv('deny_dev') : null, $rv('deny_ip'));
+	if ($st['ovr'] === 'allow') {
+		gv_finish($conn, $st);
+		gv_emit($f, $st, 'allow_override', 0, $t0, $log);
+		gv_arm_outcome($cfg, $f, $log);
+		return;                                   // zero bytes of output
 	}
 
 	// 8. Static score. gv_score stays pure and Phase 1 shaped; the Phase 2
 	// contributions are folded in below.
-	$hp_hist = false;
-	if ($conn && gv_r_get($conn, 'gv:hp:' . $f['ip']) === '1') { $hp_hist = true; }
+	$hp_hist   = ($rv('hp') === '1');
 	$scored    = gv_score($f, $hp_hist);
 	$st['sc']  = $scored[0];
 	$st['rs']  = $scored[1];
@@ -840,20 +1032,27 @@ function gv_run($t0) {
 		$st['rs'][] = 'BOT_FAKE';
 	}
 
-	// 9. Rate counters. Skipped entirely in degraded mode; values stay 0.
+	// 9. Rate counters, all in one round trip. Skipped entirely in degraded
+	// mode; values stay 0.
 	$over = $bot_over;
-	if ($conn) {
+	if (gv_redis_alive($conn)) {
+		$window = $cfg['limits']['window'];
+		$items = array();
+		if ($st['dev'] !== '') { $items[] = array(gv_key('rd:' . $st['dev']), $window); }
+		$uah = substr(md5((string)$f['ua']), 0, 12);
+		$items[] = array(gv_key('riu:' . md5($f['ip'] . '|' . $uah)), $window);
+		$items[] = array(gv_key('ri:' . $f['ip']), $window);
+		$counts = gv_bump_many($conn, $items);
 		if ($st['dev'] !== '') {
-			$st['cd'] = gv_bump($conn, 'gv:rd:' . $st['dev'], $cfg['limits']['window']);
+			$st['cd'] = array_shift($counts);
 			if ($st['cd'] > (int)$cfg['limits']['device']) { $over = true; }
 		}
-		$uah = substr(md5((string)$f['ua']), 0, 12);
-		$st['ciu'] = gv_bump($conn, 'gv:riu:' . md5($f['ip'] . '|' . $uah), $cfg['limits']['window']);
+		$st['ciu'] = $counts[0];
 		if ($st['ciu'] > (int)$cfg['limits']['ip_ua']) { $over = true; }
-		$st['ci'] = gv_bump($conn, 'gv:ri:' . $f['ip'], $cfg['limits']['window']);
+		$st['ci'] = $counts[1];
 		if ($st['ci'] > (int)$cfg['limits']['ip']) { $over = true; }
 	}
-	gv_redis_close($conn);
+	gv_finish($conn, $st);
 
 	// 10. Decision, now judging the effective score.
 	$st['esc'] = gv_effective_score($st['sc'], $st['rep'], $st['ml'], $st['clf'], $cfg);
@@ -900,7 +1099,9 @@ function gv_run($t0) {
 	gv_emit($f, $st, $intended, 0, $t0, $log);
 	if ($intended === '403') { gv_send_403(); exit; }
 	if ($intended === '429') { gv_send_429(); exit; }
-	gv_challenge_render(gv_nonce_make($cfg['secret']), $cfg['strings']);
+	$bits  = max(0, min(24, (int)$cfg['challenge']['pow_bits']));
+	$nonce = gv_nonce_make($cfg['secret'], $f['ua'], !empty($cfg['challenge']['bind_ip']) ? $f['ip'] : '', $bits);
+	gv_challenge_render($nonce, $cfg['strings'], $bits);
 	exit;
 }
 
@@ -913,6 +1114,10 @@ if (PHP_SAPI !== 'cli' && !defined('GV_NO_AUTORUN')) {
 	try {
 		gv_run($gv_t0);
 	} catch (\Throwable $e) {
-		// fail-open: never break the host application
+		// fail-open: never break the host application, but leave a trace. This also
+		// covers a config file that does not parse; gv_errlog falls back to the
+		// shipped log directory when no config was loaded.
+		gv_errlog('guard_exception', get_class($e) . ': ' . $e->getMessage()
+			. ' @ ' . basename($e->getFile()) . ':' . $e->getLine());
 	}
 }

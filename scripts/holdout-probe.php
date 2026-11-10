@@ -7,6 +7,7 @@
 // whole reason that file must never be deployed. There is no way to mint a
 // token for a chosen device id against a real configuration.
 if (PHP_SAPI !== 'cli') { exit; }
+if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n"); exit(1); }
 
 define('GV_BOOT', 1);
 putenv('GV_CONFIG=' . __DIR__ . '/config.dev.php');

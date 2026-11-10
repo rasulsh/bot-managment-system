@@ -1,6 +1,7 @@
 """Thin redis-py wrapper for the verdict contract.
 
-Every key carries the gv: prefix and a TTL, so a stopped analyzer cannot pin a
+Every key goes through key()/gp_key(), which add the namespace prefix from the
+guard's redis block, and carries a TTL, so a stopped analyzer cannot pin a
 stale verdict forever. Every call is wrapped: a Redis outage warns on stderr
 and returns False rather than raising, because a failed verdict write must
 never take down a nightly job. The analyzer only ever writes these keys - it
@@ -9,6 +10,7 @@ never blocks, challenges, or serves a request.
 
 from __future__ import print_function
 
+import re
 import sys
 
 try:
@@ -20,26 +22,101 @@ except Exception as exc:                      # pragma: no cover - env dependent
     REDIS_ERROR = str(exc)
 
 
+PREFIX_RE = re.compile(r'^[A-Za-z0-9_.:-]{0,32}$')
+NO_PASSWORD_RE = re.compile(r'without any password|no password is set', re.I)
+
+# The key namespace of the connection opened last. key() is the ONLY place a
+# 'gv:' literal is built; with an empty prefix the names are exactly the legacy
+# ones, so an upgrade changes nothing.
+_PREFIX = ''
+# Credentials in use, scrubbed from anything warn() prints: a job's captured
+# output is shown in the panel.
+_SECRETS = []
+
+
+def key(name):
+    """Namespaced gv: key. Mirrors gv_key() in guard/redis.php."""
+    return _PREFIX + 'gv:' + str(name)
+
+
+def gp_key(name):
+    """Namespaced gp: (panel) key. Mirrors gp_key() in guard/redis.php."""
+    return _PREFIX + 'gp:' + str(name)
+
+
 def warn(message):
-    print('WARN: ' + str(message), file=sys.stderr)
+    text = str(message)
+    for secret in _SECRETS:
+        if secret:
+            text = text.replace(secret, '***')
+    print('WARN: ' + text, file=sys.stderr)
 
 
-def connect(cfg):
-    """Return a live client, or None when Redis is unavailable."""
+def connect(cfg, write=False):
+    """Return a live client, or None when Redis is unavailable.
+
+    write=True is for callers that change Redis: they get None (and an explicit
+    ERROR) unless the Redis settings were confirmed - read from the guard's config
+    or stated explicitly - because writing under guessed settings means writing
+    into the wrong namespace and reporting success.
+
+    Settings come from cfg['redis'], which config.load() already resolved
+    (defaults < the guard's redis block < an explicit analyzer override).
+    """
+    global _PREFIX
     if not REDIS_AVAILABLE:
         warn('redis-py not installed: ' + REDIS_ERROR)
         return None
     settings = (cfg or {}).get('redis') or {}
+    if write and (cfg or {}).get('redis_confirmed') is False:
+        print('ERROR: the Redis settings are not confirmed (the guard\'s config could not be read), '
+              'so nothing is written.', file=sys.stderr)
+        return None
+    prefix = str(settings.get('prefix') or '')
+    if not PREFIX_RE.match(prefix):
+        # Same rule as the guard: an invalid prefix is a configuration error,
+        # never silently altered.
+        warn('redis.prefix is invalid (allowed: [A-Za-z0-9_.:-], max 32): Redis disabled')
+        return None
+    _PREFIX = prefix
+    password = str(settings.get('password') or '')
+    username = str(settings.get('username') or '')
+    _SECRETS[:] = [x for x in (password, username) if x]
+
+    def build(use_password):
+        timeout = float(settings.get('socket_timeout', 0.2))
+        kwargs = dict(db=int(settings.get('db', 0)), socket_timeout=timeout,
+                      socket_connect_timeout=timeout, decode_responses=True)
+        socket_path = str(settings.get('socket') or '')
+        if socket_path:
+            kwargs['unix_socket_path'] = socket_path
+        else:
+            kwargs['host'] = settings.get('host', '127.0.0.1')
+            kwargs['port'] = int(settings.get('port', 6379))
+        if use_password and password:
+            kwargs['password'] = password
+            if username:
+                kwargs['username'] = username
+        # RESP2 on purpose: redis-py >= 5 defaults to RESP3 (a HELLO 3 handshake),
+        # which Redis 5 does not understand. Older redis-py has no such argument.
+        try:
+            return redis_py.Redis(protocol=2, **kwargs)
+        except TypeError:
+            return redis_py.Redis(**kwargs)
+
     try:
-        client = redis_py.Redis(
-            host=settings.get('host', '127.0.0.1'),
-            port=int(settings.get('port', 6379)),
-            db=int(settings.get('db', 0)),
-            socket_timeout=float(settings.get('socket_timeout', 0.2)),
-            socket_connect_timeout=float(settings.get('socket_timeout', 0.2)),
-            decode_responses=True,
-        )
-        client.ping()
+        client = build(True)
+        try:
+            client.ping()
+        except Exception as exc:
+            # A password configured for a server that has none is harmless
+            # (the wording differs by Redis version); carry on without AUTH.
+            if password and NO_PASSWORD_RE.search(str(exc)):
+                warn('a Redis password is configured but the server has none')
+                client = build(False)
+                client.ping()
+            else:
+                raise
         return client
     except Exception as exc:
         warn('redis unavailable: %s' % exc)
@@ -72,9 +149,9 @@ def set_botv(client, ip, verdict, ttl):
     if verdict not in ('ok', 'bad'):
         warn('ignoring unknown bot verdict: %r' % (verdict,))
         return False
-    key = 'gv:botok:' + str(ip) if verdict == 'ok' else 'gv:botbad:' + str(ip)
-    other = 'gv:botbad:' + str(ip) if verdict == 'ok' else 'gv:botok:' + str(ip)
-    written = _setex(client, key, ttl, '1')
+    key_ = key('botok:' + str(ip)) if verdict == 'ok' else key('botbad:' + str(ip))
+    other = key('botbad:' + str(ip)) if verdict == 'ok' else key('botok:' + str(ip))
+    written = _setex(client, key_, ttl, '1')
     if written and client is not None:
         try:
             client.delete(other)      # a re-verified IP must not stay flagged
@@ -85,19 +162,19 @@ def set_botv(client, ip, verdict, ttl):
 
 def get_botv(client, ip):
     """Return 'bad', 'ok' or None. A bad verdict wins if both somehow exist."""
-    if _get(client, 'gv:botbad:' + str(ip)) is not None:
+    if _get(client, key('botbad:' + str(ip))) is not None:
         return 'bad'
-    if _get(client, 'gv:botok:' + str(ip)) is not None:
+    if _get(client, key('botok:' + str(ip))) is not None:
         return 'ok'
     return None
 
 
 def set_rep(client, dev, value, ttl):
-    return _setex(client, 'gv:rep:' + str(dev), ttl, int(value))
+    return _setex(client, key('rep:' + str(dev)), ttl, int(value))
 
 
 def get_rep(client, dev):
-    raw = _get(client, 'gv:rep:' + str(dev))
+    raw = _get(client, key('rep:' + str(dev)))
     try:
         return int(raw) if raw is not None else None
     except (TypeError, ValueError):
@@ -106,11 +183,11 @@ def get_rep(client, dev):
 
 def set_ml(client, dev, level, ttl):
     level = max(0, min(100, int(level)))
-    return _setex(client, 'gv:ml:' + str(dev), ttl, level)
+    return _setex(client, key('ml:' + str(dev)), ttl, level)
 
 
 def get_ml(client, dev):
-    raw = _get(client, 'gv:ml:' + str(dev))
+    raw = _get(client, key('ml:' + str(dev)))
     try:
         return int(raw) if raw is not None else None
     except (TypeError, ValueError):
@@ -119,11 +196,11 @@ def get_ml(client, dev):
 
 def set_clf(client, dev, level, ttl):
     level = max(0, min(100, int(level)))
-    return _setex(client, 'gv:clf:' + str(dev), ttl, level)
+    return _setex(client, key('clf:' + str(dev)), ttl, level)
 
 
 def get_clf(client, dev):
-    raw = _get(client, 'gv:clf:' + str(dev))
+    raw = _get(client, key('clf:' + str(dev)))
     try:
         return int(raw) if raw is not None else None
     except (TypeError, ValueError):
@@ -139,16 +216,16 @@ def set_override(client, kind, identity, ttl):
     if kind not in ('allow', 'deny'):
         warn('ignoring unknown override kind: %r' % (kind,))
         return False
-    return _setex(client, 'gv:%s:%s' % (kind, identity), ttl, '1')
+    return _setex(client, key('%s:%s' % (kind, identity)), ttl, '1')
 
 
 def get_override(client, identity):
     """Return {'allow': ttl|None, 'deny': ttl|None} for one identity."""
     out = {}
     for kind in ('allow', 'deny'):
-        key = 'gv:%s:%s' % (kind, identity)
-        if _get(client, key) == '1':
-            out[kind] = ttl_of(client, key)
+        full = key('%s:%s' % (kind, identity))
+        if _get(client, full) == '1':
+            out[kind] = ttl_of(client, full)
         else:
             out[kind] = None
     return out
@@ -161,7 +238,7 @@ def clear_override(client, identity):
     removed = 0
     for kind in ('allow', 'deny'):
         try:
-            removed += int(client.delete('gv:%s:%s' % (kind, identity)) or 0)
+            removed += int(client.delete(key('%s:%s' % (kind, identity))) or 0)
         except Exception as exc:
             warn('delete failed for %s override: %s' % (kind, exc))
     return removed
@@ -184,10 +261,12 @@ def list_overrides(client, kind=None, limit=500):
     kinds = ('allow', 'deny') if kind is None else (kind,)
     out = []
     for one in kinds:
-        prefix = 'gv:%s:' % one
+        head = key('%s:' % one)                   # prefix + family, e.g. shop1:gv:allow:
         try:
-            for key in client.scan_iter(match=prefix + '*', count=100):
-                out.append((one, str(key)[len(prefix):], ttl_of(client, key)))
+            # The prefix contains no glob characters (see PREFIX_RE), so it can
+            # go into the MATCH pattern as is.
+            for full in client.scan_iter(match=head + '*', count=100):
+                out.append((one, str(full)[len(head):], ttl_of(client, full)))
                 if len(out) >= limit:
                     return out
         except Exception as exc:
@@ -202,8 +281,8 @@ def identity_verdicts(client, identity):
         'reputation': get_rep(client, identity),
         'ml': get_ml(client, identity),
         'clf': get_clf(client, identity),
-        'botok': _get(client, 'gv:botok:' + str(identity)) == '1',
-        'botbad': _get(client, 'gv:botbad:' + str(identity)) == '1',
-        'honeypot': _get(client, 'gv:hp:' + str(identity)) == '1',
+        'botok': _get(client, key('botok:' + str(identity))) == '1',
+        'botbad': _get(client, key('botbad:' + str(identity))) == '1',
+        'honeypot': _get(client, key('hp:' + str(identity))) == '1',
         'overrides': get_override(client, identity),
     }

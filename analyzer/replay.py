@@ -41,7 +41,8 @@ ACTIONS = ('allow', 'challenge', '403', '429')
 # Rows whose outcome the decision engine never produced: they short-circuit
 # before the decision step, so replaying them would be meaningless.
 NON_DECISION_ACTS = ('exempt', 'allow_bot', '404_hp', 'token_issued',
-                     'nonce_bad', 'allow_override')
+                     'nonce_bad', 'nonce_replay', 'pow_bad', 'mint_limited',
+                     'allow_override')
 
 
 def parse_set(pairs):

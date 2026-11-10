@@ -427,8 +427,77 @@ function gp_redis($reset = false) {
 	}
 	if ($conn !== false) { return $conn; }
 	$cfg = gv_cfg_load();
-	$conn = gv_redis_connect($cfg['redis']);
+	// The panel asks for the truth, not the request path's cached "Redis is
+	// down", so it bypasses the circuit breaker (third argument).
+	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
 	return $conn;
+}
+
+// What the request path last complained about: whether the circuit breaker is
+// currently open (Redis marked down) and the newest line of guard-errors.log.
+// Read straight from the files the guard writes - no Redis, no outbound calls.
+function gp_guard_health() {
+	$cfg = gv_cfg_load();
+	$dir = rtrim((string)$cfg['log_dir'], '/\\');
+	$out = array('breaker' => false, 'last_error' => '');
+	$ttl = isset($cfg['redis']['breaker_ttl']) ? (int)$cfg['redis']['breaker_ttl'] : 5;
+	clearstatcache(true, $dir . '/.redis-down');
+	$t = @filemtime($dir . '/.redis-down');
+	if ($t !== false && $ttl > 0 && (time() - $t) < max($ttl, 60)) { $out['breaker'] = true; }
+	$f = $dir . '/guard-errors.log';
+	if (is_file($f)) {
+		$size = (int)@filesize($f);
+		$h = @fopen($f, 'rb');
+		if ($h) {
+			if ($size > 4096) { fseek($h, -4096, SEEK_END); }
+			$tail = (string)stream_get_contents($h);
+			fclose($h);
+			$lines = array_values(array_filter(explode("\n", $tail), 'strlen'));
+			if ($lines) { $out['last_error'] = substr((string)end($lines), 0, 300); }
+		}
+	}
+	return $out;
+}
+
+// Is the guard's data reachable by an ordinary web request? True when the
+// repository root or the log directory sits inside the document root, which is
+// the layout docs/03-SETUP.md warns against (the .htaccess files are a safety
+// net, not the plan). Cheap, filesystem-only, no outbound request. Returns the
+// list of offending paths (empty = fine or unknown).
+function gp_exposure_paths($docroot, array $paths) {
+	$root = $docroot !== '' ? @realpath($docroot) : false;
+	if ($root === false || $root === '') { return array(); }
+	$root = rtrim(str_replace('\\', '/', $root), '/');
+	$out = array();
+	foreach ($paths as $path) {
+		$real = @realpath((string)$path);
+		if ($real === false) { continue; }
+		$real = str_replace('\\', '/', $real);
+		if ($real === $root || strncmp($real, $root . '/', strlen($root) + 1) === 0) { $out[] = $real; }
+	}
+	return $out;
+}
+
+function gp_exposure_warning() {
+	$cfg = gv_cfg_load();
+	$docroot = isset($_SERVER['DOCUMENT_ROOT']) ? (string)$_SERVER['DOCUMENT_ROOT'] : '';
+	return gp_exposure_paths($docroot, array(dirname(__DIR__), (string)$cfg['log_dir']));
+}
+
+// Read-only description of how the guard reaches Redis, for the dashboard.
+// Deliberately built field by field: the password and username are NEVER part
+// of this array, only whether authentication is configured.
+function gp_redis_info() {
+	$cfg = gv_cfg_load();
+	$r = isset($cfg['redis']) && is_array($cfg['redis']) ? $cfg['redis'] : array();
+	$socket = isset($r['socket']) ? trim((string)$r['socket']) : '';
+	return array(
+		'endpoint' => $socket !== '' ? $socket
+			: (isset($r['host']) ? (string)$r['host'] : '127.0.0.1') . ':' . (isset($r['port']) ? (int)$r['port'] : 6379),
+		'db'       => isset($r['db']) ? (int)$r['db'] : 0,
+		'prefix'   => isset($r['prefix']) ? (string)$r['prefix'] : '',
+		'auth'     => (isset($r['password']) && (string)$r['password'] !== ''),
+	);
 }
 
 function gp_redis_up() {
@@ -443,20 +512,20 @@ function gp_identity_verdicts($identity) {
 		'botbad' => false, 'honeypot' => false, 'allow_ttl' => null, 'deny_ttl' => null);
 	$conn = gp_redis();
 	if (!$conn) { return $out; }
-	$rep = gv_r_get($conn, 'gv:rep:' . $identity);
+	$rep = gv_r_get($conn, gv_key('rep:' . $identity));
 	if (is_string($rep) && is_numeric($rep)) { $out['rep'] = (int)$rep; }
-	$ml = gv_r_get($conn, 'gv:ml:' . $identity);
+	$ml = gv_r_get($conn, gv_key('ml:' . $identity));
 	if (is_string($ml) && is_numeric($ml)) { $out['ml'] = (int)$ml; }
-	$clf = gv_r_get($conn, 'gv:clf:' . $identity);
+	$clf = gv_r_get($conn, gv_key('clf:' . $identity));
 	if (is_string($clf) && is_numeric($clf)) { $out['clf'] = (int)$clf; }
-	$out['botok'] = gv_r_get($conn, 'gv:botok:' . $identity) === '1';
-	$out['botbad'] = gv_r_get($conn, 'gv:botbad:' . $identity) === '1';
-	$out['honeypot'] = gv_r_get($conn, 'gv:hp:' . $identity) === '1';
-	if (gv_r_get($conn, 'gv:allow:' . $identity) === '1') {
-		$out['allow_ttl'] = gp_ttl('gv:allow:' . $identity);
+	$out['botok'] = gv_r_get($conn, gv_key('botok:' . $identity)) === '1';
+	$out['botbad'] = gv_r_get($conn, gv_key('botbad:' . $identity)) === '1';
+	$out['honeypot'] = gv_r_get($conn, gv_key('hp:' . $identity)) === '1';
+	if (gv_r_get($conn, gv_key('allow:' . $identity)) === '1') {
+		$out['allow_ttl'] = gp_ttl(gv_key('allow:' . $identity));
 	}
-	if (gv_r_get($conn, 'gv:deny:' . $identity) === '1') {
-		$out['deny_ttl'] = gp_ttl('gv:deny:' . $identity);
+	if (gv_r_get($conn, gv_key('deny:' . $identity)) === '1') {
+		$out['deny_ttl'] = gp_ttl(gv_key('deny:' . $identity));
 	}
 	return $out;
 }
@@ -479,11 +548,11 @@ function gp_overrides_list($limit = 200) {
 		$cursor = '0';
 		$guard = 0;
 		do {
-			$reply = gp_scan($conn, $cursor, 'gv:' . $kind . ':*');
+			$reply = gp_scan($conn, $cursor, gv_key($kind . ':') . '*');
 			if ($reply === null) { break; }
 			list($cursor, $keys) = $reply;
 			foreach ($keys as $key) {
-				$identity = substr($key, strlen('gv:' . $kind . ':'));
+				$identity = substr($key, strlen(gv_key($kind . ':')));
 				$out[] = array('kind' => $kind, 'identity' => $identity,
 					'ttl' => gp_ttl($key));
 				if (count($out) >= $limit) { return $out; }
@@ -494,51 +563,18 @@ function gp_overrides_list($limit = 200) {
 	return $out;
 }
 
-// SCAN returns a two-element array, which the Phase 1 RESP client deliberately
-// does not parse. Read it here with a small dedicated parser rather than
-// widening the guard's request-path client for the panel's benefit.
+// One SCAN step. Returns array(next_cursor, keys) or null. The shared client
+// parses multi-bulk replies, and a transport failure closes the connection
+// (fail-fast), so a bad reply can never be read as a later command's answer;
+// gp_redis(true) just forgets the dead handle so the next call reconnects.
 function gp_scan($conn, $cursor, $pattern) {
-	if (!$conn) { return null; }                  // no connection: nothing to poison
-	$payload = gv_resp_encode(array('SCAN', (string)$cursor, 'MATCH', $pattern, 'COUNT', '200'));
-	// Every failure below happens after the command was written, so the socket
-	// may hold a partial or unread reply. Drop the shared connection before
-	// returning (gp_redis(true)) so the next gp_redis() reopens a clean one and
-	// no later command reads leftover bytes as its own reply.
-	if (@fwrite($conn, $payload) === false) { gp_redis(true); return null; }
-	$line = @fgets($conn);
-	if ($line === false) { gp_redis(true); return null; }
-	$line = rtrim($line, "\r\n");
-	if (substr($line, 0, 1) !== '*') { gp_redis(true); return null; }
-	if ((int)substr($line, 1) !== 2) { gp_redis(true); return null; }
-	$next = gp_scan_bulk($conn);
-	if ($next === null) { return null; }          // gp_scan_bulk already reset the socket
-	$head = @fgets($conn);
-	if ($head === false || substr($head, 0, 1) !== '*') { gp_redis(true); return null; }
-	$count = (int)substr(rtrim($head, "\r\n"), 1);
-	$keys = array();
-	for ($i = 0; $i < $count; $i++) {
-		$key = gp_scan_bulk($conn);
-		if ($key === null) { return null; }       // gp_scan_bulk already reset the socket
-		$keys[] = $key;
+	if (!$conn) { return null; }
+	$r = gv_redis_cmd($conn, array('SCAN', (string)$cursor, 'MATCH', $pattern, 'COUNT', '200'));
+	if (!is_array($r) || count($r) !== 2 || !is_array($r[1])) {
+		if (!gv_redis_alive($conn)) { gp_redis(true); }
+		return null;
 	}
-	return array($next, $keys);
-}
-
-function gp_scan_bulk($conn) {
-	$head = @fgets($conn);
-	if ($head === false) { gp_redis(true); return null; }
-	$head = rtrim($head, "\r\n");
-	if (substr($head, 0, 1) !== '$') { gp_redis(true); return null; }
-	$len = (int)substr($head, 1);
-	if ($len < 0) { return ''; }
-	$need = $len + 2;
-	$data = '';
-	while (strlen($data) < $need) {
-		$part = @fread($conn, $need - strlen($data));
-		if ($part === false || $part === '') { gp_redis(true); return null; }
-		$data .= $part;
-	}
-	return substr($data, 0, $len);
+	return array((string)$r[0], array_map('strval', $r[1]));
 }
 
 // Write an operator override. Mirrors analyzer/ctl.py exactly, including the
@@ -554,15 +590,15 @@ function gp_override_set($kind, $identity, $ttl) {
 	if ($ttl < 60 || $ttl > GP_OVERRIDE_MAX_TTL) { return false; }
 	$conn = gp_redis();
 	if (!$conn) { return false; }
-	return gv_r_setex($conn, 'gv:' . $kind . ':' . $identity, $ttl, '1') === 'OK';
+	return gv_r_setex($conn, gv_key($kind . ':' . $identity), $ttl, '1') === 'OK';
 }
 
 function gp_override_clear($identity) {
 	$conn = gp_redis();
 	if (!$conn) { return false; }
 	if (!preg_match('/^[A-Za-z0-9._:-]+$/', (string)$identity)) { return false; }
-	gv_redis_cmd($conn, array('DEL', 'gv:allow:' . $identity));
-	gv_redis_cmd($conn, array('DEL', 'gv:deny:' . $identity));
+	gv_redis_cmd($conn, array('DEL', gv_key('allow:' . $identity)));
+	gv_redis_cmd($conn, array('DEL', gv_key('deny:' . $identity)));
 	return true;
 }
 

@@ -50,10 +50,12 @@ def parse_args(argv):
                         help='cap DNS lookups for this run')
     parser.add_argument('--dry-run', action='store_true',
                         help='resolve and report without writing verdicts')
+    parser.add_argument('--recheck', action='store_true',
+                        help='re-resolve addresses that already carry a fresh verdict')
     return parser.parse_args(argv)
 
 
-def main(argv=None):
+def main(argv=None, resolver=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
         cfg = config_mod.load(args.config)
@@ -65,36 +67,60 @@ def main(argv=None):
     if not os.path.isdir(cfg['log_dir']):
         print('ERROR: log directory not readable: %s' % cfg['log_dir'], file=sys.stderr)
         return 2
+    if resolver is None:
+        resolver = botverify.DefaultResolver(canary=cfg.get('dns_canary') or botverify.DEFAULT_CANARY)
+
+    # A bot with no suffix list can never be verified. That is a configuration
+    # gap, not an impersonator: say so once and never produce 'bad' for it.
+    for name in cfg['known_bots']:
+        if not (cfg['bot_suffixes'] or {}).get(str(name).lower()):
+            print('WARN: known bot %r has no entry in bot_suffixes; it cannot be verified '
+                  'and will be left unjudged.' % (name,), file=sys.stderr)
 
     rows = logs_mod.read_lines(cfg['log_dir'], cfg['window_days'])
     claims = collect_bot_ips(rows, cfg['known_bots'])
 
-    client = redis_io.connect(cfg)
+    client = redis_io.connect(cfg, write=not args.dry_run)
     verified = 0
     flagged = 0
+    unknown = 0
     skipped = 0
 
     for ip in sorted(claims):
-        if (verified + flagged) >= int(args.max_lookups):
+        if (verified + flagged + unknown) >= int(args.max_lookups):
             skipped += 1
             continue
         # A fresh verdict is still valid; do not re-resolve it.
-        if client is not None and redis_io.get_botv(client, ip) is not None:
+        if (not args.recheck and client is not None
+                and redis_io.get_botv(client, ip) is not None):
             skipped += 1
             continue
-        verdict = botverify.verify_ip(ip, claims[ip], cfg['bot_suffixes'])
+        verdict = botverify.verify_ip(ip, claims[ip], cfg['bot_suffixes'], resolver)
         if verdict == 'ok':
             verified += 1
-        else:
+            if not args.dry_run:
+                redis_io.set_botv(client, ip, 'ok', cfg['botv_ttl'])
+        elif verdict == 'bad':
             flagged += 1
-        if not args.dry_run:
-            redis_io.set_botv(client, ip, verdict, cfg['botv_ttl'])
+            if not args.dry_run:
+                redis_io.set_botv(client, ip, 'bad', cfg['botbad_ttl'])
+        else:
+            # Could not verify: write NOTHING and delete NOTHING. An existing
+            # verdict stays until its TTL and the address is retried next run.
+            unknown += 1
         time.sleep(DNS_SLEEP_S)
 
     if client is None:
         print('Redis unavailable: verdicts were computed but not stored.')
-    print('Bot verification: verified %d, flagged %d, skipped %d, candidates %d.'
-          % (verified, flagged, skipped, len(claims)))
+    print('Bot verification: verified %d, flagged %d, unknown %d, skipped %d, candidates %d.'
+          % (verified, flagged, unknown, skipped, len(claims)))
+    if unknown:
+        print('%d address(es) could not be verified (resolver trouble or no suffix list); '
+              'no verdict was written for them and they will be retried.' % unknown)
+    if not args.dry_run:
+        snapshot_mod.record_stats(cfg, 'run_verify', {
+            'verified': verified, 'flagged': flagged, 'unknown': unknown,
+            'skipped': skipped, 'candidates': len(claims)})
     snapshot_mod.touch_run(cfg, 'run_verify')
     return 0
 
