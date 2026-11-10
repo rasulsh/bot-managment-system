@@ -177,6 +177,7 @@ def build(rows, cfg, guard_cfg=None):
         },
         'models': model_metadata(cfg),
         'last_runs': read_last_runs(cfg),
+        'bot_verify': read_stats(cfg, 'run_verify'),
     }
     if guard_cfg:
         payload['guard'] = guard_cfg
@@ -228,6 +229,33 @@ def touch_run(cfg, name):
             handle.write(str(round(time.time(), 3)))
     except Exception:
         pass
+
+
+def stats_path(cfg, name):
+    return os.path.join(os.path.dirname(os.path.abspath(cfg['model_path'])),
+                        '.laststats-' + name)
+
+
+def record_stats(cfg, name, stats):
+    """Persist a small JSON summary of the last run, for the panel and report."""
+    try:
+        payload = dict(stats)
+        payload['at'] = round(time.time(), 3)
+        tmp = stats_path(cfg, name) + '.tmp'
+        with open(tmp, 'w') as handle:
+            json.dump(payload, handle)
+        os.replace(tmp, stats_path(cfg, name))
+    except Exception:
+        pass
+
+
+def read_stats(cfg, name):
+    try:
+        with open(stats_path(cfg, name), 'r') as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def read_last_runs(cfg):

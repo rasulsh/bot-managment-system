@@ -241,6 +241,21 @@ else
 		fi
 	fi
 	rm -f "$jar"
+
+	# 20. Three-state bot verification: a genuine Googlebot smartphone request
+	# stays 200 across a simulated resolver outage (nothing is written), and a
+	# forged one is still caught. Needs python3 + the analyzer and the dev
+	# router's log directory.
+	VERIFY_LOG_DIR="${GV_LOG_DIR:-${TMPDIR:-/tmp}/gv-logs}"
+	if command -v python3 >/dev/null 2>&1 && [ -d "$VERIFY_LOG_DIR" ]; then
+		v=$(python3 "$ROOT/scripts/verify-e2e.py" "$BASE_URL" "$VERIFY_LOG_DIR" 2>/dev/null)
+		set -- $v
+		row '20a Googlebot smartphone UA, no verdict' "${1:-ERR}" '200' '200'
+		row '20b ... across a resolver outage' "${2:-ERR}" '200' '200'
+		row '20c ... forged (definitive mismatch)' "${3:-ERR}" '200' '403'
+	else
+		row '20 three-state verification' 'SKIP' 'n/a' '200 / 200 / 403'
+	fi
 fi
 
 # --- Phase 4: response outcome capture -------------------------------------

@@ -104,6 +104,15 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 	</div>
 </div>
 
+<?php $bv = isset($s['bot_verify']) && is_array($s['bot_verify']) ? $s['bot_verify'] : array();
+if (!empty($bv['unknown'])): ?>
+<div class="gp-card">
+	<span class="gp-badge gp-badge-warn"><?= gp_e(gp_t('dash_verify_unknown')) ?></span>
+	<span class="gp-stat-val"><?= gp_num((int)$bv['unknown']) ?></span>
+	<p class="gp-help"><?= gp_e(gp_t('dash_verify_unknown_help')) ?></p>
+</div>
+<?php endif; ?>
+
 <!-- Analyzer freshness -->
 <div class="gp-card">
 	<div class="gp-card-title"><?= gp_e(gp_t('dash_last_runs')) ?></div>

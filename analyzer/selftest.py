@@ -576,21 +576,35 @@ section('Reverse DNS verification')
 
 
 class StubResolver(object):
-    def __init__(self, ptr_map, forward_map, raise_on_ptr=False, raise_on_forward=False):
+    """raise_on_* take True (an unclassified OSError, i.e. transient) or an
+    exception class/instance to raise (DnsNotFound, DnsTransient, ...)."""
+
+    def __init__(self, ptr_map, forward_map, raise_on_ptr=False, raise_on_forward=False,
+                 healthy=True):
         self.ptr_map = ptr_map
         self.forward_map = forward_map
         self.raise_on_ptr = raise_on_ptr
         self.raise_on_forward = raise_on_forward
+        self._healthy = healthy
+
+    @staticmethod
+    def _raise(spec, text):
+        if spec is True:
+            raise OSError(text)
+        raise spec
 
     def ptr(self, ip):
         if self.raise_on_ptr:
-            raise OSError('simulated PTR failure')
+            self._raise(self.raise_on_ptr, 'simulated PTR failure')
         return self.ptr_map.get(ip, [])
 
     def forward(self, hostname):
         if self.raise_on_forward:
-            raise OSError('simulated forward failure')
+            self._raise(self.raise_on_forward, 'simulated forward failure')
         return self.forward_map.get(hostname, [])
+
+    def healthy(self):
+        return self._healthy
 
 
 suffixes = cfg['bot_suffixes']
@@ -611,18 +625,40 @@ forged_ptr = StubResolver({GOOD_IP: ['fake.googlebot.com']},
 ok('a forged PTR that does not forward-confirm is bad',
    botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, forged_ptr) == 'bad')
 
-ok('a PTR resolver exception is bad',
+ok('a transient PTR failure is unknown, not bad',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, StubResolver({}, {}, raise_on_ptr=True)) == 'unknown')
+ok('a PTR TRY_AGAIN / timeout (DnsTransient) is unknown',
    botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
-                       StubResolver({}, {}, raise_on_ptr=True)) == 'bad')
-ok('a forward resolver exception is bad',
+                       StubResolver({}, {}, raise_on_ptr=botverify.DnsTransient('servfail'))) == 'unknown')
+ok('an address with no PTR record (NXDOMAIN, working resolver) is bad',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
+                       StubResolver({}, {}, raise_on_ptr=botverify.DnsNotFound('nx'))) == 'bad')
+ok('a negative PTR answer from a resolver that fails its canary is unknown',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
+                       StubResolver({}, {}, raise_on_ptr=botverify.DnsNotFound('nx'),
+                                    healthy=False)) == 'unknown')
+ok('PTR ok but forward lookup transiently failing is unknown',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
+                       StubResolver({GOOD_IP: ['x.googlebot.com']}, {}, raise_on_forward=True)) == 'unknown')
+ok('PTR ok but forward lookup failing with TRY_AGAIN is unknown',
    botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
                        StubResolver({GOOD_IP: ['x.googlebot.com']}, {},
-                                    raise_on_forward=True)) == 'bad')
-ok('an empty PTR result is bad',
+                                    raise_on_forward=botverify.DnsTransient('again'))) == 'unknown')
+ok('PTR ok but the forward name does not exist is bad (working resolver)',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
+                       StubResolver({GOOD_IP: ['x.googlebot.com']}, {},
+                                    raise_on_forward=botverify.DnsNotFound('nx'))) == 'bad')
+ok('an empty PTR result from a working resolver is bad',
    botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, StubResolver({}, {})) == 'bad')
-ok('an unknown claimed bot is bad',
-   botverify.verify_ip(GOOD_IP, 'notabot', suffixes, happy) == 'bad')
-ok('an empty ip is bad', botverify.verify_ip('', 'googlebot', suffixes, happy) == 'bad')
+ok('a claimed bot with no suffix list is unknown, never bad',
+   botverify.verify_ip(GOOD_IP, 'notabot', suffixes, happy) == 'unknown')
+ok('a bot whose suffix list is empty is unknown, never bad',
+   botverify.verify_ip(GOOD_IP, 'googlebot', {'googlebot': []}, happy) == 'unknown')
+ok('an empty ip is unknown', botverify.verify_ip('', 'googlebot', suffixes, happy) == 'unknown')
+ok('one transient forward failure does not hide a later confirming hostname',
+   botverify.verify_ip(GOOD_IP, 'googlebot', suffixes,
+                       StubResolver({GOOD_IP: ['a.googlebot.com', 'crawl.googlebot.com']},
+                                    {'crawl.googlebot.com': [GOOD_IP]})) == 'ok')
 
 multi = StubResolver({GOOD_IP: ['other.example.com', 'crawl.googlebot.com']},
                      {'crawl.googlebot.com': ['198.51.100.1', GOOD_IP]})
@@ -666,6 +702,159 @@ finally:
     botverify.socket.getaddrinfo = _orig_gai
 ok('DefaultResolver.forward returns both v4 and v6 addresses, de-duplicated',
    _resolved == ['66.249.66.1', '2001:4860:4860::8888'])
+
+# Map the real stdlib errors (codes verified on Linux/glibc).
+def _raises(exc):
+    def thrower(*args, **kwargs):
+        raise exc
+    return thrower
+
+
+_orig_gha = botverify.socket.gethostbyaddr
+_orig_gai2 = botverify.socket.getaddrinfo
+dr = botverify.DefaultResolver()
+try:
+    def ptr_outcome(exc):
+        botverify.socket.gethostbyaddr = _raises(exc)
+        try:
+            dr.ptr('192.0.2.1')
+        except botverify.DnsNotFound:
+            return 'notfound'
+        except botverify.DnsTransient:
+            return 'transient'
+        return 'returned'
+
+    def fwd_outcome(exc):
+        botverify.socket.getaddrinfo = _raises(exc)
+        try:
+            dr.forward('x.googlebot.com')
+        except botverify.DnsNotFound:
+            return 'notfound'
+        except botverify.DnsTransient:
+            return 'transient'
+        return 'returned'
+
+    ok('herror HOST_NOT_FOUND maps to NotFound', ptr_outcome(botverify.socket.herror(1, 'Unknown host')) == 'notfound')
+    ok('herror NO_DATA maps to NotFound', ptr_outcome(botverify.socket.herror(4, 'No data')) == 'notfound')
+    ok('herror TRY_AGAIN maps to Transient', ptr_outcome(botverify.socket.herror(2, 'again')) == 'transient')
+    ok('herror NO_RECOVERY maps to Transient', ptr_outcome(botverify.socket.herror(3, 'fail')) == 'transient')
+    ok('a PTR socket.timeout maps to Transient', ptr_outcome(botverify.socket.timeout('t')) == 'transient')
+    ok('a PTR OSError maps to Transient', ptr_outcome(OSError('x')) == 'transient')
+    ok('a PTR gaierror maps to Transient',
+       ptr_outcome(botverify.socket.gaierror(botverify.socket.EAI_NONAME, 'x')) == 'transient')
+    ok('gaierror EAI_NONAME maps to NotFound',
+       fwd_outcome(botverify.socket.gaierror(botverify.socket.EAI_NONAME, 'x')) == 'notfound')
+    ok('gaierror EAI_AGAIN maps to Transient',
+       fwd_outcome(botverify.socket.gaierror(botverify.socket.EAI_AGAIN, 'x')) == 'transient')
+    ok('gaierror EAI_FAIL maps to Transient',
+       fwd_outcome(botverify.socket.gaierror(botverify.socket.EAI_FAIL, 'x')) == 'transient')
+    ok('a forward socket.timeout maps to Transient', fwd_outcome(botverify.socket.timeout('t')) == 'transient')
+
+    # glibc reports an unreachable resolver as HOST_NOT_FOUND: without the canary
+    # that would be an instant false 'bad'.
+    botverify.socket.gethostbyaddr = _raises(botverify.socket.herror(1, 'Unknown host'))
+    botverify.socket.getaddrinfo = _raises(botverify.socket.gaierror(-3, 'again'))
+    ok('NXDOMAIN while the canary cannot resolve is unknown (resolver down)',
+       botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, botverify.DefaultResolver()) == 'unknown')
+    botverify.socket.getaddrinfo = lambda host, port: [(botverify.socket.AF_INET, 0, 0, '', ('1.2.3.4', 0))]
+    ok('NXDOMAIN while the canary resolves is bad',
+       botverify.verify_ip(GOOD_IP, 'googlebot', suffixes, botverify.DefaultResolver()) == 'bad')
+finally:
+    botverify.socket.gethostbyaddr = _orig_gha
+    botverify.socket.getaddrinfo = _orig_gai2
+
+v6_alt = StubResolver({V6_IP: ['crawl-v6.googlebot.com']},
+                      {'crawl-v6.googlebot.com': ['2001:4860:4860:0:0:0:0:1']})
+ok('IPv6 spelling differences do not defeat confirmation',
+   botverify.verify_ip(V6_IP, 'googlebot', suffixes, v6_alt) == 'ok')
+v6_forged = StubResolver({V6_IP: ['crawl-v6.googlebot.com']}, {'crawl-v6.googlebot.com': ['2001:db8::1']})
+ok('an IPv6 forward mismatch is bad', botverify.verify_ip(V6_IP, 'googlebot', suffixes, v6_forged) == 'bad')
+
+# ---------------------------------------------------------------------------
+section('run_verify: unknown writes nothing, bad is still caught')
+
+from analyzer import run_verify as run_verify_mod
+import contextlib
+import io as io_mod
+import json as json_rv
+
+rv_client = redis_io.connect(cfg) if redis_io.REDIS_AVAILABLE else None
+if rv_client is None:
+    skip('run_verify end to end', 'no reachable local Redis')
+else:
+    rv_dir = tempfile.mkdtemp(prefix='gv-selftest-rv-')
+    rv_logs = os.path.join(rv_dir, 'logs')
+    os.makedirs(rv_logs)
+    rv_ip = '198.51.100.%d' % (os.getpid() % 100 + 100)
+    rv_row = {'ts': 1.0, 'ip': rv_ip, 'bot': 'googlebot', 'ua': 'Googlebot', 'act': 'allow_bot'}
+    with open(os.path.join(rv_logs, 'guard-%s.jsonl' % datetime.date.today().strftime('%Y%m%d')), 'w') as fh:
+        fh.write(json_rv.dumps(rv_row) + '\n')
+    rv_cfg = os.path.join(rv_dir, 'cfg.json')
+    with open(rv_cfg, 'w') as fh:
+        json_rv.dump({'log_dir': rv_logs, 'model_path': os.path.join(rv_dir, 'model.joblib'),
+                      'redis': cfg['redis']}, fh)
+    run_verify_mod.DNS_SLEEP_S = 0
+
+    def run_rv(resolver, *extra):
+        out, err = io_mod.StringIO(), io_mod.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = run_verify_mod.main(['--config', rv_cfg] + list(extra), resolver=resolver)
+        return code, out.getvalue(), err.getvalue()
+
+    def rv_clear():
+        rv_client.delete('gv:botok:' + rv_ip, 'gv:botbad:' + rv_ip)
+
+    def rv_botbad_keys():
+        return list(rv_client.scan_iter(match='gv:botbad:*', count=500))
+
+    rv_clear()
+    before = set(rv_botbad_keys())
+    outage = StubResolver({}, {}, raise_on_ptr=botverify.DnsTransient('resolver outage'))
+    code, out, _err = run_rv(outage)
+    ok('a simulated resolver outage writes zero gv:botbad keys',
+       code == 0 and set(rv_botbad_keys()) == before and rv_client.get('gv:botok:' + rv_ip) is None)
+    ok('the outage run reports the address as unknown', 'unknown 1' in out and 'could not be verified' in out)
+    ok('the outage is recorded for the panel and report',
+       run_verify_mod.snapshot_mod.read_stats(config_mod.load(rv_cfg), 'run_verify').get('unknown') == 1)
+
+    # An existing ok verdict survives an outage even when the address is re-checked.
+    redis_io.set_botv(rv_client, rv_ip, 'ok', 600)
+    run_rv(outage, '--recheck')
+    ok('an existing ok verdict stays ok through a transient failure',
+       rv_client.get('gv:botok:' + rv_ip) == '1' and rv_client.get('gv:botbad:' + rv_ip) is None)
+
+    # A forged claim: PTR resolves under googlebot.com but forward does not confirm.
+    forged = StubResolver({rv_ip: ['fake.googlebot.com']}, {'fake.googlebot.com': ['203.0.113.250']})
+    run_rv(forged, '--recheck')
+    ok('a definitive mismatch still flips ok to bad', rv_client.get('gv:botbad:' + rv_ip) == '1'
+       and rv_client.get('gv:botok:' + rv_ip) is None)
+    ok('a bad verdict uses the short botbad_ttl so it self-heals',
+       0 < rv_client.ttl('gv:botbad:' + rv_ip) <= 3600)
+    genuine = StubResolver({rv_ip: ['crawl.googlebot.com']}, {'crawl.googlebot.com': [rv_ip]})
+    run_rv(genuine, '--recheck')
+    ok('a confirmed address flips bad back to ok with the long TTL',
+       rv_client.get('gv:botok:' + rv_ip) == '1' and rv_client.get('gv:botbad:' + rv_ip) is None
+       and rv_client.ttl('gv:botok:' + rv_ip) > 3600)
+    rv_clear()
+    run_rv(forged, '--dry-run')
+    ok('--dry-run writes nothing', rv_client.get('gv:botbad:' + rv_ip) is None)
+    rv_clear()
+    # Without --recheck a fresh verdict is not re-resolved.
+    redis_io.set_botv(rv_client, rv_ip, 'ok', 600)
+    run_rv(forged)
+    ok('a fresh verdict is not re-resolved without --recheck', rv_client.get('gv:botok:' + rv_ip) == '1')
+    rv_clear()
+
+    # A known bot with no suffix list: one warning, never bad.
+    with open(rv_cfg, 'w') as fh:
+        json_rv.dump({'log_dir': rv_logs, 'model_path': os.path.join(rv_dir, 'model.joblib'),
+                      'redis': cfg['redis'], 'bot_suffixes': {'googlebot': []}}, fh)
+    code, out, err = run_rv(forged)
+    ok('a bot without a suffix list warns by name and writes nothing',
+       "'googlebot'" in err and 'no entry in bot_suffixes' in err
+       and rv_client.get('gv:botbad:' + rv_ip) is None and 'unknown 1' in out)
+    rv_clear()
+    shutil.rmtree(rv_dir, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
 section('Redis verdict round-trip')

@@ -26,7 +26,14 @@ DEFAULTS = {
     # pin a stale verdict forever.
     'rep_ttl': 2592000,
     'ml_ttl': 86400,
+    # TTL of a bot verdict. 'ok' is a positive, forward-confirmed fact and keeps
+    # the long TTL. 'bad' revokes a crawler's pass, so a wrong one must heal
+    # quickly: it is retried within the hour. 'unknown' is never stored.
     'botv_ttl': 86400,
+    'botbad_ttl': 3600,
+    # A name that must resolve on a working resolver; a negative DNS answer only
+    # counts as a refutation while this resolves (see botverify.healthy()).
+    'dns_canary': 'www.google.com',
     # Reputation is clamped so no single device can dominate the score.
     'rep_clamp': [-50, 80],
     # Below this many clean sessions the "normal" manifold is meaningless.

@@ -27,6 +27,7 @@ from analyzer import bridge
 from analyzer import config as config_mod
 from analyzer import logs as logs_mod
 from analyzer import outcomes as outcomes_mod
+from analyzer import snapshot as snapshot_mod
 
 STATUS_ORDER = ('2xx', '3xx', '404', '4xx', '5xx', 'other')
 
@@ -83,6 +84,7 @@ def collect(rows, cfg, guard_cfg):
         'has_ml': 0,
         'has_clf': 0,
         'botv': {},
+        'verify_unknown': 0,
         'holdout_requests': 0,
         'holdout_identities': set(),
         'holdout_challenge': 0,
@@ -236,6 +238,10 @@ def collect(rows, cfg, guard_cfg):
     stats['models'] = cfg.get('_models') or {}
     stats['challenge_target'] = float(cfg.get('challenge_success_target', 0.95))
     stats['top_n'] = int(cfg.get('report_top_n', 20))
+    try:
+        stats['verify_unknown'] = int(snapshot_mod.read_stats(cfg, 'run_verify').get('unknown') or 0)
+    except Exception:
+        stats['verify_unknown'] = 0
     return stats
 
 
@@ -331,6 +337,10 @@ def render_text(stats, days):
           % ', '.join('%s=%d' % (k, v) for k, v in sorted(stats['botv'].items())))
     else:
         A('   bot verification: no known-bot traffic in this window')
+    if stats.get('verify_unknown'):
+        A('   %d address(es) could not be verified on the last run_verify (resolver'
+          % stats['verify_unknown'])
+        A('   trouble or no suffix list); they carry no verdict and are retried.')
     if total and stats['has_rep'] == 0 and stats['has_ml'] == 0 and stats['has_clf'] == 0:
         A('   NO VERDICTS AT ALL. The analyzer is probably not running, or Redis is not')
         A('   shared between the guard and the analyzer. Check the cron jobs first.')
@@ -546,6 +556,9 @@ def render_html(stats, days):
     if stats['botv']:
         A('<p class="sub">Bot verification: %s</p>'
           % _esc_html(', '.join('%s=%d' % kv for kv in sorted(stats['botv'].items()))))
+    if stats.get('verify_unknown'):
+        A('<p class="sub">%d address(es) could not be verified on the last run_verify; '
+          'they carry no verdict and are retried.</p>' % stats['verify_unknown'])
     if total and not (stats['has_rep'] or stats['has_ml'] or stats['has_clf']):
         A('<div class="note">No verdicts at all. The analyzer is probably not running, '
           'or Redis is not shared between the guard and the analyzer.</div>')
