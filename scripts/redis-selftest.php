@@ -24,9 +24,14 @@ function t_section($name) { echo "\n-- $name\n"; }
 $T_DIR = sys_get_temp_dir() . '/gv-redis-selftest-' . getmypid();
 @mkdir($T_DIR, 0775, true);
 $T_PIDS = array();
+$T_AUDIT_BACKUP = is_file(__DIR__ . '/../panel/audit.jsonl') ? file_get_contents(__DIR__ . '/../panel/audit.jsonl') : null;
 
 function t_cleanup() {
-	global $T_DIR, $T_PIDS;
+	global $T_DIR, $T_PIDS, $T_AUDIT_BACKUP;
+	// The panel tests enqueue jobs, which append to the real panel/audit.jsonl:
+	// put it back exactly as it was.
+	$audit = __DIR__ . '/../panel/audit.jsonl';
+	if ($T_AUDIT_BACKUP === null) { @unlink($audit); } else { @file_put_contents($audit, $T_AUDIT_BACKUP); }
 	foreach ($T_PIDS as $pid) { @posix_kill($pid, 15); }
 	$files = @glob($T_DIR . '/{,.}*', GLOB_BRACE);
 	foreach ((array)$files as $f) { if (is_file($f)) { @unlink($f); } }
@@ -319,6 +324,257 @@ t_ok('a line carries timestamp, code and message', preg_match('/^\S+ alpha first
 gv_errlog('bad code!', "line\nbreak", $EL);
 $all = file_get_contents($EL . '/guard-errors.log');
 t_ok('codes and messages are sanitised to one line', substr_count($all, "\n") === 3);
+
+
+// ==========================================================================
+// Work item 3: authentication, db selection, key prefix
+// ==========================================================================
+
+$ver = '';
+$info = (string)gv_redis_cmd($cx, array('INFO', 'server'));
+if (preg_match('/redis_version:(\S+)/', $info, $m)) { $ver = $m[1]; }
+$major = (int)$ver;
+echo "\n(redis-server $ver)\n";
+
+// What does this server really say to AUTH when no password is configured?
+$raw = @stream_socket_client('tcp://127.0.0.1:63800', $en, $es, 1);
+fwrite($raw, gv_resp_encode(array('AUTH', 'whatever')));
+echo "(observed reply to AUTH without a configured password: " . trim((string)fgets($raw)) . ")\n";
+fclose($raw);
+
+$auth = t_redis_start(63801, array('--requirepass', 's3cret'));
+$acl  = t_redis_start(63802);
+$sock = $T_DIR . '/redis.sock';
+$unix = t_redis_start(63803, array(), $sock);
+if ($acl && $major >= 6) {
+	$ac = gv_redis_connect(array('port' => 63802, 'timeout' => 0.2));
+	gv_redis_cmd($ac, array('ACL', 'SETUSER', 'gvuser', 'on', '>aclpass', '~*', '+@all'));
+	gv_redis_close($ac);
+}
+
+function t_mkdir_log($name) { global $T_DIR; $d = $T_DIR . '/' . $name; @mkdir($d); return $d; }
+
+// --------------------------------------------------------------------------
+t_section('Authentication modes');
+
+$LD = t_mkdir_log('auth1');
+$c = gv_redis_connect(array('port' => 63800, 'timeout' => 0.2), $LD);
+t_ok('no auth server, no password: works exactly as before', $c && gv_redis_cmd($c, array('PING')) === 'PONG');
+gv_redis_rt(true); gv_redis_close($c);
+$c = gv_redis_connect(array('port' => 63800, 'timeout' => 0.2), $LD);
+t_ok('no password and db 0: the handshake costs zero round trips', gv_redis_rt() === 0);
+gv_redis_close($c);
+
+if (!$auth) { t_skip('requirepass matrix', 'could not start a second redis'); }
+else {
+	$LD = t_mkdir_log('auth2');
+	gv_redis_rt(true);
+	$c = gv_redis_connect(array('port' => 63801, 'timeout' => 0.2, 'password' => 's3cret'), $LD);
+	t_ok('requirepass + correct password: works', $c && gv_redis_cmd($c, array('PING')) === 'PONG');
+	t_ok('AUTH costs exactly one extra round trip', gv_redis_rt() === 2);
+	gv_redis_close($c);
+
+	$LD = t_mkdir_log('auth3');
+	$c = gv_redis_connect(array('port' => 63801, 'timeout' => 0.2, 'password' => 'WRONG-pass'), $LD);
+	t_ok('requirepass + wrong password: degraded (no connection)', $c === false);
+	t_ok('wrong password arms the breaker', is_file($LD . '/.redis-down'));
+	t_ok('wrong password is logged as redis_auth', strpos((string)@file_get_contents($LD . '/guard-errors.log'), 'redis_auth') !== false);
+	t_ok('the password never appears in the error log', strpos((string)@file_get_contents($LD . '/guard-errors.log'), 'WRONG-pass') === false);
+
+	$LD = t_mkdir_log('auth4');
+	$c = gv_redis_connect(array('port' => 63801, 'timeout' => 0.2), $LD);
+	$r = $c ? gv_redis_cmd($c, array('GET', 'x')) : false;
+	t_ok('requirepass + no password: the first command fails and the connection dies', $r === false && !gv_redis_alive($c));
+	t_ok('requirepass + no password is logged as redis_auth', strpos((string)@file_get_contents($LD . '/guard-errors.log'), 'redis_auth') !== false);
+
+	// Full requests: the site must keep working (200, zero guard output, rd=1).
+	$tok = gv_tok_make('rt-secret');
+	foreach (array('wrong password' => array('password' => 'nope'), 'no password' => array()) as $label => $extra) {
+		$cfgA = t_cfg(array('port' => 63801) + $extra, array('log_dir' => t_mkdir_log('auth-' . md5($label))));
+		$p = t_probe($cfgA, t_nav(), array('_gv' => $tok));
+		$row = t_lastrow($cfgA);
+		t_ok("requirepass + $label: the request is allowed, untouched and logged rd=1",
+			$p['bytes'] === 0 && $row['act'] === 'allow' && $row['rd'] === 1);
+	}
+	$cfgA = t_cfg(array('port' => 63801, 'password' => 's3cret'), array('log_dir' => t_mkdir_log('auth-ok')));
+	$p = t_probe($cfgA, t_nav(), array('_gv' => $tok));
+	$row = t_lastrow($cfgA);
+	t_ok('requirepass + correct password: a full request counts (rd=0, ci=1), 3 round trips incl. AUTH',
+		$row['rd'] === 0 && $row['ci'] === 1 && $p['rt'] === 3);
+}
+
+$LD = t_mkdir_log('auth5');
+$c = gv_redis_connect(array('port' => 63800, 'timeout' => 0.2, 'password' => 'unneeded'), $LD);
+t_ok('no auth server + password set: still works', $c && gv_redis_cmd($c, array('PING')) === 'PONG');
+t_ok('...and the mismatch is noted once in the error log',
+	strpos((string)@file_get_contents($LD . '/guard-errors.log'), 'redis_auth_unneeded') !== false);
+t_ok('...without arming the breaker', !is_file($LD . '/.redis-down'));
+gv_redis_close($c);
+
+if ($acl && $major >= 6) {
+	$LD = t_mkdir_log('acl');
+	$c = gv_redis_connect(array('port' => 63802, 'timeout' => 0.2, 'username' => 'gvuser', 'password' => 'aclpass'), $LD);
+	t_ok('ACL user + password: works', $c && gv_redis_cmd($c, array('SET', 'acl:k', '1')) === 'OK');
+	gv_redis_close($c);
+	$c = gv_redis_connect(array('port' => 63802, 'timeout' => 0.2, 'username' => 'gvuser', 'password' => 'bad'), $LD);
+	t_ok('ACL user + wrong password: degraded', $c === false);
+} else {
+	t_skip('ACL user', 'needs Redis >= 6 (found ' . $ver . ')');
+}
+
+if ($unix) {
+	$LD = t_mkdir_log('unix');
+	$c = gv_redis_connect(array('socket' => $sock, 'port' => 1, 'timeout' => 0.2), $LD);
+	t_ok('unix socket: works and ignores host/port', $c && gv_redis_cmd($c, array('PING')) === 'PONG');
+	gv_redis_close($c);
+	$cfgU = t_cfg(array('socket' => $sock, 'port' => 1), array('log_dir' => t_mkdir_log('unix2')));
+	$tok = gv_tok_make('rt-secret');
+	$p = t_probe($cfgU, t_nav(), array('_gv' => $tok));
+	$row = t_lastrow($cfgU);
+	t_ok('unix socket: a full request counts and costs at most 2 round trips', $row['rd'] === 0 && $row['ci'] === 1 && $p['rt'] <= 2);
+} else {
+	t_skip('unix socket', 'could not start redis on a socket');
+}
+
+$LD = t_mkdir_log('db');
+$c = gv_redis_connect(array('port' => 63800, 'timeout' => 0.2, 'db' => 1), $LD);
+gv_redis_cmd($c, array('SET', 'dbtest:k', 'in-db-1'));
+gv_redis_close($c);
+$c0 = gv_redis_connect(array('port' => 63800, 'timeout' => 0.2), $LD);
+$c1 = gv_redis_connect(array('port' => 63800, 'timeout' => 0.2, 'db' => 1), $LD);
+t_ok('db = 1: keys land in db 1 and not in db 0', gv_r_get($c1, 'dbtest:k') === 'in-db-1' && gv_r_get($c0, 'dbtest:k') === null);
+gv_redis_close($c0); gv_redis_close($c1);
+$c = gv_redis_connect(array('port' => 63800, 'timeout' => 0.2, 'db' => 9999), $LD);
+t_ok('an impossible db is a failed connection, not a fatal', $c === false);
+
+// --------------------------------------------------------------------------
+t_section('Key prefix');
+
+t_ok('an empty prefix gives the legacy key names byte for byte',
+	(function () { gv_redis_prefix(''); return gv_key('rb:1.2.3.4') === 'gv:rb:1.2.3.4' && gp_key('jobs') === 'gp:jobs'; })());
+foreach (array('shop1:', 'a_b.c-d:', str_repeat('x', 32)) as $good) {
+	t_ok("prefix '$good' is accepted", gv_redis_prefix_valid($good));
+}
+foreach (array('has space', 'glob*', 'q?', 'br[ack]', str_repeat('x', 33), "new\nline", 'ünï', 'back\\slash') as $badp) {
+	t_ok('prefix ' . json_encode($badp) . ' is rejected', !gv_redis_prefix_valid($badp));
+}
+$LD = t_mkdir_log('prefix-bad');
+t_ok('an invalid prefix makes Redis unavailable rather than being altered',
+	gv_redis_connect(array('port' => 63800, 'prefix' => 'bad prefix'), $LD) === false);
+t_ok('...and is reported in the error log', strpos((string)@file_get_contents($LD . '/guard-errors.log'), 'redis_prefix') !== false);
+gv_redis_prefix('');
+
+// Two installs on one server: counters, overrides, verdicts, honeypot all isolated.
+gv_redis_cmd($cx, array('FLUSHALL'));
+$tok = gv_tok_make('rt-secret');
+$dev = gv_tok_check($tok, 'rt-secret', 604800);
+$cfgS1 = t_cfg(array('prefix' => 'shop1:'), array('log_dir' => t_mkdir_log('pfx1')));
+$cfgS2 = t_cfg(array('prefix' => 'shop2:'), array('log_dir' => t_mkdir_log('pfx2')));
+t_probe($cfgS1, t_nav(), array('_gv' => $tok));
+t_probe($cfgS1, t_nav(), array('_gv' => $tok));
+t_probe($cfgS2, t_nav(), array('_gv' => $tok));
+t_ok('prefix: every counter lands under the prefix',
+	gv_redis_cmd($cx, array('GET', 'shop1:gv:ri:198.51.100.9')) === '2'
+	&& gv_redis_cmd($cx, array('GET', 'shop2:gv:ri:198.51.100.9')) === '1'
+	&& gv_redis_cmd($cx, array('GET', 'gv:ri:198.51.100.9')) === null);
+t_ok('prefix: the two installs count independently', t_lastrow($cfgS1)['ci'] === 2 && t_lastrow($cfgS2)['ci'] === 1);
+gv_redis_cmd($cx, array('SET', 'shop1:gv:deny:198.51.100.9', '1', 'EX', '60'));
+t_probe($cfgS1, t_nav(), array('_gv' => $tok));
+t_probe($cfgS2, t_nav(), array('_gv' => $tok));
+t_ok('prefix: an override in one install does not touch the other',
+	t_lastrow($cfgS1)['ovr'] === 'deny' && t_lastrow($cfgS2)['ovr'] === '');
+gv_redis_cmd($cx, array('SET', 'shop2:gv:botok:198.51.100.9', '1', 'EX', '60'));
+$bot = t_nav(); $bot['HTTP_USER_AGENT'] = 'Googlebot/2.1';
+t_probe($cfgS1, $bot); $r1 = t_lastrow($cfgS1);
+t_probe($cfgS2, $bot); $r2 = t_lastrow($cfgS2);
+t_ok('prefix: a verdict is only seen by its own install', $r1['botv'] === '' && $r2['botv'] === 'ok');
+$noPfx = array();
+foreach ((array)gv_redis_cmd($cx, array('KEYS', 'gv:*')) as $k) { $noPfx[] = $k; }
+t_ok('prefix: no un-prefixed gv: key leaked while prefixes were in use', $noPfx === array());
+
+// Panel side: listings, overrides, job queue, login limiter, all prefixed.
+define('GP_BOOT', 1);
+define('GP_SELFTEST', 1);
+require_once __DIR__ . '/../panel/config_io.php';
+require_once __DIR__ . '/../panel/auth.php';
+require_once __DIR__ . '/../panel/data.php';
+require_once __DIR__ . '/../panel/jobs.php';
+function t_panel_as($prefix, $name) {
+	global $T_DIR;
+	$path = $T_DIR . '/panelcfg-' . $name . '.php';
+	file_put_contents($path, '<?php if (!defined("GV_BOOT")) { exit; } return ' . var_export(t_cfg(array('prefix' => $prefix),
+		array('log_dir' => $T_DIR . '/pnl-' . $name)), true) . ';');
+	putenv('GV_CONFIG=' . $path);
+	gp_redis(true);
+}
+gv_redis_cmd($cx, array('FLUSHALL'));
+t_panel_as('shop1:', 'a');
+t_ok('panel: an override is written under the prefix', gp_override_set('allow', 'ident-one', 3600)
+	&& gv_redis_cmd($cx, array('GET', 'shop1:gv:allow:ident-one')) === '1');
+t_panel_as('shop2:', 'b');
+gp_override_set('deny', 'ident-two', 3600);
+$list2 = gp_overrides_list();
+t_ok('panel: the listing shows only its own install, prefix stripped',
+	count($list2) === 1 && $list2[0]['identity'] === 'ident-two' && $list2[0]['kind'] === 'deny');
+t_panel_as('shop1:', 'a');
+$list1 = gp_overrides_list();
+t_ok('panel: the other install lists its own override', count($list1) === 1 && $list1[0]['identity'] === 'ident-one');
+t_ok('panel: ctl-style clear removes only its own', gp_override_clear('ident-one')
+	&& gv_redis_cmd($cx, array('GET', 'shop1:gv:allow:ident-one')) === null
+	&& gv_redis_cmd($cx, array('GET', 'shop2:gv:deny:ident-two')) === '1');
+$job = gp_job_enqueue('snapshot', array(), 'tester');
+t_ok('panel: a job lands in the prefixed queue', $job['ok']
+	&& (int)gv_redis_cmd($cx, array('LLEN', 'shop1:gp:jobs')) === 1 && gv_redis_cmd($cx, array('LLEN', 'gp:jobs')) === 0);
+t_ok('panel: the job list shows it', count(gp_job_list()) === 1);
+t_panel_as('shop2:', 'b');
+t_ok('panel: the other install sees no jobs', count(gp_job_list()) === 0);
+t_ok('panel: login attempts are counted under the prefix', gp_attempts_bump('bucketx', 300) === 1
+	&& gv_redis_cmd($cx, array('GET', 'shop2:gp:login:bucketx')) === '1' && gp_attempts_get('bucketx', 300) === 1);
+t_panel_as('shop1:', 'a');
+t_ok('panel: ...and not visible to the other install', gp_attempts_get('bucketx', 300) === 0);
+putenv('GV_CONFIG');
+gp_redis(true);
+
+// Login limiter must stay fail-closed to the file when Redis is down.
+t_panel_as('', 'down');
+$dead = $T_DIR . '/panelcfg-dead.php';
+file_put_contents($dead, '<?php if (!defined("GV_BOOT")) { exit; } return ' . var_export(t_cfg(array('port' => 63998),
+	array('log_dir' => $T_DIR . '/pnl-dead')), true) . ';');
+putenv('GV_CONFIG=' . $dead);
+gp_redis(true);
+$bk = 'down-' . bin2hex(random_bytes(3));
+$counts = array();
+for ($i = 0; $i < GP_LOGIN_MAX_ATTEMPTS + 1; $i++) { $counts[] = gp_attempts_bump($bk, GP_LOGIN_WINDOW); }
+t_ok('login limiter with Redis down still counts (file fallback)', $counts[0] === 1 && end($counts) === GP_LOGIN_MAX_ATTEMPTS + 1);
+@unlink(gp_attempts_file($bk));
+putenv('GV_CONFIG');
+gp_redis(true);
+
+// --------------------------------------------------------------------------
+t_section('Source audit: every key goes through the helpers');
+
+$offenders = array();
+$skip = array(realpath(__DIR__ . '/../guard/redis.php'), realpath(__DIR__ . '/../analyzer/redis_io.py'));
+$it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator(__DIR__ . '/..', FilesystemIterator::SKIP_DOTS));
+foreach ($it as $f) {
+	$path = $f->getPathname();
+	if (!preg_match('/\.(php|py|sh)$/', $path)) { continue; }
+	if (preg_match('#/(\.git|\.venv|docs|node_modules)/#', $path)) { continue; }
+	if (preg_match('#(selftest|guard-test\.sh|verify-e2e|redis-selftest)#', basename($path))) { continue; }
+	if (in_array(realpath($path), $skip, true)) { continue; }
+	foreach (file($path) as $n => $line) {
+		if (preg_match('/[\'"]g[vp]:/', $line)) { $offenders[] = substr($path, strlen(__DIR__) - 7) . ':' . ($n + 1); }
+	}
+}
+t_ok('no raw gv:/gp: key literal outside the key helpers and tests' . ($offenders ? ' (' . implode(', ', $offenders) . ')' : ''), !$offenders);
+$conns = array();
+foreach (array('guard', 'panel') as $dir) {
+	foreach (glob(__DIR__ . "/../$dir/*.php") as $path) {
+		if (basename($path) === 'redis.php') { continue; }
+		if (preg_match('/stream_socket_client|pfsockopen|fsockopen|new Redis\b/', file_get_contents($path))) { $conns[] = basename($path); }
+	}
+}
+t_ok('nothing opens Redis except the shared connect function' . ($conns ? ' (' . implode(', ', $conns) . ')' : ''), !$conns);
 
 echo "\nPASS $GV_PASS  FAIL $GV_FAIL  SKIP $GV_SKIP\n";
 exit($GV_FAIL === 0 ? 0 : 1);

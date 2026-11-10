@@ -291,10 +291,10 @@ function gp_ratelimit_file_dir() {
 // Count and record one attempt against a bucket. Returns the new count.
 // Uses Redis when reachable and a file counter when it is not.
 function gp_attempts_bump($bucket, $window) {
-	$key = 'gp:login:' . $bucket;
 	$cfg = gv_cfg_load();
 	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
 	if ($conn) {
+		$key = gp_key('login:' . $bucket);        // after connect: the prefix is set there
 		// One pipelined SET NX EX + INCR + TTL: the counter is created with its
 		// TTL in the same write, so it can never lock the bucket out forever,
 		// and a TTL-less leftover is repaired. gv_bump() folds any failure to 0,
@@ -308,11 +308,10 @@ function gp_attempts_bump($bucket, $window) {
 }
 
 function gp_attempts_get($bucket, $window) {
-	$key = 'gp:login:' . $bucket;
 	$cfg = gv_cfg_load();
 	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
 	if ($conn) {
-		$v = gv_r_get($conn, $key);
+		$v = gv_r_get($conn, gp_key('login:' . $bucket));
 		gv_redis_close($conn);
 		if (is_string($v) && ctype_digit($v)) { return (int)$v; }
 		if ($v === null) { return 0; }

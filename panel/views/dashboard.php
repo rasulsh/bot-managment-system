@@ -80,6 +80,16 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 			<span class="gp-badge <?= $redis_up ? 'gp-badge-on' : 'gp-badge-bad' ?>">
 				<?= gp_e($redis_up ? gp_t('dash_redis_up') : gp_t('dash_redis_down')) ?></span>
 		</div>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('dash_redis_endpoint')) ?></span>
+			<span class="gp-stat-val gp-mono" dir="ltr"><?= gp_e($rinfo['endpoint']) ?></span>
+		</div>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key">db / prefix / auth</span>
+			<span class="gp-stat-val gp-mono" dir="ltr"><?= gp_e($rinfo['db']) ?> /
+				<?= gp_e($rinfo['prefix'] === '' ? '-' : $rinfo['prefix']) ?> /
+				<?= gp_e($rinfo['auth'] ? 'on' : 'off') ?></span>
+		</div>
 		<?php if (!empty($health['breaker'])): ?>
 		<div class="gp-stat-row">
 			<span class="gp-stat-key"><?= gp_e(gp_t('dash_breaker')) ?></span>

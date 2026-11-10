@@ -64,6 +64,36 @@ function gv_redis_alive($conn) {
 }
 
 // --------------------------------------------------------------------------
+// Key namespace
+// --------------------------------------------------------------------------
+
+// The prefix of the connection opened last (set by gv_redis_connect, validated
+// there). EVERY Redis key in the project is built by gv_key() or gp_key(); a
+// self-test scans the source and fails on any other 'gv:' / 'gp:' literal. With
+// the default empty prefix the key names are exactly the legacy ones.
+function gv_redis_prefix($set = null) {
+	static $prefix = '';
+	if (is_string($set)) { $prefix = $set; }
+	return $prefix;
+}
+
+// Allowed prefix: letters, digits and _ . : - up to 32 characters. No glob
+// characters (it goes into SCAN MATCH patterns) and no whitespace.
+function gv_redis_prefix_valid($p) {
+	return is_string($p) && preg_match('/^[A-Za-z0-9_.:-]{0,32}$/', $p) === 1;
+}
+
+// Verdict, counter and override keys: gv:{name}, namespaced.
+function gv_key($name) {
+	return gv_redis_prefix() . 'gv:' . $name;
+}
+
+// Panel keys (login limiter, job queue): gp:{name}, namespaced.
+function gp_key($name) {
+	return gv_redis_prefix() . 'gp:' . $name;
+}
+
+// --------------------------------------------------------------------------
 // Error log and circuit breaker (best effort, silent on every failure)
 // --------------------------------------------------------------------------
 
@@ -178,6 +208,16 @@ function gv_redis_connect($cfg, $log_dir = '', $breaker = true) {
 function gv_redis_connect_do($cfg, $log_dir, $breaker) {
 	if (!is_array($cfg)) { return false; }
 	$ttl = isset($cfg['breaker_ttl']) ? (int)$cfg['breaker_ttl'] : 5;
+	$prefix = isset($cfg['prefix']) ? $cfg['prefix'] : '';
+	if (!gv_redis_prefix_valid($prefix)) {
+		// A configuration error, never silently altered: Redis is treated as
+		// unavailable (degraded mode) and the mistake is reported.
+		gv_redis_prefix('');
+		gv_redis_ctx(array('log_dir' => (string)$log_dir, 'breaker' => false));
+		gv_errlog('redis_prefix', 'redis.prefix is invalid (allowed: [A-Za-z0-9_.:-], max 32)');
+		return false;
+	}
+	gv_redis_prefix($prefix);
 	gv_redis_ctx(array('log_dir' => (string)$log_dir, 'breaker' => (bool)$breaker,
 		'breaker_ttl' => $ttl, 'probe' => false));
 

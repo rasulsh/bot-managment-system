@@ -67,6 +67,7 @@ return array(
 	'dash_redis'        => 'ردیس',
 	'dash_redis_up'     => 'در دسترس',
 	'dash_redis_down'   => 'در دسترس نیست',
+	'dash_redis_endpoint' => 'نشانی ردیس',
 	'dash_breaker'      => 'قطع‌کنندهٔ ردیس',
 	'dash_breaker_open' => 'ردیس موقتاً نادیده گرفته می‌شود',
 	'dash_last_error'   => 'آخرین خطای نگهبان',

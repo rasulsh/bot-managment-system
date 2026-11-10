@@ -1730,6 +1730,225 @@ finally:
     worker_mod.promote_mod.promote = _promo_orig
 
 # ---------------------------------------------------------------------------
+section('Redis auth, db, socket and key prefix (Python side)')
+
+import hmac as hmac_mod
+import hashlib
+import json as json_x2
+import subprocess as sp_x
+import time as time_x
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_redis_bin = shutil.which('redis-server')
+_rtmp = tempfile.mkdtemp(prefix='gv-selftest-redis-matrix-')
+_started = []
+
+
+def start_redis(port, extra=(), sock=''):
+    cmd = [_redis_bin, '--port', str(port), '--bind', '127.0.0.1', '--save', '', '--appendonly', 'no',
+           '--daemonize', 'yes', '--pidfile', os.path.join(_rtmp, 'r%d.pid' % port), '--dir', _rtmp]
+    if sock:
+        cmd += ['--unixsocket', sock, '--unixsocketperm', '700']
+    cmd += list(extra)
+    sp_x.call(cmd, stdout=sp_x.DEVNULL, stderr=sp_x.DEVNULL)
+    import socket as socket_x
+    for _ in range(50):
+        try:
+            probe = socket_x.create_connection(('127.0.0.1', port), 0.2)
+            probe.close()
+            _started.append(port)
+            return True
+        except OSError:
+            time_x.sleep(0.1)
+    return False
+
+
+def rcfg(**redis_over):
+    c = {'redis': dict(config_mod.DEFAULTS['redis'])}
+    c['redis'].update(redis_over)
+    return c
+
+
+if not _redis_bin or not redis_io.REDIS_AVAILABLE:
+    skip('python redis matrix', 'redis-server or redis-py not available')
+else:
+    P_PLAIN, P_AUTH, P_ACL, P_UNIX = 63810, 63811, 63812, 63813
+    sock_path = os.path.join(_rtmp, 'py.sock')
+    up = [start_redis(P_PLAIN), start_redis(P_AUTH, ['--requirepass', 's3cret']),
+          start_redis(P_ACL), start_redis(P_UNIX, sock=sock_path)]
+    ok('the throwaway redis servers started', all(up))
+    admin = redis_io.redis_py.Redis(port=P_PLAIN, decode_responses=True)
+    acl_ok = True
+    try:
+        redis_io.redis_py.Redis(port=P_ACL).execute_command('ACL', 'SETUSER', 'gvuser', 'on', '>aclpass', '~*', '+@all')
+    except Exception:
+        acl_ok = False
+
+    c = redis_io.connect(rcfg(port=P_PLAIN))
+    ok('no auth server, no password: connects', c is not None)
+    ok('...and an empty prefix keeps the legacy key names',
+       redis_io.key('rep:abc') == 'gv:rep:abc' and redis_io.gp_key('jobs') == 'gp:jobs')
+    c = redis_io.connect(rcfg(port=P_AUTH, password='s3cret'))
+    ok('requirepass + correct password: connects', c is not None and c.ping())
+    _err = io_mod.StringIO()
+    with contextlib.redirect_stderr(_err):
+        c = redis_io.connect(rcfg(port=P_AUTH, password='WRONG-PW-XYZ'))
+    ok('requirepass + wrong password: no client, and the password is never printed',
+       c is None and 'WRONG-PW-XYZ' not in _err.getvalue())
+    with contextlib.redirect_stderr(io_mod.StringIO()):
+        c = redis_io.connect(rcfg(port=P_AUTH))
+    ok('requirepass + no password: no client', c is None)
+    with contextlib.redirect_stderr(io_mod.StringIO()) as _e2:
+        c = redis_io.connect(rcfg(port=P_PLAIN, password='unneeded'))
+    ok('no auth server + a password configured: still connects', c is not None and c.ping())
+    if acl_ok:
+        c = redis_io.connect(rcfg(port=P_ACL, username='gvuser', password='aclpass'))
+        ok('ACL user + password: connects and writes', c is not None and c.set('acl:k', '1'))
+        with contextlib.redirect_stderr(io_mod.StringIO()):
+            ok('ACL user + wrong password: no client',
+               redis_io.connect(rcfg(port=P_ACL, username='gvuser', password='bad')) is None)
+    else:
+        skip('python ACL user', 'Redis < 6')
+    c = redis_io.connect(rcfg(socket=sock_path, port=1))
+    ok('unix socket: connects (host/port ignored)', c is not None and c.ping())
+    c1 = redis_io.connect(rcfg(port=P_PLAIN, db=1))
+    redis_io.set_rep(c1, 'dbdev', 5, 60)
+    c0 = redis_io.connect(rcfg(port=P_PLAIN))
+    ok('db = 1: keys land in db 1 and not in db 0',
+       redis_io.get_rep(c1, 'dbdev') == 5 and redis_io.get_rep(c0, 'dbdev') is None)
+    with contextlib.redirect_stderr(io_mod.StringIO()):
+        ok('an invalid prefix disables Redis instead of being altered',
+           redis_io.connect(rcfg(port=P_PLAIN, prefix='bad prefix')) is None
+           and redis_io.connect(rcfg(port=P_PLAIN, prefix='x*')) is None)
+
+    # Prefix isolation across every family the analyzer touches.
+    admin.flushall()
+    a = redis_io.connect(rcfg(port=P_PLAIN, prefix='shop1:'))
+    redis_io.set_rep(a, 'd1', 11, 60)
+    redis_io.set_ml(a, 'd1', 22, 60)
+    redis_io.set_clf(a, 'd1', 33, 60)
+    redis_io.set_botv(a, '198.51.100.7', 'ok', 60)
+    redis_io.set_override(a, 'allow', 'ident1', 600)
+    ok('a prefixed write lands under the prefix',
+       admin.get('shop1:gv:rep:d1') == '11' and admin.get('shop1:gv:botok:198.51.100.7') == '1'
+       and admin.get('gv:rep:d1') is None)
+    b = redis_io.connect(rcfg(port=P_PLAIN, prefix='shop2:'))
+    ok('another prefix sees nothing of it',
+       redis_io.get_rep(b, 'd1') is None and redis_io.get_botv(b, '198.51.100.7') is None
+       and redis_io.list_overrides(b) == [])
+    a = redis_io.connect(rcfg(port=P_PLAIN, prefix='shop1:'))
+    ok('list_overrides strips the prefix from what it shows',
+       redis_io.list_overrides(a)[0][:2] == ('allow', 'ident1'))
+    ok('clear_override removes only its own namespace',
+       redis_io.clear_override(a, 'ident1') == 1)
+    ok('the job queue key is namespaced', redis_io.gp_key('jobs') == 'shop1:gp:jobs')
+
+    # PHP guard <-> Python analyzer under one non-empty prefix.
+    php_bin_x = shutil.which('php')
+    if not php_bin_x:
+        skip('PHP/Python cross-language prefix check', 'php not available')
+    else:
+        admin.flushall()
+        secret = 'xl-secret'
+        guard_cfg_path = os.path.join(_rtmp, 'guard-cfg.php')
+        guard_log = os.path.join(_rtmp, 'guardlogs')
+        guard_cfg = {
+            'secret': secret, 'enforce': {'block': False, 'challenge': False, 'ratelimit': False},
+            'signals': {'reputation': True, 'ml': True, 'clf': True},
+            'redis': {'host': '127.0.0.1', 'port': P_AUTH, 'password': 's3cret', 'prefix': 'xl:',
+                      'db': 2, 'timeout': 0.25},
+            'log_dir': guard_log, 'known_bots': ['googlebot'],
+        }
+        _escaped = json_x2.dumps(guard_cfg).replace("\\", "\\\\").replace("'", "\\'")
+        with open(guard_cfg_path, 'w') as fh:
+            fh.write('<?php if (!defined("GV_BOOT")) { exit; } return json_decode(\'' + _escaped + '\', true);')
+
+        # (1) The analyzer resolves its Redis settings from the GUARD's config,
+        # credentials included, through the bridge - and prints none of it.
+        an_cfg_path = os.path.join(_rtmp, 'an.json')
+        with open(an_cfg_path, 'w') as fh:
+            json_x2.dump({'guard_config_path': guard_cfg_path, 'log_dir': guard_log,
+                          'model_path': os.path.join(_rtmp, 'model.joblib')}, fh)
+        an = config_mod.load(an_cfg_path)
+        ok('the analyzer takes host/port/db/prefix/password from the guard block',
+           an['redis']['port'] == P_AUTH and an['redis']['password'] == 's3cret'
+           and an['redis']['prefix'] == 'xl:' and an['redis']['db'] == 2
+           and an['redis']['socket_timeout'] >= 0.25)
+        an_override = os.path.join(_rtmp, 'an2.json')
+        with open(an_override, 'w') as fh:
+            json_x2.dump({'guard_config_path': guard_cfg_path, 'log_dir': guard_log,
+                          'model_path': os.path.join(_rtmp, 'model.joblib'),
+                          'redis': {'prefix': 'override:'}}, fh)
+        an2 = config_mod.load(an_override)
+        ok('an explicit analyzer override beats the guard block, key by key',
+           an2['redis']['prefix'] == 'override:' and an2['redis']['port'] == P_AUTH)
+        dump_default = sp_x.check_output([php_bin_x, os.path.join(REPO, 'scripts', 'config-dump.php'),
+                                          '--config', guard_cfg_path]).decode()
+        ok('the default config dump never prints the Redis password or username',
+           's3cret' not in dump_default and '"password"' not in dump_default)
+        ok('...but still shows the safe parts (host, db, prefix)',
+           '"prefix": "xl:"' in dump_default and '"db": 2' in dump_default)
+
+        # (2) Python writes a reputation; the PHP guard reads it under the prefix.
+        pc = redis_io.connect(an)
+        ok('the analyzer connects with the guard\'s credentials', pc is not None)
+        devid = 'cafe' * 6
+        redis_io.set_rep(pc, devid, 42, 120)
+        issued = str(int(time_x.time()))
+        sig = hmac_mod.new(secret.encode(), ('%s.%s' % (devid, issued)).encode(), hashlib.sha256).hexdigest()
+        token = '%s.%s.%s' % (devid, issued, sig)
+        probe_in = json_x2.dumps({'config': guard_cfg_path, 'cookie': {'_gv': token},
+                                  'server': {'HTTP_USER_AGENT': 'Mozilla/5.0 Chrome/126.0', 'HTTP_ACCEPT': 'text/html',
+                                             'HTTP_ACCEPT_LANGUAGE': 'en', 'HTTP_SEC_FETCH_MODE': 'navigate',
+                                             'HTTP_A': '1', 'HTTP_B': '2', 'HTTP_C': '3', 'HTTP_D': '4'}})
+        proc = sp_x.run([php_bin_x, os.path.join(REPO, 'scripts', 'request-probe.php')],
+                        input=probe_in.encode(), stdout=sp_x.PIPE, stderr=sp_x.PIPE)
+        rows = []
+        for fn in sorted(os.listdir(guard_log)) if os.path.isdir(guard_log) else []:
+            if fn.endswith('.jsonl'):
+                with open(os.path.join(guard_log, fn)) as fh:
+                    rows = [json_x2.loads(line) for line in fh if line.strip()]
+        ok('a rep written from Python is read by the PHP guard under the same prefix/db/auth',
+           bool(rows) and rows[-1].get('rep') == 42 and rows[-1].get('rd') == 0)
+
+        # (3) A panel-style override (PHP) is visible to ctl.py (Python).
+        php_code = ("define('GV_BOOT',1);define('GP_BOOT',1);putenv('GV_CONFIG=%s');"
+                    "require '%s/guard/guard.php';require '%s/panel/config_io.php';require '%s/panel/data.php';"
+                    "echo gp_override_set('deny','xl-ident',600) ? 'set' : 'fail';" % (guard_cfg_path, REPO, REPO, REPO))
+        out = sp_x.check_output([php_bin_x, '-d', 'display_errors=0', '-r', php_code]).decode()
+        listed = sp_x.check_output([sys.executable, os.path.join(REPO, 'analyzer', 'ctl.py'),
+                                    '--config', an_cfg_path, 'list']).decode()
+        ok('a panel override is listed by ctl.py (prefix stripped, credentials from the bridge)',
+           out == 'set' and 'xl-ident' in listed and 'xl:' not in listed)
+        redis_io.connect(rcfg(port=P_PLAIN))      # reset the module prefix for later tests
+
+    for port in _started:
+        try:
+            with open(os.path.join(_rtmp, 'r%d.pid' % port)) as pid_fh:
+                os.kill(int(pid_fh.read().strip()), 15)
+        except Exception:
+            pass
+    shutil.rmtree(_rtmp, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+section('Source audit: Redis keys go through redis_io.key()/gp_key()')
+
+_audit_bad = []
+for _dir, _dirs, _files in os.walk(os.path.join(REPO, 'analyzer')):
+    for _fn in _files:
+        if _fn.endswith('.py') and _fn not in ('selftest.py', 'redis_io.py'):
+            with open(os.path.join(_dir, _fn)) as _fh:
+                for _n, _line in enumerate(_fh, 1):
+                    if re.search(r"""['"]g[vp]:""", _line):
+                        _audit_bad.append('%s:%d' % (_fn, _n))
+ok('no raw gv:/gp: key literal in analyzer/ outside redis_io.py %s' % _audit_bad, not _audit_bad)
+ok('every Redis consumer connects through redis_io.connect()',
+   not [fn for fn in os.listdir(os.path.join(REPO, 'analyzer'))
+        if fn.endswith('.py') and fn not in ('selftest.py', 'redis_io.py')
+        and re.search(r'redis_py\.Redis\(|redis\.Redis\(|redis\.StrictRedis\(',
+                      open(os.path.join(REPO, 'analyzer', fn)).read())])
+
+# ---------------------------------------------------------------------------
 print('')
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)

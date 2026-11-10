@@ -208,6 +208,7 @@ switch ($gp_route) {
 			'kill'     => gp_killswitch_on(),
 			'redis_up' => gp_redis_up(),
 			'health'   => gp_guard_health(),
+			'rinfo'    => gp_redis_info(),
 		));
 
 	case 'logs':

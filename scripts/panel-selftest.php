@@ -717,6 +717,28 @@ t_ok('the audit search box escapes the query it echoes back',
 	strpos($rendered_audit, 'value="&lt;script&gt;') !== false);
 
 // --------------------------------------------------------------------------
+t_section('Redis settings are file-only and never displayed');
+
+foreach (array('redis.password', 'redis.username', 'redis.prefix', 'redis.host', 'redis.socket', 'redis.db') as $rk) {
+	$chk = gv_overlay_validate($rk, 'x');
+	t_ok("$rk is not in the overlay whitelist (file-only, like secret)", $chk[0] === false && $chk[1] === 'unknown_key');
+}
+$rf = tempnam(sys_get_temp_dir(), 'gvrcfg');
+file_put_contents($rf, '<?php if (!defined("GV_BOOT")) { exit; } return array("secret" => "x",'
+	. ' "redis" => array("host" => "10.1.2.3", "port" => 6380, "username" => "uSeRnAmE", "password" => "p4ssw0rd-LEAK",'
+	. ' "db" => 3, "prefix" => "shop1:"));');
+putenv('GV_CONFIG=' . $rf);
+$ri = gp_redis_info();
+putenv('GV_CONFIG');
+@unlink($rf);
+t_ok('gp_redis_info reports endpoint, db, prefix and auth on/off',
+	$ri['endpoint'] === '10.1.2.3:6380' && $ri['db'] === 3 && $ri['prefix'] === 'shop1:' && $ri['auth'] === true);
+t_ok('gp_redis_info never carries the password or username',
+	strpos(json_encode($ri), 'p4ssw0rd') === false && strpos(json_encode($ri), 'uSeRnAmE') === false);
+$dash_src = file_get_contents(__DIR__ . '/../panel/views/dashboard.php') . file_get_contents(__DIR__ . '/../panel/views/settings.php');
+t_ok('no panel view reads redis.password', strpos($dash_src, "['password']") === false);
+
+// --------------------------------------------------------------------------
 t_section('No shell execution anywhere under panel/');
 
 $forbidden = array('exec', 'shell_exec', 'system', 'passthru', 'proc_open',

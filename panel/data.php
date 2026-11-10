@@ -459,6 +459,22 @@ function gp_guard_health() {
 	return $out;
 }
 
+// Read-only description of how the guard reaches Redis, for the dashboard.
+// Deliberately built field by field: the password and username are NEVER part
+// of this array, only whether authentication is configured.
+function gp_redis_info() {
+	$cfg = gv_cfg_load();
+	$r = isset($cfg['redis']) && is_array($cfg['redis']) ? $cfg['redis'] : array();
+	$socket = isset($r['socket']) ? trim((string)$r['socket']) : '';
+	return array(
+		'endpoint' => $socket !== '' ? $socket
+			: (isset($r['host']) ? (string)$r['host'] : '127.0.0.1') . ':' . (isset($r['port']) ? (int)$r['port'] : 6379),
+		'db'       => isset($r['db']) ? (int)$r['db'] : 0,
+		'prefix'   => isset($r['prefix']) ? (string)$r['prefix'] : '',
+		'auth'     => (isset($r['password']) && (string)$r['password'] !== ''),
+	);
+}
+
 function gp_redis_up() {
 	$conn = gp_redis();
 	return $conn ? true : false;
@@ -471,20 +487,20 @@ function gp_identity_verdicts($identity) {
 		'botbad' => false, 'honeypot' => false, 'allow_ttl' => null, 'deny_ttl' => null);
 	$conn = gp_redis();
 	if (!$conn) { return $out; }
-	$rep = gv_r_get($conn, 'gv:rep:' . $identity);
+	$rep = gv_r_get($conn, gv_key('rep:' . $identity));
 	if (is_string($rep) && is_numeric($rep)) { $out['rep'] = (int)$rep; }
-	$ml = gv_r_get($conn, 'gv:ml:' . $identity);
+	$ml = gv_r_get($conn, gv_key('ml:' . $identity));
 	if (is_string($ml) && is_numeric($ml)) { $out['ml'] = (int)$ml; }
-	$clf = gv_r_get($conn, 'gv:clf:' . $identity);
+	$clf = gv_r_get($conn, gv_key('clf:' . $identity));
 	if (is_string($clf) && is_numeric($clf)) { $out['clf'] = (int)$clf; }
-	$out['botok'] = gv_r_get($conn, 'gv:botok:' . $identity) === '1';
-	$out['botbad'] = gv_r_get($conn, 'gv:botbad:' . $identity) === '1';
-	$out['honeypot'] = gv_r_get($conn, 'gv:hp:' . $identity) === '1';
-	if (gv_r_get($conn, 'gv:allow:' . $identity) === '1') {
-		$out['allow_ttl'] = gp_ttl('gv:allow:' . $identity);
+	$out['botok'] = gv_r_get($conn, gv_key('botok:' . $identity)) === '1';
+	$out['botbad'] = gv_r_get($conn, gv_key('botbad:' . $identity)) === '1';
+	$out['honeypot'] = gv_r_get($conn, gv_key('hp:' . $identity)) === '1';
+	if (gv_r_get($conn, gv_key('allow:' . $identity)) === '1') {
+		$out['allow_ttl'] = gp_ttl(gv_key('allow:' . $identity));
 	}
-	if (gv_r_get($conn, 'gv:deny:' . $identity) === '1') {
-		$out['deny_ttl'] = gp_ttl('gv:deny:' . $identity);
+	if (gv_r_get($conn, gv_key('deny:' . $identity)) === '1') {
+		$out['deny_ttl'] = gp_ttl(gv_key('deny:' . $identity));
 	}
 	return $out;
 }
@@ -507,11 +523,11 @@ function gp_overrides_list($limit = 200) {
 		$cursor = '0';
 		$guard = 0;
 		do {
-			$reply = gp_scan($conn, $cursor, 'gv:' . $kind . ':*');
+			$reply = gp_scan($conn, $cursor, gv_key($kind . ':') . '*');
 			if ($reply === null) { break; }
 			list($cursor, $keys) = $reply;
 			foreach ($keys as $key) {
-				$identity = substr($key, strlen('gv:' . $kind . ':'));
+				$identity = substr($key, strlen(gv_key($kind . ':')));
 				$out[] = array('kind' => $kind, 'identity' => $identity,
 					'ttl' => gp_ttl($key));
 				if (count($out) >= $limit) { return $out; }
@@ -549,15 +565,15 @@ function gp_override_set($kind, $identity, $ttl) {
 	if ($ttl < 60 || $ttl > GP_OVERRIDE_MAX_TTL) { return false; }
 	$conn = gp_redis();
 	if (!$conn) { return false; }
-	return gv_r_setex($conn, 'gv:' . $kind . ':' . $identity, $ttl, '1') === 'OK';
+	return gv_r_setex($conn, gv_key($kind . ':' . $identity), $ttl, '1') === 'OK';
 }
 
 function gp_override_clear($identity) {
 	$conn = gp_redis();
 	if (!$conn) { return false; }
 	if (!preg_match('/^[A-Za-z0-9._:-]+$/', (string)$identity)) { return false; }
-	gv_redis_cmd($conn, array('DEL', 'gv:allow:' . $identity));
-	gv_redis_cmd($conn, array('DEL', 'gv:deny:' . $identity));
+	gv_redis_cmd($conn, array('DEL', gv_key('allow:' . $identity)));
+	gv_redis_cmd($conn, array('DEL', gv_key('deny:' . $identity)));
 	return true;
 }
 

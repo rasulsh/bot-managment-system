@@ -17,7 +17,6 @@ require_once __DIR__ . '/../guard/guard.php';
 require_once __DIR__ . '/data.php';
 
 define('GP_JOB_TTL', 86400);
-define('GP_JOB_LIST', 'gp:jobs');
 
 function gp_job_types() {
 	return array('verify', 'nightly', 'train', 'train_clf', 'replay_full',
@@ -79,8 +78,8 @@ function gp_job_enqueue($type, array $params, $actor) {
 
 	$status = json_encode(array_merge($envelope, array('status' => 'queued')),
 		JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-	gv_r_setex($conn, 'gp:job:' . $id, GP_JOB_TTL, $status);
-	$pushed = gv_redis_cmd($conn, array('LPUSH', GP_JOB_LIST, $json));
+	gv_r_setex($conn, gp_key('job:' . $id), GP_JOB_TTL, $status);
+	$pushed = gv_redis_cmd($conn, array('LPUSH', gp_key('jobs'), $json));
 	if ($pushed === false) {
 		return array('ok' => false, 'id' => null, 'error' => 'queue_failed');
 	}
@@ -88,7 +87,7 @@ function gp_job_enqueue($type, array $params, $actor) {
 	// the list expires 24h after the LAST enqueue, which bounds growth if the
 	// worker is permanently down. The worker normally drains it every minute, so
 	// in practice the TTL is never reached; removing it risks unbounded growth.
-	gv_redis_cmd($conn, array('EXPIRE', GP_JOB_LIST, (string)GP_JOB_TTL));
+	gv_redis_cmd($conn, array('EXPIRE', gp_key('jobs'), (string)GP_JOB_TTL));
 
 	gp_audit_append(array('event' => 'job', 'actor' => (string)$actor,
 		'ip' => gp_client_ip(), 'key' => $type, 'old' => null,
@@ -111,12 +110,11 @@ function gp_job_list($limit = 50) {
 	$cursor = '0';
 	$guard = 0;
 	do {
-		// The glob 'gp:job:*' requires the trailing colon, so it matches the
-		// per-job status keys (gp:job:<id>) but NOT the list key GP_JOB_LIST
-		// ('gp:jobs', no colon). A GET on the list key would fail and be skipped
-		// anyway, so this is doubly safe (#21d: the reviewer's collision claim is
-		// incorrect).
-		$reply = gp_scan($conn, $cursor, 'gp:job:*');
+		// The glob job:* requires the trailing colon, so it matches the per-job
+		// status keys (job:<id>) but NOT the list key (jobs, no colon). A GET on
+		// the list key would fail and be skipped anyway, so this is doubly safe
+		// (#21d: the reviewer's collision claim is incorrect).
+		$reply = gp_scan($conn, $cursor, gp_key('job:*'));
 		if ($reply === null) { break; }
 		list($cursor, $keys) = $reply;
 		foreach ($keys as $key) {

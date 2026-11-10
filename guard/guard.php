@@ -604,8 +604,8 @@ function gv_bot_verdict_from($botbad, $botok) {
 function gv_bot_verdict($conn, $ip) {
 	if (!gv_redis_alive($conn)) { return ''; }
 	$r = gv_redis_pipeline($conn, array(
-		array('GET', 'gv:botbad:' . $ip),
-		array('GET', 'gv:botok:' . $ip),
+		array('GET', gv_key('botbad:' . $ip)),
+		array('GET', gv_key('botok:' . $ip)),
 	));
 	if ($r === false) { return ''; }
 	return gv_bot_verdict_from($r[0], $r[1]);
@@ -683,10 +683,10 @@ function gv_override_from($allow_dev, $allow_ip, $deny_dev, $deny_ip) {
 function gv_override($conn, $ip, $dev) {
 	if (!gv_redis_alive($conn)) { return ''; }
 	$cmds = array(
-		'allow_dev' => ($dev !== '') ? array('GET', 'gv:allow:' . $dev) : null,
-		'allow_ip'  => ($ip  !== '') ? array('GET', 'gv:allow:' . $ip)  : null,
-		'deny_dev'  => ($dev !== '') ? array('GET', 'gv:deny:' . $dev)  : null,
-		'deny_ip'   => array('GET', 'gv:deny:' . $ip),
+		'allow_dev' => ($dev !== '') ? array('GET', gv_key('allow:' . $dev)) : null,
+		'allow_ip'  => ($ip  !== '') ? array('GET', gv_key('allow:' . $ip))  : null,
+		'deny_dev'  => ($dev !== '') ? array('GET', gv_key('deny:' . $dev))  : null,
+		'deny_ip'   => array('GET', gv_key('deny:' . $ip)),
 	);
 	$send = array_values(array_filter($cmds));
 	$r = gv_redis_pipeline($conn, $send);
@@ -821,20 +821,20 @@ function gv_run($t0) {
 
 	$reads = array();
 	if ($bot !== '') {
-		$reads['botbad'] = array('GET', 'gv:botbad:' . $f['ip']);
-		$reads['botok']  = array('GET', 'gv:botok:' . $f['ip']);
+		$reads['botbad'] = array('GET', gv_key('botbad:' . $f['ip']));
+		$reads['botok']  = array('GET', gv_key('botok:' . $f['ip']));
 	}
 	if (!$is_hp) {
 		if ($dev !== '') {
-			$reads['rep']       = array('GET', 'gv:rep:' . $dev);
-			$reads['ml']        = array('GET', 'gv:ml:' . $dev);
-			$reads['clf']       = array('GET', 'gv:clf:' . $dev);
-			$reads['allow_dev'] = array('GET', 'gv:allow:' . $dev);
-			$reads['deny_dev']  = array('GET', 'gv:deny:' . $dev);
+			$reads['rep']       = array('GET', gv_key('rep:' . $dev));
+			$reads['ml']        = array('GET', gv_key('ml:' . $dev));
+			$reads['clf']       = array('GET', gv_key('clf:' . $dev));
+			$reads['allow_dev'] = array('GET', gv_key('allow:' . $dev));
+			$reads['deny_dev']  = array('GET', gv_key('deny:' . $dev));
 		}
-		if ($f['ip'] !== '') { $reads['allow_ip'] = array('GET', 'gv:allow:' . $f['ip']); }
-		$reads['deny_ip'] = array('GET', 'gv:deny:' . $f['ip']);
-		$reads['hp']      = array('GET', 'gv:hp:' . $f['ip']);
+		if ($f['ip'] !== '') { $reads['allow_ip'] = array('GET', gv_key('allow:' . $f['ip'])); }
+		$reads['deny_ip'] = array('GET', gv_key('deny:' . $f['ip']));
+		$reads['hp']      = array('GET', gv_key('hp:' . $f['ip']));
 	}
 	$val = array();                               // label => reply; empty = no signal
 	if ($reads && gv_redis_alive($conn)) {
@@ -866,7 +866,7 @@ function gv_run($t0) {
 			if ($verdict === 'ok') { $st['botv'] = 'ok'; }
 			// The pass bumps only its own counter (rb), never rd/riu/ri.
 			if (gv_redis_alive($conn)) {
-				$n = gv_bump($conn, 'gv:rb:' . $f['ip'], $cfg['limits']['window']);
+				$n = gv_bump($conn, gv_key('rb:' . $f['ip']), $cfg['limits']['window']);
 				if ($n > (int)$cfg['limits']['bot']) { $bot_over = true; }
 			}
 			if (!$bot_over) {
@@ -880,7 +880,7 @@ function gv_run($t0) {
 
 	// 6. Honeypot. Fires regardless of the enforce toggles: it is labelling data.
 	if ($is_hp) {
-		if (gv_redis_alive($conn)) { gv_r_setex($conn, 'gv:hp:' . $f['ip'], 604800, '1'); }
+		if (gv_redis_alive($conn)) { gv_r_setex($conn, gv_key('hp:' . $f['ip']), 604800, '1'); }
 		$st['hp'] = 1;
 		gv_finish($conn, $st);
 		gv_emit($f, $st, '404_hp', 0, $t0, $log);
@@ -938,10 +938,10 @@ function gv_run($t0) {
 	if (gv_redis_alive($conn)) {
 		$window = $cfg['limits']['window'];
 		$items = array();
-		if ($st['dev'] !== '') { $items[] = array('gv:rd:' . $st['dev'], $window); }
+		if ($st['dev'] !== '') { $items[] = array(gv_key('rd:' . $st['dev']), $window); }
 		$uah = substr(md5((string)$f['ua']), 0, 12);
-		$items[] = array('gv:riu:' . md5($f['ip'] . '|' . $uah), $window);
-		$items[] = array('gv:ri:' . $f['ip'], $window);
+		$items[] = array(gv_key('riu:' . md5($f['ip'] . '|' . $uah)), $window);
+		$items[] = array(gv_key('ri:' . $f['ip']), $window);
 		$counts = gv_bump_many($conn, $items);
 		if ($st['dev'] !== '') {
 			$st['cd'] = array_shift($counts);

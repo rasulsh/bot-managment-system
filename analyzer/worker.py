@@ -37,7 +37,6 @@ from analyzer import run_nightly
 from analyzer import run_verify
 from analyzer import snapshot as snapshot_mod
 
-JOB_LIST = 'gp:jobs'
 JOB_TTL = 86400
 MAX_OUTPUT = 8000
 
@@ -160,7 +159,7 @@ def set_status(client, job_id, payload):
     try:
         # set(..., ex=) rather than setex(): redis-py deprecated setex, and the
         # warning would otherwise be captured into the job output the panel shows.
-        client.set('gp:job:' + job_id, json.dumps(payload, ensure_ascii=False),
+        client.set(redis_io.gp_key('job:' + job_id), json.dumps(payload, ensure_ascii=False),
                    ex=JOB_TTL)
     except Exception as exc:
         redis_io.warn('could not write job status: %s' % exc)
@@ -251,7 +250,7 @@ def main(argv=None):
     done = 0
     for _ in range(max(1, int(args.max_jobs))):
         try:
-            raw = client.rpop(JOB_LIST)
+            raw = client.rpop(redis_io.gp_key('jobs'))
         except Exception as exc:
             redis_io.warn('could not read the queue: %s' % exc)
             break
