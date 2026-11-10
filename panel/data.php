@@ -427,8 +427,36 @@ function gp_redis($reset = false) {
 	}
 	if ($conn !== false) { return $conn; }
 	$cfg = gv_cfg_load();
-	$conn = gv_redis_connect($cfg['redis']);
+	// The panel asks for the truth, not the request path's cached "Redis is
+	// down", so it bypasses the circuit breaker (third argument).
+	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
 	return $conn;
+}
+
+// What the request path last complained about: whether the circuit breaker is
+// currently open (Redis marked down) and the newest line of guard-errors.log.
+// Read straight from the files the guard writes - no Redis, no outbound calls.
+function gp_guard_health() {
+	$cfg = gv_cfg_load();
+	$dir = rtrim((string)$cfg['log_dir'], '/\\');
+	$out = array('breaker' => false, 'last_error' => '');
+	$ttl = isset($cfg['redis']['breaker_ttl']) ? (int)$cfg['redis']['breaker_ttl'] : 5;
+	clearstatcache(true, $dir . '/.redis-down');
+	$t = @filemtime($dir . '/.redis-down');
+	if ($t !== false && $ttl > 0 && (time() - $t) < max($ttl, 60)) { $out['breaker'] = true; }
+	$f = $dir . '/guard-errors.log';
+	if (is_file($f)) {
+		$size = (int)@filesize($f);
+		$h = @fopen($f, 'rb');
+		if ($h) {
+			if ($size > 4096) { fseek($h, -4096, SEEK_END); }
+			$tail = (string)stream_get_contents($h);
+			fclose($h);
+			$lines = array_values(array_filter(explode("\n", $tail), 'strlen'));
+			if ($lines) { $out['last_error'] = substr((string)end($lines), 0, 300); }
+		}
+	}
+	return $out;
 }
 
 function gp_redis_up() {
@@ -494,51 +522,18 @@ function gp_overrides_list($limit = 200) {
 	return $out;
 }
 
-// SCAN returns a two-element array, which the Phase 1 RESP client deliberately
-// does not parse. Read it here with a small dedicated parser rather than
-// widening the guard's request-path client for the panel's benefit.
+// One SCAN step. Returns array(next_cursor, keys) or null. The shared client
+// parses multi-bulk replies, and a transport failure closes the connection
+// (fail-fast), so a bad reply can never be read as a later command's answer;
+// gp_redis(true) just forgets the dead handle so the next call reconnects.
 function gp_scan($conn, $cursor, $pattern) {
-	if (!$conn) { return null; }                  // no connection: nothing to poison
-	$payload = gv_resp_encode(array('SCAN', (string)$cursor, 'MATCH', $pattern, 'COUNT', '200'));
-	// Every failure below happens after the command was written, so the socket
-	// may hold a partial or unread reply. Drop the shared connection before
-	// returning (gp_redis(true)) so the next gp_redis() reopens a clean one and
-	// no later command reads leftover bytes as its own reply.
-	if (@fwrite($conn, $payload) === false) { gp_redis(true); return null; }
-	$line = @fgets($conn);
-	if ($line === false) { gp_redis(true); return null; }
-	$line = rtrim($line, "\r\n");
-	if (substr($line, 0, 1) !== '*') { gp_redis(true); return null; }
-	if ((int)substr($line, 1) !== 2) { gp_redis(true); return null; }
-	$next = gp_scan_bulk($conn);
-	if ($next === null) { return null; }          // gp_scan_bulk already reset the socket
-	$head = @fgets($conn);
-	if ($head === false || substr($head, 0, 1) !== '*') { gp_redis(true); return null; }
-	$count = (int)substr(rtrim($head, "\r\n"), 1);
-	$keys = array();
-	for ($i = 0; $i < $count; $i++) {
-		$key = gp_scan_bulk($conn);
-		if ($key === null) { return null; }       // gp_scan_bulk already reset the socket
-		$keys[] = $key;
+	if (!$conn) { return null; }
+	$r = gv_redis_cmd($conn, array('SCAN', (string)$cursor, 'MATCH', $pattern, 'COUNT', '200'));
+	if (!is_array($r) || count($r) !== 2 || !is_array($r[1])) {
+		if (!gv_redis_alive($conn)) { gp_redis(true); }
+		return null;
 	}
-	return array($next, $keys);
-}
-
-function gp_scan_bulk($conn) {
-	$head = @fgets($conn);
-	if ($head === false) { gp_redis(true); return null; }
-	$head = rtrim($head, "\r\n");
-	if (substr($head, 0, 1) !== '$') { gp_redis(true); return null; }
-	$len = (int)substr($head, 1);
-	if ($len < 0) { return ''; }
-	$need = $len + 2;
-	$data = '';
-	while (strlen($data) < $need) {
-		$part = @fread($conn, $need - strlen($data));
-		if ($part === false || $part === '') { gp_redis(true); return null; }
-		$data .= $part;
-	}
-	return substr($data, 0, $len);
+	return array((string)$r[0], array_map('strval', $r[1]));
 }
 
 // Write an operator override. Mirrors analyzer/ctl.py exactly, including the

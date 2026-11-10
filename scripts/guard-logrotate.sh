@@ -23,6 +23,15 @@ for f in "$LOG_DIR"/guard-*.jsonl; do
 	gzipped=$((gzipped + 1))
 done
 
+# The guard's own error log (guard-errors.log) is tiny and throttled, so it is
+# rotated by size rather than by day: past 1 MiB it is archived and restarted.
+ERR="$LOG_DIR/guard-errors.log"
+if [ -f "$ERR" ] && [ "$(wc -c < "$ERR")" -gt 1048576 ]; then
+	mv "$ERR" "$LOG_DIR/guard-errors-$(date +%Y%m%d%H%M%S).log"
+	gzip -f "$LOG_DIR"/guard-errors-*.log
+fi
+find "$LOG_DIR" -maxdepth 1 -name 'guard-errors-*.log.gz' -type f -mtime "+$RETENTION_DAYS" -delete
+
 deleted=$(find "$LOG_DIR" -maxdepth 1 -name '*.jsonl.gz' -type f -mtime "+$RETENTION_DAYS" -print -delete | wc -l | tr -d ' ')
 
 echo "Bot Guard log rotation: compressed $gzipped file(s), deleted $deleted archive(s) older than $RETENTION_DAYS days in $LOG_DIR"

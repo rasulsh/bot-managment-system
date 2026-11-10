@@ -293,24 +293,16 @@ function gp_ratelimit_file_dir() {
 function gp_attempts_bump($bucket, $window) {
 	$key = 'gp:login:' . $bucket;
 	$cfg = gv_cfg_load();
-	$conn = gv_redis_connect($cfg['redis']);
+	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
 	if ($conn) {
-		// SET NX EX creates the counter with its TTL in one atomic command, so
-		// the first write can never leave a TTL-less key that would lock the
-		// bucket out forever (the old INCR-then-EXPIRE had that window).
-		$set = gv_r_set_nx_ex($conn, $key, $window, 1);
-		if ($set === 'OK') {
-			gv_redis_close($conn);
-			return 1;
-		}
-		if ($set === null) {                  // key already exists and carries a TTL
-			$n = gv_r_incr($conn, $key);
-			if ($n !== false && $n !== null) {
-				gv_redis_close($conn);
-				return (int)$n;
-			}
-		}
+		// One pipelined SET NX EX + INCR + TTL: the counter is created with its
+		// TTL in the same write, so it can never lock the bucket out forever,
+		// and a TTL-less leftover is repaired. gv_bump() folds any failure to 0,
+		// which sends this down the file fallback below - the limiter never
+		// fails open just because Redis is unreachable.
+		$n = gv_bump($conn, $key, $window);
 		gv_redis_close($conn);
+		if ($n > 0) { return $n; }
 	}
 	return gp_attempts_bump_file($bucket, $window);
 }
@@ -318,7 +310,7 @@ function gp_attempts_bump($bucket, $window) {
 function gp_attempts_get($bucket, $window) {
 	$key = 'gp:login:' . $bucket;
 	$cfg = gv_cfg_load();
-	$conn = gv_redis_connect($cfg['redis']);
+	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
 	if ($conn) {
 		$v = gv_r_get($conn, $key);
 		gv_redis_close($conn);

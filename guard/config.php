@@ -53,8 +53,17 @@ return array(
 	'known_bots'       => array('googlebot', 'bingbot'),  // lowercase UA substrings
 	'cdn_ranges'       => array(),            // v4 CIDRs; XFF trusted only when
 	                                          // REMOTE_ADDR is inside one of these
-	'redis'            => array('host' => '127.0.0.1', 'port' => 6379,
-	                            'timeout' => 0.05),
+	'redis'            => array(              // shared by the guard, the panel AND the analyzer
+		'host'        => '127.0.0.1',
+		'port'        => 6379,
+		'socket'      => '',                  // unix socket path; when set, host/port are ignored
+		'username'    => '',                  // optional (Redis 6+ ACL); empty = default user
+		'password'    => '',                  // optional; empty = no AUTH is sent
+		'db'          => 0,                   // optional; 0 = no SELECT is sent
+		'prefix'      => '',                  // optional key namespace, e.g. 'shop1:'
+		'timeout'     => 0.05,                // seconds, per read in the request path
+		'breaker_ttl' => 5,                   // seconds to skip Redis after a failure; 0 = off
+	),
 	'log_dir'          => dirname(__DIR__) . '/logs',
 	'strings'          => array(              // user-facing, operator-localizable
 		'lang'     => 'fa',
