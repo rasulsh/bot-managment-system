@@ -61,5 +61,6 @@ return array(
 		'noscript' => 'Please enable JavaScript and cookies to continue.',
 		'failed'   => 'We could not verify your browser.',
 		'retry'    => 'Try again',
+		'nocookie' => 'Your browser is not keeping cookies. Please enable cookies for this site and try again.',
 	),
 );

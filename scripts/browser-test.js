@@ -91,6 +91,32 @@ return $c;`);
     check('the manual retry link starts a fresh challenge that succeeds', posts === before);
     await ctx.close();
 
+    // Cookies blocked: the handshake succeeds (204) but the browser never stores the
+    // token. The page must not loop forever minting tokens: one token, then the
+    // localized "enable cookies" text with a retry link.
+    {
+      const ctxc = await browser.newContext();
+      const pc = await ctxc.newPage();
+      let okPosts = 0;
+      await pc.route('**/*', async route => {
+        if (route.request().method() !== 'POST') return route.continue();
+        const resp = await route.fetch();
+        if (resp.status() === 204) okPosts++;
+        const headers = Object.assign({}, resp.headers());
+        delete headers['set-cookie'];                    // the browser "refuses" the cookie
+        await ctxc.clearCookies();                       // route.fetch() shares the cookie jar: undo it
+        return route.fulfill({ status: resp.status(), headers, body: '' });
+      });
+      await pc.goto('http://127.0.0.1:' + port + '/?run=nocookie');
+      let shown = true;
+      try { await pc.waitForSelector('#gv-cookie:not([hidden])', { timeout: 15000 }); } catch (e) { shown = false; }
+      await pc.waitForTimeout(1500);
+      check('cookies blocked: the cookie message is shown instead of looping', shown);
+      check('cookies blocked: exactly one token was minted (no loop)', okPosts === 1, okPosts + ' successful handshakes');
+      check('cookies blocked: the message mentions cookies', shown && /cookie/i.test(await pc.textContent('#gv-cookie')));
+      await ctxc.close();
+    }
+
     // Solve time at the default difficulty, and raw hashes per second.
     const times = [];
     let rate = 0;

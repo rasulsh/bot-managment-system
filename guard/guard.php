@@ -73,6 +73,7 @@ function gv_cfg_defaults(array $cfg) {
 		'noscript' => 'Please enable JavaScript and cookies to continue.',
 		'failed'   => 'We could not verify your browser.',
 		'retry'    => 'Try again',
+		'nocookie' => 'Your browser is not keeping cookies. Please enable cookies for this site and try again.',
 	);
 	if (!isset($cfg['strings']) || !is_array($cfg['strings'])) { $cfg['strings'] = array(); }
 	$cfg['strings'] = array_merge($strings, $cfg['strings']);

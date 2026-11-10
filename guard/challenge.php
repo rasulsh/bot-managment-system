@@ -184,23 +184,31 @@ function solve(done) {
 }
 function sget() { try { return sessionStorage.getItem(SK); } catch (e) { return window.name.indexOf(SK + '=') === 0 ? window.name.slice(SK.length + 1) : null; } }
 function sset(v) { try { sessionStorage.setItem(SK, v); } catch (e) { try { window.name = SK + '=' + v; } catch (e2) {} } }
-function tries() { var v = sget(); if (!v) { return 0; } var p = v.split(':'); return (Date.now() - (+p[1] || 0) > 60000) ? 0 : (+p[0] || 0); }
-function bump() { sset((tries() + 1) + ':' + Date.now()); }
-function giveUp() {
+// State "failures:successes:timestamp", forgotten after a minute. failures: refused
+// handshakes reloaded so far. successes: handshakes that returned 204 but still
+// brought us back to a challenge - the browser is not keeping the token cookie.
+function gst() { var v = sget(), p = v ? v.split(':') : [], t = +p[2] || 0; return (Date.now() - t > 60000) ? [0, 0] : [+p[0] || 0, +p[1] || 0]; }
+function gput(f, s) { sset(f + ':' + s + ':' + Date.now()); }
+function show(id) {
 	document.getElementById('gv-wait').hidden = true;
-	document.getElementById('gv-fail').hidden = false;
+	document.getElementById(id).hidden = false;
 }
 function retry() {
-	if (tries() < MAX) { bump(); location.reload(); } else { giveUp(); }
+	var s = gst();
+	if (s[0] < MAX) { gput(s[0] + 1, s[1]); location.reload(); } else { show('gv-fail'); }
 }
-document.getElementById('gv-retry').onclick = function (ev) { ev.preventDefault(); sset('0:0'); location.reload(); };
+document.getElementById('gv-retry').onclick = function (ev) { ev.preventDefault(); sset('0:0:0'); location.reload(); };
+document.getElementById('gv-retry2').onclick = document.getElementById('gv-retry').onclick;
 function post(counter) {
 	var h = {'X-GV': N};
 	if (B > 0) { h['X-GV-P'] = String(counter); }
 	fetch(location.href, {method: 'POST', headers: h, credentials: 'same-origin'})
-		.then(function (r) { if (r.status === 204) { bump(); location.reload(); } else { retry(); } })
+		.then(function (r) { if (r.status === 204) { var s = gst(); gput(s[0], s[1] + 1); location.reload(); } else { retry(); } })
 		.catch(retry);
 }
+// Back on a challenge right after a successful handshake: the cookie was not kept.
+// Say so instead of minting a token on every cycle.
+if (gst()[1] >= 1) { show('gv-cookie'); return; }
 setTimeout(function () { if (B > 0) { solve(post); } else { post(0); } }, 50);
 })();
 JS;
@@ -216,6 +224,7 @@ function gv_challenge_render($nonce, array $strings, $bits = 0) {
 	$sub   = htmlspecialchars(isset($strings['sub']) ? (string)$strings['sub'] : '', ENT_QUOTES, 'UTF-8');
 	$nos   = htmlspecialchars(isset($strings['noscript']) ? (string)$strings['noscript'] : '', ENT_QUOTES, 'UTF-8');
 	$fail  = htmlspecialchars(isset($strings['failed']) ? (string)$strings['failed'] : '', ENT_QUOTES, 'UTF-8');
+	$nock  = htmlspecialchars(isset($strings['nocookie']) ? (string)$strings['nocookie'] : '', ENT_QUOTES, 'UTF-8');
 	$retry = htmlspecialchars(isset($strings['retry']) ? (string)$strings['retry'] : '', ENT_QUOTES, 'UTF-8');
 
 	if (!headers_sent()) {
@@ -250,6 +259,7 @@ function gv_challenge_render($nonce, array $strings, $bits = 0) {
 	echo '<h1>' . $title . "</h1>\n";
 	echo '<p id="gv-wait">' . $sub . "</p>\n";
 	echo '<p id="gv-fail" hidden>' . $fail . ' <a id="gv-retry" href="">' . $retry . "</a></p>\n";
+	echo '<p id="gv-cookie" hidden>' . $nock . ' <a id="gv-retry2" href="">' . $retry . "</a></p>\n";
 	echo '<noscript><p class="n">' . $nos . "</p></noscript>\n";
 	echo "</div>\n";
 	echo "<script>\n";
