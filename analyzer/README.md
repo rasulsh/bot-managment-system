@@ -390,3 +390,18 @@ are not.
 |-----|---------|
 | `model_candidate_path` | Where `--candidate` writes the anomaly model. Defaults to `model_path` + `.candidate`, so relocating the model takes its candidate with it. Git-ignored. |
 | `clf_candidate_path` | Where `--candidate` writes the classifier. Defaults to `clf_path` + `.candidate`. Git-ignored. |
+
+
+## Bot verification (three-state) and Redis settings
+
+* `verify_ip()` returns `ok`, `bad` or `unknown`. Only a definitive refutation is `bad`;
+  transient DNS errors, a dead resolver (detected with the `dns_canary` lookup) and a bot
+  without a `bot_suffixes` entry are `unknown`: `run_verify` writes and deletes nothing and
+  retries next run. The run summary (`unknown N`) reaches the snapshot, report and panel.
+* TTLs: `botv_ttl` (86400) for `ok`, `botbad_ttl` (3600) for `bad`. `--recheck` re-resolves
+  addresses that already have a verdict.
+* Redis settings resolve as: defaults < the guard's `redis` block (read via
+  `scripts/config-dump.php --redis-credentials` over a pipe, never logged) < an explicit
+  `redis` override in the analyzer config. All keys go through `redis_io.key()/gp_key()`,
+  honouring `redis.prefix`; AUTH, ACL user, db and unix socket are supported. The client
+  speaks RESP2 so Redis 5 works with redis-py 5+.

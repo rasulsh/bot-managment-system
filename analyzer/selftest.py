@@ -1219,6 +1219,45 @@ ok('pre-change rows (old action names, missing fields) still aggregate',
    snapshot_hs.build(old_rows, cfg, {'source': 'defaults'})['funnel']['token_issued'] == 1)
 
 # ---------------------------------------------------------------------------
+section('Panel replay and analyzer replay agree (including the new acts)')
+
+import json as json_rp
+
+rp_dir = tempfile.mkdtemp(prefix='gv-selftest-replay-parity-')
+rp_acts = ['allow', 'challenge', '403', '429', 'exempt', 'allow_bot', '404_hp', 'token_issued',
+           'nonce_bad', 'nonce_replay', 'pow_bad', 'mint_limited', 'allow_override', 'allow']
+rp_rows = []
+for i in range(84):
+    act = rp_acts[i % len(rp_acts)]
+    rp_rows.append(row(1000.0 + i, dev=('d%d' % (i % 7)), ip='10.7.0.%d' % (i % 5), sc=(i * 7) % 90,
+                       act=act, sh=(i % 3 == 0 and act in ('nonce_replay', 'pow_bad', 'mint_limited')) and 1 or 0,
+                       rep=(i % 5) * 6 - 6, ml=(i * 11) % 100 if i % 4 else -1, clf=(i * 13) % 100 if i % 6 else -1,
+                       nav=1 if i % 3 else 0, ovr='deny' if act == '403' and i % 2 else ''))
+with open(os.path.join(rp_dir, 'guard-%s.jsonl' % datetime.date.today().strftime('%Y%m%d')), 'w') as fh:
+    for r in rp_rows:
+        fh.write(json_rp.dumps(r) + '\n')
+rp_php = shutil.which('php')
+if not rp_php:
+    skip('panel/analyzer replay parity', 'php not available')
+else:
+    rp_script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts', 'replay-parity.php')
+    rp_out = json_rp.loads(subprocess.check_output([rp_php, rp_script, rp_dir, '45', 'reputation,ml']).decode())
+    rp_base = {'hard_block_score': 60, 'signals': {'reputation': False, 'ml': False, 'clf': False},
+               'ml_weight': 0.4, 'clf_weight': 0.5}
+    rp_cand = {'hard_block_score': 45, 'signals': {'reputation': True, 'ml': True, 'clf': False},
+               'ml_weight': 0.4, 'clf_weight': 0.5}
+    rp_py = replay_hs.replay_rows(rp_rows, rp_base, rp_cand)
+    ok('both replays consider the same rows (%d) and skip the same non-decisions (%d)'
+       % (rp_py['considered'], rp_py['skipped_non_decision']),
+       rp_out['considered'] == rp_py['considered'] and rp_out['skipped'] == rp_py['skipped_non_decision'])
+    ok('...and every handshake act is a non-decision on both sides',
+       rp_py['skipped_non_decision'] >= 4 * 6)
+    ok('both replays agree on the baseline and candidate action counts',
+       rp_out['baseline'] == rp_py['baseline'] and rp_out['candidate'] == rp_py['candidate'])
+    ok('...and on how many rows changed score', rp_out['esc_changed'] == rp_py['esc_changed'])
+shutil.rmtree(rp_dir, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
 section('Period report')
 
 from analyzer import report as report_mod
@@ -1781,7 +1820,7 @@ import subprocess as sp_x
 import time as time_x
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_redis_bin = shutil.which('redis-server')
+_redis_bin = os.environ.get('GV_REDIS_BIN') or shutil.which('redis-server')
 _rtmp = tempfile.mkdtemp(prefix='gv-selftest-redis-matrix-')
 _started = []
 
@@ -1805,6 +1844,15 @@ def start_redis(port, extra=(), sock=''):
     return False
 
 
+def raw_client(**kw):
+    # Same RESP2 choice as redis_io.connect(): redis-py 8 would send HELLO 3,
+    # which Redis 5 rejects.
+    try:
+        return redis_io.redis_py.Redis(protocol=2, **kw)
+    except TypeError:
+        return redis_io.redis_py.Redis(**kw)
+
+
 def rcfg(**redis_over):
     c = {'redis': dict(config_mod.DEFAULTS['redis'])}
     c['redis'].update(redis_over)
@@ -1819,10 +1867,10 @@ else:
     up = [start_redis(P_PLAIN), start_redis(P_AUTH, ['--requirepass', 's3cret']),
           start_redis(P_ACL), start_redis(P_UNIX, sock=sock_path)]
     ok('the throwaway redis servers started', all(up))
-    admin = redis_io.redis_py.Redis(port=P_PLAIN, decode_responses=True)
+    admin = raw_client(port=P_PLAIN, decode_responses=True)
     acl_ok = True
     try:
-        redis_io.redis_py.Redis(port=P_ACL).execute_command('ACL', 'SETUSER', 'gvuser', 'on', '>aclpass', '~*', '+@all')
+        raw_client(port=P_ACL).execute_command('ACL', 'SETUSER', 'gvuser', 'on', '>aclpass', '~*', '+@all')
     except Exception:
         acl_ok = False
 
@@ -1884,6 +1932,13 @@ else:
     ok('clear_override removes only its own namespace',
        redis_io.clear_override(a, 'ident1') == 1)
     ok('the job queue key is namespaced', redis_io.gp_key('jobs') == 'shop1:gp:jobs')
+    # ctl.py show / identity_verdicts read every family back through key().
+    redis_io.set_override(a, 'allow', 'ident9', 600)
+    redis_io.set_rep(a, 'ident9', 7, 60)
+    iv = redis_io.identity_verdicts(a, 'ident9')
+    ok('identity_verdicts reads overrides and verdicts back under the prefix',
+       iv['reputation'] == 7 and iv['overrides']['allow'] is not None and iv['overrides']['deny'] is None)
+    ok('get_override reports the remaining ttl', 0 < redis_io.get_override(a, 'ident9')['allow'] <= 600)
 
     # PHP guard <-> Python analyzer under one non-empty prefix.
     php_bin_x = shutil.which('php')

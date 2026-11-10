@@ -88,7 +88,12 @@ def connect(cfg):
             kwargs['password'] = password
             if username:
                 kwargs['username'] = username
-        return redis_py.Redis(**kwargs)
+        # RESP2 on purpose: redis-py >= 5 defaults to RESP3 (a HELLO 3 handshake),
+        # which Redis 5 does not understand. Older redis-py has no such argument.
+        try:
+            return redis_py.Redis(protocol=2, **kwargs)
+        except TypeError:
+            return redis_py.Redis(**kwargs)
 
     try:
         client = build(True)
@@ -209,9 +214,9 @@ def get_override(client, identity):
     """Return {'allow': ttl|None, 'deny': ttl|None} for one identity."""
     out = {}
     for kind in ('allow', 'deny'):
-        key = key('%s:%s' % (kind, identity))
-        if _get(client, key) == '1':
-            out[kind] = ttl_of(client, key)
+        full = key('%s:%s' % (kind, identity))
+        if _get(client, full) == '1':
+            out[kind] = ttl_of(client, full)
         else:
             out[kind] = None
     return out

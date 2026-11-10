@@ -18,6 +18,7 @@
 // the analyzer connects with the same settings as the guard. It is not meant
 // to be run by hand, logged or captured.
 if (PHP_SAPI !== 'cli') { exit; }
+if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n"); exit(1); }
 
 define('GV_BOOT', 1);
 

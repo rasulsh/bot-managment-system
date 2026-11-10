@@ -11,14 +11,13 @@ step at a time.** Do not skip the monitor period.
 
 ## Prerequisites
 
-- **PHP 7.x or 8.x** with the standard library. No PHP extensions are required for
-  the guard — the Redis client is a raw socket implementation. `apcu` is
-  recommended (used for an optional config-overlay cache; see the performance
-  notes) but not required.
+- **PHP 8.0 or newer**. No PHP extensions are required for the guard — the Redis
+  client is a raw socket implementation. (The overlay is read from disk on every
+  request; there is no APCu cache.)
 - **Redis** reachable from PHP (default `127.0.0.1:6379`). The guard works without
   it, but in a degraded mode that can only ever allow — Redis is what makes rate
   limiting and offline verdicts function.
-- **Python 3.8+** for the analyzer, with `redis`, `scikit-learn`, and `numpy`
+- **Python 3.9+** for the analyzer, with `redis`, `scikit-learn`, and `numpy`
   (see `analyzer/requirements.txt`). The analyzer degrades gracefully if
   scikit-learn is missing (it just does no ML that run), but you want it for the
   full system.
@@ -48,6 +47,40 @@ chmod 0775 /home/youruser/bot-guard/logs
 ```
 
 ---
+
+### Layout (supported)
+
+Keep the repository outside the document root and expose only the panel:
+
+```bash
+# repository outside the docroot, guard wired by auto_prepend_file
+/home/USER/bot-guard/                      # repo
+# panel under a name you choose, by symlink (create it as the web user so
+# SymLinksIfOwnerMatch accepts it)
+ln -s /home/USER/bot-guard/panel /home/USER/public_html/gv-admin
+```
+
+Apache alternative (LiteSpeed Enterprise reads the same config):
+
+```apache
+Alias /gv-admin /home/USER/bot-guard/panel
+<Directory /home/USER/bot-guard/panel>
+	AllowOverride All
+	Options FollowSymLinks
+	Require all granted
+</Directory>
+```
+
+Notes verified on Apache 2.4 and OpenLiteSpeed 1.9: `.htaccess` needs `AllowOverride All`
+(or `AuthConfig Limit FileInfo`; a partial set gives a 500, which fails closed). The
+rewrite fallback needs `FollowSymLinks`/`SymLinksIfOwnerMatch`. OpenLiteSpeed ignores
+`Require`/`Order` in `.htaccess` and relies on the rewrite rule. With `AllowOverride None`
+nothing protects an in-docroot install - another reason to use this layout. The panel
+cookie path becomes `/gv-admin/`; add that prefix to `exempt_paths`. Then verify:
+
+```bash
+bash scripts/exposure-check.sh https://example.com /gv-admin
+```
 
 ## Step 1 — Create the guard config
 
@@ -305,7 +338,8 @@ panel) — it takes effect on their next request.
 | `exempt_params` | query param → value-prefix exemptions | e.g. `route => ['payment/','api/']` |
 | `known_bots` | lowercase UA substrings given the fast pass | `['googlebot','bingbot']` |
 | `cdn_ranges` | IPv4 CIDRs whose XFF is trusted | empty unless behind a CDN |
-| `redis` | host / port / timeout | `127.0.0.1:6379`, 0.05s |
+| `redis` | host, port, socket, username, password, db, prefix, timeout, breaker_ttl | `127.0.0.1:6379`, no auth, db 0, no prefix, 0.05s, 5s |
+| `limits.mint` / `challenge.pow_bits` / `challenge.bind_ip` | token minting cap, proof-of-work bits, nonce IP binding | 60 / 16 / true |
 | `log_dir` | where JSONL is written | `../logs` |
 | `strings` | interstitial language and text | Persian/RTL by default |
 

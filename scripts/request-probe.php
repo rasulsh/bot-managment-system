@@ -5,6 +5,7 @@
 // and prints one JSON line: {"rt": <redis round trips>, "bytes": <guard output>,
 // "ms": <elapsed>}. CLI only; used by redis-selftest.php and the web-server CI.
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n"); exit(1); }
 
 $gv_in = json_decode((string)stream_get_contents(STDIN), true);
 if (!is_array($gv_in) || empty($gv_in['config'])) { fwrite(STDERR, "bad input\n"); exit(2); }

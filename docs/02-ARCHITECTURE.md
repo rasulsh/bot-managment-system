@@ -125,6 +125,17 @@ branch winning:
     slice, log what *would* have happened, allow, and let the app run. If
     enforcement is on, emit the block / 429 / challenge response and exit.
 
+### Redis contract (request path)
+
+At most two round trips per request: one pipeline of every `GET` the request can need
+(token is verified first, it is a pure HMAC), then one pipeline of counters
+(`SET k 0 EX w NX` + `INCR` + `TTL`, repaired with `EXPIRE` if the TTL is -1). A
+known-bot over its limit makes one extra trip. The first transport or auth failure closes
+the connection (no reply desync, one timeout at most) and touches `logs/.redis-down`;
+for `redis.breaker_ttl` seconds later requests skip Redis (`rd=1`). Failures go to
+`logs/guard-errors.log`, throttled per code. All keys are built by `gv_key()`/`gp_key()`
+(prefix-aware). The handshake costs one round trip (nonce claim + counters).
+
 ### The challenge
 
 `guard/challenge.php` issues stateless, HMAC-signed tokens and nonces — they carry

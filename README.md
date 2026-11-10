@@ -20,11 +20,11 @@ criterion per stage.
 
 ## Requirements
 
-PHP 7.4+ (no Composer, no extensions, no external dependencies). Redis optional.
+PHP 8.0+ (no Composer, no extensions, no external dependencies). On older PHP `prepend.php` returns at once, the host app runs unguarded and one line goes to `logs/guard-errors.log`. Python 3.9+ for the analyzer. Redis optional (any version from 5; AUTH, ACL users, a db number, a unix socket and a key prefix are all optional).
 
 ## Install
 
-Copy this directory anywhere outside the web root, then pick one entry point.
+Keep this directory **outside the web root** (see docs/03-SETUP.md, "Layout": the panel is exposed by a symlink or an Alias). The shipped `.htaccess` files deny everything by default as a safety net, and `scripts/exposure-check.sh <BASE_URL> [panel-path]` verifies it over HTTP. Then pick one entry point.
 
 - `.user.ini` (PHP-FPM / LiteSpeed / CGI): `auto_prepend_file=/full/path/bot-guard/prepend.php`
 - `.htaccess` (mod_php / lsapi): `php_value auto_prepend_file /full/path/bot-guard/prepend.php`
@@ -48,15 +48,18 @@ cache layer and needs zero host-app changes. Then set a real secret in
 | `enforce.ratelimit` | Serve 429 over the limits. Stage 3. |
 | `hard_block_score` | Score at or above which a navigation is a block candidate. |
 | `limits.window` | Fixed counter window in seconds. |
+| `limits.mint` | Tokens minted per IP per window (default 60). Over it: 429 with `enforce.ratelimit`, logged `mint_limited` with `sh=1` otherwise. An allow-listed IP is never refused. |
+| `challenge.pow_bits` | Proof-of-work difficulty of the challenge, 0-24 (default 16, 0 = off). Panel-tunable. |
+| `challenge.bind_ip` | Bind a nonce to the IP it was issued to (default true). |
 | `limits.device` / `ip_ua` / `ip` / `bot` | Requests per window per device token, per IP+UA pair, per IP, per known bot. The IP limit is deliberately generous. |
 | `honeypot_path` | Hidden path that must 404 today. A hit marks the IP for 7 days. |
 | `exempt_paths` | URI prefixes the guard skips entirely. |
 | `exempt_params` | `param => array of value prefixes` the guard skips, e.g. `'route' => array('payment/')`. |
 | `known_bots` | Lowercase UA substrings allowed through under their own bucket. |
 | `cdn_ranges` | IPv4 CIDRs. `X-Forwarded-For` is trusted only when `REMOTE_ADDR` is inside one, and then only its last entry. |
-| `redis` | `host`, `port`, `timeout` (0.05 s: fail fast, never stall a page). |
+| `redis` | One block shared by guard, panel and analyzer: `host`, `port`, `socket` (unix path, wins over host/port), `username`, `password` (empty = no AUTH sent), `db` (0 = no SELECT), `prefix` (key namespace, `[A-Za-z0-9_.:-]{0,32}`, empty = legacy key names), `timeout` (0.05 s), `breaker_ttl` (seconds to skip Redis after a failure, 0 = off). File-only: never in the panel overlay, never displayed, stripped from `config-dump.php`. |
 | `log_dir` | JSONL destination. |
-| `strings` | `lang`, `dir`, `title`, `sub`, `noscript` — the only user-facing text; translate here, the code stays English. |
+| `strings` | `lang`, `dir`, `title`, `sub`, `noscript`, `failed`, `retry` — the only user-facing text; translate here, the code stays English. |
 | `signals.reputation` | Phase 2. Add `gv:rep:{dev}` to the score. Default off (shadow). |
 | `signals.ml` | Phase 2. Add the scaled `gv:ml:{dev}` anomaly level to the score. Default off (shadow). |
 | `ml_weight` | Phase 2. Multiplier turning an anomaly level of 0..100 into a score contribution. Default 0.4. |
@@ -153,7 +156,7 @@ only change a decision once you switch a `signals` toggle on. See
 
 ## Requirements
 
-Python 3.8+ and `python3 -m pip install -r analyzer/requirements.txt` (redis,
+Python 3.9+ (3.8 is end-of-life) and `python3 -m pip install -r analyzer/requirements.txt` (redis,
 scikit-learn, numpy). Redis must be reachable by both the PHP guard and the
 analyzer — it is the only channel between them. Without Redis both sides simply
 degrade: the guard runs as in Phase 1, the analyzer computes and reports without
@@ -168,7 +171,7 @@ verdict forever.
 | key | writer | value | TTL | effect in the guard |
 |-----|--------|-------|-----|---------------------|
 | `gv:botok:{ip}` | `run_verify` | `"1"` | 86400 | The UA-claimed bot is forward-confirmed. Logged as `botv=ok`; the known-bot pass stands. |
-| `gv:botbad:{ip}` | `run_verify` | `"1"` | 86400 | The UA claims a known bot but reverse DNS failed. Logged as `botv=bad`; **revokes** the pass and adds `BOT_FAKE` (+35). |
+| `gv:botbad:{ip}` | `run_verify` | `"1"` | 3600 (`botbad_ttl`) | The UA claims a known bot but reverse DNS failed. Logged as `botv=bad`; **revokes** the pass and adds `BOT_FAKE` (+35). |
 | `gv:rep:{dev}` | `run_nightly` | signed int, clamped [-50, 80] | 2592000 | Behavioural reputation. Logged as `rep`; added to the score when `signals.reputation` is on. |
 | `gv:ml:{dev}` | `run_nightly` | int 0..100 | 86400 | Isolation Forest anomaly level. Logged as `ml`; `round(ml * ml_weight)` is added when `signals.ml` is on. |
 
@@ -181,6 +184,27 @@ identity.
 score, because a revoked bot claim is a hard signal. It still does not block on
 its own (+35 is below the default `hard_block_score`) — an impersonator is
 scored like any other client, not summarily blocked.
+
+## Bot verification is three-state
+
+`run_verify` answers `ok`, `bad` or `unknown`. `bad` is written only on a definitive
+refutation (PTR answered and no suffix matches; no PTR record; forward lookup does not
+contain the address). Timeouts, SERVFAIL, an unreachable resolver and a known bot with
+no `bot_suffixes` entry are `unknown`: nothing is written or deleted and the address is
+retried next run. A negative DNS answer only counts while a canary name resolves
+(`dns_canary`), because glibc reports a refused resolver as HOST_NOT_FOUND. `ok` keeps
+`botv_ttl` (24 h); `bad` uses `botbad_ttl` (1 h) so a wrong verdict heals itself.
+`run_verify --recheck` re-resolves addresses that already have a verdict.
+
+## Challenge (what it does and does not do)
+
+The nonce is HMAC-bound to User-Agent (and IP), single use (Redis `SET NX`; with Redis
+down the handshake stays open), must be accompanied by a SHA-256 proof of work
+(`X-GV-P`), and minting is metered per IP. New log acts: `nonce_replay`, `pow_bad`
+(403 with `enforce.challenge`, otherwise logged with `sh=1` and the token is still
+issued) and `mint_limited` (429 with `enforce.ratelimit`, else `sh=1`). The funnel counts
+a shadowed one as an issued token. A JavaScript challenge cannot stop a real headless
+browser and a token can still be shared between machines (bounded by `limits.device`).
 
 ## Cron
 
@@ -600,3 +624,17 @@ expiry and tampering, CSRF, the login rate limit with Redis up *and* down, store
 XSS (asserted by parsing the rendered HTML with `DOMDocument` and counting what a
 browser would actually execute, not by matching a regex), and a token-level scan
 proving no shell function, backtick or `eval` exists under `panel/`.
+
+# Upgrade notes (production-readiness release)
+
+* **Nothing to do by default.** Defaults keep key names, token cookies and behaviour; the
+  new `redis` keys, `limits.mint` (60), `challenge.pow_bits` (16) and `bind_ip` (true) have
+  safe defaults. PHP 8.0+ is now required (older PHP: guard silently off + note in
+  `logs/guard-errors.log`). Python 3.9+.
+* **Challenge:** nonce format changed; a visitor mid-challenge during the deploy gets one
+  automatic retry. `_gv` tokens stay valid. `pow_bits` can be tuned in the panel.
+* **Changing `redis.prefix`** orphans existing counters, verdicts and overrides (they expire
+  by TTL). Re-add overrides; the analyzer rebuilds verdicts on its next runs. Raw
+  `redis-cli` commands must use the prefixed names.
+* **Ops:** run `scripts/exposure-check.sh`; `guard-logrotate.sh` now also rotates
+  `guard-errors.log`; no new cron jobs.

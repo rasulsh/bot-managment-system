@@ -1,0 +1,188 @@
+# Bot Guard CI. No deployment step. Runs on pull requests and on pushes to master.
+# Target wall-clock: under ~10 minutes (the jobs run in parallel).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- lint
+  lint-php:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: shivammathur/setup-php@2.31.1
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+      - name: php -l on every PHP file
+        run: |
+          status=0
+          while IFS= read -r -d '' f; do
+            php -l "$f" >/dev/null || { php -l "$f"; status=1; }
+          done < <(find . -name '*.php' -not -path './.git/*' -print0)
+          exit $status
+
+  lint-other:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: '3.12'
+      - name: Python compiles
+        run: python -m compileall -q analyzer scripts
+      - name: Shell scripts parse and pass shellcheck
+        run: |
+          for f in scripts/*.sh .github/ci/*.sh; do bash -n "$f"; done
+          shellcheck -S warning scripts/*.sh .github/ci/*.sh
+
+  # --------------------------------------------------- PHP self-tests
+  php-tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: shivammathur/setup-php@2.31.1
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+      - run: sudo apt-get install -y -qq redis-server
+      - name: guard self-test
+        run: php -d display_errors=1 -d error_reporting=-1 scripts/guard-selftest.php
+      - name: panel self-test
+        run: php -d display_errors=1 -d error_reporting=-1 scripts/panel-selftest.php
+      - name: redis self-test (round trips, fail-fast, breaker, auth, prefix, handshake)
+        run: php -d display_errors=1 -d error_reporting=-1 scripts/redis-selftest.php
+
+  # --------------------------------------- Python tests + PHP/Python parity
+  python-tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.8 is end-of-life and not offered on current runners; 3.9 is the floor.
+        python: ['3.9', '3.13']
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: shivammathur/setup-php@2.31.1
+        with:
+          php-version: '8.3'
+          coverage: none
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get install -y -qq redis-server && (redis-server --daemonize yes --save "" >/dev/null)
+      - run: pip install -r analyzer/requirements.txt
+      # selftest.py also runs scripts/decision-parity.php --emit and compares every
+      # PHP decision with analyzer/decision.py case by case.
+      - name: analyzer self-test (includes the PHP/Python decision parity check)
+        run: python analyzer/selftest.py
+
+  # -------------------------------------------- Redis versions and auth modes
+  redis-matrix:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 5.x answers AUTH-without-password and wrong passwords differently from 6+;
+        # ACL users exist from 6 (the ACL cases skip on 5).
+        redis: ['5.0.14', '6.2.14', '7.4.1']
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: shivammathur/setup-php@2.31.1
+        with:
+          php-version: '8.3'
+          coverage: none
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: '3.12'
+      - run: pip install -r analyzer/requirements.txt
+      - uses: actions/cache@v4.2.0
+        id: redis-cache
+        with:
+          path: ~/redis-bin
+          key: redis-server-${{ matrix.redis }}-${{ runner.os }}
+      - name: build redis-server ${{ matrix.redis }} (no TLS, no system library needed)
+        if: steps.redis-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL https://download.redis.io/releases/redis-${{ matrix.redis }}.tar.gz | tar xz
+          make -C redis-${{ matrix.redis }} -j4 BUILD_TLS=no >/dev/null
+          mkdir -p ~/redis-bin
+          cp redis-${{ matrix.redis }}/src/redis-server ~/redis-bin/redis-server
+      - name: use it
+        run: |
+          ~/redis-bin/redis-server --version
+          echo "GV_REDIS_BIN=$HOME/redis-bin/redis-server" >> "$GITHUB_ENV"
+      - name: default instance on :6379 for the suites that expect one
+        run: '"$GV_REDIS_BIN" --daemonize yes --save "" >/dev/null'
+      - name: redis self-test (no auth, requirepass, ACL, unix socket, db, prefix)
+        run: php scripts/redis-selftest.php
+      - name: analyzer redis matrix (auth, ACL, socket, db, prefix, PHP<->Python)
+        run: python analyzer/selftest.py
+
+  # -------------------------------------------------------- HTTP and browser
+  http:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: shivammathur/setup-php@2.31.1
+        with:
+          php-version: '8.3'
+          coverage: none
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4.1.0
+        with:
+          node-version: '22'
+      - run: sudo apt-get install -y -qq redis-server jq && (redis-server --daemonize yes --save "" >/dev/null)
+      - run: pip install -r analyzer/requirements.txt
+      - name: dev router + HTTP matrix (incl. nonce replay, PoW, binding, Googlebot across a resolver outage)
+        run: |
+          php -S 127.0.0.1:8080 scripts/dev-router.php >/tmp/dev-router.log 2>&1 &
+          sleep 1
+          bash scripts/guard-test.sh http://127.0.0.1:8080 | tee /tmp/matrix.txt
+          # the rows that prove the hardening must show the enforced outcome
+          for row in '^4d .*\| 1 ' '^4e .*\| 403 ' '^4f .*\| 403 ' '^20b .*\| 200 ' '^20c .*\| 403 '; do
+            grep -E "$row" /tmp/matrix.txt || { echo "missing/unexpected row: $row"; exit 1; }
+          done
+      - name: every allow path is byte-identical with the guard on and off
+        run: bash scripts/identity-check.sh http://127.0.0.1:8080
+      - name: monitor mode (secret = CHANGE_ME) is inert
+        run: bash scripts/monitor-check.sh
+      - name: real browsers run the JavaScript challenge (http and https)
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.49.1
+          export NODE_PATH="$RUNNER_TEMP/pw/node_modules"
+          npx --prefix "$RUNNER_TEMP/pw" playwright install --with-deps chromium firefox
+          node scripts/browser-test.js chromium
+          node scripts/browser-test.js firefox
+
+  # ------------------------------------------------------------ web servers
+  webservers:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        server: [apache, ols]
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: shivammathur/setup-php@2.31.1
+        with:
+          php-version: '8.3'
+          coverage: none
+      - name: exposure-check.sh and panel-smoke.sh against a real ${{ matrix.server }} in every layout
+        run: sudo bash .github/ci/webserver-test.sh ${{ matrix.server }}

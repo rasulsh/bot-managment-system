@@ -7,6 +7,7 @@
 // This is what a bot would have to implement - and it is the point: a client
 // that only regex-parses the page cannot get a token without doing this work.
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n"); exit(1); }
 define('GV_BOOT', 1);
 require __DIR__ . '/../guard/challenge.php';
 

@@ -2,6 +2,7 @@
 // Bot Guard CLI self-test. Run: php scripts/guard-selftest.php
 // Exit code 0 when every non-SKIP assertion passes, 1 otherwise.
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n"); exit(1); }
 
 define('GV_BOOT', 1);
 require __DIR__ . '/../guard/guard.php';

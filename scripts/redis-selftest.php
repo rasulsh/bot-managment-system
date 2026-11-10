@@ -6,6 +6,7 @@
 // db selection and key prefix isolation.
 // Exit code 0 when every non-SKIP assertion passes, 1 otherwise.
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n"); exit(1); }
 
 define('GV_BOOT', 1);
 define('GV_NO_AUTORUN', 1);
@@ -48,7 +49,10 @@ register_shutdown_function('t_cleanup');
 // Start a redis-server with extra args. Returns array(port, sock) or null.
 function t_redis_start($port, array $extra = array(), $sock = '') {
 	global $T_DIR, $T_PIDS;
-	$bin = trim((string)@shell_exec('command -v redis-server 2>/dev/null'));
+	// GV_REDIS_BIN selects the server under test (CI runs the suite against several
+	// Redis major versions).
+	$bin = (string)getenv('GV_REDIS_BIN');
+	if ($bin === '') { $bin = trim((string)@shell_exec('command -v redis-server 2>/dev/null')); }
 	if ($bin === '') { return null; }
 	$pid = $T_DIR . '/redis-' . $port . '.pid';
 	$cmd = escapeshellarg($bin) . ' --port ' . (int)$port . ' --bind 127.0.0.1 --save "" --appendonly no'
@@ -90,7 +94,11 @@ function t_probe(array $cfg, array $server = array(), array $cookie = array()) {
 	$path = $T_DIR . '/cfg-' . md5(serialize($cfg)) . '.php';
 	file_put_contents($path, '<?php if (!defined("GV_BOOT")) { exit; } return ' . var_export($cfg, true) . ';');
 	$in = json_encode(array('config' => $path, 'server' => $server, 'cookie' => $cookie));
-	$cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/request-probe.php');
+	// E_ALL with display_errors on: any notice or deprecation the guard raises on
+	// the way to the host application would be printed into its response, and
+	// shows up here as guard output (bytes > 0).
+	$cmd = escapeshellarg(PHP_BINARY) . ' -d display_errors=1 -d error_reporting=-1 -d html_errors=0 '
+		. escapeshellarg(__DIR__ . '/request-probe.php');
 	$p = proc_open($cmd, array(0 => array('pipe', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $pipes);
 	fwrite($pipes[0], $in); fclose($pipes[0]);
 	$out = stream_get_contents($pipes[1]); fclose($pipes[1]);
@@ -220,6 +228,30 @@ t_ok('the honeypot fires even with every enforce toggle off', (function () use (
 	return gv_redis_cmd($cx, array('GET', 'gv:hp:198.51.100.9')) === '1';
 })());
 gv_redis_cmd($cx, array('FLUSHALL'));
+
+// --------------------------------------------------------------------------
+t_section('No guard output on any allow path (E_ALL, display_errors=1)');
+
+gv_redis_cmd($cx, array('FLUSHALL'));
+$tokq = gv_tok_make('rt-secret');
+$devq = gv_tok_check($tokq, 'rt-secret', 604800);
+$paths = array();
+$paths['allow'] = t_probe(t_cfg(), t_nav(), array('_gv' => $tokq));
+$ex = t_nav(); $ex['REQUEST_URI'] = '/exempt-me/x';
+$paths['exempt'] = t_probe(t_cfg(array(), array('exempt_paths' => array('/exempt-me'))), $ex);
+gv_redis_cmd($cx, array('SET', 'gv:botok:198.51.100.9', '1', 'EX', '60'));
+$gb = t_nav(); $gb['HTTP_USER_AGENT'] = 'Googlebot/2.1';
+$paths['allow_bot'] = t_probe(t_cfg(), $gb);
+gv_redis_cmd($cx, array('DEL', 'gv:botok:198.51.100.9'));
+gv_redis_cmd($cx, array('SET', 'gv:allow:' . $devq, '1', 'EX', '60'));
+$paths['allow_override'] = t_probe(t_cfg(), t_nav(), array('_gv' => $tokq));
+gv_redis_cmd($cx, array('DEL', 'gv:allow:' . $devq));
+$paths['monitor allow (challenge would fire)'] = t_probe(t_cfg(array(), array('enforce' => array('block' => false, 'challenge' => false, 'ratelimit' => false))), t_nav());
+$paths['Redis down'] = t_probe(t_cfg(array('port' => 63996), array('log_dir' => $T_DIR . '/q-down')), t_nav(), array('_gv' => $tokq));
+$paths['config unreadable (fail-open)'] = t_probe(array('redis' => 'not-an-array', 'secret' => 'x', 'log_dir' => $T_DIR . '/q-bad'), t_nav());
+foreach ($paths as $label => $res) {
+	t_ok("zero bytes of guard output: $label", $res['bytes'] === 0 && $res['code'] === false);
+}
 
 // --------------------------------------------------------------------------
 t_section('Fail-fast and the late-reply hazard');
@@ -562,7 +594,7 @@ foreach ($it as $f) {
 	$path = $f->getPathname();
 	if (!preg_match('/\.(php|py|sh)$/', $path)) { continue; }
 	if (preg_match('#/(\.git|\.venv|docs|node_modules)/#', $path)) { continue; }
-	if (preg_match('#(selftest|guard-test\.sh|verify-e2e|redis-selftest)#', basename($path))) { continue; }
+	if (preg_match('#(selftest|guard-test\.sh|identity-check|verify-e2e|redis-selftest)#', basename($path))) { continue; }
 	if (in_array(realpath($path), $skip, true)) { continue; }
 	foreach (file($path) as $n => $line) {
 		if (preg_match('/[\'"]g[vp]:/', $line)) { $offenders[] = substr($path, strlen(__DIR__) - 7) . ':' . ($n + 1); }
@@ -619,18 +651,18 @@ t_ok('...and 299 logged nonce_replay rejections (403)', ($acts['nonce_replay'] ?
 $n2 = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
 $c2 = t_solve($n2);
 $p = t_post($cfgH, $n2, $c2, 'curl/8.0');
-t_ok('a nonce issued to UA A is rejected from UA B', $p['code'] === 403 && end(t_rows($cfgH))['act'] === 'nonce_bad');
+t_ok('a nonce issued to UA A is rejected from UA B', $p['code'] === 403 && t_lastrow($cfgH)['act'] === 'nonce_bad');
 $p = t_post($cfgH, $n2, $c2, $UA, '203.0.113.77');
-t_ok('a nonce issued to IP A is rejected from IP B', $p['code'] === 403 && end(t_rows($cfgH))['act'] === 'nonce_bad');
+t_ok('a nonce issued to IP A is rejected from IP B', $p['code'] === 403 && t_lastrow($cfgH)['act'] === 'nonce_bad');
 $p = t_post($cfgH, $n2, $c2, $UA);
 t_ok('the rejected attempts did not burn the nonce for its rightful owner', $p['code'] === 204);
 
 $n3 = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
 $p = t_post($cfgH, $n3, '', $UA);
-t_ok('no proof of work: rejected (pow_bad)', $p['code'] === 403 && end(t_rows($cfgH))['act'] === 'pow_bad');
+t_ok('no proof of work: rejected (pow_bad)', $p['code'] === 403 && t_lastrow($cfgH)['act'] === 'pow_bad');
 $p = t_post($cfgH, $n3, '0123', $UA);
 t_ok('a nonce that failed its proof is burned: a later correct proof cannot reuse it',
-	$p['code'] === 403 && end(t_rows($cfgH))['act'] === 'nonce_replay');
+	$p['code'] === 403 && t_lastrow($cfgH)['act'] === 'nonce_replay');
 $n4 = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
 $wrong = '1';
 while (gv_pow_ok($n4, $wrong, 10)) { $wrong = (string)((int)$wrong + 1); }
@@ -645,9 +677,9 @@ $cfgM = t_cfg(array(), array('log_dir' => t_mkdir_log('hs-mon'), 'challenge' => 
 	'enforce' => array('block' => false, 'challenge' => false, 'ratelimit' => false)));
 $nm = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
 $p1 = t_post($cfgM, $nm, '', $UA);
-$r1 = end(t_rows($cfgM));
+$r1 = t_lastrow($cfgM);
 $p2 = t_post($cfgM, $nm, '', $UA);
-$r2 = end(t_rows($cfgM));
+$r2 = t_lastrow($cfgM);
 t_ok('monitor mode: a missing proof is logged (pow_bad, sh=1) but the token is still issued',
 	$p1['code'] === 204 && $r1['act'] === 'pow_bad' && $r1['sh'] === 1);
 t_ok('monitor mode: a replay is logged (nonce_replay, sh=1) but not refused',
@@ -655,7 +687,7 @@ t_ok('monitor mode: a replay is logged (nonce_replay, sh=1) but not refused',
 $cfgC = t_cfg(array(), array('log_dir' => t_mkdir_log('hs-chg'), 'secret' => 'CHANGE_ME', 'challenge' => array('pow_bits' => 10)));
 $nc = gv_nonce_make('CHANGE_ME', $UA, '198.51.100.9', 10);
 $p = t_post($cfgC, $nc, '', $UA);
-t_ok('secret = CHANGE_ME forces monitor mode for the new checks too', $p['code'] === 204 && end(t_rows($cfgC))['sh'] === 1);
+t_ok('secret = CHANGE_ME forces monitor mode for the new checks too', $p['code'] === 204 && t_lastrow($cfgC)['sh'] === 1);
 
 t_section('Handshake: minting is metered');
 
@@ -666,7 +698,7 @@ $codes = array();
 for ($i = 0; $i < 8; $i++) { $codes[] = t_post($cfgL, gv_nonce_make('rt-secret', $UA, '198.51.100.9', 0), '', $UA)['code']; }
 t_ok('more than limits.mint mints per window are refused with 429 when enforce.ratelimit is on',
 	array_slice($codes, 0, 5) === array(204, 204, 204, 204, 204) && array_slice($codes, 5) === array(429, 429, 429));
-$last = end(t_rows($cfgL));
+$last = t_lastrow($cfgL);
 t_ok('...logged as mint_limited with sh=0', $last['act'] === 'mint_limited' && $last['sh'] === 0);
 t_ok('another IP is unaffected', t_post($cfgL, gv_nonce_make('rt-secret', $UA, '198.51.100.55', 0), '', $UA, '198.51.100.55')['code'] === 204);
 gv_redis_cmd($cx, array('SET', 'gv:allow:198.51.100.9', '1', 'EX', '60'));
@@ -691,7 +723,7 @@ $cfgD2 = t_cfg(array('port' => 63997), array('log_dir' => t_mkdir_log('hs-down')
 $nd = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
 $cd = t_solve($nd);
 $p1 = t_post($cfgD2, $nd, $cd, $UA);
-$row = end(t_rows($cfgD2));
+$row = t_lastrow($cfgD2);
 t_ok('Redis down: a human still passes the challenge (204, rd=1)', $p1['code'] === 204 && $row['rd'] === 1 && $row['act'] === 'token_issued');
 t_ok('Redis down: proof of work and binding still apply',
 	t_post($cfgD2, gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10), '', $UA)['code'] === 403

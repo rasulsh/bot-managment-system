@@ -5,6 +5,13 @@
 // there is no dynamic include of a path derived from the request.
 declare(strict_types=0);
 
+if (PHP_VERSION_ID < 80000) {
+	http_response_code(500);
+	header('Content-Type: text/plain; charset=utf-8');
+	echo 'Bot Guard panel requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n";
+	exit;
+}
+
 define('GP_BOOT', 1);
 
 require_once __DIR__ . '/config_io.php';
