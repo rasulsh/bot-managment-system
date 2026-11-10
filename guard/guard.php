@@ -798,6 +798,9 @@ function gv_run($t0) {
 		$valid   = gv_nonce_check($f['xgv'], $cfg['secret'], $cfg['nonce_ttl'], $f['ua'],
 			$bind_ip ? $f['ip'] : '');
 		$parsed  = $valid ? gv_nonce_parse($f['xgv']) : false;
+		// Proof of work is one hash and needs no storage: check it BEFORE Redis so a
+		// request that cannot become a token never touches the mint counter.
+		$pow_ok  = $parsed ? gv_pow_ok($f['xgv'], $f['xgvp'], $parsed[1]) : false;
 		$window  = $cfg['limits']['window'];
 
 		$conn  = gv_redis_connect($cfg['redis'], $log);
@@ -810,12 +813,25 @@ function gv_run($t0) {
 			array(gv_key('riu:' . md5($f['ip'] . '|' . substr(md5((string)$f['ua']), 0, 12))), $window),
 			array(gv_key('ri:' . $f['ip']), $window),
 		);
-		if ($parsed) { $items[] = array(gv_key('mint:' . $f['ip']), $window); }
+		$mint_at = -1;                                // only a request that could become a token counts
+		if ($parsed && $pow_ok) {
+			$mint_at = count($items);
+			$items[] = array(gv_key('mint:' . $f['ip']), $window);
+		}
 		$counts = gv_bump_many($conn, $items, $extra, $reads);
 		$st['ciu'] = $counts[0];
 		$st['ci']  = $counts[1];
 		$allowed_ip = ($reads[0] === '1');
 		$replay     = ($parsed && $reads[1] === null);      // false (error) is no verdict
+		$mint_n     = ($mint_at >= 0) ? $counts[$mint_at] : 0;
+		// limits.mint counts tokens ISSUED. The bump rode in the same round trip as
+		// the nonce claim, so give it back when this turns out to be a replay or a
+		// refusal (the counter must not grow for requests that got no token).
+		$mint_refused = ($mint_n > (int)$cfg['limits']['mint']) && !$allowed_ip
+			&& !empty($cfg['enforce']['ratelimit']);
+		if ($mint_at >= 0 && ($replay || $mint_refused) && gv_redis_alive($conn)) {
+			gv_redis_cmd($conn, array('DECR', gv_key('mint:' . $f['ip'])));
+		}
 		gv_finish($conn, $st);
 
 		if (!$valid) {
@@ -830,7 +846,7 @@ function gv_run($t0) {
 		$reject = '';
 		if ($replay) {
 			$reject = 'nonce_replay';
-		} elseif (!gv_pow_ok($f['xgv'], $f['xgvp'], $parsed[1])) {
+		} elseif (!$pow_ok) {
 			$reject = 'pow_bad';
 		}
 		$act = 'token_issued';
@@ -845,7 +861,7 @@ function gv_run($t0) {
 			$sh  = 1;
 		} else {
 			// Mint metering. An allow-listed IP is never refused a token.
-			$over = ($counts[2] > (int)$cfg['limits']['mint'])
+			$over = ($mint_n > (int)$cfg['limits']['mint'])
 				|| ($st['ci'] > (int)$cfg['limits']['ip'])
 				|| ($st['ciu'] > (int)$cfg['limits']['ip_ua']);
 			if ($over && !$allowed_ip) {
@@ -1097,6 +1113,10 @@ if (PHP_SAPI !== 'cli' && !defined('GV_NO_AUTORUN')) {
 	try {
 		gv_run($gv_t0);
 	} catch (\Throwable $e) {
-		// fail-open: never break the host application
+		// fail-open: never break the host application, but leave a trace. This also
+		// covers a config file that does not parse; gv_errlog falls back to the
+		// shipped log directory when no config was loaded.
+		gv_errlog('guard_exception', get_class($e) . ': ' . $e->getMessage()
+			. ' @ ' . basename($e->getFile()) . ':' . $e->getLine());
 	}
 }

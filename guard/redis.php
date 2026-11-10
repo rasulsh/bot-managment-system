@@ -107,7 +107,9 @@ function gv_errlog($code, $msg = '', $log_dir = null) {
 			$log_dir = $c['log_dir'];
 		}
 		$log_dir = rtrim((string)$log_dir, '/\\');
-		if ($log_dir === '') { return; }
+		// Before the config is loaded (a syntax error in it is exactly such a case) no
+		// log_dir is known yet: fall back to the shipped default, next to the code.
+		if ($log_dir === '') { $log_dir = dirname(__DIR__) . '/logs'; }
 		if (!is_dir($log_dir)) {
 			@mkdir($log_dir, 0775, true);
 			if (!is_dir($log_dir)) { return; }

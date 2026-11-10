@@ -253,6 +253,33 @@ foreach ($paths as $label => $res) {
 	t_ok("zero bytes of guard output: $label", $res['bytes'] === 0 && $res['code'] === false);
 }
 
+t_section('Swallowed exceptions are logged (config that does not parse)');
+
+$defdir = realpath(__DIR__ . '/..') . '/logs';
+$errlog = $defdir . '/guard-errors.log';
+$had_dir = is_dir($defdir);
+$old_err = is_file($errlog) ? file_get_contents($errlog) : null;
+foreach ((array)glob($defdir . '/.err-guard_exception') as $m) { @unlink($m); }
+@unlink($errlog);
+$badcfg = $T_DIR . '/syntax-error.php';
+file_put_contents($badcfg, "<?php if (!defined('GV_BOOT')) { exit; }\nreturn array('secret' => ;\n");
+$sock = @stream_socket_server('tcp://127.0.0.1:0', $en, $es);
+$sn = stream_socket_get_name($sock, false);
+$sport = (int)substr($sn, strrpos($sn, ':') + 1);
+fclose($sock);
+$srv = proc_open(escapeshellarg(PHP_BINARY) . ' -S 127.0.0.1:' . $sport . ' ' . escapeshellarg(__DIR__ . '/dev-router.php'),
+	array(1 => array('file', '/dev/null', 'w'), 2 => array('file', '/dev/null', 'w')), $sp, null, array('GV_DEV_CONFIG' => $badcfg));
+usleep(700000);
+$resp = @file_get_contents('http://127.0.0.1:' . $sport . '/', false, stream_context_create(array('http' => array('ignore_errors' => true))));
+proc_terminate($srv);
+t_ok('a config that does not parse still serves the site (fail-open)', is_string($resp) && strpos($resp, 'OK') !== false);
+$logged = is_file($errlog) ? file_get_contents($errlog) : '';
+t_ok('...and the exception is recorded in guard-errors.log', strpos($logged, 'guard_exception') !== false && strpos($logged, 'ParseError') !== false);
+@unlink($errlog);
+foreach ((array)glob($defdir . '/.err-guard_exception') as $m) { @unlink($m); }
+if ($old_err !== null) { file_put_contents($errlog, $old_err); }
+if (!$had_dir) { @rmdir($defdir); }
+
 // --------------------------------------------------------------------------
 t_section('Fail-fast and the late-reply hazard');
 
@@ -716,6 +743,28 @@ for ($i = 0; $i < 6; $i++) { $codes[] = t_post($cfgS, gv_nonce_make('rt-secret',
 $rows = t_rows($cfgS);
 t_ok('with enforce.ratelimit off the mint limit only logs (sh=1) and every token is still issued',
 	$codes === array(204, 204, 204, 204, 204, 204) && end($rows)['act'] === 'mint_limited' && end($rows)['sh'] === 1);
+
+// Only an issued token counts toward limits.mint.
+gv_redis_cmd($cx, array('FLUSHALL'));
+$cfgM2 = t_cfg(array(), array('log_dir' => t_mkdir_log('mint-pow'), 'challenge' => array('pow_bits' => 10),
+	'limits' => array('mint' => 5, 'ip' => 100000, 'ip_ua' => 100000)));
+$nm2 = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
+for ($i = 0; $i < 100; $i++) { t_post($cfgM2, $nm2, '', $UA); }
+t_ok('100 POSTs of one nonce without a proof leave the mint counter at 0',
+	(int)gv_redis_cmd($cx, array('GET', 'gv:mint:198.51.100.9')) === 0);
+$nh = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
+t_ok('...so the next honest visitor on that IP still gets a token', t_post($cfgM2, $nh, t_solve($nh), $UA)['code'] === 204);
+t_ok('...and counts exactly once', (int)gv_redis_cmd($cx, array('GET', 'gv:mint:198.51.100.9')) === 1);
+$nr = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10);
+$cr = t_solve($nr);
+t_post($cfgM2, $nr, $cr, $UA);
+for ($i = 0; $i < 50; $i++) { t_post($cfgM2, $nr, $cr, $UA); }
+t_ok('50 replays of an issued nonce do not add to the mint counter (2 tokens issued)',
+	(int)gv_redis_cmd($cx, array('GET', 'gv:mint:198.51.100.9')) === 2);
+$hit = 0;
+for ($i = 0; $i < 6; $i++) { $nx = gv_nonce_make('rt-secret', $UA, '198.51.100.9', 10); $hit = t_post($cfgM2, $nx, t_solve($nx), $UA)['code']; }
+t_ok('refusals at the limit are given back: the counter stays at the limit', $hit === 429
+	&& (int)gv_redis_cmd($cx, array('GET', 'gv:mint:198.51.100.9')) === 5);
 
 t_section('Handshake: Redis down');
 
