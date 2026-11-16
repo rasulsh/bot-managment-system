@@ -74,6 +74,8 @@ def human_visit(rng, out, ip, ua, start, pages, cached=False, landing_ref='https
                 out.append(line(t + 1, ip, asset, ua, ref='https://shop.example' + url, size=9000))
         out.append(line(t + 2, ip, '/index.php?route=common/cart/info', ua,
                         ref='https://shop.example' + url, size=600))
+        out.append(line(t + 3, ip, '/index.php?route=product/product/review&product_id=%d'
+                        % rng.randint(1, 400), ua, ref='https://shop.example' + url, size=900))
         prev = 'https://shop.example' + url
         t += rng.randint(8, 240)
 
@@ -128,6 +130,24 @@ def build_day(rng):
         out.append(line(t, '66.249.66.%d' % (1 + n % 3), '/product/item-%d' % (n % 180), GOOGLEBOT,
                         proto='HTTP/1.1'))
         t += 400
+    # 9. One address with a browser User-Agent and faked Referers walks 400 products once,
+    #    irregularly, inside three hours: no re-polling, no steady pace, no long hours.
+    t = DAY0 + 50000
+    for n in range(400):
+        out.append(line(t, '46.245.89.90', '/product/walk-%d' % n, CHROME,
+                        ref='https://shop.example/category/x', proto='HTTP/1.1'))
+        t += rng.randint(3, 50)
+    # 10. Our own tool on our own server: pages only, round the clock, and customers who
+    #     type in the live search (one XHR per keystroke, a second apart).
+    for n in range(600):
+        out.append(line(DAY0 + 30 + n * 140, '198.51.100.7', '/product/own-%d' % (n % 40),
+                        'OwnTool/1.0', proto='HTTP/1.1'))
+    for i in range(12):
+        t = DAY0 + rng.randint(10 * 3600, 22 * 3600)
+        for k in range(25):
+            out.append(line(t + k, '37.129.10.%d' % (10 + i),
+                            '/index.php?route=product/search&search=ps%d' % k, SAFARI,
+                            ref='https://shop.example/'))
     # 8. A tiny bare client: 5 pages. Below any threshold.
     for n in range(5):
         out.append(line(DAY0 + 40000 + n * 7, '203.0.113.50', '/product/x-%d' % n, 'curl/8.5',
@@ -212,7 +232,31 @@ try:
     section('Customers are left alone')
     flagged = [a for a in actors if a['verdict'] in ('scraper', 'review')]
     flagged_ips = set(c.ip for a in flagged for c in a['members'])
-    ok('exactly the three scrapers are flagged (%d)' % len(flagged), len(flagged) == 3)
+    ok('the three scrapers, the one-pass walker and the unlisted own tool are flagged (%d)'
+       % len(flagged), len(flagged) == 5)
+    walker = actor_of(actors, '46.245.89.90')
+    ok('one address walking 400 products once is a scraper on depth alone (score %s)'
+       % (walker and walker['score']),
+       walker is not None and walker['verdict'] == 'scraper' and 'deep' in walker['signals']
+       and 'repoll' not in walker['signals'] and 'no_referer' not in walker['signals'])
+    ok('a crowd reading many pages between them is not deep',
+       slow is not None and 'deep' not in thin[0]['signals'])
+    ok('live-search and review XHR are not catalogue pages',
+       not __import__('re').search(rep.DEFAULT_CATALOG, '/index.php?route=product/search&search=ps')
+       and not __import__('re').search(rep.DEFAULT_CATALOG, '/index.php?route=product/product/review&product_id=3')
+       and __import__('re').search(rep.DEFAULT_CATALOG, '/index.php?route=product/product&product_id=3')
+       and __import__('re').search(rep.DEFAULT_CATALOG, '/index.php?path=1&route=product/category'))
+
+    section('--ignore: your own servers and tools')
+    own = actor_of(actors, '198.51.100.7')
+    ok('an own tool that is not listed looks like a scraper (that is why --ignore exists)',
+       own is not None and own['verdict'] == 'scraper')
+    d_ign, a_ign, _ = rep.analyse([log], ignore=rep.parse_networks(['198.51.100.0/24, 203.0.113.50']))
+    ok('--ignore drops it from actors and from the address table',
+       actor_of(a_ign, '198.51.100.7') is None and '198.51.100.7' not in d_ign['by_ip']
+       and d_ign['ignored'] == 605)
+    ok('...and nothing else changes', len([a for a in a_ign if a['verdict'] in ('scraper', 'review')]) == 4)
+    ok('a bad --ignore value is refused', rep.main([log, '--ignore', 'not-a-network']) == 2)
     ok('no ordinary customer network is flagged', not any(ip.startswith('31.') for ip in flagged_ips))
     ok('returning customers with a full cache (pages only) are not flagged',
        not any(ip.startswith('37.129.10.') for ip in flagged_ips))
@@ -288,6 +332,7 @@ try:
     text = rep.render(data, actors, env, 20, False)
     ok('the report names the sections and the old top-address table',
        'LIKELY SCRAPERS' in text and 'TOP ADDRESSES BY REQUESTS' in text and 'not a block list' in text)
+    ok('the address table shows the catalogue share', ' cat% ' in text)
     ok('times are printed in the log zone', "UTC+03:30" in text)
     ok('--all adds the low scorers', 'BELOW THE REVIEW SCORE' in rep.render(data, actors, env, 20, True))
     out_json = os.path.join(tmp, 'r.json')
