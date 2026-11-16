@@ -791,5 +791,113 @@ $cfgR = t_cfg(array(), array('log_dir' => t_mkdir_log('hs-rt'), 'challenge' => a
 $pr = t_post($cfgR, gv_nonce_make('rt-secret', $UA, '198.51.100.9', 0), '', $UA);
 t_ok('a handshake costs one round trip (' . $pr['rt'] . ')', $pr['rt'] === 1 && $pr['code'] === 204);
 
+// --------------------------------------------------------------------------
+t_section('Slow-scraper defences: gate, long-window budgets, preview budget');
+
+gv_redis_cmd($cx, array('FLUSHALL'));
+$cfgG = t_cfg(array(), array('log_dir' => t_mkdir_log('gate'),
+	'limits' => array('device_hour' => 3, 'device_day' => 5, 'preview' => 2),
+	'known_bots' => array('googlebot', 'adsbot-google'), 'preview_bots' => array('telegrambot')));
+$bare = array('HTTP_USER_AGENT' => t_nav()['HTTP_USER_AGENT'], 'HTTP_ACCEPT' => '*/*', 'HTTP_HOST' => 'x',
+	'HTTP_ACCEPT_ENCODING' => 'gzip', 'HTTP_CONNECTION' => 'keep-alive', 'HTTP_ACCEPT_LANGUAGE' => 'en',
+	'HTTP_SEC_FETCH_MODE' => 'cors');
+$p = t_probe($cfgG, $bare);
+$row = t_lastrow($cfgG);
+t_ok('a token-less GET with Accept: */* is challenged (503), not served',
+	$p['code'] === 503 && $row['act'] === 'challenge' && $row['nav'] === 0 && $row['gate'] === 1);
+$xhr = $bare; $xhr['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest'; $xhr['HTTP_ACCEPT'] = 'application/json';
+$p = t_probe($cfgG, $xhr);
+t_ok('claiming to be XHR does not skip the challenge', $p['code'] === 503);
+$noacc = $bare; unset($noacc['HTTP_ACCEPT']);
+$p = t_probe($cfgG, $noacc);
+t_ok('sending no Accept header does not skip the challenge', $p['code'] === 503);
+$p = t_probe($cfgG, array_merge($bare, array('REQUEST_METHOD' => 'POST')));
+$row = t_lastrow($cfgG);
+t_ok('a token-less POST is still never challenged', $p['bytes'] === 0 && $row['act'] === 'allow' && $row['gate'] === 0);
+$tokG = gv_tok_make('rt-secret');
+$p = t_probe($cfgG, $xhr, array('_gv' => $tokG));
+$row = t_lastrow($cfgG);
+t_ok('a real browser XHR carries the token and is allowed untouched', $p['bytes'] === 0 && $row['act'] === 'allow');
+$cfgT = t_cfg(array(), array('log_dir' => t_mkdir_log('gate-old'), 'challenge' => array('trust_headers' => true)));
+$p = t_probe($cfgT, $bare);
+$row = t_lastrow($cfgT);
+t_ok('trust_headers = true is the old behaviour (rollback switch)',
+	$p['bytes'] === 0 && $row['act'] === 'allow' && $row['gate'] === 0);
+$cfgM = t_cfg(array(), array('log_dir' => t_mkdir_log('gate-mon'),
+	'enforce' => array('block' => false, 'challenge' => false, 'ratelimit' => false)));
+$p = t_probe($cfgM, $bare);
+$row = t_lastrow($cfgM);
+t_ok('monitor mode only records the would-be challenge (sh=1, zero output)',
+	$p['bytes'] === 0 && $row['act'] === 'challenge' && $row['sh'] === 1);
+
+// Long-window budgets: one token, a slow client, addresses changing every request.
+gv_redis_cmd($cx, array('FLUSHALL'));
+$tokS = gv_tok_make('rt-secret');
+$devS = gv_tok_check($tokS, 'rt-secret', 604800);
+$acts = array(); $rts = array();
+for ($i = 1; $i <= 6; $i++) {
+	$srv = t_nav(); $srv['REMOTE_ADDR'] = '203.0.113.' . $i;      // a new address every time
+	$p = t_probe($cfgG, $srv, array('_gv' => $tokS));
+	$row = t_lastrow($cfgG);
+	$acts[] = $row['act']; $rts[] = $p['rt'];
+}
+t_ok('the hourly device budget follows the token across changing addresses (' . implode(',', $acts) . ')',
+	$acts === array('allow', 'allow', 'allow', '429', '429', '429'));
+t_ok('the row names the budget and carries both counters',
+	in_array('DEV_HOUR', $row['rs'], true) && in_array('DEV_DAY', $row['rs'], true)
+	&& $row['cdh'] === 6 && $row['cdd'] === 6 && $row['ci'] === 1);
+t_ok('the budgets ride in the existing counter round trip (max ' . max($rts) . ')', max($rts) <= 2);
+$ttl_h = gv_redis_cmd($cx, array('TTL', 'gv:rdh:' . $devS));
+$ttl_d = gv_redis_cmd($cx, array('TTL', 'gv:rdd:' . $devS));
+t_ok('the budget counters expire after an hour and a day', $ttl_h > 3500 && $ttl_h <= 3600 && $ttl_d > 86300 && $ttl_d <= 86400);
+gv_redis_cmd($cx, array('SET', 'gv:rdh:' . $devS, '0'));
+gv_redis_cmd($cx, array('EXPIRE', 'gv:rdh:' . $devS, '3600'));
+$p = t_probe($cfgG, t_nav(), array('_gv' => $tokS));
+$row = t_lastrow($cfgG);
+t_ok('the daily budget holds on its own after the hour resets',
+	$row['act'] === '429' && $row['rs'] === array('DEV_DAY') && $row['cdh'] === 1);
+$cfgGM = $cfgG; $cfgGM['enforce']['ratelimit'] = false; $cfgGM['log_dir'] = t_mkdir_log('gate-shadow');
+$p = t_probe($cfgGM, t_nav(), array('_gv' => $tokS));
+$row = t_lastrow($cfgGM);
+t_ok('with enforce.ratelimit off an exhausted budget is shadow only', $p['bytes'] === 0 && $row['act'] === '429' && $row['sh'] === 1);
+gv_redis_cmd($cx, array('SET', 'gv:allow:' . $devS, '1', 'EX', '60'));
+$p = t_probe($cfgG, t_nav(), array('_gv' => $tokS));
+$row = t_lastrow($cfgG);
+t_ok('an operator allow rescues a device that is over its budget', $p['bytes'] === 0 && $row['act'] === 'allow_override');
+
+// Preview fetchers: one small site-wide budget per name, however many addresses.
+gv_redis_cmd($cx, array('FLUSHALL'));
+$acts = array();
+for ($i = 1; $i <= 4; $i++) {
+	$srv = array('HTTP_USER_AGENT' => 'TelegramBot (like TwitterBot)', 'HTTP_ACCEPT' => 'text/html',
+		'HTTP_HOST' => 'x', 'REMOTE_ADDR' => '203.0.113.' . (50 + $i));
+	$p = t_probe($cfgG, $srv);
+	$row = t_lastrow($cfgG);
+	$acts[] = $row['act'];
+}
+t_ok('a link preview passes inside the budget, then is treated like anyone else (' . implode(',', $acts) . ')',
+	$acts === array('allow_preview', 'allow_preview', 'challenge', 'challenge'));
+t_ok('the preview budget is one counter for the name, not one per address',
+	gv_redis_cmd($cx, array('GET', 'gv:rp:telegrambot')) === '4');
+gv_redis_cmd($cx, array('DEL', 'gv:rp:telegrambot'));
+gv_redis_cmd($cx, array('SET', 'gv:deny:203.0.113.99', '1', 'EX', '60'));
+$p = t_probe($cfgG, array('HTTP_USER_AGENT' => 'TelegramBot (like TwitterBot)', 'HTTP_ACCEPT' => 'text/html',
+	'HTTP_HOST' => 'x', 'REMOTE_ADDR' => '203.0.113.99'));
+$row = t_lastrow($cfgG);
+t_ok('an operator deny on the address beats the preview pass', $p['code'] === 403 && $row['act'] === '403' && $row['ovr'] === 'deny');
+$cfgPD = t_cfg(array('port' => 63997), array('log_dir' => t_mkdir_log('prev-down'), 'preview_bots' => array('telegrambot')));
+$p = t_probe($cfgPD, array('HTTP_USER_AGENT' => 'TelegramBot (like TwitterBot)', 'HTTP_ACCEPT' => 'text/html', 'HTTP_HOST' => 'x'));
+$row = t_lastrow($cfgPD);
+t_ok('Redis down: no preview pass, the stateless challenge still applies', $p['code'] === 503 && $row['act'] === 'challenge' && $row['rd'] === 1);
+$ads = array('HTTP_USER_AGENT' => 'AdsBot-Google (+http://www.google.com/adsbot.html)', 'HTTP_ACCEPT' => 'text/html', 'HTTP_HOST' => 'x');
+$p = t_probe($cfgG, $ads);
+$row = t_lastrow($cfgG);
+t_ok('AdsBot-Google takes the known-bot pass under its own name', $p['bytes'] === 0 && $row['act'] === 'allow_bot' && $row['bot'] === 'adsbot-google');
+gv_redis_cmd($cx, array('SET', 'gv:botbad:198.51.100.9', '1', 'EX', '60'));
+$p = t_probe($cfgG, $ads);
+$row = t_lastrow($cfgG);
+t_ok('a forged AdsBot-Google (failed reverse DNS) loses the pass', $row['act'] !== 'allow_bot' && $row['botv'] === 'bad' && $p['bytes'] > 0);
+gv_redis_cmd($cx, array('FLUSHALL'));
+
 echo "\nPASS $GV_PASS  FAIL $GV_FAIL  SKIP $GV_SKIP\n";
 exit($GV_FAIL === 0 ? 0 : 1);

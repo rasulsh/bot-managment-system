@@ -35,8 +35,15 @@ return array(
 	'bot_suffixes'     => array(              // consumed by the Python verifier;
 	                                          // documented here for one source of truth.
 	                                          // Keep in sync with analyzer/config.py.
-		'googlebot' => array('.googlebot.com', '.google.com'),
-		'bingbot'   => array('.search.msn.com'),
+		'googlebot'             => array('.googlebot.com', '.google.com'),
+		'adsbot-google'         => array('.googlebot.com', '.google.com'),
+		'mediapartners-google'  => array('.googlebot.com', '.google.com'),
+		'google-inspectiontool' => array('.googlebot.com', '.google.com'),
+		'storebot-google'       => array('.googlebot.com', '.google.com'),
+		'googleother'           => array('.googlebot.com', '.google.com'),
+		'bingbot'               => array('.search.msn.com'),
+		'adidxbot'              => array('.search.msn.com'),
+		'bingpreview'           => array('.search.msn.com'),
 	),
 	'hard_block_score' => 60,
 	'limits'           => array(              // fixed window, per 'window' seconds
@@ -46,6 +53,12 @@ return array(
 		'ip'     => 1200,                     // deliberately generous: CGNAT reality
 		'bot'    => 600,
 		'mint'   => 60,                       // tokens minted per IP per window (see challenge)
+		'device_hour' => 400,                 // requests per device token per hour and per
+		'device_day'  => 1500,                // day (fixed windows). These catch the scraper
+		                                      // that paces itself under 'device' and keeps
+		                                      // changing address. Exempt your admin path first.
+		'preview'     => 60,                  // requests per preview_bots name per window,
+		                                      // site-wide (not per IP)
 	),
 	'challenge'        => array(
 		'pow_bits' => 16,                     // proof-of-work difficulty, 0-24; 0 disables
@@ -53,12 +66,26 @@ return array(
 		                                      // second in a current browser)
 		'bind_ip'  => true,                   // tie a nonce to the IP it was issued to; set
 		                                      // false on networks that rotate IPs mid-page-load
+		'trust_headers' => false,             // false: every GET needs a token. true: only a
+		                                      // GET that asks for HTML does (the old rule; any
+		                                      // client that omits Accept: text/html walks past)
 	),
 	'honeypot_path'    => '/old-archive',     // change per site; must 404 today
 	'exempt_paths'     => array(),            // URI prefixes, e.g. '/wp-cron.php', '/wp-json/'
 	'exempt_params'    => array(),            // param => array of value prefixes,
 	                                          // e.g. 'route' => array('payment/', 'api/')
-	'known_bots'       => array('googlebot', 'bingbot'),  // lowercase UA substrings
+	'known_bots'       => array(              // lowercase UA substrings. Each one needs a
+	                                          // bot_suffixes entry: the pass is revoked for
+	                                          // an address that fails reverse-DNS verification
+		'googlebot', 'adsbot-google', 'mediapartners-google', 'google-inspectiontool',
+		'storebot-google', 'googleother', 'bingbot', 'adidxbot', 'bingpreview',
+	),
+	'preview_bots'     => array(              // link-preview fetchers, lowercase UA substrings.
+	                                          // Nothing verifies them, so all addresses of one
+	                                          // name share limits.preview; over it they are
+	                                          // treated like any other client
+		'telegrambot', 'whatsapp', 'facebookexternalhit', 'twitterbot', 'linkedinbot',
+	),
 	'cdn_ranges'       => array(),            // v4 CIDRs; XFF trusted only when
 	                                          // REMOTE_ADDR is inside one of these
 	'redis'            => array(              // shared by the guard, the panel AND the analyzer

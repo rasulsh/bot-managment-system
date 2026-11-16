@@ -191,13 +191,14 @@ All request-path configuration is in `guard/config.php`. The essentials:
 | `secret` | HMAC master secret. **While `CHANGE_ME`, all enforcement is forced off.** Set it to `openssl rand -hex 32`. |
 | `enforce.{block,challenge,ratelimit}` | The three enforcement switches. All `false` = monitor mode. |
 | `signals.{reputation,ml,clf}` | Whether each offline verdict adds to the score. All `false` = shadow. |
-| `hard_block_score` | Effective score at/above which a navigation is blocked (default 60). |
+| `hard_block_score` | Effective score at/above which a GET is blocked (default 60). |
 | `holdout_pct` | Percent measured but never enforced against (0–5). Use a few during rollout. |
 | `honeypot_path` | An invisible path that 404s today; fetching it flags a bot. |
 | `exempt_paths` / `exempt_params` | Paths/params the guard never touches (payments, cron, APIs, admin). |
 | `known_bots` | Lowercase UA substrings given the fast pass (verified out of band). |
 | `cdn_ranges` | IPv4 CIDRs whose `X-Forwarded-For` is trusted (set only if behind a CDN). |
-| `limits.*` | Fixed-window rate counters (ship deliberately generous for CGNAT). |
+| `limits.*` | Fixed-window rate counters (ship deliberately generous for CGNAT), plus hourly and daily per-device budgets for slow clients on changing addresses. |
+| `preview_bots` | Link-preview fetchers; pass inside one small site-wide budget per name. |
 
 The full table with defaults is in [`docs/03-SETUP.md`](docs/03-SETUP.md). The
 panel can edit most of these live (writing a validated JSON overlay in
@@ -269,6 +270,8 @@ Python (`analyzer/decision.py`); the parity test fails until they agree exactly
   onto any PHP CMS, with per-platform exemption lists.
 - [`ROLLOUT.md`](ROLLOUT.md) — the operational, day-by-day rollout checklist.
 - [`analyzer/README.md`](analyzer/README.md) — analyzer internals in depth.
+- [`docs/05-ACCESS-LOG-REPORT.md`](docs/05-ACCESS-LOG-REPORT.md) — the daily
+  access-log report that finds slow scrapers on changing addresses.
 
 ## Requirements
 

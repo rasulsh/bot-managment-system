@@ -127,6 +127,24 @@ row '6 GET /exempt-me' "$got" '200' '200'
 got=$(browser -o /dev/null -w '%{http_code}' -X POST -H 'X-Requested-With: XMLHttpRequest' -d 'a=1' "$BASE_URL/")
 row '7 POST as XHR without a cookie' "$got" '200' '200'
 
+# 7b-7e. The challenge does not depend on headers the client chooses. A GET
+# with curl's default Accept, a GET that claims to be XHR and a GET with no
+# Accept at all used to walk past the challenge; each must get it now.
+got=$(curl -sk -o /dev/null -w '%{http_code}' -H "User-Agent: $CHROME_UA" -H 'Accept-Language: en-US,en;q=0.9' \
+	-H 'Accept-Encoding: gzip' -H 'Sec-Fetch-Mode: cors' "$BASE_URL/product/7b")
+row '7b GET with Accept: */*, no cookie' "$got" '200' '503'
+got=$(curl -sk -o /dev/null -w '%{http_code}' -H "User-Agent: $CHROME_UA" -H 'Accept-Language: en-US,en;q=0.9' \
+	-H 'Accept-Encoding: gzip' -H 'Sec-Fetch-Mode: cors' -H 'Accept: application/json' \
+	-H 'X-Requested-With: XMLHttpRequest' "$BASE_URL/product/7c")
+row '7c GET claiming XHR, no cookie' "$got" '200' '503'
+got=$(curl -sk -o /dev/null -w '%{http_code}' -H "User-Agent: $CHROME_UA" -H 'Accept-Language: en-US,en;q=0.9' \
+	-H 'Accept-Encoding: gzip' -H 'Sec-Fetch-Mode: cors' -H 'Accept:' "$BASE_URL/product/7d")
+row '7d GET with no Accept header, no cookie' "$got" '200' '503'
+# A link-preview fetcher cannot solve a challenge; it passes inside a small
+# site-wide budget (needs Redis: without a counter there is no pass).
+got=$(curl -sk -o /dev/null -w '%{http_code}' -H 'User-Agent: TelegramBot (like TwitterBot)' -H 'Accept: text/html' "$BASE_URL/product/7e")
+row '7e link preview (TelegramBot UA)' "$got" '200' '200 (503 without Redis)'
+
 # 8. Rate limit: 30 rapid navigations from one UA. Needs Redis.
 codes=''
 saw429=0

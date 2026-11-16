@@ -76,13 +76,18 @@ anything that:
 - is a machine-to-machine endpoint that legitimately has no browser, no
   Accept-Language, and no cookie (REST/GraphQL APIs, XML-RPC, feeds).
 
-Remember the decision logic already protects you here: **the challenge only fires
-on navigations** — a GET that asks for HTML and is not an AJAX request. So your
-CSS/JS/image sub-resources and your XHR/fetch API calls are never challenged just
-by being sub-resources. And a POST is never a navigation, so form submits and
-payment callbacks are never challenged. Exemptions are for the cases where even the
-*scoring* or *rate limiting* would be wrong — endpoints that must be completely
-untouched.
+How the decision logic treats them: **every GET without a valid token is
+challenged**, whatever headers it sends. `Accept` and `X-Requested-With` are chosen
+by the client, so a rule built on them is one a scraper opts out of. Your own
+pages are unaffected: static CSS/JS/images never reach PHP, and the XHR/fetch
+calls a page makes carry the token cookie its page load obtained. A POST is never
+challenged, so form submits and POSTed payment callbacks pass. What does need an
+exemption is any **GET made by a machine that has no cookie**: feeds, price or
+marketplace APIs, callbacks a gateway makes by GET, cron URLs and uptime monitors.
+
+Also exempt the back office. Staff working in an admin panel make thousands of
+requests a day from one browser, which is exactly what the per-device hourly and
+daily budgets (`limits.device_hour` / `device_day`) exist to stop elsewhere.
 
 ### WordPress
 
@@ -110,7 +115,8 @@ OpenCart routes through `index.php?route=...`, so exemptions are usually by
 'exempt_params' => array(
     'route' => array(
         'payment/',      // all payment extension callbacks
-        'api/',          // the OpenCart API
+        'api/',          // the OpenCart API, and marketplace/price APIs under it
+        'feed/',         // product feeds fetched by machines
         'checkout/',     // optionally, to never risk the checkout flow
     ),
 ),

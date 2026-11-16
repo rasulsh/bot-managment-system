@@ -73,9 +73,10 @@ cfg = config_mod.load()
 ok('defaults load and validate', isinstance(cfg, dict) and cfg['window_days'] >= 1)
 ok('rep_clamp is a two-element range', len(cfg['rep_clamp']) == 2
    and cfg['rep_clamp'][0] < cfg['rep_clamp'][1])
-ok('known_bots matches the documented pair', cfg['known_bots'] == ['googlebot', 'bingbot'])
-ok('bot_suffixes carries googlebot and bingbot',
-   set(cfg['bot_suffixes']) == set(['googlebot', 'bingbot']))
+ok('known_bots carries the Google and Bing crawler families',
+   set(['googlebot', 'adsbot-google', 'bingbot']) <= set(cfg['known_bots']))
+ok('every known bot has a suffix list, so none is left unverifiable',
+   set(cfg['known_bots']) == set(cfg['bot_suffixes']))
 ok('path patterns are empty by default: no platform coupling',
    cfg['path_listing'] == [] and cfg['path_detail'] == [])
 
@@ -1225,7 +1226,8 @@ import json as json_rp
 
 rp_dir = tempfile.mkdtemp(prefix='gv-selftest-replay-parity-')
 rp_acts = ['allow', 'challenge', '403', '429', 'exempt', 'allow_bot', '404_hp', 'token_issued',
-           'nonce_bad', 'nonce_replay', 'pow_bad', 'mint_limited', 'allow_override', 'allow']
+           'nonce_bad', 'nonce_replay', 'pow_bad', 'mint_limited', 'allow_override', 'allow',
+           'allow_preview']
 rp_rows = []
 for i in range(84):
     act = rp_acts[i % len(rp_acts)]
@@ -1233,6 +1235,12 @@ for i in range(84):
                        act=act, sh=(i % 3 == 0 and act in ('nonce_replay', 'pow_bad', 'mint_limited')) and 1 or 0,
                        rep=(i % 5) * 6 - 6, ml=(i * 11) % 100 if i % 4 else -1, clf=(i * 13) % 100 if i % 6 else -1,
                        nav=1 if i % 3 else 0, ovr='deny' if act == '403' and i % 2 else ''))
+    # Schema 5: most rows carry the gate, and on some it differs from nav (a GET
+    # that did not ask for HTML). Every fourth row is left as an old, gate-less row.
+    if i % 4:
+        rp_rows[-1]['gate'] = 0 if i % 5 == 0 else 1
+        if i % 2:
+            rp_rows[-1]['tok'] = 'm'
 with open(os.path.join(rp_dir, 'guard-%s.jsonl' % datetime.date.today().strftime('%Y%m%d')), 'w') as fh:
     for r in rp_rows:
         fh.write(json_rp.dumps(r) + '\n')
@@ -1255,6 +1263,23 @@ else:
     ok('both replays agree on the baseline and candidate action counts',
        rp_out['baseline'] == rp_py['baseline'] and rp_out['candidate'] == rp_py['candidate'])
     ok('...and on how many rows changed score', rp_out['esc_changed'] == rp_py['esc_changed'])
+    ok('...and the rows in play include a gated non-navigation and a gate-less old row',
+       any(r.get('gate') == 1 and r['nav'] == 0 for r in rp_rows)
+       and any('gate' not in r for r in rp_rows))
+rp_cfg = {'hard_block_score': 60, 'signals': {'reputation': False, 'ml': False, 'clf': False},
+          'ml_weight': 0.4, 'clf_weight': 0.5}
+rp_gated = row(1.0, nav=0, tok='m')
+rp_gated['gate'] = 1
+ok('replay re-decides a schema 5 row on its gate: a token-less non-HTML GET is a challenge',
+   replay_hs.row_decision(rp_gated, rp_cfg)[1] == 'challenge')
+ok('replay re-decides an old row on nav, as the guard did when it was written',
+   replay_hs.row_decision(row(1.0, nav=0, tok='m'), rp_cfg)[1] == 'allow'
+   and replay_hs.row_decision(row(1.0, nav=1, tok='m'), rp_cfg)[1] == 'challenge')
+rp_post = row(1.0, nav=0, tok='m')
+rp_post['gate'] = 0
+ok('a schema 5 row with gate 0 (a POST) is never challenged on replay',
+   replay_hs.row_decision(rp_post, rp_cfg)[1] == 'allow')
+ok('replay treats the preview pass as a non-decision', 'allow_preview' in replay_hs.NON_DECISION_ACTS)
 shutil.rmtree(rp_dir, ignore_errors=True)
 
 # ---------------------------------------------------------------------------

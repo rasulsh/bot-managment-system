@@ -192,6 +192,52 @@ t_ok('x-requested-with is never a navigation',
 t_ok('json GET is ajax', gv_is_ajax(t_facts(array('accept' => 'application/json'))) === true);
 t_ok('post is never a navigation', gv_is_nav(t_facts(array('method' => 'POST'))) === false);
 
+// The gate decides who must carry a token. It must not read anything the
+// client chooses: Accept and X-Requested-With were the bypass.
+t_ok('a browser GET is gated', gv_is_gate(t_facts()) === true);
+t_ok('a GET that does not ask for HTML is gated (curl / python-requests default)',
+	gv_is_gate(t_facts(array('accept' => '*/*'))) === true);
+t_ok('a GET with no Accept header at all is gated', gv_is_gate(t_facts(array('accept' => ''))) === true);
+t_ok('a GET claiming to be XHR is gated',
+	gv_is_gate(t_facts(array('xrw' => 'XMLHttpRequest', 'accept' => 'application/json'))) === true);
+t_ok('a POST is never gated', gv_is_gate(t_facts(array('method' => 'POST'))) === false);
+t_ok('trust_headers restores the old rule: only a navigation is gated',
+	gv_is_gate(t_facts(), true) === true
+	&& gv_is_gate(t_facts(array('accept' => '*/*')), true) === false
+	&& gv_is_gate(t_facts(array('xrw' => 'XMLHttpRequest')), true) === false);
+t_ok('a header-less GET with no token is challenged, not allowed',
+	gv_decide(0, false, gv_is_gate(t_facts(array('accept' => '*/*'))), 'm', 60, '') === 'challenge');
+t_ok('a hard score blocks a scripted GET that does not ask for HTML',
+	gv_decide(60, false, gv_is_gate(t_facts(array('accept' => '*/*'))), 'm', 60, '') === '403');
+
+// Defaults of the keys added with the gate.
+$gate_cfg = gv_cfg_defaults(array());
+t_ok('trust_headers defaults to off', $gate_cfg['challenge']['trust_headers'] === false);
+t_ok('the long-window device budgets and the preview budget have defaults',
+	$gate_cfg['limits']['device_hour'] === 400 && $gate_cfg['limits']['device_day'] === 1500
+	&& $gate_cfg['limits']['preview'] === 60);
+t_ok('a config file without them still gets them (old installs keep working)',
+	gv_cfg_defaults(array('limits' => array('device' => 7)))['limits']['device_hour'] === 400
+	&& gv_cfg_defaults(array('limits' => array('device' => 7)))['limits']['device'] === 7);
+t_ok('preview_bots defaults to an empty list and is forced to a list',
+	$gate_cfg['preview_bots'] === array() && gv_cfg_defaults(array('preview_bots' => 'x'))['preview_bots'] === array());
+t_ok('every default known bot has a suffix list to be verified against',
+	count(array_diff((require __DIR__ . '/../guard/config.php')['known_bots'],
+		array_keys((require __DIR__ . '/../guard/config.php')['bot_suffixes']))) === 0);
+t_ok('the Google ad and inspection crawlers match a default known bot',
+	gv_match_bot('AdsBot-Google (+http://www.google.com/adsbot.html)',
+		(require __DIR__ . '/../guard/config.php')['known_bots']) === 'adsbot-google'
+	&& gv_match_bot('Mozilla/5.0 (compatible; Google-InspectionTool/1.0;)',
+		(require __DIR__ . '/../guard/config.php')['known_bots']) === 'google-inspectiontool');
+t_ok('the overlay accepts the new limits and refuses a zero',
+	gv_overlay_validate('limits.device_hour', 200) === array(true, 200)
+	&& gv_overlay_validate('limits.device_day', 900) === array(true, 900)
+	&& gv_overlay_validate('limits.preview', 30) === array(true, 30)
+	&& gv_overlay_validate('limits.device_day', 0)[0] === false);
+t_ok('the overlay accepts preview_bots and has no key for trust_headers',
+	gv_overlay_validate('preview_bots', array('telegrambot'))[0] === true
+	&& gv_overlay_validate('challenge.trust_headers', true)[0] === false);
+
 // --------------------------------------------------------------------------
 t_section('Static scoring');
 
@@ -288,8 +334,8 @@ t_ok('log file holds exactly one line', count($lines) === 1);
 $row = count($lines) === 1 ? json_decode($lines[0], true) : null;
 t_ok('log line is valid JSON', is_array($row));
 
-$schema = array('v', 'rid', 'ts', 'ip', 'ua', 'uah', 'm', 'p', 'q', 'aj', 'nav', 'tok',
-	'dev', 'sf', 'al', 'hc', 'sc', 'esc', 'rs', 'cd', 'ciu', 'ci', 'rd', 'hp', 'bot',
+$schema = array('v', 'rid', 'ts', 'ip', 'ua', 'uah', 'm', 'p', 'q', 'aj', 'nav', 'gate', 'tok',
+	'dev', 'sf', 'al', 'hc', 'sc', 'esc', 'rs', 'cd', 'cdh', 'cdd', 'ciu', 'ci', 'rd', 'hp', 'bot',
 	'ref', 'botv', 'rep', 'ml', 'clf', 'hold', 'ovr', 'act', 'sh', 'ms');
 t_ok('log line carries every schema key in order', is_array($row) && array_keys($row) === $schema);
 t_ok('referer is reduced to its host', is_array($row) && $row['ref'] === 'example.com');
@@ -408,7 +454,9 @@ $rid_row = gv_log_row($rid_facts, $rid_state, 'allow', 0, microtime(true));
 $rid_keys = array_keys($rid_row);
 t_ok('the decision line starts with v then rid then ts',
 	array_slice($rid_keys, 0, 3) === array('v', 'rid', 'ts'));
-t_ok('the schema version is 4', $rid_row['v'] === 4);
+t_ok('the schema version is 5', $rid_row['v'] === 5);
+t_ok('a hand-built state without the schema 5 keys logs them as 0',
+	$rid_row['gate'] === 0 && $rid_row['cdh'] === 0 && $rid_row['cdd'] === 0);
 t_ok('the decision line carries the request id', $rid_row['rid'] === $rid);
 t_ok('a facts array without a rid still logs cleanly',
 	gv_log_row(t_facts(), $rid_state, 'allow', 0, microtime(true))['rid'] === '');
@@ -567,7 +615,7 @@ for ($i = 0; $i < count($run_lines); $i++) {
 	}
 }
 t_ok('every return path in gv_run arms outcome capture (' . $armed_returns . ' armed)',
-	$armed_returns === 5 && $bare_returns === 0);
+	$armed_returns === 6 && $bare_returns === 0);
 t_ok('no exit path arms outcome capture', $armed_exits === 0);
 
 // --------------------------------------------------------------------------

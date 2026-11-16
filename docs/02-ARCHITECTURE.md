@@ -108,15 +108,19 @@ branch winning:
    bot claim.
 
 9. **Rate counters.** Increment the per-device, per-IP+UA, and per-IP fixed-window
-   counters (skipped entirely in degraded mode). Any counter over its limit sets an
-   "over" flag.
+   counters (skipped entirely in degraded mode), plus two long fixed windows per
+   device: one hour and one day. The short window sees speed; the long ones see the
+   client that never hurries and never stops, from whatever address. Any counter
+   over its limit sets an "over" flag.
 
 10. **Decision.** Fold the offline verdicts into the static score to get an
     *effective* score (each signal contributes only if its toggle is on — otherwise
     the effective score equals the static score exactly, so signals are visible in
     logs long before they change anything). Then decide, first match wins: deny
-    override → block; effective score over the hard block threshold on a navigation
-    → block; over a rate limit → 429; a navigation with no valid token → challenge;
+    override → block; effective score over the hard block threshold on a GET
+    → block; over a rate limit → 429; a GET with no valid token → challenge (the
+    gate is the method alone, never `Accept` or `X-Requested-With`, which the
+    client chooses);
     otherwise allow.
 
 11. **Act.** Log exactly one line. If the decision is "allow," arm outcome capture

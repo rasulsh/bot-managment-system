@@ -432,7 +432,8 @@ function gp_settings_from_request() {
 		$out[$key] = !empty($post['f'][$key]);
 	}
 	$ints = array('hard_block_score', 'limits.window', 'limits.device', 'limits.ip_ua',
-		'limits.ip', 'limits.bot', 'limits.mint', 'challenge.pow_bits', 'holdout_pct');
+		'limits.ip', 'limits.bot', 'limits.mint', 'limits.device_hour', 'limits.device_day',
+		'limits.preview', 'challenge.pow_bits', 'holdout_pct');
 	foreach ($ints as $key) {
 		if (!isset($post['f'][$key]) || $post['f'][$key] === '') { continue; }
 		$raw = trim((string)$post['f'][$key]);
@@ -448,7 +449,7 @@ function gp_settings_from_request() {
 	if (isset($post['f']['honeypot_path'])) {
 		$out['honeypot_path'] = trim((string)$post['f']['honeypot_path']);
 	}
-	foreach (array('exempt_paths', 'known_bots') as $key) {
+	foreach (array('exempt_paths', 'known_bots', 'preview_bots') as $key) {
 		if (!isset($post['f'][$key])) { continue; }
 		$out[$key] = gp_lines_to_list((string)$post['f'][$key]);
 	}

@@ -44,15 +44,18 @@ def effective_score(sc, rep, ml, clf, cfg):
 
 
 def decide(esc, over, nav, tok, hard_block_score, ovr):
-    """Mirror of gv_decide. First match wins."""
+    """Mirror of gv_decide. First match wins.
+
+    nav is "this request is subject to the page rules": the guard passes its
+    gate (every GET), and replay passes the logged gate.
+    """
     if ovr == 'deny':
         return '403'
     if int(esc) >= int(hard_block_score) and nav:
         return '403'
     if over:
         return '429'
-    # Only navigations reach this rule, so POST, XHR and REST clients are never
-    # challenged.
+    # Only gated requests reach this rule, so a POST is never challenged.
     if nav and tok != 'v':
         return 'challenge'
     return 'allow'

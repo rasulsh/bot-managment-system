@@ -18,7 +18,7 @@ require_once __DIR__ . '/data.php';
 // before the decision step, exactly as in analyzer/replay.py.
 function gp_replay_non_decision() {
 	return array('exempt', 'allow_bot', '404_hp', 'token_issued', 'nonce_bad',
-		'nonce_replay', 'pow_bad', 'mint_limited', 'allow_override');
+		'nonce_replay', 'pow_bad', 'mint_limited', 'allow_override', 'allow_preview');
 }
 
 function gp_replay_actions() {
@@ -204,7 +204,8 @@ function gp_replay_scan_day($date, array $baseline, array $candidate, $base_hard
 		$ml  = isset($row['ml']) ? (int)$row['ml'] : -1;
 		$clf = isset($row['clf']) ? (int)$row['clf'] : -1;
 		$over = $act === '429';
-		$nav = (int)($row['nav'] ?? 0) === 1;
+		// Schema 5 logs the gate the guard decided on; older rows have only nav.
+		$nav = (int)($row['gate'] ?? $row['nav'] ?? 0) === 1;
 		$tok = (string)($row['tok'] ?? 'm');
 		$ovr = (string)($row['ovr'] ?? '');
 

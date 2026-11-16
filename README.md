@@ -2,7 +2,7 @@
 
 A drop-in request guard for any PHP application. One `require` (or one
 `auto_prepend_file` line) in front of WordPress, OpenCart, Laravel or plain PHP:
-every top-level HTML navigation without a valid token is challenged to complete
+every GET without a valid token is challenged to complete
 a small cookie handshake before it reaches the app, every request is written to
 a JSONL log, and an
 instant kill switch is one `touch` away. Redis is **optional** — without it the
@@ -43,19 +43,23 @@ cache layer and needs zero host-app changes. Then set a real secret in
 | `cookie_name` | Token cookie name. |
 | `token_ttl` | Token lifetime in seconds (default 7 days). |
 | `nonce_ttl` | Challenge nonce lifetime in seconds. |
-| `enforce.block` | Serve 403 on hard-score navigations. Stage 1. |
-| `enforce.challenge` | Serve the JS challenge to token-less navigations. Stage 2. |
+| `enforce.block` | Serve 403 on hard-score GETs. Stage 1. |
+| `enforce.challenge` | Serve the JS challenge to every token-less GET, whatever headers it sends. Stage 2. |
 | `enforce.ratelimit` | Serve 429 over the limits. Stage 3. |
-| `hard_block_score` | Score at or above which a navigation is a block candidate. |
+| `hard_block_score` | Score at or above which a GET is a block candidate. |
 | `limits.window` | Fixed counter window in seconds. |
 | `limits.mint` | Tokens minted per IP per window (default 60). Over it: 429 with `enforce.ratelimit`, logged `mint_limited` with `sh=1` otherwise. An allow-listed IP is never refused. |
 | `challenge.pow_bits` | Proof-of-work difficulty of the challenge, 0-24 (default 16, 0 = off). Panel-tunable. |
 | `challenge.bind_ip` | Bind a nonce to the IP it was issued to (default true). |
+| `challenge.trust_headers` | Default false. `true` restores the old rule (only a GET that asks for HTML is challenged), which any client walks past by not sending `Accept: text/html`. A rollback switch, file-only. |
 | `limits.device` / `ip_ua` / `ip` / `bot` | Requests per window per device token, per IP+UA pair, per IP, per known bot. The IP limit is deliberately generous. |
+| `limits.device_hour` / `device_day` | Requests per device token per hour (400) and per day (1500), fixed windows. They catch the client that paces itself under `limits.device` and keeps changing address: the count follows the token, not the IP. Over either: 429 with `enforce.ratelimit`, otherwise logged with `sh=1` and `DEV_HOUR` / `DEV_DAY` in `rs`. Exempt your admin path before enforcing. |
+| `limits.preview` | Requests per `preview_bots` name per window, **site-wide** (default 60). |
 | `honeypot_path` | Hidden path that must 404 today. A hit marks the IP for 7 days. |
 | `exempt_paths` | URI prefixes the guard skips entirely. |
 | `exempt_params` | `param => array of value prefixes` the guard skips, e.g. `'route' => array('payment/')`. |
-| `known_bots` | Lowercase UA substrings allowed through under their own bucket. |
+| `known_bots` | Lowercase UA substrings allowed through under their own bucket. Ships with the Google and Bing crawler families (Googlebot, AdsBot, Mediapartners, InspectionTool, StoreBot, GoogleOther, Bingbot, AdIdxBot, BingPreview). Each needs a `bot_suffixes` entry so the claim is verified by reverse DNS out of band. |
+| `preview_bots` | Lowercase UA substrings of link-preview fetchers (Telegram, WhatsApp, Facebook, X, LinkedIn). They cannot solve a challenge and cannot be verified, so they pass only inside `limits.preview`, a budget shared by every address using that name; past it they are handled like any other client. No Redis, no pass. Logged as `allow_preview`. |
 | `cdn_ranges` | IPv4 CIDRs. `X-Forwarded-For` is trusted only when `REMOTE_ADDR` is inside one, and then only its last entry. |
 | `redis` | One block shared by guard, panel and analyzer: `host`, `port`, `socket` (unix path, wins over host/port), `username`, `password` (empty = no AUTH sent), `db` (0 = no SELECT), `prefix` (key namespace, `[A-Za-z0-9_.:-]{0,32}`, empty = legacy key names), `timeout` (0.05 s), `breaker_ttl` (seconds to skip Redis after a failure, 0 = off). File-only: never in the panel overlay, never displayed, stripped from `config-dump.php`. |
 | `log_dir` | JSONL destination. |
@@ -70,15 +74,17 @@ cache layer and needs zero host-app changes. Then set a real secret in
 
 - **WordPress**: `auto_prepend_file` recommended. Typical exemptions:
   `/wp-cron.php`, `/xmlrpc.php`, and `/wp-json/` when headless clients exist.
-  `admin-ajax.php` POSTs are already safe under the non-navigation rule.
+  `admin-ajax.php` POSTs are already safe: a POST is never challenged.
 - **OpenCart**: `auto_prepend_file`, or the top of the catalog `index.php`.
   Typical exemptions via query param: `'route' => array('payment/', 'api/')`.
 
 **Before enabling `enforce.challenge`, exempt every server-to-server endpoint** —
 payment gateway callbacks, webhooks, cron URLs, feeds and REST endpoints. The
-non-navigation rule already means POST, XHR and non-HTML clients are never
-challenged or blocked by the challenge rule, but exemptions are the explicit
-guarantee.
+A POST is never challenged, but **every GET is**, whatever `Accept` or
+`X-Requested-With` it carries - those headers are chosen by the client, so they
+cannot decide who is let through. A browser's own XHR and `fetch()` calls carry
+the token cookie and are unaffected; a server-to-server GET has no cookie and
+must be exempted.
 
 ## Honeypot
 
@@ -204,7 +210,10 @@ down the handshake stays open), must be accompanied by a SHA-256 proof of work
 (403 with `enforce.challenge`, otherwise logged with `sh=1` and the token is still
 issued) and `mint_limited` (429 with `enforce.ratelimit`, else `sh=1`). The funnel counts
 a shadowed one as an issued token. A JavaScript challenge cannot stop a real headless
-browser and a token can still be shared between machines (bounded by `limits.device`).
+browser and a token can still be shared between machines (bounded by `limits.device`
+and, over the long run, by `limits.device_hour` / `device_day`). A headless browser that
+throws its token away when a budget runs out pays one proof of work per budget; that
+price is `challenge.pow_bits`.
 
 ## Cron
 
@@ -569,10 +578,11 @@ guard runs on read, permanently.
 
 **Whitelist:** `enforce.*` and `signals.*` (bool), `hard_block_score` (10–200),
 `ml_weight` / `clf_weight` (0.0–2.0), `limits.window` (30–3600),
-`limits.device` / `.ip_ua` / `.ip` / `.bot` (1–100000), `holdout_pct` (0–5),
+`limits.device` / `.ip_ua` / `.ip` / `.bot` / `.mint` / `.preview` (1–100000),
+`limits.device_hour` / `.device_day` (1–1000000), `holdout_pct` (0–5),
 `capture_outcomes` (bool), `exempt_paths` (≤50 entries, each ≤200 chars starting
-with `/`), `exempt_params` (≤20 params, ≤50 values each), `known_bots` (≤20,
-lowercase `[a-z0-9._-]`), `honeypot_path` (starts with `/`, ≤100 chars).
+with `/`), `exempt_params` (≤20 params, ≤50 values each), `known_bots` and
+`preview_bots` (≤20 each, lowercase `[a-z0-9._-]`), `honeypot_path` (starts with `/`, ≤100 chars).
 
 Editing `guard/config.php` by hand still works and is still authoritative for
 anything not in the overlay. To go back to the file, use **reset to file** in the
@@ -624,6 +634,30 @@ expiry and tampering, CSRF, the login rate limit with Redis up *and* down, store
 XSS (asserted by parsing the rendered HTML with `DOMDocument` and counting what a
 browser would actually execute, not by matching a regex), and a token-level scan
 proving no shell function, backtick or `eval` exists under `panel/`.
+
+# Upgrade notes (slow-scraper release)
+
+* **The challenge no longer depends on request headers.** Before, only a GET with
+  `Accept: text/html` and no `X-Requested-With` was challenged, so any HTTP library
+  with default headers was served without a token. Now every non-exempt GET needs one.
+  **Before enabling `enforce.challenge`, list every server-to-server GET** (feeds, price
+  APIs, payment callbacks made by GET, cron URLs, uptime monitors) in `exempt_paths` /
+  `exempt_params`. In monitor mode they show up as `act=challenge, sh=1, nav=0` rows:
+  `jq -r 'select(.act=="challenge" and .nav==0)|.p' logs/guard-*.jsonl | sort | uniq -c | sort -rn | head -30`.
+  `challenge.trust_headers = true` is the rollback.
+* **Log schema 5:** new fields `gate` (1 = this request needed a token), `cdh` and `cdd`
+  (the hourly and daily device counters), new act `allow_preview`. Replay reads `gate`
+  and falls back to `nav` on older rows, so existing logs keep replaying.
+* **New limits** `device_hour` (400), `device_day` (1500), `preview` (60) and the
+  `preview_bots` list are all panel-tunable. The device budgets enforce under
+  `enforce.ratelimit`; read the `DEV_HOUR` / `DEV_DAY` shadow rows first, and exempt the
+  shop's admin path, where staff legitimately make thousands of requests a day.
+* **`known_bots` grew and `preview_bots` is new.** Both lists come from `config.php`
+  (or the panel), not from built-in defaults: an existing `config.php` keeps the bots it
+  names and has no preview fetchers until you copy the two lists from the shipped
+  `guard/config.php`.
+* **New tool:** `scripts/accesslog_report.py`, see
+  [`docs/05-ACCESS-LOG-REPORT.md`](docs/05-ACCESS-LOG-REPORT.md).
 
 # Upgrade notes (production-readiness release)
 
