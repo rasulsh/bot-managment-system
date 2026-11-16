@@ -10,7 +10,7 @@ function gp_logs_qs(array $filter, array $extra = array()) {
 	return 'index.php?' . http_build_query($query);
 }
 $act_options = array('', 'allow', 'challenge', '403', '429', 'exempt', 'allow_bot',
-	'allow_override', '404_hp', 'token_issued', 'nonce_bad', 'nonce_replay', 'pow_bad',
+	'allow_preview', 'allow_override', '404_hp', 'token_issued', 'nonce_bad', 'nonce_replay', 'pow_bad',
 	'mint_limited');
 $reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR',
 	'HP_HIST', 'BOT_FAKE');
@@ -132,7 +132,7 @@ $reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR'
 	<?php foreach ($rows as $i => $row):
 		$act = (string)($row['act'] ?? '');
 		$badge = 'gp-badge-off';
-		if ($act === 'allow' || $act === 'allow_bot' || $act === 'allow_override') { $badge = 'gp-badge-on'; }
+		if ($act === 'allow' || $act === 'allow_bot' || $act === 'allow_preview' || $act === 'allow_override') { $badge = 'gp-badge-on'; }
 		elseif ($act === '403' || $act === 'nonce_bad' || $act === 'nonce_replay' || $act === 'pow_bad') { $badge = 'gp-badge-bad'; }
 		elseif ($act === '429' || $act === 'challenge' || $act === 'mint_limited') { $badge = 'gp-badge-warn'; }
 		$out = isset($row['_out']) && is_array($row['_out']) ? $row['_out'] : null;

@@ -328,15 +328,18 @@ panel) — it takes effect on their next request.
 | `enforce.block` / `.challenge` / `.ratelimit` | the three enforcement switches | all `false` (monitor) |
 | `signals.reputation` / `.ml` / `.clf` | whether each offline signal adds to the score | all `false` (shadow) |
 | `ml_weight` / `clf_weight` | how much the 0–100 model level contributes | `0.4` / `0.5` |
-| `hard_block_score` | effective score at/above which a navigation is blocked | `60` |
+| `hard_block_score` | effective score at/above which a GET is blocked | `60` |
 | `holdout_pct` | percent of visitors measured but never enforced against (0–5) | `0` (off; use a few during rollout) |
 | `holdout_salt` | stable salt fixing holdout membership | set once |
 | `capture_outcomes` | record status/size of allowed requests (Phase 4) | `false` until you want outcome signals |
 | `limits.window` / `.device` / `.ip_ua` / `.ip` / `.bot` | fixed-window rate counters | shipped generous |
+| `limits.device_hour` / `.device_day` | per-device budgets over an hour and a day, for slow clients on changing addresses | `400` / `1500`; exempt the admin path first |
+| `limits.preview` / `preview_bots` | site-wide budget per link-preview fetcher name | `60`; Telegram, WhatsApp, Facebook, X, LinkedIn |
+| `challenge.trust_headers` | `true` = old rule, challenge only GETs that ask for HTML (bypassable) | `false` |
 | `honeypot_path` | the invisible 404 trap path | `/old-archive` (change per site) |
 | `exempt_paths` | URI prefixes the guard never touches | add payment/cron/webhook/admin paths |
 | `exempt_params` | query param → value-prefix exemptions | e.g. `route => ['payment/','api/']` |
-| `known_bots` | lowercase UA substrings given the fast pass | `['googlebot','bingbot']` |
+| `known_bots` | lowercase UA substrings given the fast pass | Google and Bing crawler families |
 | `cdn_ranges` | IPv4 CIDRs whose XFF is trusted | empty unless behind a CDN |
 | `redis` | host, port, socket, username, password, db, prefix, timeout, breaker_ttl | `127.0.0.1:6379`, no auth, db 0, no prefix, 0.05s, 5s |
 | `limits.mint` / `challenge.pow_bits` / `challenge.bind_ip` | token minting cap, proof-of-work bits, nonce IP binding | 60 / 16 / true |

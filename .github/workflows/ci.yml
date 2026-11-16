@@ -95,6 +95,8 @@ jobs:
       # PHP decision with analyzer/decision.py case by case.
       - name: analyzer self-test (includes the PHP/Python decision parity check)
         run: python analyzer/selftest.py
+      - name: access-log report self-test (standard library only)
+        run: python -W error scripts/accesslog_selftest.py
       - name: the suites left the working tree clean (nothing tracked or logged into the repo)
         run: |
           git status --porcelain
@@ -160,13 +162,13 @@ jobs:
           node-version: '22'
       - run: sudo apt-get install -y -qq redis-server jq && (redis-server --daemonize yes --save "" >/dev/null)
       - run: pip install -r analyzer/requirements.txt
-      - name: dev router + HTTP matrix (incl. nonce replay, PoW, binding, Googlebot across a resolver outage)
+      - name: dev router + HTTP matrix (incl. nonce replay, PoW, binding, header-independent challenge, Googlebot across a resolver outage)
         run: |
           php -S 127.0.0.1:8080 scripts/dev-router.php >/tmp/dev-router.log 2>&1 &
           sleep 1
           bash scripts/guard-test.sh http://127.0.0.1:8080 | tee /tmp/matrix.txt
           # the rows that prove the hardening must show the enforced outcome
-          for row in '^4d .*\| 1 ' '^4e .*\| 403 ' '^4f .*\| 403 ' '^20b .*\| 200 ' '^20c .*\| 403 '; do
+          for row in '^4d .*\| 1 ' '^4e .*\| 403 ' '^4f .*\| 403 ' '^7b .*\| 503 ' '^7c .*\| 503 ' '^7d .*\| 503 ' '^7e .*\| 200 ' '^20b .*\| 200 ' '^20c .*\| 403 '; do
             grep -E "$row" /tmp/matrix.txt || { echo "missing/unexpected row: $row"; exit 1; }
           done
       - name: every allow path is byte-identical with the guard on and off

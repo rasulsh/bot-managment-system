@@ -42,7 +42,7 @@ ACTIONS = ('allow', 'challenge', '403', '429')
 # before the decision step, so replaying them would be meaningless.
 NON_DECISION_ACTS = ('exempt', 'allow_bot', '404_hp', 'token_issued',
                      'nonce_bad', 'nonce_replay', 'pow_bad', 'mint_limited',
-                     'allow_override')
+                     'allow_override', 'allow_preview')
 
 
 def parse_set(pairs):
@@ -80,7 +80,9 @@ def row_decision(row, cfg):
         int(row.get('clf', -1) if row.get('clf') is not None else -1),
         cfg)
     over = str(row.get('act') or '') == '429'
-    nav = int(row.get('nav') or 0) == 1
+    # Schema 5 logs the gate the guard decided on. Older rows have only nav,
+    # which is what the guard decided on when they were written.
+    nav = int(row.get('gate', row.get('nav')) or 0) == 1
     tok = str(row.get('tok') or 'm')
     ovr = str(row.get('ovr') or '')
     return esc, decision.decide(esc, over, nav, tok, cfg['hard_block_score'], ovr)

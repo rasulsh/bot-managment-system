@@ -134,7 +134,8 @@ function gp_reset_button($key) {
 		<div class="gp-card-title"><?= gp_e(gp_t('set_group_limits')) ?></div>
 		<div class="gp-grid-3">
 			<?php foreach (array('limits.window', 'limits.device', 'limits.ip_ua',
-				'limits.ip', 'limits.bot', 'limits.mint') as $k) {
+				'limits.ip', 'limits.bot', 'limits.mint', 'limits.device_hour',
+				'limits.device_day', 'limits.preview') as $k) {
 				gp_field_num($k, $cfg, $overlay, $errors);
 			} ?>
 		</div>
@@ -186,6 +187,14 @@ function gp_reset_button($key) {
 				dir="ltr"><?= gp_e(implode("\n", (array)($cfg['known_bots'] ?? array()))) ?></textarea>
 			<span class="gp-help"><?= gp_e(gp_t('help_known_bots')) ?></span>
 			<?php gp_field_error('known_bots', $errors); ?>
+		</label>
+
+		<label class="gp-field">
+			<span class="gp-label gp-mono">preview_bots</span>
+			<textarea class="gp-textarea gp-ltr" name="f[preview_bots]" rows="3"
+				dir="ltr"><?= gp_e(implode("\n", (array)($cfg['preview_bots'] ?? array()))) ?></textarea>
+			<span class="gp-help"><?= gp_e(gp_t('help_preview_bots')) ?></span>
+			<?php gp_field_error('preview_bots', $errors); ?>
 		</label>
 
 		<label class="gp-field">

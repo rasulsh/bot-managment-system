@@ -100,7 +100,10 @@ in **Settings** (or a line in `guard/config.php`).
 2. `enforce.challenge = true` — the main event. Watch the challenge funnel on the
    dashboard; the ≥95% guidance is printed next to the number.
 3. Replace the `limits` defaults with your own p99.9 from the logs, then
-   `enforce.ratelimit = true`.
+   `enforce.ratelimit = true`. For `limits.device_hour` / `device_day`, first look at
+   who would have been stopped:
+   `jq -r 'select(.act=="429" and (.rs|index("DEV_DAY") or index("DEV_HOUR")))|[.dev,.cdh,.cdd,.p]|@tsv' logs/guard-*.jsonl | sort | uniq -c | sort -rn | head -30`.
+   Staff in the shop's admin panel belong in `exempt_paths`, not in this list.
 
 **Before any threshold change:** run it through **Replay** with the proposed
 value (or `python3 analyzer/replay.py --set <key>=<value>`). The panel's replay

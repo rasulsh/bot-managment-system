@@ -49,10 +49,19 @@ DEFAULTS = {
     'contamination': 0.05,
     'model_path': os.path.join(REPO_ROOT, 'analyzer', 'model.joblib'),
     # Must match guard/config.php.
-    'known_bots': ['googlebot', 'bingbot'],
+    'known_bots': ['googlebot', 'adsbot-google', 'mediapartners-google',
+                   'google-inspectiontool', 'storebot-google', 'googleother',
+                   'bingbot', 'adidxbot', 'bingpreview'],
     'bot_suffixes': {
         'googlebot': ['.googlebot.com', '.google.com'],
+        'adsbot-google': ['.googlebot.com', '.google.com'],
+        'mediapartners-google': ['.googlebot.com', '.google.com'],
+        'google-inspectiontool': ['.googlebot.com', '.google.com'],
+        'storebot-google': ['.googlebot.com', '.google.com'],
+        'googleother': ['.googlebot.com', '.google.com'],
         'bingbot': ['.search.msn.com'],
+        'adidxbot': ['.search.msn.com'],
+        'bingpreview': ['.search.msn.com'],
     },
     # Operator-supplied regexes identifying listing and detail pages. Empty by
     # default: nothing here knows anything about any particular platform.

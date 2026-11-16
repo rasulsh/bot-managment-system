@@ -28,6 +28,7 @@ function gv_cfg_defaults(array $cfg) {
 		'exempt_paths'     => array(),
 		'exempt_params'    => array(),
 		'known_bots'       => array(),
+		'preview_bots'     => array(),
 		'cdn_ranges'       => array(),
 		'log_dir'          => dirname(__DIR__) . '/logs',
 		'ml_weight'        => 0.4,
@@ -36,8 +37,15 @@ function gv_cfg_defaults(array $cfg) {
 		'holdout_salt'     => 'CHANGE_ME_TOO',
 		'capture_outcomes' => false,
 		'bot_suffixes'     => array(
-			'googlebot' => array('.googlebot.com', '.google.com'),
-			'bingbot'   => array('.search.msn.com'),
+			'googlebot'             => array('.googlebot.com', '.google.com'),
+			'adsbot-google'         => array('.googlebot.com', '.google.com'),
+			'mediapartners-google'  => array('.googlebot.com', '.google.com'),
+			'google-inspectiontool' => array('.googlebot.com', '.google.com'),
+			'storebot-google'       => array('.googlebot.com', '.google.com'),
+			'googleother'           => array('.googlebot.com', '.google.com'),
+			'bingbot'               => array('.search.msn.com'),
+			'adidxbot'              => array('.search.msn.com'),
+			'bingpreview'           => array('.search.msn.com'),
 		),
 	);
 	foreach ($d as $k => $v) {
@@ -52,12 +60,14 @@ function gv_cfg_defaults(array $cfg) {
 	if (!isset($cfg['signals']) || !is_array($cfg['signals'])) { $cfg['signals'] = array(); }
 	$cfg['signals'] = array_merge($signals, $cfg['signals']);
 	$limits = array('window' => 300, 'device' => 150, 'ip_ua' => 400, 'ip' => 1200, 'bot' => 600,
-		'mint' => 60);
+		'mint' => 60, 'device_hour' => 400, 'device_day' => 1500, 'preview' => 60);
 	if (!isset($cfg['limits']) || !is_array($cfg['limits'])) { $cfg['limits'] = array(); }
 	$cfg['limits'] = array_merge($limits, $cfg['limits']);
 	// Challenge hardening. pow_bits is the proof-of-work difficulty (0 disables it);
 	// bind_ip ties a nonce to the IP it was issued to.
-	$challenge = array('pow_bits' => 16, 'bind_ip' => true);
+	// trust_headers restores the old rule where only a GET that asks for HTML
+	// is challenged; see gv_is_gate.
+	$challenge = array('pow_bits' => 16, 'bind_ip' => true, 'trust_headers' => false);
 	if (!isset($cfg['challenge']) || !is_array($cfg['challenge'])) { $cfg['challenge'] = array(); }
 	$cfg['challenge'] = array_merge($challenge, $cfg['challenge']);
 	$redis = array('host' => '127.0.0.1', 'port' => 6379, 'socket' => '',
@@ -77,7 +87,7 @@ function gv_cfg_defaults(array $cfg) {
 	);
 	if (!isset($cfg['strings']) || !is_array($cfg['strings'])) { $cfg['strings'] = array(); }
 	$cfg['strings'] = array_merge($strings, $cfg['strings']);
-	foreach (array('exempt_paths', 'exempt_params', 'known_bots', 'cdn_ranges', 'bot_suffixes') as $k) {
+	foreach (array('exempt_paths', 'exempt_params', 'known_bots', 'preview_bots', 'cdn_ranges', 'bot_suffixes') as $k) {
 		if (!is_array($cfg[$k])) { $cfg[$k] = array(); }
 	}
 	return $cfg;
@@ -115,12 +125,16 @@ function gv_overlay_whitelist() {
 		'limits.ip'          => array('int', 1, 100000),
 		'limits.bot'         => array('int', 1, 100000),
 		'limits.mint'        => array('int', 1, 100000),
+		'limits.device_hour' => array('int', 1, 1000000),
+		'limits.device_day'  => array('int', 1, 1000000),
+		'limits.preview'     => array('int', 1, 100000),
 		'challenge.pow_bits' => array('int', 0, 24),
 		'holdout_pct'        => array('int', 0, 5),
 		'capture_outcomes'   => array('bool'),
 		'exempt_paths'       => array('paths'),
 		'exempt_params'      => array('params'),
 		'known_bots'         => array('bots'),
+		'preview_bots'       => array('bots'),
 		'honeypot_path'      => array('hppath'),
 	);
 }
@@ -392,6 +406,26 @@ function gv_is_nav(array $f) {
 	return true;
 }
 
+// Gate: a request that must carry a valid token. Every GET is one.
+//
+// gv_is_nav stays a DESCRIPTION of the request (it feeds the log, the score and
+// the analyzer's features) but it reads Accept and X-Requested-With, which the
+// client chooses. Deciding the challenge on it let any client through that did
+// not ask for HTML - the default of curl and of every HTTP library. A real
+// browser's XHR and fetch() carry the token cookie its page load obtained, so
+// they are unaffected; server-to-server GETs (feeds, callbacks, cron URLs,
+// monitors) must be listed in exempt_paths / exempt_params, as they always had
+// to be. POST is never gated: the handshake itself is a POST, and payment
+// callbacks and webhooks stay untouched.
+//
+// $trust_headers = true is the old behaviour (gate only what looks like a
+// navigation). It exists as a rollback switch, not as a recommended setting.
+function gv_is_gate(array $f, $trust_headers = false) {
+	if ((string)$f['method'] !== 'GET') { return false; }
+	if ($trust_headers) { return gv_is_nav($f); }
+	return true;
+}
+
 // Major version claimed by a modern browser UA, or 0 when none is claimed.
 function gv_ua_modern_major($ua) {
 	$m = array();
@@ -522,7 +556,7 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 		if (is_string($host)) { $ref = gv_cut($host, 100); }
 	}
 	return array(
-		'v'   => 4,
+		'v'   => 5,
 		'rid' => isset($f['rid']) ? (string)$f['rid'] : '',
 		'ts'  => round(microtime(true), 3),
 		'ip'  => (string)$f['ip'],
@@ -533,6 +567,7 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 		'q'   => gv_cut((string)$f['query'], 100),
 		'aj'  => gv_is_ajax($f) ? 1 : 0,
 		'nav' => gv_is_nav($f) ? 1 : 0,
+		'gate' => (int)($st['gate'] ?? 0),
 		'tok' => (string)$st['tok'],
 		'dev' => (string)$st['dev'],
 		'sf'  => (string)$f['sf'],
@@ -542,6 +577,8 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 		'esc' => (int)$st['esc'],
 		'rs'  => array_values($st['rs']),
 		'cd'  => (int)$st['cd'],
+		'cdh' => (int)($st['cdh'] ?? 0),
+		'cdd' => (int)($st['cdd'] ?? 0),
 		'ciu' => (int)$st['ciu'],
 		'ci'  => (int)$st['ci'],
 		'rd'  => (int)$st['rd'],
@@ -592,8 +629,8 @@ function gv_finish($conn, array &$st) {
 // operator override.
 function gv_state_new() {
 	return array(
-		'tok' => 'm', 'dev' => '', 'sc' => 0, 'rs' => array(),
-		'cd'  => 0, 'ciu' => 0, 'ci' => 0, 'rd' => 0, 'hp' => 0, 'bot' => '',
+		'tok' => 'm', 'dev' => '', 'sc' => 0, 'rs' => array(), 'gate' => 0,
+		'cd'  => 0, 'cdh' => 0, 'cdd' => 0, 'ciu' => 0, 'ci' => 0, 'rd' => 0, 'hp' => 0, 'bot' => '',
 		'botv' => '', 'rep' => 0, 'ml' => -1, 'clf' => -1, 'esc' => 0,
 		'hold' => 0, 'ovr' => '',
 	);
@@ -716,12 +753,17 @@ function gv_override($conn, $ip, $dev) {
 
 // The Phase 1 decision, unchanged except that it now judges the effective
 // score and honours a deny override. First match wins. Pure.
+//
+// $nav is "this request is subject to the page rules". gv_run passes the gate
+// (gv_is_gate), which no longer depends on client-chosen headers; replay passes
+// the logged gate. The parameter keeps its name because analyzer/decision.py
+// mirrors this function argument for argument.
 function gv_decide($esc, $over, $nav, $tok, $hard_block_score, $ovr) {
 	if ($ovr === 'deny') { return '403'; }
 	if ((int)$esc >= (int)$hard_block_score && $nav) { return '403'; }
 	if ($over) { return '429'; }
-	// Only navigations reach this rule, so POST, XHR and REST clients are
-	// never challenged: payment callbacks and webhooks stay untouched.
+	// Only gated requests reach this rule, so a POST is never challenged:
+	// payment callbacks and webhooks stay untouched.
 	if ($nav && $tok !== 'v') { return 'challenge'; }
 	return 'allow';
 }
@@ -894,6 +936,11 @@ function gv_run($t0) {
 		return;
 	}
 
+	// Whether this request must carry a token. Recorded on every row from here
+	// on, so replay can re-decide from the log alone.
+	$gate = gv_is_gate($f, !empty($cfg['challenge']['trust_headers']));
+	$st['gate'] = $gate ? 1 : 0;
+
 	// 4. Token. A pure HMAC check, so it can run before Redis is opened: the
 	// device id is needed to build the batched reads below. The result stays in
 	// locals and reaches $st at the point it always did (step 7), so the logged
@@ -978,6 +1025,28 @@ function gv_run($t0) {
 		}
 	}
 
+	// 5b. Link-preview fetchers (Telegram, WhatsApp, ...). They cannot solve a
+	// challenge and publish nothing to verify them by, so the pass is not a
+	// trust decision: it is a small SITE-WIDE budget per fetcher name. Real
+	// previews are a trickle. A scraper that borrows the User-Agent shares that
+	// one budget across all of its addresses, uses it up and is then handled
+	// like any other client - changing IP does not buy a new budget.
+	// No Redis, no pass: without a counter the budget cannot be enforced. An
+	// operator deny on the address still wins.
+	if ($bot === '' && !$is_hp && $rv('deny_ip') !== '1' && gv_redis_alive($conn)) {
+		$pv = gv_match_bot($f['ua'], $cfg['preview_bots']);
+		if ($pv !== '') {
+			$n = gv_bump($conn, gv_key('rp:' . $pv), $cfg['limits']['window']);
+			if ($n >= 1 && $n <= (int)$cfg['limits']['preview']) {
+				$st['bot'] = $pv;
+				gv_finish($conn, $st);
+				gv_emit($f, $st, 'allow_preview', 0, $t0, $log);
+				gv_arm_outcome($cfg, $f, $log);
+				return;
+			}
+		}
+	}
+
 	// 6. Honeypot. Fires regardless of the enforce toggles: it is labelling data.
 	if ($is_hp) {
 		if (gv_redis_alive($conn)) { gv_r_setex($conn, gv_key('hp:' . $f['ip']), 604800, '1'); }
@@ -1038,7 +1107,17 @@ function gv_run($t0) {
 	if (gv_redis_alive($conn)) {
 		$window = $cfg['limits']['window'];
 		$items = array();
-		if ($st['dev'] !== '') { $items[] = array(gv_key('rd:' . $st['dev']), $window); }
+		// The device token gets two more budgets on fixed long windows. The short
+		// window above only sees speed; a scraper that paces itself (one page
+		// every few seconds, around the clock) never trips it, whatever address
+		// it comes from, but it cannot stay under an hourly and a daily budget
+		// and still fetch a catalogue. Counted per token, so a rotating IP
+		// changes nothing. Same round trip as the other counters.
+		if ($st['dev'] !== '') {
+			$items[] = array(gv_key('rd:' . $st['dev']), $window);
+			$items[] = array(gv_key('rdh:' . $st['dev']), 3600);
+			$items[] = array(gv_key('rdd:' . $st['dev']), 86400);
+		}
 		$uah = substr(md5((string)$f['ua']), 0, 12);
 		$items[] = array(gv_key('riu:' . md5($f['ip'] . '|' . $uah)), $window);
 		$items[] = array(gv_key('ri:' . $f['ip']), $window);
@@ -1046,6 +1125,10 @@ function gv_run($t0) {
 		if ($st['dev'] !== '') {
 			$st['cd'] = array_shift($counts);
 			if ($st['cd'] > (int)$cfg['limits']['device']) { $over = true; }
+			$st['cdh'] = array_shift($counts);
+			if ($st['cdh'] > (int)$cfg['limits']['device_hour']) { $over = true; $st['rs'][] = 'DEV_HOUR'; }
+			$st['cdd'] = array_shift($counts);
+			if ($st['cdd'] > (int)$cfg['limits']['device_day']) { $over = true; $st['rs'][] = 'DEV_DAY'; }
 		}
 		$st['ciu'] = $counts[0];
 		if ($st['ciu'] > (int)$cfg['limits']['ip_ua']) { $over = true; }
@@ -1056,8 +1139,7 @@ function gv_run($t0) {
 
 	// 10. Decision, now judging the effective score.
 	$st['esc'] = gv_effective_score($st['sc'], $st['rep'], $st['ml'], $st['clf'], $cfg);
-	$nav       = gv_is_nav($f);
-	$intended  = gv_decide($st['esc'], $over, $nav, $st['tok'], $cfg['hard_block_score'],
+	$intended  = gv_decide($st['esc'], $over, $gate, $st['tok'], $cfg['hard_block_score'],
 		$st['ovr']);
 
 	// 11. Act. Every branch logs exactly one line.
