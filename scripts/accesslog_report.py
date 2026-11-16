@@ -58,8 +58,11 @@ ASSET_RE = re.compile(
     re.I)
 
 # Pages that make up the catalogue. The default fits OpenCart with and without
-# SEO URLs; override with --catalog-regex for anything else.
-DEFAULT_CATALOG = r'^/(?:product|category)/|[?&]route=product/(?:product|category|search)'
+# SEO URLs; override with --catalog-regex for anything else. Only the page
+# routes themselves: route=product/search (live search fires once per keystroke)
+# and route=product/product/review (loaded by every product page) are XHR calls
+# of a real browser, and counting them made customers look like a steady loop.
+DEFAULT_CATALOG = r'^/(?:product|category)/|[?&]route=product/(?:product|category)(?:&|$)'
 
 # User-Agents that say outright that they are a program. LOW weight on purpose:
 # it adds a little to an actor that already behaves like a crawler and can
@@ -96,6 +99,7 @@ SIGNALS = (
     ('no_referer', 10, 'shape: at least 90% of its page requests carry no Referer'),
     ('breadth', 10, 'shape: read 30 or more different catalogue pages'),
     ('breadth_wide', 5, 'shape: ...and 100 or more'),
+    ('deep', 25, 'machine: 100 or more different catalogue pages per address it used'),
     ('repoll', 20, 'machine: polls the same pages again and again (30%+ fetched 3+ times)'),
     ('cadence', 20, 'machine: a steady interval between requests, or a burst of 60+/minute'),
     ('hours', 10, 'machine: active in 18 or more hours of the day'),
@@ -164,16 +168,43 @@ def open_log(path):
     return io.open(path, 'r', encoding='utf-8', errors='replace')
 
 
-def read_logs(paths):
+def parse_networks(values):
+    """['10.0.0.0/8,192.0.2.7', ...] -> list of ip_network. Raises ValueError on a bad one."""
+    nets = []
+    for value in values or []:
+        for item in str(value).split(','):
+            item = item.strip()
+            if item:
+                nets.append(ipaddress.ip_network(item, strict=False))
+    return nets
+
+
+def is_ignored(ip, nets, cache):
+    """True when the address is inside an --ignore network. Cached per address."""
+    hit = cache.get(ip)
+    if hit is None:
+        try:
+            addr = ipaddress.ip_address(ip)
+            hit = any(addr.version == net.version and addr in net for net in nets)
+        except ValueError:
+            hit = False
+        cache[ip] = hit
+    return hit
+
+
+def read_logs(paths, ignore=None):
     """Parse the logs into per-client and per-address tallies.
 
-    Returns a dict: clients, by_ip, urls (id -> url), lines, bad, pages, assets,
-    first, last.
+    Returns a dict: clients, by_ip, urls (id -> url), lines, bad, ignored, pages,
+    assets, first, last. Requests from an address inside one of the `ignore`
+    networks (your own servers, monitors, office) are counted and dropped.
     """
+    ignore = ignore or []
+    ignore_cache = {}
     clients = {}
     by_ip = {}
     url_ids = {}
-    out = {'lines': 0, 'bad': 0, 'pages': 0, 'assets': 0, 'assets_http1': 0,
+    out = {'lines': 0, 'bad': 0, 'ignored': 0, 'pages': 0, 'assets': 0, 'assets_http1': 0,
            'first': None, 'last': None, 'tz': 0}
     for path in paths:
         with open_log(path) as handle:
@@ -186,6 +217,9 @@ def read_logs(paths):
                     continue
                 epoch, hour, out['tz'] = when
                 ip = match.group('ip')
+                if ignore and is_ignored(ip, ignore, ignore_cache):
+                    out['ignored'] += 1
+                    continue
                 ua = match.group('ua') or ''
                 url = match.group('url')
                 ref = match.group('ref') or ''
@@ -199,7 +233,7 @@ def read_logs(paths):
                 tally = by_ip.get(ip)
                 if tally is None:
                     tally = by_ip[ip] = {'req': 0, 'pages': 0, 'assets': 0, 'no_ref': 0,
-                                         'http1': 0, 'bytes': 0, 'uas': set()}
+                                         'http1': 0, 'bytes': 0, 'uas': set(), 'urls': []}
                 tally['req'] += 1
                 tally['http1'] += 1 if http1 else 0
                 size = match.group('size')
@@ -231,6 +265,7 @@ def read_logs(paths):
                 if uid is None:
                     uid = url_ids[url] = len(url_ids)
                 client.hits.append((epoch, hour, uid))
+                tally['urls'].append(uid)
     out['clients'] = clients
     out['by_ip'] = by_ip
     out['urls'] = dict((uid, url) for url, uid in url_ids.items())
@@ -298,6 +333,10 @@ def build_actor(name, members, env, urls):
         signals.append('breadth')
     if unique >= 100:
         signals.append('breadth_wide')
+    # Many customers together read many pages; one address reading a hundred
+    # different products is not a customer.
+    if ips and float(unique) / len(ips) >= 100:
+        signals.append('deep')
     if unique >= 20 and float(repolled) / unique >= 0.3:
         signals.append('repoll')
     if steady >= 0.5 or peak >= 60:
@@ -464,8 +503,8 @@ def render(data, actors, env, top, show_all):
     tz = data.get('tz', 0)
     add('Access-log report (times in the log\'s own time zone, UTC%+03d:%02d)'
         % (int(tz / 3600), abs(tz) % 3600 // 60))
-    add('  lines %d (unparsed %d)   page requests %d   asset requests %d'
-        % (data['lines'], data['bad'], data['pages'], data['assets']))
+    add('  lines %d (unparsed %d, ignored %d)   page requests %d   asset requests %d'
+        % (data['lines'], data['bad'], data['ignored'], data['pages'], data['assets']))
     add('  from %s to %s   addresses %d   clients (address + User-Agent) %d'
         % (fmt_time(data['first'], tz), fmt_time(data['last'], tz), len(data['by_ip']), len(data['clients'])))
     if not env['assets_logged']:
@@ -516,12 +555,17 @@ def render(data, actors, env, top, show_all):
         add('  %-13s +%-2d %s' % (key, pts, text))
     add('')
     add('== TOP ADDRESSES BY REQUESTS (the old view; an address is not an identity)')
-    add('  %-39s %8s %7s %7s %6s %6s %4s %9s'
-        % ('address', 'requests', 'pages', 'assets', 'noRef%', 'http1%', 'UAs', 'MB'))
+    add('  cat% = share of its pages that are catalogue pages. Thousands of pages with a low cat%')
+    add('  are usually staff in the admin panel or one of your own tools: pass those to --ignore.')
+    add('  %-39s %8s %7s %7s %5s %6s %6s %4s %9s'
+        % ('address', 'requests', 'pages', 'assets', 'cat%', 'noRef%', 'http1%', 'UAs', 'MB'))
     ranked = sorted(data['by_ip'].items(), key=lambda kv: -kv[1]['req'])[:top]
+    catalog = env['catalog']
     for ip, t in ranked:
-        add('  %-39s %8d %7d %7d %6d %6d %4d %9.1f'
+        in_cat = len(t['urls']) if catalog is None else sum(1 for uid in t['urls'] if uid in catalog)
+        add('  %-39s %8d %7d %7d %5d %6d %6d %4d %9.1f'
             % (ip, t['req'], t['pages'], t['assets'],
+               round(100.0 * in_cat / t['pages']) if t['pages'] else 0,
                round(100.0 * t['no_ref'] / t['pages']) if t['pages'] else 0,
                round(100.0 * t['http1'] / t['req']) if t['req'] else 0,
                len(t['uas']), t['bytes'] / 1e6))
@@ -537,7 +581,8 @@ def to_json(data, actors, env):
         row = dict((k, v) for k, v in actor.items() if k not in ('url_ids', 'members'))
         listed.append(row)
     return {
-        'lines': data['lines'], 'unparsed': data['bad'], 'pages': data['pages'],
+        'lines': data['lines'], 'unparsed': data['bad'], 'ignored': data['ignored'],
+        'pages': data['pages'],
         'assets': data['assets'], 'assets_logged': env['assets_logged'],
         'http1_tells': env['http1_tells'], 'catalog_matched': env['catalog'] is not None,
         'first': data['first'], 'last': data['last'], 'utc_offset_s': data.get('tz', 0),
@@ -546,8 +591,9 @@ def to_json(data, actors, env):
     }
 
 
-def analyse(paths, min_pages=30, catalog=DEFAULT_CATALOG, use_rdns=False, resolver=socket):
-    data = read_logs(paths)
+def analyse(paths, min_pages=30, catalog=DEFAULT_CATALOG, use_rdns=False, resolver=socket,
+            ignore=None):
+    data = read_logs(paths, ignore)
     actors, env = find_actors(data, min_pages, re.compile(catalog))
     classify(actors, use_rdns, resolver)
     return data, actors, env
@@ -564,6 +610,9 @@ def main(argv=None):
                         help='regex matching catalogue pages (default fits OpenCart)')
     parser.add_argument('--rdns', action='store_true',
                         help='verify search-engine claims by reverse DNS (needs working DNS)')
+    parser.add_argument('--ignore', action='append', default=[], metavar='CIDR[,CIDR...]',
+                        help='addresses or networks to leave out entirely: your own servers, '
+                             'tools, monitors, office (repeatable)')
     parser.add_argument('--all', action='store_true', help='also list actors below the review score')
     parser.add_argument('--json', default=None, help='also write the findings to this JSON file')
     args = parser.parse_args(argv)
@@ -573,7 +622,13 @@ def main(argv=None):
         print('ERROR: bad --catalog-regex: %s' % exc, file=sys.stderr)
         return 2
     try:
-        data, actors, env = analyse(args.logs, args.min_pages, args.catalog_regex, args.rdns)
+        ignore = parse_networks(args.ignore)
+    except ValueError as exc:
+        print('ERROR: bad --ignore value: %s' % exc, file=sys.stderr)
+        return 2
+    try:
+        data, actors, env = analyse(args.logs, args.min_pages, args.catalog_regex, args.rdns,
+                                    ignore=ignore)
     except (IOError, OSError) as exc:
         print('ERROR: cannot read a log: %s' % exc, file=sys.stderr)
         return 2

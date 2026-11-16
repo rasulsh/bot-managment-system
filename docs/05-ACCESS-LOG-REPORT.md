@@ -23,6 +23,7 @@ python3 scripts/accesslog_report.py --rdns --json /tmp/report.json yesterday.log
 | `--top N` | rows per section (default 20) |
 | `--catalog-regex RE` | which URLs are catalogue pages (default fits OpenCart, with and without SEO URLs) |
 | `--rdns` | verify search-engine claims by forward-confirmed reverse DNS |
+| `--ignore CIDR[,CIDR]` | leave these addresses out entirely: your own servers and tools, monitors, the office (repeatable) |
 | `--all` | also list actors below the review score |
 | `--json FILE` | also write every actor, with its numbers, as JSON |
 
@@ -49,6 +50,7 @@ itself off and the report says so.
 | `no_referer` 90%+ of page requests without a Referer | 10 | shape |
 | `breadth` 30+ different catalogue pages | 10 | shape |
 | `breadth_wide` 100+ | 5 | shape |
+| `deep` 100+ different catalogue pages per address it used | 25 | machine |
 | `repoll` 30%+ of its pages fetched 3+ times | 20 | machine |
 | `cadence` steady interval, or 60+ pages in a minute | 20 | machine |
 | `hours` active in 18+ hours of the day | 10 | machine |
@@ -65,6 +67,13 @@ must never be enough. An actor is only listed when it also does something only a
 program does.
 
 ## Reading the result
+
+- Your own tools look exactly like scrapers (pages only, round the clock). Run the
+  report once, find them in the list, and pass their addresses to `--ignore` from
+  then on.
+- In the address table, `cat%` is the share of an address's pages that are
+  catalogue pages. Thousands of pages with assets and a low `cat%` are usually
+  staff working in the admin panel.
 
 - Addresses are printed as evidence of where an actor was seen. **They are not a
   block list**: a carrier address is shared with customers and belongs to someone
