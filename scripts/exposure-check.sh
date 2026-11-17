@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Bot Guard deployment self-check: are the sensitive files reachable over HTTP?
 #
-#   bash scripts/exposure-check.sh <BASE_URL> [panel-path]
+#   bash scripts/exposure-check.sh <BASE_URL> [panel-path|none]
+#
+# Pass "none" as the panel path when the panel is not installed: the panel is
+# optional, and without this the check failed on a site that simply has none.
 #
 #   BASE_URL     where the repository root would be served if it were inside the
 #                document root, e.g. https://example.com or https://example.com/bot-guard
@@ -17,6 +20,8 @@ set -uo pipefail
 
 BASE_URL="${1:-}"
 PANEL_PATH="${2:-/panel}"
+NO_PANEL=0
+if [ "$PANEL_PATH" = "none" ]; then NO_PANEL=1; PANEL_PATH="/panel"; fi
 if [ -z "$BASE_URL" ]; then
 	echo "Usage: bash scripts/exposure-check.sh <BASE_URL> [panel-path]"
 	echo "Example: bash scripts/exposure-check.sh https://example.com /gv-admin"
@@ -35,6 +40,10 @@ SENSITIVE=(
 	"/guard/config.php"
 	"/guard/config.local.json"
 	"/guard/guard.php"
+	"/guard/config.php.bak"
+	"/guard/config.php~"
+	"/guard/config.php.save"
+	"/guard/config.php.orig"
 	"/panel/panel.config.php"
 	"/panel/audit.jsonl"
 	"/panel/views/layout.php"
@@ -88,6 +97,9 @@ for path in "${SENSITIVE[@]}"; do
 done
 
 echo
+if [ "$NO_PANEL" = "1" ]; then
+	echo "Panel: not installed (skipped; anything under /panel was already tested above)"
+else
 echo "Panel:"
 entry="$("${CURL[@]}" -o /dev/null -w '%{http_code} %{size_download}' "$BASE_URL$PANEL_PATH/index.php" 2>/dev/null)"
 case "$entry" in
@@ -118,6 +130,7 @@ for path in "$PANEL_PATH/panel.config.php" "$PANEL_PATH/audit.jsonl" "$PANEL_PAT
 		printf '%-34s | %s\n' "$path" "$code ok"
 	fi
 done
+fi
 
 echo
 if [ "$warnings" -gt 0 ]; then

@@ -180,8 +180,8 @@ $cases = array(
 	array('limits.mint', 100001, false),
 	array('challenge.pow_bits', 16, true),
 	array('challenge.pow_bits', 0, true),
-	array('challenge.pow_bits', 24, true),
-	array('challenge.pow_bits', 25, false),
+	array('challenge.pow_bits', 22, true),
+	array('challenge.pow_bits', 23, false),
 	array('challenge.pow_bits', -1, false),
 	array('challenge.pow_bits', '16', false),
 	array('challenge.bind_ip', false, false),
@@ -814,6 +814,80 @@ t_ok('no eval appears under panel/', !$evals);
 // --------------------------------------------------------------------------
 // Restore whatever the operator had before this ran.
 t_clear_overlay();
+@unlink(gv_overlay_path() . '.lock');
+// --------------------------------------------------------------------------
+t_section('Review hardening');
+
+$h_audit = is_file(gp_audit_path()) ? file_get_contents(gp_audit_path()) : null;
+t_clear_overlay();
+@unlink(gp_audit_path());
+
+gp_audit_append(array('event' => 'login_failed', 'actor' => str_repeat('A', 1200000), 'ip' => '203.0.113.9'));
+gp_audit_append(array('event' => 'config', 'actor' => 'tester', 'ip' => '203.0.113.9', 'key' => 'hard_block_score', 'old' => 60, 'new' => 55));
+t_ok('an oversized username cannot bloat the audit file (' . filesize(gp_audit_path()) . ' bytes)', filesize(gp_audit_path()) < 600);
+$h_rows = gp_audit_read(50);
+t_ok('...or push real entries out of the audit view', count($h_rows) === 2 && strlen($h_rows[1]['actor'] ?? $h_rows[0]['actor']) <= 70);
+gp_audit_append(array('event' => 'x', 'actor' => array('not', 'a', 'string'), 'ip' => '203.0.113.9'));
+t_ok('a non-string actor is stored as an empty string, without a warning',
+	strpos(file_get_contents(gp_audit_path()), '"event":"x","actor":""') !== false);
+
+// A save writes only what changed.
+$h_form = array('hard_block_score' => 60, 'holdout_pct' => 0, 'limits.device' => 150, 'limits.ip' => 1200);
+$h_eff = gv_cfg_load();
+foreach ($h_form as $k => $_v) { $h_form[$k] = gp_effective_value($h_eff, $k); }   // the form as loaded
+$h_form['limits.ip'] = 999;
+$h_save = gp_config_save($h_form, 'tester', '203.0.113.9');
+$h_file = json_decode(file_get_contents(gv_overlay_path()), true);
+t_ok('saving a form with one changed field writes one key, not the whole form',
+	$h_save['ok'] && array_keys($h_file) === array('limits.ip') && $h_file['limits.ip'] === 999);
+t_ok('the save lock file is not left locked', ($h_fh = fopen(gv_overlay_path() . '.lock', 'c')) && flock($h_fh, LOCK_EX | LOCK_NB));
+if ($h_fh) { flock($h_fh, LOCK_UN); fclose($h_fh); }
+@unlink(gv_overlay_path() . '.lock');
+
+// An overlay the guard would ignore as a whole is refused at write time.
+$h_big = array();
+for ($i = 0; $i < 20; $i++) {
+	$vals = array();
+	for ($j = 0; $j < 50; $j++) { $vals[] = str_repeat('"', 150) . $i . '-' . $j; }
+	$h_big['p' . $i] = $vals;
+}
+$h_res = gp_config_save(array('exempt_params' => $h_big), 'tester', '203.0.113.9');
+t_ok('a save that would exceed the size the guard reads is refused, not silently ignored',
+	$h_res['ok'] === false && isset($h_res['errors']['_write'])
+	&& json_decode(file_get_contents(gv_overlay_path()), true) === array('limits.ip' => 999));
+
+// One-click outages are refused by the same validators the guard reads with.
+foreach (array(array('exempt_paths', array('/')), array('known_bots', array('mozilla')), array('preview_bots', array('a')),
+	array('honeypot_path', '/'), array('challenge.pow_bits', 24)) as $h_case) {
+	$h_r = gp_config_save(array($h_case[0] => $h_case[1]), 'tester', '203.0.113.9');
+	t_ok('the panel refuses ' . $h_case[0] . ' = ' . json_encode($h_case[1]), $h_r['ok'] === false && isset($h_r['errors'][$h_case[0]]));
+}
+
+// Overrides land on the key the guard reads.
+t_ok('an override address is stored in the guard\'s canonical spelling',
+	gp_identity_canon('2001:DB8:0:0:0:0:0:5') === '2001:db8::5' && gp_identity_canon('::ffff:203.0.113.7') === '203.0.113.7'
+	&& gp_identity_canon('203.0.113.7') === '203.0.113.7' && gp_identity_canon('a1b2c3d4e5f6a1b2c3d4e5f6') === 'a1b2c3d4e5f6a1b2c3d4e5f6');
+
+// The file login counter under real concurrency.
+$h_bucket = 'race-' . bin2hex(random_bytes(4));
+$h_code = 'define("GV_BOOT",1);define("GP_BOOT",1);define("GP_SELFTEST",1);define("GV_NO_AUTORUN",1);'
+	. 'require ' . var_export(realpath(__DIR__ . '/../guard/guard.php'), true) . ';'
+	. 'require ' . var_export(realpath(__DIR__ . '/../panel/config_io.php'), true) . ';'
+	. 'require ' . var_export(realpath(__DIR__ . '/../panel/auth.php'), true) . ';'
+	. 'for($i=0;$i<25;$i++){gp_attempts_bump_file(' . var_export($h_bucket, true) . ',900);}';
+$h_procs = array();
+for ($i = 0; $i < 8; $i++) {
+	$h_procs[] = proc_open(array(PHP_BINARY, '-r', $h_code), array(1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $h_pipes);
+}
+foreach ($h_procs as $h_p) { if (is_resource($h_p)) { proc_close($h_p); } }
+$h_n = gp_attempts_get_file($h_bucket, 900);
+t_ok('8 processes x 25 attempts are all counted by the file limiter (' . $h_n . ' of 200)', $h_n === 200);
+@unlink(gp_attempts_file($h_bucket));
+
+t_clear_overlay();
+@unlink(gv_overlay_path() . '.lock');
+if ($h_audit !== null) { file_put_contents(gp_audit_path(), $h_audit); } else { @unlink(gp_audit_path()); }
+
 if ($overlay_backup !== null) { file_put_contents($overlay, $overlay_backup); }
 
 echo "\n";

@@ -32,7 +32,7 @@ DEFAULTS = {
     'session_gap_s': 1800,
     # Verdict lifetimes. Every write carries one so a stopped analyzer cannot
     # pin a stale verdict forever.
-    'rep_ttl': 2592000,
+    'rep_ttl': 1209600,                   # 14 days: twice the window, not a month of stale penalty
     'ml_ttl': 86400,
     # TTL of a bot verdict. 'ok' is a positive, forward-confirmed fact and keeps
     # the long TTL. 'bad' revokes a crawler's pass, so a wrong one must heal

@@ -168,7 +168,7 @@ jobs:
           sleep 1
           bash scripts/guard-test.sh http://127.0.0.1:8080 | tee /tmp/matrix.txt
           # the rows that prove the hardening must show the enforced outcome
-          for row in '^4d .*\| 1 ' '^4e .*\| 403 ' '^4f .*\| 403 ' '^7b .*\| 503 ' '^7c .*\| 503 ' '^7d .*\| 503 ' '^7e .*\| 200 ' '^20b .*\| 200 ' '^20c .*\| 403 '; do
+          for row in '^4d .*\| 1 ' '^4e .*\| 403 ' '^4f .*\| 403 ' '^7b .*\| 503 ' '^7c .*\| 503 ' '^7d .*\| 503 ' '^7e .*\| 200 ' '^7f .*\| 503 ' '^7g .*\| 200 ' '^7h .*\| 503 ' '^20b .*\| 200 ' '^20c .*\| 403 '; do
             grep -E "$row" /tmp/matrix.txt || { echo "missing/unexpected row: $row"; exit 1; }
           done
       - name: every allow path is byte-identical with the guard on and off

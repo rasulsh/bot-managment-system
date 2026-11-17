@@ -110,7 +110,7 @@ function gp_reset_button($key) {
 	<div class="gp-card">
 		<div class="gp-card-title"><?= gp_e(gp_t('set_group_enforce')) ?></div>
 		<div class="gp-grid-3">
-			<?php foreach (array('enforce.block', 'enforce.challenge', 'enforce.ratelimit') as $k) {
+			<?php foreach (array('enforce.block', 'enforce.challenge', 'enforce.ratelimit', 'challenge.gate_post') as $k) {
 				gp_field_bool($k, $cfg, $overlay, $errors);
 			} ?>
 		</div>
@@ -135,7 +135,7 @@ function gp_reset_button($key) {
 		<div class="gp-grid-3">
 			<?php foreach (array('limits.window', 'limits.device', 'limits.ip_ua',
 				'limits.ip', 'limits.bot', 'limits.mint', 'limits.device_hour',
-				'limits.device_day', 'limits.preview') as $k) {
+				'limits.device_day', 'limits.preview', 'limits.bot_unverified') as $k) {
 				gp_field_num($k, $cfg, $overlay, $errors);
 			} ?>
 		</div>

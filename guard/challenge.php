@@ -10,8 +10,12 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 // users on every network change.
 
 // Issue a token: device_id . issued_at . signature.
-function gv_tok_make($secret) {
-	$p = bin2hex(random_bytes(12)) . '.' . time();          // device_id . issued_at
+// $nonce_id, when given, fixes the device id: one nonce, one device.
+function gv_tok_make($secret, $nonce_id = '') {
+	$dev = ((string)$nonce_id !== '')
+		? substr(hash_hmac('sha256', 'dev|' . $nonce_id, $secret), 0, 24)
+		: bin2hex(random_bytes(12));
+	$p = $dev . '.' . time();                                // device_id . issued_at
 	return $p . '.' . hash_hmac('sha256', $p, $secret);
 }
 
@@ -77,7 +81,10 @@ function gv_nonce_check($n, $secret, $ttl, $ua = '', $ip = '') {
 	$x = explode('.', (string)$n);
 	$p = $x[0] . '.' . $x[1] . '.' . $x[2];
 	if (!hash_equals(hash_hmac('sha256', $p . '|' . gv_nonce_bind($ua, $ip), $secret), $x[3])) return false;
-	if ((time() - (int)$x[0]) >= $ttl) return false;
+	$age = time() - (int)$x[0];
+	// A nonce dated in the future can only come from a node whose clock is
+	// ahead; allow a small skew, not an arbitrary head start on its lifetime.
+	if ($age >= $ttl || $age < -30) return false;
 	return true;
 }
 
@@ -229,6 +236,7 @@ function gv_challenge_render($nonce, array $strings, $bits = 0) {
 
 	if (!headers_sent()) {
 		http_response_code(503);
+		header('X-LiteSpeed-Cache-Control: no-cache');
 		header('Retry-After: 3');
 		header('Content-Type: text/html; charset=utf-8');
 		header('Cache-Control: no-store');

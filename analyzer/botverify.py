@@ -101,8 +101,13 @@ class DefaultResolver(object):
                 out.append(addr)
         return out
 
-    def healthy(self):
+    def healthy(self, fresh=False):
         """True when the resolver demonstrably works right now.
+
+        fresh=True ignores the cached answer. verify_ip asks for that after a
+        NEGATIVE reply: a resolver that worked half a minute ago and has died
+        since answers "not found" for everything, and a cached "healthy" would
+        turn each of those into a 'bad' verdict for a real crawler.
 
         glibc reports an UNREACHABLE resolver as HOST_NOT_FOUND on some systems
         (observed: gethostbyaddr answers herror(1) in milliseconds when UDP/53
@@ -111,7 +116,8 @@ class DefaultResolver(object):
         a canary name resolves in the same breath.
         """
         now = time.time()
-        if self._health is not None and (now - self._health[0]) < CANARY_TTL_S:
+        if (not fresh and self._health is not None
+                and (now - self._health[0]) < CANARY_TTL_S):
             return self._health[1]
         try:
             alive = bool(socket.getaddrinfo(self.canary, None))
@@ -141,18 +147,31 @@ def _same_address(a, b):
     if ipaddress is None:
         return False
     try:
-        return ipaddress.ip_address(a) == ipaddress.ip_address(b)
+        return _unmapped(ipaddress.ip_address(a)) == _unmapped(ipaddress.ip_address(b))
     except ValueError:
         return False
 
 
+def _unmapped(addr):
+    """::ffff:1.2.3.4 is the IPv4 address 1.2.3.4 written as IPv6."""
+    mapped = getattr(addr, 'ipv4_mapped', None)
+    return mapped if mapped is not None else addr
+
+
 def _resolver_works(resolver):
-    """An injected resolver without healthy() is assumed to be working."""
+    """An injected resolver without healthy() is assumed to be working.
+
+    Always asks for a FRESH check: this is only called after a negative answer,
+    and that answer is worth nothing unless the resolver is alive right now.
+    """
     check = getattr(resolver, 'healthy', None)
     if check is None:
         return True
     try:
-        return bool(check())
+        try:
+            return bool(check(fresh=True))
+        except TypeError:
+            return bool(check())                 # an injected resolver without the flag
     except Exception:
         return False
 

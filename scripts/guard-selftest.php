@@ -200,7 +200,123 @@ t_ok('a GET that does not ask for HTML is gated (curl / python-requests default)
 t_ok('a GET with no Accept header at all is gated', gv_is_gate(t_facts(array('accept' => ''))) === true);
 t_ok('a GET claiming to be XHR is gated',
 	gv_is_gate(t_facts(array('xrw' => 'XMLHttpRequest', 'accept' => 'application/json'))) === true);
-t_ok('a POST is never gated', gv_is_gate(t_facts(array('method' => 'POST'))) === false);
+// HEAD runs the application like GET. POST and the rest are gated in SHADOW
+// until challenge.gate_post is switched on; OPTIONS (CORS preflight) never is.
+t_ok('HEAD is gated and enforced like GET',
+	gv_is_gate(t_facts(array('method' => 'HEAD'))) === true && gv_gate_enforced(t_facts(array('method' => 'HEAD')), false) === true);
+t_ok('a POST is gated, but only enforced with challenge.gate_post',
+	gv_is_gate(t_facts(array('method' => 'POST'))) === true
+	&& gv_gate_enforced(t_facts(array('method' => 'POST')), false) === false
+	&& gv_gate_enforced(t_facts(array('method' => 'POST')), true) === true);
+t_ok('PUT, DELETE and unknown methods follow POST',
+	gv_is_gate(t_facts(array('method' => 'PUT'))) === true && gv_gate_enforced(t_facts(array('method' => 'FOO')), false) === false);
+t_ok('OPTIONS is never gated', gv_is_gate(t_facts(array('method' => 'OPTIONS'))) === false);
+
+// gv_served: the first rule that matches AND is enforced.
+$EN = function ($b, $c, $r) { return array('block' => $b, 'challenge' => $c, 'ratelimit' => $r); };
+t_ok('all on: served equals decided for every rule',
+	gv_served(70, false, true, 'm', 60, '', $EN(true, true, true), 0, true) === '403'
+	&& gv_served(0, true, true, 'm', 60, '', $EN(true, true, true), 0, true) === '429'
+	&& gv_served(0, false, true, 'm', 60, '', $EN(true, true, true), 0, true) === 'challenge'
+	&& gv_served(0, false, true, 'v', 60, '', $EN(true, true, true), 0, true) === 'allow');
+t_ok('rate limiting in shadow no longer cancels the challenge for a token-less client over a limit',
+	gv_decide(0, true, true, 'm', 60, '') === '429'
+	&& gv_served(0, true, true, 'm', 60, '', $EN(true, true, false), 0, true) === 'challenge');
+t_ok('blocking in shadow no longer cancels the challenge for a high-scoring token-less client',
+	gv_decide(90, false, true, 'm', 60, '') === '403'
+	&& gv_served(90, false, true, 'm', 60, '', $EN(false, true, true), 0, true) === 'challenge');
+t_ok('...nor the rate limit', gv_served(90, true, true, 'v', 60, '', $EN(false, true, true), 0, true) === '429');
+t_ok('everything off: always allow, whatever matched',
+	gv_served(90, true, true, 'm', 60, 'deny', $EN(false, false, false), 0, true) === 'allow');
+t_ok('a valid token over a shadowed limit is allowed', gv_served(0, true, true, 'v', 60, '', $EN(true, true, false), 0, true) === 'allow');
+t_ok('holdout suppresses the score block and the challenge, never a 429 or a deny',
+	gv_served(90, false, true, 'm', 60, '', $EN(true, true, true), 1, true) === 'allow'
+	&& gv_served(90, true, true, 'm', 60, '', $EN(true, true, true), 1, true) === '429'
+	&& gv_served(0, false, true, 'v', 60, 'deny', $EN(true, true, true), 1, true) === '403');
+t_ok('an operator deny needs enforce.block and applies to any method',
+	gv_served(0, false, true, 'v', 60, 'deny', $EN(true, false, false), 0, false) === '403'
+	&& gv_served(0, false, true, 'v', 60, 'deny', $EN(false, true, true), 0, false) === 'allow');
+t_ok('page rules off for the method (a POST without gate_post): no challenge, no score block, still 429',
+	gv_served(90, false, true, 'm', 60, '', $EN(true, true, true), 0, false) === 'allow'
+	&& gv_served(90, true, true, 'm', 60, '', $EN(true, true, true), 0, false) === '429');
+t_ok('a hard_block_score of 0 or less cannot block everybody through the mask',
+	gv_served(0, false, true, 'v', 0, '', $EN(false, true, true), 0, true) === 'allow');
+
+// Exemptions a client cannot award itself.
+$EXP = array('/admin/', '/payment-callback');
+$EXQ = array('route' => array('payment/', 'api/'));
+$FC  = array('/', '/index.php');
+$ex  = function ($path, $params = array()) use ($EXP, $EXQ, $FC) {
+	return gv_is_exempt(t_facts(array('path' => $path, 'params' => $params)), $EXP, $EXQ, $FC);
+};
+t_ok('a real exempt path and a real front-controller route are exempt',
+	$ex('/admin/index.php') && $ex('/index.php', array('route' => 'payment/zarinpal/callback')) && $ex('/', array('route' => 'api/torob')));
+t_ok('?route=payment/x appended to an SEO URL is NOT an exemption',
+	!$ex('/product/ps5-slim', array('route' => 'payment/x')) && !$ex('/category/games', array('route' => 'api/x')));
+t_ok('a dot segment, an empty segment or an encoded slash/dot never matches an exempt prefix',
+	!$ex('/admin/../product/x') && !$ex('/admin/./x') && !$ex('/admin//x') && !$ex('//admin/x')
+	&& !$ex('/admin/%2e%2e/product/x') && !$ex('/admin/..%2fproduct') && !$ex('/admin/x\\..\\y'));
+t_ok('without a path list (old callers) parameter exemptions behave as before',
+	gv_is_exempt(t_facts(array('path' => '/product/x', 'params' => array('route' => 'payment/x'))), $EXP, $EXQ) === true);
+t_ok('the front-controller list has a default', gv_cfg_defaults(array())['exempt_params_paths'] === array('/', '/index.php'));
+
+// One spelling per address; IPv6 counted per /64.
+t_ok('IPv4 is its own key and its own network', gv_ip_canon('203.0.113.7') === '203.0.113.7' && gv_ip_net('203.0.113.7') === '203.0.113.7');
+t_ok('IPv6 spellings collapse to one',
+	gv_ip_canon('2001:DB8::7') === '2001:db8::7' && gv_ip_canon('2001:0db8:0:0:0:0:0:7') === '2001:db8::7');
+t_ok('an IPv4-mapped IPv6 address is the IPv4 address', gv_ip_canon('::ffff:203.0.113.7') === '203.0.113.7');
+t_ok('every address of one /64 shares a network key',
+	gv_ip_net('2001:db8:1:2::1') === '2001:db8:1:2::/64' && gv_ip_net('2001:db8:1:2:aaaa:bbbb:cccc:dddd') === '2001:db8:1:2::/64'
+	&& gv_ip_net('2001:db8:1:3::1') !== gv_ip_net('2001:db8:1:2::1'));
+t_ok('garbage is returned unchanged, never an exception',
+	gv_ip_canon('not:an:ip') === 'not:an:ip' && gv_ip_net('') === '' && gv_ip_canon('') === '');
+
+// Cookie candidates.
+t_ok('an array cookie (_gv[]=x) yields no candidate and no warning', gv_cookie_values('_gv', array('_gv' => array('x')), '_gv[]=x') === array());
+t_ok('PHP\'s pick comes first, then every other value of the same name from the raw header',
+	gv_cookie_values('_gv', array('_gv' => 'stale'), 'a=1; _gv=stale; _gv=fresh; b=2') === array('stale', 'fresh'));
+t_ok('other cookies and look-alike names are ignored', gv_cookie_values('_gv', array(), 'x_gv=1; _gvx=2; _gv =ok') === array('ok'));
+t_ok('at most four candidates, and an oversized header is not parsed',
+	count(gv_cookie_values('_gv', array(), '_gv=a; _gv=b; _gv=c; _gv=d; _gv=e; _gv=f')) === 4
+	&& gv_cookie_values('_gv', array(), str_repeat('_gv=a; ', 4000)) === array());
+
+// Hand-edited config values.
+$hc = gv_cfg_defaults(array('limits' => array('device' => 0, 'ip' => '1,200', 'window' => -5, 'ip_ua' => '250', 'bot' => 'x'),
+	'token_ttl' => 'x', 'nonce_ttl' => 0, 'enforce' => array('block' => 'false', 'challenge' => 'on', 'ratelimit' => 0)));
+t_ok('a limit that is not a positive whole number falls back to its default',
+	$hc['limits']['device'] === 150 && $hc['limits']['ip'] === 1200 && $hc['limits']['window'] === 300 && $hc['limits']['bot'] === 600);
+t_ok('a numeric string limit is accepted as its number', $hc['limits']['ip_ua'] === 250);
+t_ok('a non-numeric lifetime falls back (a token must expire)', $hc['token_ttl'] === 604800 && $hc['nonce_ttl'] === 120);
+t_ok("enforce 'false' / 0 read as off and 'on' as on", $hc['enforce']['block'] === false && $hc['enforce']['ratelimit'] === false && $hc['enforce']['challenge'] === true);
+
+// One nonce, one device.
+t_ok('a token made from a nonce id has a device id derived from it, the same every time',
+	gv_tok_check(gv_tok_make('s3', 'aabbccddeeff0011'), 's3', 60) === gv_tok_check(gv_tok_make('s3', 'aabbccddeeff0011'), 's3', 60)
+	&& gv_tok_check(gv_tok_make('s3', 'aabbccddeeff0011'), 's3', 60) !== gv_tok_check(gv_tok_make('s3', 'aabbccddeeff0012'), 's3', 60)
+	&& preg_match('/^[0-9a-f]{24}$/', gv_tok_check(gv_tok_make('s3', 'aabbccddeeff0011'), 's3', 60)) === 1);
+t_ok('the derived device id depends on the secret', gv_tok_check(gv_tok_make('s3', 'aabbccddeeff0011'), 's3', 60) !== gv_tok_check(gv_tok_make('s4', 'aabbccddeeff0011'), 's4', 60));
+t_ok('without a nonce id the device id is random', gv_tok_check(gv_tok_make('s3'), 's3', 60) !== gv_tok_check(gv_tok_make('s3'), 's3', 60));
+$fut = (time() + 600) . '.' . '00112233aabbccdd' . '.0';
+$fut .= '.' . hash_hmac('sha256', $fut . '|' . gv_nonce_bind('ua', ''), 's3');
+t_ok('a nonce dated well in the future is refused', gv_nonce_check($fut, 's3', 120, 'ua', '') === false);
+$near = (time() + 10) . '.' . '00112233aabbccdd' . '.0';
+$near .= '.' . hash_hmac('sha256', $near . '|' . gv_nonce_bind('ua', ''), 's3');
+t_ok('a few seconds of clock skew are tolerated', gv_nonce_check($near, 's3', 120, 'ua', '') === true);
+
+// Settings that would switch the guard off, or the shop, in one click.
+t_ok('the overlay refuses an exempt path that covers the whole site',
+	gv_overlay_validate('exempt_paths', array('/'))[0] === false && gv_overlay_validate('exempt_paths', array('/a'))[0] === false
+	&& gv_overlay_validate('exempt_paths', array('/admin/'))[0] === true);
+t_ok('the overlay refuses a bot fragment that matches every browser',
+	gv_overlay_validate('known_bots', array('a'))[0] === false && gv_overlay_validate('known_bots', array('mozilla'))[0] === false
+	&& gv_overlay_validate('preview_bots', array('chrome'))[0] === false && gv_overlay_validate('known_bots', array('bingbot'))[0] === true);
+t_ok('the overlay refuses a honeypot on the home page', gv_overlay_validate('honeypot_path', '/')[0] === false && gv_overlay_validate('honeypot_path', '/old-archive')[0] === true);
+t_ok('proof-of-work is capped where a phone can still solve it', gv_overlay_validate('challenge.pow_bits', 24)[0] === false && gv_overlay_validate('challenge.pow_bits', 22)[0] === true);
+t_ok('gate_post and the unverified-bot budget are tunable; trust_headers still is not',
+	gv_overlay_validate('challenge.gate_post', true) === array(true, true) && gv_overlay_validate('limits.bot_unverified', 50) === array(true, 50)
+	&& gv_overlay_validate('challenge.trust_headers', true)[0] === false);
+$lr = gv_log_row(t_facts(array('method' => str_repeat('M', 500), 'sf' => str_repeat('s', 9000))), gv_state_new(), 'allow', 0, microtime(true));
+t_ok('the method and Sec-Fetch-Mode are capped in the log row', strlen($lr['m']) === 16 && strlen($lr['sf']) === 32);
 t_ok('trust_headers restores the old rule: only a navigation is gated',
 	gv_is_gate(t_facts(), true) === true
 	&& gv_is_gate(t_facts(array('accept' => '*/*')), true) === false
@@ -215,7 +331,8 @@ $gate_cfg = gv_cfg_defaults(array());
 t_ok('trust_headers defaults to off', $gate_cfg['challenge']['trust_headers'] === false);
 t_ok('the long-window device budgets and the preview budget have defaults',
 	$gate_cfg['limits']['device_hour'] === 400 && $gate_cfg['limits']['device_day'] === 1500
-	&& $gate_cfg['limits']['preview'] === 60);
+	&& $gate_cfg['limits']['preview'] === 20 && $gate_cfg['limits']['bot_unverified'] === 300
+	&& $gate_cfg['limits']['mint'] === 300 && $gate_cfg['challenge']['gate_post'] === false);
 t_ok('a config file without them still gets them (old installs keep working)',
 	gv_cfg_defaults(array('limits' => array('device' => 7)))['limits']['device_hour'] === 400
 	&& gv_cfg_defaults(array('limits' => array('device' => 7)))['limits']['device'] === 7);
@@ -615,7 +732,7 @@ for ($i = 0; $i < count($run_lines); $i++) {
 	}
 }
 t_ok('every return path in gv_run arms outcome capture (' . $armed_returns . ' armed)',
-	$armed_returns === 6 && $bare_returns === 0);
+	$armed_returns === 7 && $bare_returns === 0);
 t_ok('no exit path arms outcome capture', $armed_exits === 0);
 
 // --------------------------------------------------------------------------

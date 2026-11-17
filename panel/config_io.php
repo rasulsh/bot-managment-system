@@ -31,6 +31,15 @@ function gp_audit_path() {
 function gp_audit_append(array $row) {
 	try {
 		$row = array_merge(array('ts' => round(microtime(true), 3)), $row);
+		// Bounded fields. The login form writes the attempted username here
+		// before any authentication: unbounded, one megabyte-long "username"
+		// filled the tail the audit view reads and hid every real entry.
+		foreach (array('actor' => 64, 'ip' => 64, 'key' => 100, 'event' => 40) as $field => $max) {
+			if (isset($row[$field])) {
+				$v = is_scalar($row[$field]) ? (string)$row[$field] : '';
+				$row[$field] = strlen($v) > $max ? substr($v, 0, $max) . '...' : $v;
+			}
+		}
 		$flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
 		if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) { $flags |= JSON_INVALID_UTF8_SUBSTITUTE; }
 		$line = json_encode($row, $flags);
@@ -180,15 +189,28 @@ function gp_config_save(array $proposed, $actor, $client_ip) {
 		return array('ok' => false, 'errors' => $errors, 'applied' => array());
 	}
 
-	$diff = gp_overlay_diff($clean);
-	if (!$diff) {
-		return array('ok' => true, 'errors' => array(), 'applied' => array());
-	}
-
-	$merged = array_merge(gp_overlay_current(), $clean);
-	if (!gp_overlay_write($merged)) {
-		return array('ok' => false, 'errors' => array('_write' => 'write_failed'),
-			'applied' => array());
+	// Read, merge and write under one lock. Without it two saves at the same
+	// moment each merged into the overlay they had read, and the later rename
+	// silently discarded the other one's change while both reported success.
+	$lock = @fopen(gv_overlay_path() . '.lock', 'c');
+	if ($lock) { @flock($lock, LOCK_EX); }
+	try {
+		$diff = gp_overlay_diff($clean);
+		if (!$diff) {
+			return array('ok' => true, 'errors' => array(), 'applied' => array());
+		}
+		// Only the keys that actually change go into the overlay. The form posts
+		// every field; merging all of them pinned each one to today's value, so
+		// a later edit of config.php for any of them was silently shadowed.
+		$changed = array();
+		foreach ($diff as $change) { $changed[$change['key']] = $clean[$change['key']]; }
+		$merged = array_merge(gp_overlay_current(), $changed);
+		if (!gp_overlay_write($merged)) {
+			return array('ok' => false, 'errors' => array('_write' => 'write_failed'),
+				'applied' => array());
+		}
+	} finally {
+		if ($lock) { @flock($lock, LOCK_UN); @fclose($lock); }
 	}
 
 	foreach ($diff as $change) {
@@ -229,6 +251,9 @@ function gp_overlay_write(array $flat) {
 		// An empty overlay must still be a JSON object, never [].
 		$json = $flat ? json_encode($flat, $flags) : '{}';
 		if ($json === false) { return false; }
+		// The guard ignores an overlay over 256 KiB as a whole. Writing one would
+		// report "saved" and silently switch every panel setting off.
+		if (strlen($json) > 200000) { return false; }
 		$tmp = $path . '.tmp' . bin2hex(random_bytes(4));
 		if (@file_put_contents($tmp, $json . "\n", LOCK_EX) === false) {
 			@unlink($tmp);

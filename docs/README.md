@@ -272,6 +272,8 @@ Python (`analyzer/decision.py`); the parity test fails until they agree exactly
 - [`analyzer/README.md`](analyzer/README.md) — analyzer internals in depth.
 - [`docs/05-ACCESS-LOG-REPORT.md`](docs/05-ACCESS-LOG-REPORT.md) — the daily
   access-log report that finds slow scrapers on changing addresses.
+- [`docs/06-KNOWN-LIMITS.md`](docs/06-KNOWN-LIMITS.md) — what the guard cannot do,
+  what degraded mode switches off, and what Redis and the server must provide.
 
 ## Requirements
 

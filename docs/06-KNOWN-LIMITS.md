@@ -1,0 +1,122 @@
+# Known limits and operating requirements
+
+What the guard does not do, what it loses when a dependency is unhealthy, and
+what the server around it has to provide. None of this is hidden behaviour; it is
+collected here so that nobody has to find it out in production.
+
+## What a challenge can and cannot stop
+
+- A client that runs no JavaScript gets no token and no page. That is the large
+  majority of price scrapers.
+- A client that solves the challenge pays for it: two requests and a proof of
+  work per token (about 60,000 SHA-256 hashes at `pow_bits = 16`; milliseconds in
+  compiled code, tens of milliseconds in a script). A token is then bounded by
+  `limits.device`, `limits.device_hour` and `limits.device_day`.
+- A headless browser that throws its token away when a budget runs out gets a
+  fresh one for the same price. The only levers are `challenge.pow_bits` (each
+  extra bit doubles the cost, for visitors too) and lower budgets. A patient,
+  well-funded scraper with a real browser and many addresses is slowed and made
+  visible, not stopped.
+- `limits.mint` caps tokens per address (per /64 for IPv6). On a carrier address
+  shared by many people it is deliberately generous (300 per window): a low value
+  lets one client use the budget up and lock new visitors out for the window.
+
+## Redis
+
+Redis holds every counter, override and verdict. Requirements:
+
+- **Its own instance or database, with `maxmemory-policy noeviction`.** Under an
+  evicting policy a flood of new clients pushes out operator deny overrides,
+  verdicts and nonce claims. Every key has a TTL, so `volatile-*` policies evict
+  them just the same.
+- **`redis.host` must be an IP literal, `localhost` or a socket path.** A host
+  name is resolved by the system resolver, which the configured timeout does not
+  cover: a slow resolver stalls every request.
+- Memory: about two short-lived keys per distinct client per window plus three
+  per device token (5 minutes, 1 hour, 24 hours). A million distinct clients in
+  one window is a few hundred megabytes.
+
+**Degraded mode** (Redis down, the breaker armed, or Redis refusing writes) keeps
+the site up and the stateless challenge working. It switches off:
+
+- every rate limit and device budget,
+- operator allow and deny overrides,
+- bot verdicts: any User-Agent that names a known crawler takes the crawler pass,
+  unmetered, for as long as Redis is down (showing a real crawler 503s for the
+  length of an outage costs more),
+- link-preview passes (no counter, no pass),
+- honeypot history,
+- nonce single-use and mint metering (one nonce can be replayed, but always
+  yields the same device id).
+
+Rows written in degraded mode carry `rd=1`, and `logs/guard-errors.log` names the
+reason at most once a minute per reason. Watch that file.
+
+The breaker arms after two timeouts within ten seconds, or one refused
+connection, and then skips Redis for `breaker_ttl` (5 s).
+
+## Exemptions
+
+- `exempt_paths` is a prefix match on the raw path: `/admin` also covers
+  `/administrator`. End entries with `/` when you mean a directory.
+- An exempt request skips everything, including an operator deny.
+- Server-to-server GETs (feeds, price APIs, gateway callbacks made by GET, cron
+  URLs, uptime monitors, including HEAD checks) have no cookie and must be exempt
+  before `enforce.challenge` is switched on.
+- Until `challenge.gate_post` is on, a POST is never challenged. If the
+  application renders a page for a POST, that is a way round the challenge.
+
+## Crawlers
+
+- Only crawlers in `known_bots` pass. Every other crawler, monitor and SEO tool
+  gets the 503 challenge page on every visit.
+- A claim is verified out of band by `analyzer-cron.sh verify` (reverse DNS that
+  forward-confirms). Until then it draws on `limits.bot_unverified`, one budget
+  per crawler name for the whole site. **Without that cron job a real crawler
+  never leaves the shared budget**, and anybody sending the same User-Agent can
+  use it up.
+- Verification handles 200 addresses per run, busiest first.
+
+## Signals from the analyzer: leave them off for now
+
+`signals.reputation`, `signals.ml` and `signals.clf` add the analyzer's verdicts
+to a visitor's score. The review found that, as trained today, they are not safe
+to enforce:
+
+- The classifier's "bot" examples are all token-less clients and its "human"
+  examples all token-bearing ones, so its measured precision says nothing; fast
+  but ordinary shoppers (many tabs, a quick purchase) score as bots.
+- Reputation and the anomaly score have no minimum amount of evidence: a visitor
+  with one or a handful of requests can receive a strong verdict.
+- A scraper that solves the challenge and never touches the honeypot is counted
+  as a human, in reputation and in the training data.
+
+The verdicts are still computed and logged (`rep`, `ml`, `clf` on every row) when
+the cron jobs run, which is how they can be evaluated. Do not switch the three
+`signals.*` toggles on until that has been done on real traffic.
+
+Model files are Python pickles. Loading one runs code, so the `analyzer/`
+directory must be writable only by the user the cron jobs run as.
+
+## Other
+
+- **Holdout** (`holdout_pct`, default 0): membership is a hash of the device id
+  or address. A client can find an identity that lands in the slice by trying a
+  few dozen. Keep it at 0 unless you are measuring, and change `holdout_salt`.
+- **Honeypot**: a hit marks the address for seven days. On a carrier address
+  that is everybody behind it (+40 on the score, which alone does not block).
+- **LiteSpeed Cache / CDN**: a page served from a public cache never reaches PHP,
+  so the guard neither sees nor limits it. Guard responses carry
+  `Cache-Control: no-store` and `X-LiteSpeed-Cache-Control: no-cache`.
+- **`.user.ini`** changes take up to five minutes (PHP's `user_ini.cache_ttl`).
+  The only instant switch is the kill file: `touch /full/path/bot-guard/guard.off`.
+- **File permissions**: `guard/config.php` holds the HMAC secret; `chmod 600` it.
+  Logs contain addresses, paths and the first 100 characters of query strings
+  (which can include tokens from links in e-mails): keep the project directory
+  outside the web root, or verify with `scripts/exposure-check.sh`.
+- **Time zones**: log files are named by PHP's date. `guard-logrotate.sh` leaves
+  any file written in the last hour alone, so a different system time zone is
+  harmless; the analyzer reads the newest files by its own date, so keep PHP and
+  the system on the same time zone.
+- **PHP 8.0+** is required. Below that `prepend.php` returns at once and the
+  guard does nothing, silently.

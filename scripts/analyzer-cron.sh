@@ -54,7 +54,13 @@ case "$MODE" in
 		;;
 esac
 
-LOCK="$ROOT/analyzer/.$MODE.lock"
+# Every mode that writes models or verdicts shares ONE lock: nightly, the two
+# training modes and the worker (which runs the same code in-process) must never
+# run side by side. Read-mostly modes keep a lock of their own.
+case "$MODE" in
+	nightly|train|train-clf|worker) LOCK="$ROOT/analyzer/.write.lock" ;;
+	*)                              LOCK="$ROOT/analyzer/.$MODE.lock" ;;
+esac
 
 if ! command -v flock >/dev/null 2>&1; then
 	echo "flock not available: running $MODE without a lock"

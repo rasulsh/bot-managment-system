@@ -61,7 +61,7 @@ def _read_file(path, opener):
                 row = json.loads(line)
             except Exception:
                 continue                  # skip the bad line, keep the file
-            if isinstance(row, dict):
+            if isinstance(row, dict) and _clean(row):
                 rows.append(row)
     except Exception:
         pass
@@ -160,3 +160,26 @@ def device_history(sessions):
     for session in sessions:
         history.setdefault(session['key'], []).extend(session['rows'])
     return history
+
+
+# Fields every consumer reads with int(). The guard always writes numbers, but a
+# log can be hand-edited or damaged, and one row with a string or a list in one
+# of these used to raise in whichever job read it first: nightly, snapshot,
+# report and replay all died on it, and under cron nobody saw why.
+_INT_FIELDS = ('nav', 'gate', 'aj', 'al', 'hc', 'sc', 'esc', 'cd', 'cdh', 'cdd', 'ciu', 'ci',
+               'rd', 'hp', 'rep', 'ml', 'clf', 'hold', 'sh', 'st', 'by')
+
+
+def _clean(row):
+    """Coerce the integer fields of a row in place; False drops the row."""
+    for name in _INT_FIELDS:
+        value = row.get(name)
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+            continue
+        try:
+            if isinstance(value, (list, dict)):
+                return False
+            row[name] = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return False
+    return True

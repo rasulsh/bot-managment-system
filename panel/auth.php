@@ -332,17 +332,26 @@ function gp_attempts_bump_file($bucket, $window) {
 	$file = gp_attempts_file($bucket);
 	$now = time();
 	$state = array('n' => 0, 'start' => $now);
-	if (is_file($file)) {
-		$raw = @file_get_contents($file);
-		$decoded = $raw === false ? null : json_decode($raw, true);
-		if (is_array($decoded) && isset($decoded['n'], $decoded['start'])
-			&& ($now - (int)$decoded['start']) < (int)$window) {
-			$state = array('n' => (int)$decoded['n'], 'start' => (int)$decoded['start']);
-		}
+	// Read, increment and write under one lock on one handle. Reading without
+	// the lock while another request truncated the file made a reader see an
+	// empty counter and start again at 1: sixty parallel guesses all got through.
+	$fh = @fopen($file, 'c+');
+	if (!$fh) { return GP_LOGIN_MAX_ATTEMPTS + 1; }           // cannot count: lock out
+	@chmod($file, 0600);
+	if (!@flock($fh, LOCK_EX)) { @fclose($fh); return GP_LOGIN_MAX_ATTEMPTS + 1; }
+	$raw = stream_get_contents($fh);
+	$decoded = ($raw === false || $raw === '') ? null : json_decode($raw, true);
+	if (is_array($decoded) && isset($decoded['n'], $decoded['start'])
+		&& ($now - (int)$decoded['start']) < (int)$window) {
+		$state = array('n' => (int)$decoded['n'], 'start' => (int)$decoded['start']);
 	}
 	$state['n']++;
-	@file_put_contents($file, json_encode($state), LOCK_EX);
-	@chmod($file, 0600);
+	rewind($fh);
+	ftruncate($fh, 0);
+	fwrite($fh, json_encode($state));
+	fflush($fh);
+	@flock($fh, LOCK_UN);
+	@fclose($fh);
 	return $state['n'];
 }
 
@@ -390,8 +399,9 @@ function gp_login_record_failure() {
 function gp_login_attempt($username, $password) {
 	$cfg = gp_panel_config();
 	if ($cfg === null) { return array(false, 'login_failed'); }
-	$username = (string)$username;
-	$password = (string)$password;
+	// A form field can arrive as an array (username[]=x); that is not a login.
+	$username = is_string($username) ? $username : '';
+	$password = is_string($password) ? $password : '';
 
 	if (gp_login_locked($username)) {
 		gp_audit_append(array('event' => 'login_locked', 'actor' => $username,

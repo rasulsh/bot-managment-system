@@ -1,6 +1,7 @@
 logs/*.jsonl
 logs/*.gz
 guard.off
+guard/config.local.json.lock
 
 # Phase 2 analyzer artefacts: all derived from real traffic, never committed.
 analyzer/model.joblib

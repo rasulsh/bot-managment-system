@@ -2125,5 +2125,94 @@ ok('every Redis consumer connects through redis_io.connect()',
 
 # ---------------------------------------------------------------------------
 print('')
+# ---------------------------------------------------------------------------
+section('Review hardening')
+
+from analyzer import botverify as bv_h                       # noqa: E402
+from analyzer import run_verify as rv_h                      # noqa: E402
+from analyzer import decision as dec_h                       # noqa: E402
+from analyzer import logs as logs_h                          # noqa: E402
+from analyzer import model as model_h                        # noqa: E402
+import json
+import time
+
+
+class DyingResolver(object):
+    """Answered the canary a moment ago, dead now: every lookup is 'not found'."""
+    def __init__(self):
+        self.calls = []
+
+    def ptr(self, ip):
+        raise bv_h.DnsNotFound('nxdomain')
+
+    def forward(self, host):
+        raise bv_h.DnsNotFound('nxdomain')
+
+    def healthy(self, fresh=False):
+        self.calls.append(fresh)
+        return (not fresh)                    # the cached answer says alive; a fresh check says dead
+
+
+dying = DyingResolver()
+ok('a negative answer from a resolver that died after its last health check is NOT a bad verdict',
+   bv_h.verify_ip('66.249.66.1', 'googlebot', {'googlebot': ['.googlebot.com']}, dying) == 'unknown')
+ok('...because the health check after a negative answer is always a fresh one', dying.calls == [True])
+
+
+class OldStyleResolver(object):
+    def ptr(self, ip):
+        raise bv_h.DnsNotFound('nxdomain')
+
+    def forward(self, host):
+        return []
+
+    def healthy(self):
+        return True
+
+
+ok('an injected resolver whose healthy() takes no argument still works',
+   bv_h.verify_ip('203.0.113.9', 'googlebot', {'googlebot': ['.googlebot.com']}, OldStyleResolver()) == 'bad')
+ok('an IPv4-mapped IPv6 spelling of the same address matches',
+   bv_h._same_address('::ffff:66.249.66.1', '66.249.66.1') and not bv_h._same_address('::ffff:66.249.66.1', '66.249.66.2'))
+
+hr_rows = ([{'bot': 'googlebot', 'ip': '10.0.0.%d' % i} for i in range(1, 60)]
+           + [{'bot': 'googlebot', 'ip': '66.249.66.1'} for _ in range(40)]
+           + [{'bot': 'unlisted', 'ip': '9.9.9.9'} for _ in range(99)])
+hr_counts = rv_h.claim_counts(hr_rows, ['googlebot'])
+hr_order = rv_h.lookup_order(rv_h.collect_bot_ips(hr_rows, ['googlebot']), hr_counts)
+ok('verification looks at the busiest claimant first, not the lowest address',
+   hr_order[0] == '66.249.66.1' and hr_counts['66.249.66.1'] == 40 and '9.9.9.9' not in hr_counts)
+ok('ties keep a stable address order', hr_order[1:4] == ['10.0.0.1', '10.0.0.10', '10.0.0.11'])
+
+ok('rounding matches PHP at the binary-fraction boundaries',
+   dec_h.php_round(0.7 * 85) == 60 and dec_h.php_round(0.35 * 90) == 32
+   and dec_h.php_round(0.5) == 1 and dec_h.php_round(1.5) == 2 and dec_h.php_round(-0.5) == -1
+   and dec_h.php_round(59.4) == 59)
+hr_php = shutil.which('php')
+if hr_php:
+    hr_code = ('$o=[];for($w=0;$w<=200;$w++){for($l=0;$l<=100;$l++){$o[]=(int)round($l*($w/100));}}'
+               'echo implode(",",$o);')
+    hr_out = subprocess.run([hr_php, '-r', hr_code], stdout=subprocess.PIPE, universal_newlines=True).stdout
+    hr_php_vals = [int(x) for x in hr_out.split(',')]
+    hr_py_vals = [dec_h.php_round(l * (w / 100.0)) for w in range(201) for l in range(101)]
+    ok('...and for every weight 0.00-2.00 x level 0-100 (%d cases)' % len(hr_py_vals), hr_php_vals == hr_py_vals)
+
+hr_dir = tempfile.mkdtemp(prefix='gv-hard-')
+with open(os.path.join(hr_dir, 'guard-%s.jsonl' % time.strftime('%Y%m%d')), 'w') as fh:
+    fh.write(json.dumps({'v': 5, 'ts': time.time(), 'nav': 1, 'hp': 0, 'act': 'allow'}) + '\n')
+    fh.write(json.dumps({'v': 5, 'ts': time.time(), 'nav': '1', 'hp': 0.0, 'act': 'allow'}) + '\n')
+    fh.write(json.dumps({'v': 5, 'ts': time.time(), 'nav': [1], 'hp': 0, 'act': 'allow'}) + '\n')
+    fh.write(json.dumps({'v': 5, 'ts': time.time(), 'nav': 'yes', 'hp': 0, 'act': 'allow'}) + '\n')
+hr_read = list(logs_h.read_lines(hr_dir, 1))
+ok('a row with a wrong-typed integer field is coerced when it can be and dropped when it cannot',
+   len(hr_read) == 2 and all(r['nav'] == 1 and isinstance(r['nav'], int) for r in hr_read))
+
+hr_model = os.path.join(hr_dir, 'm.joblib')
+model_h._dump_atomic({'a': 1}, hr_model)
+ok('a model is written through a temp file and no temp file is left behind',
+   os.path.isfile(hr_model) and [n for n in os.listdir(hr_dir) if '.tmp.' in n] == [])
+shutil.rmtree(hr_dir, ignore_errors=True)
+ok('reputation expires in two weeks, not a month', config_mod.DEFAULTS['rep_ttl'] == 1209600)
+
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)
