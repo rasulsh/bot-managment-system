@@ -239,9 +239,24 @@ Then, per the tool's own post-install advice:
 2. Make sure the `snapshot` and `worker` cron lines from Step 4 are present.
 3. Open `panel/index.php` in a browser and sign in.
 
-Optionally lock the panel to your own IP range: edit `panel.config.php` and set
-`ip_allowlist` to a list of IPv4 CIDRs (e.g. `array('203.0.113.0/24')`); empty
-disables it.
+Optionally lock the panel to your own IP addresses: edit `panel/panel.config.php`
+and set `ip_allowlist` to single IPv4/IPv6 addresses or CIDR ranges, for example
+`array('203.0.113.7', '198.51.100.0/24', '2001:db8::/32')`.
+
+- An empty list means no IP restriction (the login still applies). The panel shows
+  a notice on the dashboard while the list is empty.
+- A non-empty list in which no entry is valid locks everyone out, on purpose: a typo
+  must never switch the restriction off. Fix the file to get back in.
+- If the panel is behind your own reverse proxy, load balancer or CDN, add that
+  proxy's address to `trusted_proxies`. Only a request that arrives from a trusted
+  proxy may name the client in `X-Forwarded-For`; otherwise the header is ignored.
+  Leave `trusted_proxies` empty when there is no proxy.
+- The same client address is used for the allowlist, the login rate limit and the
+  audit trail. Re-running `setpass.php` keeps both lists.
+
+Every panel response carries `X-Robots-Tag: noindex, nofollow, noarchive, nosnippet`
+and a robots meta tag. Do **not** add the panel path to `robots.txt`: it would
+publish the path, and crawlers that obey it would never see the noindex header.
 
 ---
 

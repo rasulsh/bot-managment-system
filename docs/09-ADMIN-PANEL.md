@@ -88,7 +88,8 @@ ignores `.htaccess`, put `panel/` outside the document root and alias only
 | **CSRF** | Per-session token in a hidden field on every state-changing POST, verified with `hash_equals`. GET routes never change state. |
 | **Login rate limit** | 5 attempts per 15 minutes per IP (`gp:login:{ip}`), plus a second global counter across all addresses (`gp:login:user`) at four times that, so an attempt spread over many IPs is caught too. Wrong user and wrong password give an identical message and an identical response time. |
 | **Redis down** | The limiter falls back to a **file counter**, not to no limit. This is the one place in the whole system that deliberately does **not** fail open. |
-| **IP allowlist** | Optional `ip_allowlist` in `panel/panel.config.php`: an array of CIDRs, empty means disabled. Set it if the panel is reachable from the internet. |
+| **IP allowlist** | Optional `ip_allowlist` in `panel/panel.config.php`: IPv4 and IPv6 addresses or CIDR ranges. Empty means no restriction (default, so upgrades lock nobody out); a non-empty list with no valid entry refuses everyone (fail closed). It is checked before any route, login included. `X-Forwarded-For` is read only when the connection comes from an address in `trusted_proxies`, walking from the right past trusted hops. The same address feeds the login rate limit and the audit trail. |
+| **Search engines** | `X-Robots-Tag: noindex, nofollow, noarchive, nosnippet` on every response (PHP, and `.htaccess` for assets and server errors) plus a robots meta tag. No `robots.txt`, on purpose. |
 | **Audit trail** | Every accepted config change, override, job and login — success *and* failure — appends one JSONL line to `panel/audit.jsonl` with timestamp, actor, key, old value, new value and client IP. Append-only; the panel offers no delete. An untraceable config change in a security tool is unacceptable. |
 
 Nothing sensitive is committed: `panel/panel.config.php`, `panel/audit.jsonl`,
@@ -176,3 +177,11 @@ expiry and tampering, CSRF, the login rate limit with Redis up *and* down, store
 XSS (asserted by parsing the rendered HTML with `DOMDocument` and counting what a
 browser would actually execute, not by matching a regex), and a token-level scan
 proving no shell function, backtick or `eval` exists under `panel/`.
+
+## Themes
+
+The sidebar and login page have a Light / Dark / Automatic switcher. The choice is kept in the browser (`localStorage`, key `gp_theme`) and applied before first paint, so there is no flash. Automatic follows the system setting. All colours are CSS variables defined once in `panel/assets/app.src.css`; the self-test checks the contrast of every text/background pair in both themes (4.5:1 for text, 3:1 for control borders). The switcher needs JavaScript; without it the panel follows the system setting.
+
+## Why the panel is still exposed by symlink
+
+Replacing the symlink with an `.htaccess` rewrite was tested on Apache 2.4 with mod_php. A per-directory `RewriteRule` cannot target a path outside the document root: Apache prepends the docroot, so the panel answers 404. `Alias` would work but needs the server or vhost config, which shared hosting does not give you. A small PHP stub in the docroot that `require`s the real panel would work, but it adds a second entry point that must repeat every guard (allowlist, headers, direct-access rules). Not worth the extra attack surface, so the symlink stays. OpenLiteSpeed was not tested.

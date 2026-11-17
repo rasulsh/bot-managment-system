@@ -40,6 +40,11 @@ function gp_hardening_headers() {
 	header('X-Content-Type-Options: nosniff');
 	header('Referrer-Policy: no-referrer');
 	header('X-Frame-Options: DENY');
+	// Keep every panel response out of search results. Together with the robots
+	// meta tag in layout.php; robots.txt is deliberately NOT used (see
+	// docs/09-ADMIN-PANEL.md): it would announce the panel's URL and stop crawlers
+	// from ever reading this header.
+	header('X-Robots-Tag: noindex, nofollow, noarchive, nosnippet');
 	header('Cache-Control: no-store, no-cache, must-revalidate');
 	// 'unsafe-inline' for scripts is required because every enhancement in this
 	// panel is a small inline block - there is no bundler and no external JS.
@@ -60,6 +65,7 @@ function gp_bare_404() {
 	if (!headers_sent()) {
 		http_response_code(404);
 		header('Content-Type: text/plain; charset=utf-8');
+		header('X-Robots-Tag: noindex, nofollow');
 	}
 	exit;
 }
@@ -221,6 +227,7 @@ switch ($gp_route) {
 			'health'   => gp_guard_health(),
 			'rinfo'    => gp_redis_info(),
 			'exposed'  => gp_exposure_warning(),
+			'ip_open'  => empty($gp_cfg['ip_allowlist']),
 		));
 
 	case 'logs':

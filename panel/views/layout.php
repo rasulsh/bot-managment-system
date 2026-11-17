@@ -4,7 +4,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex,nofollow">
+<meta name="robots" content="noindex,nofollow,noarchive,nosnippet">
+<meta name="color-scheme" content="light dark">
+<script>
+// Apply the saved theme before the first paint, so there is no flash. "system"
+// (nothing saved) leaves the attribute off and the OS preference decides.
+(function () {
+	try {
+		var t = window.localStorage.getItem('gp_theme');
+		if (t === 'light' || t === 'dark') { document.documentElement.setAttribute('data-theme', t); }
+	} catch (e) {}
+})();
+</script>
 <title><?= gp_e(gp_t('app_name')) ?> — <?= gp_e(gp_t('app_sub')) ?></title>
 <link rel="stylesheet" href="assets/app.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#128737;</text></svg>">
@@ -23,6 +34,7 @@
 		</a>
 		<form method="post" action="index.php?r=logout" class="gp-topbar-actions">
 			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
+			<?php require __DIR__ . '/theme_switch.php'; ?>
 			<span class="gp-user"><?= gp_e($user) ?></span>
 			<button type="submit" class="gp-btn gp-btn-ghost"><?= gp_e(gp_t('logout')) ?></button>
 		</form>
@@ -84,9 +96,38 @@
 
 <script>
 // Progressive enhancement only: every action on every page works with this
-// block removed. No framework, no bundler, no network call.
+// block removed (the theme then simply follows the system setting). No framework, no bundler, no network call.
 (function () {
 	'use strict';
+	// Theme switcher: light, dark, or follow the system. The choice lives in this
+	// browser (localStorage) and is applied before first paint by the head script.
+	(function () {
+		var buttons = document.querySelectorAll('[data-theme-set]');
+		var current = function () {
+			try {
+				var t = window.localStorage.getItem('gp_theme');
+				return (t === 'light' || t === 'dark') ? t : 'system';
+			} catch (e) { return 'system'; }
+		};
+		var show = function (value) {
+			buttons.forEach(function (b) {
+				b.setAttribute('aria-pressed', b.getAttribute('data-theme-set') === value ? 'true' : 'false');
+			});
+		};
+		show(current());
+		buttons.forEach(function (button) {
+			button.addEventListener('click', function () {
+				var value = button.getAttribute('data-theme-set');
+				try {
+					if (value === 'system') { window.localStorage.removeItem('gp_theme'); }
+					else { window.localStorage.setItem('gp_theme', value); }
+				} catch (e) {}
+				if (value === 'system') { document.documentElement.removeAttribute('data-theme'); }
+				else { document.documentElement.setAttribute('data-theme', value); }
+				show(value);
+			});
+		});
+	})();
 	// Confirm dialogs for anything destructive or site-wide.
 	document.querySelectorAll('form[data-confirm]').forEach(function (form) {
 		form.addEventListener('submit', function (event) {

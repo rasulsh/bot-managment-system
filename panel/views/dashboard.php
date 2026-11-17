@@ -28,11 +28,15 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 </div>
 
 <?php if (!empty($exposed)): ?>
-<div class="gp-card" style="border-color:#c0392b">
+<div class="gp-card gp-card-danger">
 	<span class="gp-badge gp-badge-bad"><?= gp_e(gp_t('dash_exposed')) ?></span>
 	<p class="gp-help"><?= gp_e(gp_t('dash_exposed_help')) ?></p>
 	<p class="gp-mono" dir="ltr"><?= gp_e(implode('  ', $exposed)) ?></p>
 </div>
+<?php endif; ?>
+
+<?php if (!empty($ip_open)): ?>
+<div class="gp-note"><?= gp_e(gp_t('dash_ip_open')) ?></div>
 <?php endif; ?>
 
 <!-- The kill switch: the single most important control in this panel. -->
@@ -174,7 +178,7 @@ if (!empty($bv['unknown'])): ?>
 			<?= $rate === null ? gp_e(gp_t('unknown')) : gp_num($rate, 1) . '٪' ?>
 		</div>
 		<?php if ($rate !== null && $rate < 95): ?>
-		<div class="gp-kpi-hint" style="color:#e11d48">
+		<div class="gp-kpi-hint gp-text-bad">
 			<?= gp_e(gp_t('dash_challenge_hint')) ?>
 		</div>
 		<?php else: ?>
@@ -201,6 +205,7 @@ if (!empty($bv['unknown'])): ?>
 	</div>
 	<div class="gp-card">
 		<div class="gp-card-title"><?= gp_e(gp_t('dash_coverage')) ?></div>
+		<p class="gp-help"><?= gp_e(gp_t('dash_coverage_sub')) ?></p>
 		<?php foreach (array('rep', 'ml', 'clf') as $k):
 			$pc = (float)($coverage[$k] ?? 0); ?>
 		<div style="margin-bottom:.5rem">
@@ -236,8 +241,8 @@ if (!empty($bv['unknown'])): ?>
 	<div class="gp-card">
 		<div class="gp-card-title"><?= gp_e(gp_t('dash_decisions')) ?></div>
 		<?php echo gp_chart_bars($decisions, array('colors' => array(
-			'allow' => '#059669', 'challenge' => '#0284c7',
-			'403' => '#e11d48', '429' => '#d97706'))); ?>
+			'allow' => gp_chart_color('ok'), 'challenge' => gp_chart_color('info'),
+			'403' => gp_chart_color('bad'), '429' => gp_chart_color('warn')))); ?>
 	</div>
 </div>
 
@@ -246,13 +251,13 @@ if (!empty($bv['unknown'])): ?>
 		<div class="gp-card-title"><?= gp_e(gp_t('dash_chart_status')) ?></div>
 		<?php echo gp_chart_bars(
 			isset($s['status']) && is_array($s['status']) ? $s['status'] : array(),
-			array('color' => '#0284c7')); ?>
+			array('color' => gp_chart_color('info'))); ?>
 	</div>
 	<div class="gp-card">
 		<div class="gp-card-title"><?= gp_e(gp_t('dash_chart_reasons')) ?></div>
 		<?php echo gp_chart_bars(
 			isset($s['reasons']) && is_array($s['reasons']) ? $s['reasons'] : array(),
-			array('color' => '#7c3aed')); ?>
+			array('color' => gp_chart_color('accent'))); ?>
 	</div>
 </div>
 

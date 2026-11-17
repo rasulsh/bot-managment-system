@@ -1,5 +1,6 @@
 <?php if (!defined('GP_BOOT')) { http_response_code(404); exit; } ?>
 <div class="gp-login">
+	<div class="gp-theme-bare"><?php require __DIR__ . '/theme_switch.php'; ?></div>
 	<div class="gp-login-card">
 		<div class="gp-login-brand">
 			<span class="gp-brand-mark" aria-hidden="true">&#9679;</span>

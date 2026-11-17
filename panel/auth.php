@@ -61,9 +61,12 @@ function gp_panel_config() {
 			|| $cfg['session_ttl'] < 300) {
 			$cfg['session_ttl'] = 43200;
 		}
-		if (!isset($cfg['ip_allowlist']) || !is_array($cfg['ip_allowlist'])) {
-			$cfg['ip_allowlist'] = array();
-		}
+		// The two address lists are normalised by gp_ip_list(): a single string
+		// becomes a one-entry list, anything else that is not a list is kept as
+		// an empty ('misconfigured') list so gp_ip_allowed() can fail closed.
+		$cfg['ip_allowlist'] = isset($cfg['ip_allowlist']) ? gp_ip_list($cfg['ip_allowlist']) : array();
+		$cfg['trusted_proxies'] = isset($cfg['trusted_proxies']) ? gp_ip_list($cfg['trusted_proxies']) : array();
+		if ($cfg['trusted_proxies'] === null) { $cfg['trusted_proxies'] = array(); }
 		$cache = $cfg;
 	} catch (\Throwable $e) {
 		$cache = null;
@@ -71,19 +74,135 @@ function gp_panel_config() {
 	return $cache;
 }
 
-// The panel's view of the client address. The panel is not behind the guard's
-// CDN logic, so this stays deliberately simple: REMOTE_ADDR only.
-function gp_client_ip() {
-	return isset($_SERVER['REMOTE_ADDR']) ? (string)$_SERVER['REMOTE_ADDR'] : '';
+// --------------------------------------------------------------------------
+// Client address and IP allowlist
+// --------------------------------------------------------------------------
+
+// Turn a configured value into a list of strings. null means "configured, but
+// not a usable list" (the caller decides what that means); array() is a real,
+// empty list.
+function gp_ip_list($value) {
+	if (is_string($value)) { return $value === '' ? array() : array($value); }
+	if (!is_array($value)) { return null; }
+	$out = array();
+	foreach ($value as $entry) {
+		if (!is_string($entry)) { return null; }
+		$out[] = $entry;
+	}
+	return $out;
 }
 
-// Optional CIDR allowlist. Empty means disabled.
+// Split "addr" or "addr/bits" into array(packed address, bits), or null when it
+// is not a valid IPv4 or IPv6 address or prefix. An IPv4-mapped IPv6 address is
+// treated as the IPv4 address it is, so 1.2.3.4 and ::ffff:1.2.3.4 are one
+// thing. No zone ids, no hostnames, no ranges written with a dash.
+function gp_ip_parse($text) {
+	$text = trim((string)$text);
+	if ($text === '' || strlen($text) > 64) { return null; }
+	$pos = strpos($text, '/');
+	$addr = $pos === false ? $text : substr($text, 0, $pos);
+	$bits = null;
+	if ($pos !== false) {
+		$tail = substr($text, $pos + 1);
+		if ($tail === '' || !ctype_digit($tail) || strlen($tail) > 3) { return null; }
+		$bits = (int)$tail;
+	}
+	if (filter_var($addr, FILTER_VALIDATE_IP) === false) { return null; }
+	$canon = gv_ip_canon($addr);
+	$packed = @inet_pton($canon);
+	if ($packed === false) { return null; }
+	$max = strlen($packed) * 8;
+	if ($bits === null) { return array($packed, $max); }
+	// A prefix written against the IPv6 form of a mapped address ("::ffff:1.2.3.0/120")
+	// would need shifting; it is refused rather than guessed at.
+	if (strpos($addr, ':') !== false && strlen($packed) === 4) { return null; }
+	if ($bits > $max) { return null; }
+	return array($packed, $bits);
+}
+
+// True when $ip lies inside $cidr (single address or prefix, IPv4 or IPv6).
+function gp_ip_in($ip, $cidr) {
+	$a = gp_ip_parse($ip);
+	$b = gp_ip_parse($cidr);
+	if ($a === null || $b === null) { return false; }
+	if (strpos((string)$ip, '/') !== false) { return false; }       // an address, not a range
+	if (strlen($a[0]) !== strlen($b[0])) { return false; }          // v4 never matches v6
+	$bits = $b[1];
+	$whole = intdiv($bits, 8);
+	if ($whole > 0 && substr($a[0], 0, $whole) !== substr($b[0], 0, $whole)) { return false; }
+	$rest = $bits % 8;
+	if ($rest === 0) { return true; }
+	$mask = (0xFF << (8 - $rest)) & 0xFF;
+	return ((ord($a[0][$whole]) & $mask) === (ord($b[0][$whole]) & $mask));
+}
+
+function gp_ip_in_any($ip, array $list) {
+	foreach ($list as $cidr) {
+		if (gp_ip_in($ip, (string)$cidr)) { return true; }
+	}
+	return false;
+}
+
+// The client address, decided from the connection and, only when that
+// connection comes from a trusted proxy, from X-Forwarded-For.
+//
+// REMOTE_ADDR is the only thing a client cannot choose. X-Forwarded-For is a
+// header anyone can send, so it is read ONLY when REMOTE_ADDR is inside
+// $trusted. Then the list is walked from the right, skipping addresses that are
+// themselves trusted proxies, and the first address that is not one is the
+// client: entries further left were written by the client or by hops we have no
+// reason to believe. A header that does not parse is ignored as a whole.
+// Pure, so the self-test can exercise it without a web server.
+function gp_resolve_client_ip(array $server, array $trusted) {
+	$remote = isset($server['REMOTE_ADDR']) ? (string)$server['REMOTE_ADDR'] : '';
+	if (gp_ip_parse($remote) === null || strpos($remote, '/') !== false) { return ''; }
+	$remote = gv_ip_canon($remote);
+	if (!$trusted || !gp_ip_in_any($remote, $trusted)) { return $remote; }
+	$header = isset($server['HTTP_X_FORWARDED_FOR']) ? (string)$server['HTTP_X_FORWARDED_FOR'] : '';
+	if ($header === '' || strlen($header) > 1024) { return $remote; }
+	$hops = array_map('trim', explode(',', $header));
+	if (count($hops) > 20) { return $remote; }
+	foreach ($hops as $hop) {
+		if (gp_ip_parse($hop) === null || strpos($hop, '/') !== false) { return $remote; }
+	}
+	for ($i = count($hops) - 1; $i >= 0; $i--) {
+		$hop = gv_ip_canon($hops[$i]);
+		if (!gp_ip_in_any($hop, $trusted)) { return $hop; }
+	}
+	return $remote;
+}
+
+// The panel's view of the client address (see gp_resolve_client_ip).
+function gp_client_ip() {
+	static $cache = null;
+	if (defined('GP_SELFTEST')) { $cache = null; }                   // the test changes $_SERVER
+	if ($cache !== null) { return $cache; }
+	$cfg = gp_panel_config();
+	$trusted = ($cfg !== null && isset($cfg['trusted_proxies'])) ? $cfg['trusted_proxies'] : array();
+	$cache = gp_resolve_client_ip($_SERVER, $trusted);
+	return $cache;
+}
+
+// The IP allowlist.
+//
+//   key absent, or an empty list   no restriction (login still required). This is
+//                                  the documented default so an upgrade does not
+//                                  lock anybody out.
+//   non-empty list                 only a client inside one of the entries gets in.
+//                                  Entries that do not parse are ignored; if NONE
+//                                  parses, nobody gets in (a typo must never turn
+//                                  the restriction off).
+//   present but not a list         nobody gets in.
+//   no usable client address       nobody gets in.
 function gp_ip_allowed(array $cfg) {
-	$list = isset($cfg['ip_allowlist']) ? $cfg['ip_allowlist'] : array();
+	if (!array_key_exists('ip_allowlist', $cfg)) { return true; }
+	$list = $cfg['ip_allowlist'];
+	if ($list === null) { return false; }
 	if (!$list) { return true; }
 	$ip = gp_client_ip();
-	foreach ($list as $cidr) {
-		if (gv_cidr_match($ip, (string)$cidr)) { return true; }
+	if ($ip === '') { return false; }
+	foreach ($list as $entry) {
+		if (gp_ip_in($ip, (string)$entry)) { return true; }
 	}
 	return false;
 }

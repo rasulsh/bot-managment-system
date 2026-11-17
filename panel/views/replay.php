@@ -111,7 +111,7 @@ $r = is_array($result) ? $result : null;
 	<?php if (empty($r['movement'])): ?>
 		<p class="gp-help"><?= gp_e(gp_t('rep_no_movement')) ?></p>
 	<?php else: ?>
-		<?php echo gp_chart_bars($r['movement'], array('color' => '#0284c7')); ?>
+		<?php echo gp_chart_bars($r['movement'], array('color' => gp_chart_color('info'))); ?>
 	<?php endif; ?>
 </div>
 
@@ -126,14 +126,14 @@ $r = is_array($result) ? $result : null;
 	</div>
 
 	<!-- The number that decides the change. -->
-	<div class="gp-card" style="border-color:#e11d48;border-width:2px">
-		<div class="gp-kpi-label" style="color:#e11d48;font-weight:700">
+	<div class="gp-card gp-card-danger">
+		<div class="gp-kpi-label gp-text-bad" style="font-weight:700">
 			<?= gp_e(gp_t('rep_human_rows')) ?>
 		</div>
-		<div class="gp-kpi-value" style="color:#e11d48">
+		<div class="gp-kpi-value gp-text-bad">
 			<?= gp_num((int)$r['human_newly']) ?>
 		</div>
-		<div class="gp-kpi-hint" style="color:#e11d48">
+		<div class="gp-kpi-hint gp-text-bad">
 			<?= gp_e(gp_t('rep_decider')) ?>
 			(<?= gp_num((int)$r['human_rows']) ?>)
 		</div>
