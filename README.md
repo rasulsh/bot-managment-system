@@ -1,740 +1,226 @@
-# Bot Guard — Phase 1
+# Bot Guard
 
-A drop-in request guard for any PHP application. One `require` (or one
-`auto_prepend_file` line) in front of WordPress, OpenCart, Laravel or plain PHP:
-every GET without a valid token is challenged to complete
-a small cookie handshake before it reaches the app, every request is written to
-a JSONL log, and an
-instant kill switch is one `touch` away. Redis is **optional** — without it the
-guard runs in degraded mode: rate limiting, device budgets, operator allow/deny
-overrides, bot verdicts, honeypot history and nonce single-use are all off (the
-full list is in `docs/06-KNOWN-LIMITS.md`), while logging, static scoring and the
-whole token/challenge handshake keep working (both are stateless by design). Every path fails open: a Throwable, a missing
-Redis or an unwritable log directory results in a silent allow. The guard may
-fail; the site may not. IP is treated as a weak signal throughout (CGNAT, mobile
-carriers and shared VPN egress are normal), so the guard never hard-blocks on IP
-alone and always prefers a challenge over a block.
+Bot Guard sits in front of your PHP site and keeps scrapers and bots away from it.
+It works with WordPress, OpenCart, Laravel or plain PHP. You add one line of PHP
+configuration, and your application code stays untouched.
 
-Operational rollout and day-to-day monitoring: see **[ROLLOUT.md](ROLLOUT.md)**.
-This file is the reference; that one is the ordered sequence, with a pass
-criterion per stage.
+Out of the box it only **watches and logs**. It does not block anyone until you
+turn that on, step by step.
 
-## Requirements
+## Quick Start
 
-PHP 8.0+ (no Composer, no extensions, no external dependencies). On older PHP `prepend.php` returns at once, the host app runs unguarded and one line goes to `logs/guard-errors.log`. Python 3.9+ for the analyzer. Redis optional (any version from 5; AUTH, ACL users, a db number, a unix socket and a key prefix are all optional).
+This gets the guard running in **monitor mode**: it logs every request and changes
+nothing for your visitors.
 
-## Install
+**You need**
 
-Keep this directory **outside the web root** (see docs/03-SETUP.md, "Layout": the panel is exposed by a symlink or an Alias). The shipped `.htaccess` files deny everything by default as a safety net, and `scripts/exposure-check.sh <BASE_URL> [panel-path]` verifies it over HTTP. Then pick one entry point.
+- PHP 8.0 or newer. No Composer, no extensions. (On older PHP the guard does
+  nothing, your site runs as before, and one line goes to `logs/guard-errors.log`.)
+- Shell access to the server.
+- Redis and Python 3.9+ are **optional**. You do not need them for this Quick Start
+  (see [Next steps](#next-steps)).
 
-- `.user.ini` (PHP-FPM / LiteSpeed / CGI): `auto_prepend_file=/full/path/bot-guard/prepend.php`
-- `.htaccess` (mod_php / lsapi): `php_value auto_prepend_file /full/path/bot-guard/prepend.php`
-- global `php.ini`: `auto_prepend_file = /full/path/bot-guard/prepend.php`
-- fallback — first line of the host front controller: `require '/full/path/bot-guard/prepend.php';`
+**1. Put the files in place**
 
-`auto_prepend_file` is preferred: it runs before any application code or page
-cache layer and needs zero host-app changes. Then set a real secret in
-`guard/config.php`: `openssl rand -hex 32`. Never commit it.
-
-## Configuration (`guard/config.php`)
-
-| key | meaning |
-|-----|---------|
-| `secret` | HMAC key for tokens and nonces. While it equals `CHANGE_ME` every enforce toggle is forced off (monitor only). |
-| `cookie_name` | Token cookie name. |
-| `token_ttl` | Token lifetime in seconds (default 7 days). |
-| `nonce_ttl` | Challenge nonce lifetime in seconds. |
-| `enforce.block` | Serve 403 on hard-score GETs. Stage 1. |
-| `enforce.challenge` | Serve the JS challenge to every token-less GET, whatever headers it sends. Stage 2. |
-| `enforce.ratelimit` | Serve 429 over the limits. Stage 3. |
-| `hard_block_score` | Score at or above which a GET is a block candidate. |
-| `limits.window` | Fixed counter window in seconds. |
-| `limits.mint` | Tokens minted per IP (IPv6: per /64) per window (default 300; a carrier address is shared by many new visitors). Over it: 429 with `enforce.ratelimit`, logged `mint_limited` with `sh=1` otherwise. An allow-listed IP is never refused. |
-| `challenge.pow_bits` | Proof-of-work difficulty of the challenge, 0-24 (default 16, 0 = off). Panel-tunable. |
-| `challenge.bind_ip` | Bind a nonce to the IP it was issued to (default true). |
-| `challenge.trust_headers` | Default false. `true` restores the old rule (only a GET that asks for HTML is challenged), which any client walks past by not sending `Accept: text/html`. A rollback switch, file-only. |
-| `limits.device` / `ip_ua` / `ip` / `bot` | Requests per window per device token, per IP+UA pair, per IP, per known bot. The IP limit is deliberately generous. |
-| `limits.device_hour` / `device_day` | Requests per device token per hour (400) and per day (1500), fixed windows. They catch the client that paces itself under `limits.device` and keeps changing address: the count follows the token, not the IP. Over either: 429 with `enforce.ratelimit`, otherwise logged with `sh=1` and `DEV_HOUR` / `DEV_DAY` in `rs`. Exempt your admin path before enforcing. |
-| `limits.preview` | Requests per `preview_bots` name per window, **site-wide** (default 20). |
-| `limits.bot_unverified` | Requests per `known_bots` name per window, **site-wide**, from addresses the verifier has not confirmed (default 300). Past it an unverified claim is handled like any client. A verified crawler (`botok`) is outside it, so `analyzer-cron.sh verify` must be running. |
-| `challenge.gate_post` | Default false: a token-less POST is served and logged as a shadow challenge (`act=challenge, sh=1, m=POST`). True: it is challenged like a GET. Turn it on once the shadow rows show only endpoints you have exempted. |
-| `exempt_params_paths` | The exact paths on which `exempt_params` count (default `/` and `/index.php`). On any other path the parameter is something the client added and exempts nothing. |
-| `honeypot_path` | Hidden path that must 404 today. A hit marks the IP for 7 days. |
-| `exempt_paths` | URI prefixes the guard skips entirely. |
-| `exempt_params` | `param => array of value prefixes` the guard skips, e.g. `'route' => array('payment/')`. |
-| `known_bots` | Lowercase UA substrings allowed through under their own bucket. Ships with the Google and Bing crawler families (Googlebot, AdsBot, Mediapartners, InspectionTool, StoreBot, GoogleOther, Bingbot, AdIdxBot, BingPreview). Each needs a `bot_suffixes` entry so the claim is verified by reverse DNS out of band. |
-| `preview_bots` | Lowercase UA substrings of link-preview fetchers (Telegram, WhatsApp, Facebook, X, LinkedIn). They cannot solve a challenge and cannot be verified, so they pass only inside `limits.preview`, a budget shared by every address using that name; past it they are handled like any other client. No Redis, no pass. Logged as `allow_preview`. |
-| `cdn_ranges` | IPv4 CIDRs. `X-Forwarded-For` is trusted only when `REMOTE_ADDR` is inside one, and then only its last entry. |
-| `redis` | One block shared by guard, panel and analyzer: `host`, `port`, `socket` (unix path, wins over host/port), `username`, `password` (empty = no AUTH sent), `db` (0 = no SELECT), `prefix` (key namespace, `[A-Za-z0-9_.:-]{0,32}`, empty = legacy key names), `timeout` (0.05 s), `breaker_ttl` (seconds to skip Redis after a failure, 0 = off). File-only: never in the panel overlay, never displayed, stripped from `config-dump.php`. |
-| `log_dir` | JSONL destination. |
-| `strings` | `lang`, `dir`, `title`, `sub`, `noscript`, `failed`, `retry` — the only user-facing text; translate here, the code stays English. |
-| `signals.reputation` | Phase 2. Add `gv:rep:{dev}` to the score. Default off (shadow). |
-| `signals.ml` | Phase 2. Add the scaled `gv:ml:{dev}` anomaly level to the score. Default off (shadow). |
-| `ml_weight` | Phase 2. Multiplier turning an anomaly level of 0..100 into a score contribution. Default 0.4. |
-| `bot_suffixes` | Phase 2. Reverse-DNS suffixes per known bot. Consumed by the Python verifier; kept here as one source of truth. |
-| `capture_outcomes` | Phase 4. Record what the application did with each allowed request as a second tiny log line. Default off. |
-
-## Platform notes
-
-- **WordPress**: `auto_prepend_file` recommended. Typical exemptions:
-  `/wp-cron.php`, `/xmlrpc.php`, and `/wp-json/` when headless clients exist.
-  `admin-ajax.php` POSTs are already safe: a POST is never challenged.
-- **OpenCart**: `auto_prepend_file`, or the top of the catalog `index.php`.
-  Typical exemptions via query param: `'route' => array('payment/', 'api/')`.
-
-**Before enabling `enforce.challenge`, exempt every server-to-server endpoint** —
-payment gateway callbacks, webhooks, cron URLs, feeds and REST endpoints. The
-A POST is never challenged, but **every GET is**, whatever `Accept` or
-`X-Requested-With` it carries - those headers are chosen by the client, so they
-cannot decide who is let through. A browser's own XHR and `fetch()` calls carry
-the token cookie and are unaffected; a server-to-server GET has no cookie and
-must be exempted.
-
-## Honeypot
-
-Two one-line additions to the host site. In `robots.txt`:
-
-```
-Disallow: /old-archive
-```
-
-And in the site template:
-
-```html
-<a href="/old-archive" style="position:absolute;left:-9999px" tabindex="-1" rel="nofollow" aria-hidden="true">archive</a>
-```
-
-Real users never see it; a client that follows it is labelled for 7 days.
-
-## Rollout
-
-1. Set a real `secret`. 2. Run 14 days in monitor mode and read the logs.
-3. Enable `enforce.block`. 4. After a few quiet days enable `enforce.challenge`.
-5. Tune `limits` from the observed counters. 6. Enable `enforce.ratelimit` last.
-
-Kill switch — takes effect on the very next request, no restart:
+Keep this directory **outside** your web root, for example `/home/youruser/bot-guard`
+(your site stays in `public_html`). Make the log folder writable by PHP:
 
 ```bash
-touch /full/path/bot-guard/guard.off      # off;  rm guard.off to re-arm
+cd /home/youruser/bot-guard
+mkdir -p logs && chmod 0775 logs
 ```
 
-Log rotation (compresses finished days, drops archives after 60 days):
-
-```
-10 3 * * * /full/path/bot-guard/scripts/guard-logrotate.sh >/dev/null 2>&1
-```
-
-## KPIs
+**2. Set a secret**
 
 ```bash
-# 1. Challenge success rate — token_issued vs challenge. Target >= ~95%.
-jq -r 'select(.act=="challenge" or .act=="token_issued")|.act' logs/guard-*.jsonl | sort | uniq -c
-
-# 2. Top scored IPs and UA hashes.
-jq -r 'select(.sc>=30)|[.sc,.ip,.uah]|@tsv' logs/guard-*.jsonl | sort -k2 | uniq -c -f1 | sort -rn | head -20
-
-# 3. Shadow-action distribution — what enforcement would have done.
-jq -r 'select(.sh==1)|.act' logs/guard-*.jsonl | sort | uniq -c | sort -rn
+openssl rand -hex 32     # copy the output
+openssl rand -hex 16     # copy this one too
 ```
 
-## Local testing
+Open `guard/config.php`. Paste the first value as `'secret'` and the second as
+`'holdout_salt'`. Never commit them. Leave everything else as it is.
 
-```bash
-php scripts/guard-selftest.php                     # unit self-test, exit 0 on success
-php -S 127.0.0.1:8080 scripts/dev-router.php &     # full guard in front of a stub page
-bash scripts/guard-test.sh http://127.0.0.1:8080   # HTTP matrix
-```
+> While `'secret'` is still `CHANGE_ME`, all blocking is forced off. This is a
+> safety net: an unconfigured install cannot affect your site.
 
-The dev router uses `scripts/config.dev.php`: a public secret, all enforce
-toggles on and tiny limits. **It is test-only and must never be deployed.**
-Without Redis the matrix shows degraded behaviour (`rd=1` in the logs, no 429 in
-case 8) — that is the expected result, not a failure.
+**3. Connect the guard to PHP**
 
----
+Use **one** of these. Use your own absolute path.
 
-# Phase 2 — offline analyzer
-
-Phase 2 adds an **out-of-band Python analyzer** (`analyzer/`) that reads these
-same JSONL logs, writes verdicts into Redis, and stops there. It never sees a
-live request, never blocks and never challenges — the in-band PHP guard remains
-the only component that touches traffic. The guard reads the verdicts as cheap
-Redis GETs and folds them into the score it already computes.
-
-Everything Phase 2 adds is **shadow-first**: the verdicts are always logged, but
-only change a decision once you switch a `signals` toggle on. See
-`analyzer/README.md` for the analyzer's own operator guide.
-
-## Requirements
-
-Python 3.9+ (3.8 is end-of-life) and `python3 -m pip install -r analyzer/requirements.txt` (redis,
-scikit-learn, numpy). Redis must be reachable by both the PHP guard and the
-analyzer — it is the only channel between them. Without Redis both sides simply
-degrade: the guard runs as in Phase 1, the analyzer computes and reports without
-storing.
-
-## Verdict contract
-
-All keys are written by Python and read by PHP. All are optional — absence means
-no signal — and all carry a TTL, so a stopped analyzer cannot pin a stale
-verdict forever.
-
-| key | writer | value | TTL | effect in the guard |
-|-----|--------|-------|-----|---------------------|
-| `gv:botok:{ip}` | `run_verify` | `"1"` | 86400 | The UA-claimed bot is forward-confirmed. Logged as `botv=ok`; the known-bot pass stands. |
-| `gv:botbad:{ip}` | `run_verify` | `"1"` | 3600 (`botbad_ttl`) | The UA claims a known bot but reverse DNS failed. Logged as `botv=bad`; **revokes** the pass and adds `BOT_FAKE` (+35). |
-| `gv:rep:{dev}` | `run_nightly` | signed int, clamped [-50, 80] | 2592000 | Behavioural reputation. Logged as `rep`; added to the score when `signals.reputation` is on. |
-| `gv:ml:{dev}` | `run_nightly` | int 0..100 | 86400 | Isolation Forest anomaly level. Logged as `ml`; `round(ml * ml_weight)` is added when `signals.ml` is on. |
-
-Positive reputation is suspicious, negative is trustworthy — the same sign
-convention the static score uses. `botok`/`botbad` are per IP because bots do
-not carry the cookie; `rep`/`ml` are per device because they describe a browsing
-identity.
-
-`BOT_FAKE` is deliberately **not** gated by any toggle: it is part of the static
-score, because a revoked bot claim is a hard signal. It still does not block on
-its own (+35 is below the default `hard_block_score`) — an impersonator is
-scored like any other client, not summarily blocked.
-
-## Bot verification is three-state
-
-`run_verify` answers `ok`, `bad` or `unknown`. `bad` is written only on a definitive
-refutation (PTR answered and no suffix matches; no PTR record; forward lookup does not
-contain the address). Timeouts, SERVFAIL, an unreachable resolver and a known bot with
-no `bot_suffixes` entry are `unknown`: nothing is written or deleted and the address is
-retried next run. A negative DNS answer only counts while a canary name resolves
-(`dns_canary`), because glibc reports a refused resolver as HOST_NOT_FOUND. `ok` keeps
-`botv_ttl` (24 h); `bad` uses `botbad_ttl` (1 h) so a wrong verdict heals itself.
-`run_verify --recheck` re-resolves addresses that already have a verdict.
-
-## Challenge (what it does and does not do)
-
-The nonce is HMAC-bound to User-Agent (and IP), single use (Redis `SET NX`; with Redis
-down the handshake stays open), must be accompanied by a SHA-256 proof of work
-(`X-GV-P`), and minting is metered per IP. New log acts: `nonce_replay`, `pow_bad`
-(403 with `enforce.challenge`, otherwise logged with `sh=1` and the token is still
-issued) and `mint_limited` (429 with `enforce.ratelimit`, else `sh=1`). The funnel counts
-a shadowed one as an issued token. A JavaScript challenge cannot stop a real headless
-browser and a token can still be shared between machines (bounded by `limits.device`
-and, over the long run, by `limits.device_hour` / `device_day`). A headless browser that
-throws its token away when a budget runs out pays one proof of work per budget; that
-price is `challenge.pow_bits`.
-
-## Cron
-
-```
-*/10 * * * * /full/path/bot-guard/scripts/analyzer-cron.sh verify  >/dev/null 2>&1
-17 4   * * * /full/path/bot-guard/scripts/analyzer-cron.sh nightly >/dev/null 2>&1
-41 5   * * 0 /full/path/bot-guard/scripts/analyzer-cron.sh train   >/dev/null 2>&1
-```
-
-Each mode takes its own `flock`, so overlapping firings skip cleanly rather than
-writing partial verdicts. The weekly `train` run trains a **candidate** model,
-never the live one; promote it explicitly (panel "promote" or `ctl.py promote`)
-to put it in force.
-
-## New log fields
-
-`botv` (`ok` / `bad` / empty), `rep`, `ml` (`-1` means no verdict), and `esc` —
-the effective score. `sc` remains the pure static score, so `esc` next to `sc`
-shows exactly what the new signals contributed.
-
-```bash
-# Distribution of bot verification verdicts.
-jq -r 'select(.bot!="")|.botv' logs/guard-*.jsonl | sort | uniq -c | sort -rn
-
-# Requests where the Phase 2 signals actually moved the score.
-jq -c 'select(.esc != .sc)|{ip,dev,sc,esc,rep,ml,act,sh}' logs/guard-*.jsonl
-
-# Top devices by anomaly level.
-jq -r 'select(.ml>=0)|[.ml,.dev]|@tsv' logs/guard-*.jsonl | sort -rnu | head -20
-```
-
-## Keep the two configs in sync
-
-`known_bots` and `bot_suffixes` live in **both** `guard/config.php` and
-`analyzer/config.py`. They are one contract seen from two sides: the analyzer
-decides which addresses are impersonators, the guard honours the verdict. If
-they drift, the guard keeps passing a UA the analyzer never checks.
-
-## Evaluating the signals
-
-To generate labelled bot traffic, point a headless browser or HTTP client you
-control at a **staging copy** of the site, let it browse, then run the nightly
-job and confirm those device ids come back with a high `ml` and a positive
-`rep`. Compare against your own real browsing session on the same staging copy.
-
-## Phase 2 rollout
-
-1. Install the requirements and wire both cron jobs. Leave
-   `signals.reputation` and `signals.ml` **off**.
-2. Run about two weeks. `botv`, `rep`, `ml` and `esc` appear in every log line
-   while `esc` still equals `sc` — nothing can change a decision yet.
-3. Read the logs. Check that devices you believe are human carry a negative
-   `rep`, and that `esc` would only have moved requests you are happy to move.
-4. Enable `signals.reputation`. Watch the `403` and `challenge` rates.
-5. Later, enable `signals.ml`, and tune `ml_weight` (and the reputation weights
-   in `analyzer/reputation.py`) from what the logs show.
-
-Bot verification needs no toggle and is safe from day one — it only ever
-replaces a blind pass with a checked one.
-
----
-
-# Phase 3 — measure, tune, then classify
-
-Phase 3 adds no new detection surface. It makes the first two phases
-**measurable**: a control group that produces unbiased outcome data, a replay
-tool that answers "what would this change have done?" against real history, a
-report that turns the KPIs into one command, a fast escape hatch for false
-positives — and only then a supervised classifier, trained on labels that do
-not come from the guard's own decisions.
-
-## Holdout control group
-
-```php
-'holdout_pct'  => 0,                 // 1-2 is the right place to start
-'holdout_salt' => 'CHANGE_ME_TOO',   // any stable string
-```
-
-A deterministic slice of identities is scored and logged exactly as usual, but
-never actually challenged or blocked. Those requests carry `hold=1` and the
-intended action with `sh=1`, so the report can compare the enforced population
-against a population nothing was done to.
-
-**What it costs:** those requests are genuinely unprotected. At 1% that is one
-visitor in a hundred, which is why the value is clamped at 5 — it is a
-measurement sample, not a bypass.
-
-**What it buys:** the only unbiased outcome data the system has. Every other
-label is contaminated by enforcement — `challenge_unsolved` means "we
-challenged it and it did not answer", which says as much about the guard as
-about the client. The holdout is also the only way to estimate **false
-negatives** at all: whatever the holdout shows and the enforced population does
-not is what enforcement is hiding from you.
-
-Rate limiting (`429`) is never held out. It is resource protection, not
-classification, and the holdout must not become a way to hammer the site.
-
-**Identity limitation:** a holdout identity is never challenged, so it never
-receives a token, so it has no stable `dev` and falls back to `ip|uah`. Holdout
-data is therefore **sound in aggregate only** — the nightly job deliberately
-writes no per-device reputation or classifier verdict from holdout sessions.
-
-Changing `holdout_salt` reshuffles who is in the holdout, so change it rarely.
-
-## Operator overrides
-
-```bash
-python3 analyzer/ctl.py show  <device_id|ip>     # run this FIRST
-python3 analyzer/ctl.py allow <device_id> --ttl 3600
-python3 analyzer/ctl.py deny  <device_id|ip> --ttl 86400
-python3 analyzer/ctl.py list  [--kind allow|deny]
-python3 analyzer/ctl.py clear <device_id|ip>
-```
-
-When someone reports being blocked, `ctl.py show` is the first response: it
-prints every `gv:` verdict for that identity — reputation, anomaly level,
-classifier level, bot verification, honeypot history and any override — which
-usually explains what happened without reading a log line. The device id is the
-leading field of the `_gv` cookie.
-
-**Allow is ungated, deny is not.** A permissive override can only ever make the
-guard less strict, so it is safe in any mode and takes effect on the customer's
-very next request — it is the five-second fix. A restrictive override is an
-enforcement action, so it respects `enforce.block` like everything else;
-otherwise monitor mode would no longer mean what you were promised. Allow wins
-over deny. Every override carries a TTL, and TTLs above 30 days are refused: an
-override that never expires is a config change in disguise.
-
-## New config keys
-
-| key | meaning |
-|-----|---------|
-| `holdout_pct` | Percent of identities measured but never enforced against. 0 = off, clamped at 5. |
-| `holdout_salt` | Stable string that fixes holdout membership. Changing it reshuffles the sample. |
-| `signals.clf` | Add the scaled `gv:clf:{dev}` classifier level to the score. Default off (shadow). |
-| `clf_weight` | Multiplier turning a classifier level of 0..100 into a score contribution. Default 0.5. |
-
-## New log fields
-
-`clf` (classifier level, `-1` = no verdict), `hold` (1 = in the holdout) and
-`ovr` (`allow` / `deny` / empty). A new action, `allow_override`, appears when a
-permissive override short-circuits the request.
-
-## Phase 3 rollout
-
-1. **Enable the holdout first** — `holdout_pct = 1` and a real `holdout_salt` —
-   and let it fill for a couple of weeks. Everything downstream reads better
-   with a control group in the data.
-2. **Never touch a threshold without replaying it.** `analyzer/replay.py` tells
-   you exactly what a change would have done to traffic you already have.
-3. **Run the report weekly.** It is what turns "enable the next toggle" from a
-   leap into a decision.
-4. **Enable `signals.clf` last**, and only after the classifier's precision on
-   held-out data is above target — `run_nightly.py --train-clf` prints it on
-   every training run, and says so in words when the target was not reached.
-
-Bot verification and the holdout need no toggle. Everything else stays
-shadow-first.
-
----
-
-# Phase 4 — response outcome capture
-
-Everything the guard logged before this phase ended at its own decision. A
-device that pulls three hundred product pages and a device that walks a stale
-URL list into three hundred 404s looked identical. Phase 4 records **what the
-host application actually did** with each allowed request.
-
-This is the first guard code that runs *after* the application, so it is held to
-one absolute rule: **the capture may never alter the response.** The shutdown
-callback emits no bytes, sends no header, sets no cookie, starts no buffer,
-never exits, and swallows every Throwable. It does exactly one thing — append
-one short line to a file. The test suite compares response bodies and headers
-byte-for-byte with capture on and off, across a normal page, a 404, a 500, a
-128 KiB body, custom headers and a fatal error.
-
-## Turning it on
-
-```php
-'capture_outcomes' => false,   // Phase 4, off by default
-```
-
-Off by default, like every other new behaviour. When off, no closure is
-registered and nothing changes anywhere.
-
-## Two kinds of log line
-
-The decision line gains `v` (schema version, `4`) and `rid` (12 hex chars),
-placed first. A line without `v` predates this phase and simply has no outcome.
-
-The outcome line is separate and deliberately tiny:
-
-```json
-{"o":1,"rid":"a1b2c3d4e5f6","st":404,"by":1183,"dur":38.4,"ts":1786134525.912}
-```
-
-| key | value |
-|-----|-------|
-| `o` | always `1`, so the analyzer can split on one cheap key test |
-| `rid` | correlation key, matches a decision line in the same file |
-| `st` | `http_response_code()` at shutdown |
-| `by` | declared `Content-Length`, or `null` |
-| `dur` | total request milliseconds |
-| `ts` | shutdown timestamp |
-
-Roughly +40% lines but only a few percent of bytes. The existing rotation
-handles it; there is no sampling.
-
-The hook is armed on every path where the guard **returns** and the application
-runs — `allow`, `allow_bot`, `exempt`, `allow_override`, and the monitor and
-holdout suppressed paths — and on none of the paths where the guard **exits**
-having produced the response itself. A `403` or a `challenge` therefore has no
-outcome line: `act` already says what happened.
-
-## When there is no outcome line — none of these are bugs
-
-- **The process was killed.** `register_shutdown_function` runs on fatal errors,
-  which is exactly why it is the right hook — a request that fataled is itself a
-  signal. It does not run on `SIGKILL`, an OOM kill, or a hard server timeout.
-  Those requests have no outcome, and the analyzer treats that as unknown.
-- **The web server substituted the status.** `http_response_code()` returns what
-  PHP knows. A `304` from the server's own cache validation, or an error page it
-  generated itself, is invisible here.
-- **No `Content-Length` was declared.** `by` is `null`, never guessed. This is
-  normal for compressed and streamed responses. Buffering the response to
-  measure it would break streaming and downloads, double the memory of large
-  pages, and collide with the application's own buffering — so we do not.
-  Partial coverage of a safe signal beats full coverage of a dangerous one, and
-  the `outcome_cov` feature exists precisely so the model learns how much to
-  trust the rest.
-
-If the application calls `fastcgi_finish_request()`, the callback runs after the
-client already holds the full response, so the capture costs the visitor nothing.
-
-## Rollout
-
-Outcome capture extends the model feature set, which makes both existing model
-bundles stale. **Follow the ordered runbook in `analyzer/README.md`** — getting
-it out of order opens a window where the models stop writing verdicts and, if
-`signals.ml` or `signals.clf` are on, the effective score silently drops for
-everyone.
-
----
-
-# Phase 5 — admin panel
-
-Everything the first four phases built is operated from a terminal: `jq` over
-JSONL, `ctl.py` for overrides, an editor for `guard/config.php`, `replay.py`
-before every threshold change. That works, and it is why the panel adds **no new
-detection surface and no new decision authority**. It is a window onto data that
-already exists and a controlled writer for settings that already exist.
-
-The panel is **optional**. Delete `panel/` and the guard and analyzer behave
-exactly as before; the overlay file simply stops being written and the guard
-falls back to `guard/config.php`. Pure PHP 7.4+, no Composer, no vendor
-directory, no build step, no CDN — it runs on a server with no outbound network
-access at all.
-
-## Two rules it is built around
-
-**It never writes PHP and never runs a shell command.** Settings changed in the
-panel are written as **JSON** to `guard/config.local.json`, never as PHP source:
-a panel that rewrites executable config from form input is a code-injection hole
-in a security tool. Analyzer actions are queued in Redis and drained by
-`analyzer/worker.py`, which maps a job type to a Python function called
-in-process. No `exec`, `shell_exec`, `system`, `passthru`, `proc_open`, `popen`
-or backticks appear anywhere in `panel/` — `scripts/panel-selftest.php` fails the
-build if one ever does.
-
-**Everything it displays is attacker-controlled.** User agents, paths, referers
-and query strings in the logs were written by the bots this system fights. Every
-value rendered anywhere goes through `gp_e()`. A stored XSS in the admin panel of
-a bot guard would be handing an attacker the console.
-
-## Install
-
-```bash
-php panel/setpass.php          # the only terminal command the panel needs
-```
-
-It prompts for a username and password, refuses passwords under 12 characters,
-generates a session secret distinct from the guard's, and writes
-`panel/panel.config.php` at mode 0600. Re-run it to rotate credentials. Then:
-
-> **Installs created before the credential file carried a direct-access guard:**
-> the generated file now begins with
-> `if (!defined('GP_BOOT')) { http_response_code(404); exit; }`, the same line
-> every other file under `panel/` has. An older `panel.config.php` keeps working
-> and is unaffected — to pick the guard up, either re-run `setpass.php` or add
-> that one line by hand above the `return`.
-
-1. **Add the panel to `exempt_paths` in `guard/config.php`:**
-
-   ```php
-   'exempt_paths' => array('/bot-guard/panel/'),   // your panel's URI prefix
-   ```
-
-   Being challenged or blocked out of your own admin panel by your own bot guard
-   is a real and stupid failure mode. The panel carries its own auth, CSRF and
-   login rate limit, so exempting it costs nothing. There is no guard code for
-   this on purpose — it is a config line you set.
-
-2. **Add two cron entries** next to the existing analyzer ones:
-
-   ```
-   */15 * * * * /full/path/bot-guard/scripts/analyzer-cron.sh snapshot >/dev/null 2>&1
-   *    * * * * /full/path/bot-guard/scripts/analyzer-cron.sh worker   >/dev/null 2>&1
-   ```
-
-   `snapshot` writes `analyzer/snapshot.json`, which is the only thing the
-   dashboard reads — a busy site's dashboard opens as fast as a quiet one's.
-   `worker` drains the job queue; without it the panel's action buttons queue
-   jobs that nobody runs. Both take the same `flock` as the other modes.
-
-3. Serve `panel/` over HTTPS. The session cookie sets `Secure` on HTTPS,
-   `HttpOnly` and `SameSite=Strict` always, with `Path` scoped to the panel
-   directory.
-
-`panel/.htaccess` denies everything except `index.php` and the CSS/font assets,
-and denies `panel.config.php` and `audit.jsonl` explicitly. If your server
-ignores `.htaccess`, put `panel/` outside the document root and alias only
-`index.php` and `assets/`.
-
-## Security model
-
-| control | behaviour |
+| Where you can edit | Line to add |
 |---|---|
-| **No setup wizard** | If `panel/panel.config.php` is absent or malformed, **every panel route returns a bare 404** — no hint that a panel exists. A first-run setup screen reachable by whoever finds the URL first is how admin panels get taken over; one install-time command is the correct trade. |
-| **Session** | Signed cookie `gp_sess` = `user.issued_at.hmac`, verified with `hash_equals`, sliding renewal at half of `session_ttl` (default 12 h). Tampering with any part invalidates it. |
-| **CSRF** | Per-session token in a hidden field on every state-changing POST, verified with `hash_equals`. GET routes never change state. |
-| **Login rate limit** | 5 attempts per 15 minutes per IP (`gp:login:{ip}`), plus a second global counter across all addresses (`gp:login:user`) at four times that, so an attempt spread over many IPs is caught too. Wrong user and wrong password give an identical message and an identical response time. |
-| **Redis down** | The limiter falls back to a **file counter**, not to no limit. This is the one place in the whole system that deliberately does **not** fail open. |
-| **IP allowlist** | Optional `ip_allowlist` in `panel/panel.config.php`: an array of CIDRs, empty means disabled. Set it if the panel is reachable from the internet. |
-| **Audit trail** | Every accepted config change, override, job and login — success *and* failure — appends one JSONL line to `panel/audit.jsonl` with timestamp, actor, key, old value, new value and client IP. Append-only; the panel offers no delete. An untraceable config change in a security tool is unacceptable. |
+| `.user.ini` in your web root (PHP-FPM, LiteSpeed, CGI) | `auto_prepend_file=/home/youruser/bot-guard/prepend.php` |
+| `.htaccess` (mod_php, lsapi) | `php_value auto_prepend_file /home/youruser/bot-guard/prepend.php` |
+| `php.ini` or cPanel MultiPHP INI Editor | `auto_prepend_file = "/home/youruser/bot-guard/prepend.php"` |
+| Last resort: first line of your site's `index.php` | `require '/home/youruser/bot-guard/prepend.php';` |
 
-Nothing sensitive is committed: `panel/panel.config.php`, `panel/audit.jsonl`,
-`guard/config.local.json` and `analyzer/snapshot.json` are all git-ignored, and
-`scripts/config-dump.php` strips the panel credentials from its output.
+`auto_prepend_file` is the best choice: it runs before any application code and
+needs no change to your site. `.user.ini` changes can take a few minutes to apply.
 
-## The config overlay and its precedence
+**4. Check that it works**
 
-```
-shipped defaults  →  guard/config.php  →  guard/config.local.json
+Open your site in a browser, then:
+
+```bash
+tail -1 logs/guard-*.jsonl
 ```
 
-The overlay is a flat JSON object written only by the panel, atomically (temp
-file in the same directory, `chmod 0640`, then `rename()`), so a half-written
-overlay is never observable by the guard.
+You should see one JSON line per request, and your site should answer as usual.
+A line with `"sh":1` ("shadow") shows what the guard *would* do once you turn
+enforcement on, for example `"act":"challenge"`. In monitor mode nothing is
+actually done. If no line appears, the `auto_prepend_file` path is wrong or PHP
+has not reloaded yet. Look at `logs/guard-errors.log` for hints.
 
-- Missing file: ignored silently.
-- Unreadable, malformed, or non-object JSON: ignored silently. The guard
-  continues on `guard/config.php`. **Never fatal, never a warning that could
-  reach output.**
-- Only whitelisted keys are read; anything else in the file is discarded. A key
-  with the wrong type or an out-of-range value is discarded **individually**, not
-  the whole file.
+Also check that the guard files cannot be opened from the internet:
 
-Validation lives in `gv_overlay_validate()` in `guard/guard.php`, not in
-`panel/`, and both sides call it. The panel is optional and deleting it must
-change nothing — so what the panel accepts on write has to be the same code the
-guard runs on read, permanently.
+```bash
+bash scripts/exposure-check.sh https://your-site.example none
+```
 
-**Whitelist:** `enforce.*` and `signals.*` (bool), `hard_block_score` (10–200),
-`ml_weight` / `clf_weight` (0.0–2.0), `limits.window` (30–3600),
-`limits.device` / `.ip_ua` / `.ip` / `.bot` / `.mint` / `.preview` (1–100000),
-`limits.device_hour` / `.device_day` (1–1000000), `holdout_pct` (0–5),
-`capture_outcomes` (bool), `exempt_paths` (≤50 entries, each ≤200 chars starting
-with `/`), `exempt_params` (≤20 params, ≤50 values each), `known_bots` and
-`preview_bots` (≤20 each, lowercase `[a-z0-9._-]`), `honeypot_path` (starts with `/`, ≤100 chars).
+(Use `none` when you have not installed the admin panel. Otherwise give the panel
+path, for example `/gv-admin`.)
 
-Editing `guard/config.php` by hand still works and is still authoritative for
-anything not in the overlay. To go back to the file, use **reset to file** in the
-settings view — it removes the key from the overlay rather than writing the old
-value back.
+**5. Know the emergency switch**
 
-## What deliberately has no UI
+```bash
+touch /home/youruser/bot-guard/guard.off     # guard off, from the very next request
+rm    /home/youruser/bot-guard/guard.off     # guard on again
+```
 
-| setting | why |
+The file must be in the top directory (next to `prepend.php`), not inside `guard/`.
+
+That is all. Leave it in monitor mode and read the logs for about two weeks
+before you turn anything on. See [Turning enforcement on](#turning-enforcement-on).
+
+### Try it locally
+
+You can test the guard on your own computer without a real site:
+
+```bash
+php scripts/guard-selftest.php                     # unit tests, exit code 0 = success
+php -S 127.0.0.1:8080 scripts/dev-router.php &     # the guard in front of a test page
+bash scripts/guard-test.sh http://127.0.0.1:8080   # sends test requests, prints a table
+```
+
+The test server uses `scripts/config.dev.php` (a public secret, every blocking
+option on, very small limits). **Use it for testing only. Never deploy it.** It
+writes its log to your system temp folder (`/tmp/gv-logs/`). Without Redis, some
+rows of the table show `SKIP` or degraded results. That is expected.
+
+## Next steps
+
+Do these after the guard has run in monitor mode.
+
+**Add the analyzer (recommended).** A Python program that reads the logs, checks
+whether "Googlebot" is really Google, and scores visitors. To pass its verdicts
+to the guard it needs Redis, reachable from both PHP and Python.
+
+```bash
+python3 -m pip install -r analyzer/requirements.txt
+```
+
+Add two cron jobs (use your own path):
+
+```
+*/10 * * * * /home/youruser/bot-guard/scripts/analyzer-cron.sh verify  >/dev/null 2>&1
+17 4   * * * /home/youruser/bot-guard/scripts/analyzer-cron.sh nightly >/dev/null 2>&1
+```
+
+Without these, a real search-engine crawler can never be confirmed, so it will
+share one small request budget with anyone who copies its name.
+
+**Add the admin panel (optional).**
+
+```bash
+php panel/setpass.php        # asks for a username and a password (12+ characters)
+```
+
+Then add the panel's URL path to `exempt_paths` in `guard/config.php`
+(for example `array('/gv-admin/')`), so the guard does not block your own panel.
+Add two more cron jobs: `analyzer-cron.sh snapshot` every 15 minutes and
+`analyzer-cron.sh worker` every minute. Details: [docs/09-ADMIN-PANEL.md](docs/09-ADMIN-PANEL.md).
+
+**Add the honeypot.** A hidden link that only bots follow. See
+[docs/07-CONFIG-REFERENCE.md](docs/07-CONFIG-REFERENCE.md#honeypot).
+
+**Rotate the logs.** Add one cron job for `scripts/guard-logrotate.sh`
+(example in [docs/07-CONFIG-REFERENCE.md](docs/07-CONFIG-REFERENCE.md#log-rotation)).
+
+## Turning enforcement on
+
+Go slowly. Each step should be quiet in the logs before you take the next one.
+
+1. Set a real `secret` (done in the Quick Start).
+2. Run about 14 days in monitor mode and read the logs.
+3. Turn on `enforce.block`.
+4. After a few quiet days, turn on `enforce.challenge`.
+5. Tune the `limits` from what the logs show.
+6. Turn on `enforce.ratelimit` last.
+
+**Before step 4**, list every address that is called by a program and not by a
+browser. These have no cookie and would be challenged: payment gateway callbacks,
+webhooks, cron URLs, feeds, uptime monitors (they use HEAD or GET) and REST
+endpoints. Add them to `exempt_paths` or `exempt_params` in `guard/config.php`.
+Ready-made lists for WordPress, OpenCart and others are in
+[docs/04-CMS-INTEGRATION.md](docs/04-CMS-INTEGRATION.md). The full day-by-day
+checklist with a pass criterion for every stage is [ROLLOUT.md](ROLLOUT.md).
+
+## How it works
+
+Three parts that talk to each other only through Redis and the daily log files:
+
+- **The guard** (`guard/`, `prepend.php`): PHP that runs on every request. It
+  gives the request a score and decides: allow, challenge, rate limit (429) or
+  block (403). A *challenge* is a short page that a real browser passes
+  automatically with a cookie, and a simple script cannot.
+- **The analyzer** (`analyzer/`): Python on cron. It reads the logs, checks bots
+  with reverse DNS, scores visitors, and leaves small verdicts in Redis for the
+  guard to read. It never touches live requests.
+- **The panel** (`panel/`): an optional web console for one operator, in
+  Persian (RTL). It has dashboards, a log search, per-visitor overrides and
+  settings. It writes settings as validated JSON and never runs shell commands.
+
+Four rules shape the whole design:
+
+- **Fail open.** If anything goes wrong (an error, no Redis, an unwritable log
+  folder), the request is allowed. The guard may fail; the site may not.
+- **Monitor first.** Every blocking action is off by default and logged as
+  "would have happened" (`sh=1`) until you switch it on.
+- **IP is a weak signal.** Mobile carriers and shared VPNs put many people behind
+  one address, so the guard never blocks on IP alone and prefers a challenge to
+  a block.
+- **Redis is optional.** Without it the guard still logs, scores and runs the
+  challenge. It loses rate limits, device budgets, operator overrides, bot
+  verdicts, honeypot memory and one-time nonces. The full list is in
+  [docs/06-KNOWN-LIMITS.md](docs/06-KNOWN-LIMITS.md).
+
+## Documentation
+
+| Read this | When |
 |---|---|
-| `secret`, `holdout_salt` | Not on the whitelist and there is no form for them. Rotating `secret` invalidates every issued token at once; changing `holdout_salt` silently reshuffles the control group and invalidates the comparison the holdout exists to provide. Both are `openssl rand` + an editor, once. |
-| Panel username, password, session secret | `setpass.php` only. A panel that can rewrite its own credentials from a session is one XSS away from a permanent backdoor. |
-| Reputation weights (`analyzer/reputation.py`), `DECISION_SPAN`, model internals | Code, not configuration. Changing them changes what every historical score meant, and the honest way to do that is a diff, a replay and a deploy. |
-| Log deletion, audit deletion | Append-only by design. Rotation is `scripts/guard-logrotate.sh`. |
-| Arbitrary jobs | The queue accepts exactly eight named types — `verify`, `nightly`, `train`, `train_clf`, `replay_full`, `promote_ml`, `promote_clf`, `snapshot`. Queued training always writes to `--candidate`, so a job fired from a browser can never make the guard more permissive while nobody is watching. |
-
-## What the panel does
-
-- **Dashboard** — kill-switch state, every toggle, Redis reachability, and the
-  last successful `run_verify` / `run_nightly` / `snapshot` / `worker` times with
-  a stale warning. KPI cards, inline-SVG charts generated in PHP, and the
-  kill-switch control itself behind a confirm step.
-- **Log explorer** — the replacement for `grep` and `jq`. Filters on date, `act`,
-  `sh`, `hold`, `ovr`, `tok`, device, IP, path substring, reason, response status
-  and score ranges; reverse-streamed with a hard cap of 200 rows per page. It
-  never loads a whole log file into memory, and CSV export of the current filter.
-- **Identity drill-down** — every `gv:` verdict for one device or IP on one page:
-  the `ctl.py show` output that answers "why was this customer blocked?".
-- **Overrides** — the `ctl.py allow` / `deny` five-second fix, with the same TTL
-  ceiling of 30 days and the same rule that allow is ungated and deny respects
-  `enforce.block`.
-- **Replay** — `replay.py` against real history before a threshold change, run
-  natively in PHP through the guard's own `gv_effective_score()` and
-  `gv_decide()`, so the preview and the live decision cannot drift.
-- **Models** — bundle status, staleness, classifier precision, and the buttons
-  that queue training and promotion.
-- **Audit** — the append-only trail, searchable.
+| [docs/03-SETUP.md](docs/03-SETUP.md) | The full, exact install guide (analyzer, cron, panel, honeypot, enforcement) |
+| [ROLLOUT.md](ROLLOUT.md) | The day-by-day rollout checklist |
+| [docs/07-CONFIG-REFERENCE.md](docs/07-CONFIG-REFERENCE.md) | Every `guard/config.php` setting, platform notes, honeypot, KPI commands |
+| [docs/04-CMS-INTEGRATION.md](docs/04-CMS-INTEGRATION.md) | WordPress, OpenCart, Magento, Drupal, Joomla, caching and CDN |
+| [docs/06-KNOWN-LIMITS.md](docs/06-KNOWN-LIMITS.md) | What the guard cannot do, and what Redis and the server must provide |
+| [docs/01-OVERVIEW.md](docs/01-OVERVIEW.md) | What the tool is and why it exists |
+| [docs/02-ARCHITECTURE.md](docs/02-ARCHITECTURE.md) | How the parts fit together; what happens on one request |
+| [docs/08-ANALYZER-PHASES.md](docs/08-ANALYZER-PHASES.md) | Phases 2 to 4: analyzer, verdicts, holdout group, overrides, outcome capture |
+| [analyzer/README.md](analyzer/README.md) | Analyzer internals and the model migration runbook |
+| [docs/09-ADMIN-PANEL.md](docs/09-ADMIN-PANEL.md) | Panel install, security model, settings overlay |
+| [docs/05-ACCESS-LOG-REPORT.md](docs/05-ACCESS-LOG-REPORT.md) | Finding slow scrapers in your web server's access log |
+| [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md) | What changed in each release and what to do about it |
+| [docs/CODE-REVIEW.md](docs/CODE-REVIEW.md) | Performance and workflow review notes |
+| [docs/README.md](docs/README.md) | The documentation index |
 
 ## Testing
 
 ```bash
-php scripts/panel-selftest.php     # 100 assertions, exit 0 on success
+php scripts/guard-selftest.php           # guard
+php scripts/redis-selftest.php           # Redis layer
+php scripts/panel-selftest.php           # admin panel
+python3 -m analyzer.selftest             # analyzer
+python3 scripts/accesslog_selftest.py    # access-log report
 ```
 
-It covers overlay precedence and the never-fatal rules, that `secret` and
-`holdout_salt` are unreachable through the overlay, every whitelist bound, the
-atomic write and audit append, the bounded tail reader, session signing and
-expiry and tampering, CSRF, the login rate limit with Redis up *and* down, stored
-XSS (asserted by parsing the rendered HTML with `DOMDocument` and counting what a
-browser would actually execute, not by matching a regex), and a token-level scan
-proving no shell function, backtick or `eval` exists under `panel/`.
-
-# Upgrade notes (review-hardening release)
-
-A full review with concurrent testing found the problems below. Behaviour changes are listed
-first; everything is covered by tests.
-
-**Behaviour that changed**
-
-* **A rule in shadow no longer cancels the rules below it.** With `enforce.ratelimit` off and
-  `enforce.challenge` on, a token-less client that went over a limit was served unchallenged
-  for the rest of the window; with `enforce.block` off the worst-scoring clients skipped the
-  challenge. Now the first rule that matches *and is enforced* is served. The row carries the
-  served action and names the shadowed one in `rs` (`SH_429`, `SH_403`).
-* **`exempt_params` only count on the front controller** (`exempt_params_paths`, default `/`
-  and `/index.php`). `?route=payment/x` appended to a product URL used to exempt it from
-  everything. A path with a dot segment, a doubled slash or an encoded slash/dot is never
-  exempt by prefix either. If your callbacks arrive on another path, add it to
-  `exempt_params_paths` or use `exempt_paths`.
-* **HEAD is gated like GET.** Uptime monitors that use HEAD need an exemption or an allow.
-* **POST is shadow-gated.** Most applications render a page for a POST as well, which made
-  POST the next way round the challenge. Token-less POSTs are now logged as
-  `act=challenge, sh=1`; set `challenge.gate_post` to enforce, after checking
-  `jq -r 'select(.m=="POST" and .act=="challenge")|.p+"?"+.q' logs/guard-*.jsonl | sort | uniq -c | sort -rn | head -30`.
-* **Unverified crawler claims share one budget** (`limits.bot_unverified`) and an operator deny
-  now beats the crawler pass. Run `analyzer-cron.sh verify`.
-* **IPv6 clients are counted per /64**, and every address is stored in one canonical spelling
-  (an IPv4-mapped address as its IPv4 address), in the guard, the panel and the verifier.
-* **Defaults:** `limits.mint` 60 → 300, `limits.preview` 60 → 20, `challenge.pow_bits` maximum
-  24 → 22 in the panel.
-* **The breaker needs two timeouts within ten seconds** before it switches Redis off for
-  `breaker_ttl`; one slow reply used to open a site-wide gap. A refused connection still arms
-  it at once. Its marker falls back to the system temp directory when `logs/` is not writable.
-* **Monitor mode refuses nothing:** a bad handshake nonce is logged (`nonce_bad`, `sh=1`) and
-  the request runs.
-
-**Fixed without a behaviour change you need to act on**
-
-* `Cookie: _gv[]=x` raised a PHP warning; a stale `_gv` cookie in front of a valid one caused
-  an endless challenge loop.
-* A Redis that answers but refuses writes (read-only replica, out of memory, loading) left
-  every counter at 0 with no sign of it: rows are now `rd=1` and `guard-errors.log` says
-  `redis_cmd_error`.
-* A reply line without an end could exhaust PHP's memory (uncatchable); a breaker marker dated
-  in the future kept Redis off; a log that cannot be written now reports `log_write_failed`.
-* `config.php` values are sanity-checked: a limit or lifetime that is not a positive whole
-  number falls back to its default, `'false'`/`'off'` read as off, an empty secret forces
-  monitor mode.
-* The panel refuses settings that switch the guard or the shop off in one click (`/` as an
-  exempt path or honeypot, a bot fragment like `mozilla`), saves under a lock and writes only
-  the keys that changed, bounds audit rows, counts login attempts atomically, lists deny
-  overrides first and completely, and neutralises spreadsheet formulas in the CSV export.
-* `guard-logrotate.sh` no longer compresses a file that is still being written, never
-  overwrites an archive, skips anything that is not a regular file and exits non-zero on
-  failure. `GV_LOG_DIR` points it at a non-default directory.
-* Analyzer: a DNS failure right after a successful health check can no longer mark a real
-  crawler as fake; verification looks at the busiest claimants first; a wrong-typed log field
-  no longer kills every job; models are written atomically; rounding matches PHP exactly;
-  all writing cron modes share one lock; reputation expires in 14 days.
-* `scripts/accesslog_report.py`: see `docs/05-ACCESS-LOG-REPORT.md` (served-only counting,
-  per-client machine signals, `--date`, format and truncation warnings).
-
-**Known and not changed** (see `docs/06-KNOWN-LIMITS.md`)
-
-# Upgrade notes (slow-scraper release)
-
-* **The challenge no longer depends on request headers.** Before, only a GET with
-  `Accept: text/html` and no `X-Requested-With` was challenged, so any HTTP library
-  with default headers was served without a token. Now every non-exempt GET needs one.
-  **Before enabling `enforce.challenge`, list every server-to-server GET** (feeds, price
-  APIs, payment callbacks made by GET, cron URLs, uptime monitors) in `exempt_paths` /
-  `exempt_params`. In monitor mode they show up as `act=challenge, sh=1, nav=0` rows:
-  `jq -r 'select(.act=="challenge" and .nav==0)|.p' logs/guard-*.jsonl | sort | uniq -c | sort -rn | head -30`.
-  `challenge.trust_headers = true` is the rollback.
-* **Log schema 5:** new fields `gate` (1 = this request needed a token), `cdh` and `cdd`
-  (the hourly and daily device counters), new act `allow_preview`. Replay reads `gate`
-  and falls back to `nav` on older rows, so existing logs keep replaying.
-* **New limits** `device_hour` (400), `device_day` (1500), `preview` (60) and the
-  `preview_bots` list are all panel-tunable. The device budgets enforce under
-  `enforce.ratelimit`; read the `DEV_HOUR` / `DEV_DAY` shadow rows first, and exempt the
-  shop's admin path, where staff legitimately make thousands of requests a day.
-* **`known_bots` grew and `preview_bots` is new.** Both lists come from `config.php`
-  (or the panel), not from built-in defaults: an existing `config.php` keeps the bots it
-  names and has no preview fetchers until you copy the two lists from the shipped
-  `guard/config.php`.
-* **New tool:** `scripts/accesslog_report.py`, see
-  [`docs/05-ACCESS-LOG-REPORT.md`](docs/05-ACCESS-LOG-REPORT.md).
-
-# Upgrade notes (production-readiness release)
-
-* **Nothing to do by default.** Defaults keep key names, token cookies and behaviour; the
-  new `redis` keys, `limits.mint` (60), `challenge.pow_bits` (16) and `bind_ip` (true) have
-  safe defaults. PHP 8.0+ is now required (older PHP: guard silently off + note in
-  `logs/guard-errors.log`). Python 3.9+.
-* **Challenge:** nonce format changed; a visitor mid-challenge during the deploy gets one
-  automatic retry. `_gv` tokens stay valid. `pow_bits` can be tuned in the panel.
-* **Changing `redis.prefix`** orphans existing counters, verdicts and overrides (they expire
-  by TTL). Re-add overrides; the analyzer rebuilds verdicts on its next runs. Raw
-  `redis-cli` commands must use the prefixed names.
-* **Ops:** run `scripts/exposure-check.sh`; `guard-logrotate.sh` now also rotates
-  `guard-errors.log`; no new cron jobs.
+Each one exits with code 0 when everything passes.
