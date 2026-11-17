@@ -147,9 +147,9 @@ ls -la /home/youruser/bot-guard/logs/
 tail -1 /home/youruser/bot-guard/logs/guard-*.jsonl
 ```
 
-You should see one JSON line per request, each with `"act":"allow"` (or `exempt`)
-and `"sh":1` on any it would have acted on (the `sh:1` means "shadow" — it would
-have done this, but monitor mode allowed it).
+You should see one JSON line per request. A line with `"sh":1` (for example
+`"act":"challenge"`) means "shadow": the guard would have done this, but monitor
+mode let the request through. The site answers as usual.
 
 If nothing appears, the prepend is not loading. Confirm the `auto_prepend_file`
 path is absolute and correct and that PHP restarted.

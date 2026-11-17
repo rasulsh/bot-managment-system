@@ -154,7 +154,7 @@ openssl rand -hex 32        # paste into guard/config.php -> 'secret'
 #    auto_prepend_file = "/full/path/bot-guard/prepend.php"
 
 # 4. Confirm monitor mode works: load your site, then:
-tail -1 logs/guard-*.jsonl   # one JSON line per request, act:"allow", sh:1 on shadowed actions
+tail -1 logs/guard-*.jsonl   # one JSON line per request; sh:1 marks what would have happened
 
 # 5. Install + schedule the analyzer:
 pip install -r analyzer/requirements.txt
@@ -166,7 +166,7 @@ php panel/setpass.php        # then add the panel path to exempt_paths, sign in
 ```
 
 Full, exact steps — including the crontab, the honeypot, and CMS exemptions — are
-in [`docs/03-SETUP.md`](docs/03-SETUP.md).
+in [`docs/03-SETUP.md`](03-SETUP.md).
 
 ## The rollout, in one paragraph
 
@@ -180,7 +180,7 @@ few-percent **holdout** kept as a control, waiting days between steps and watchi
 for false positives. When a real customer is caught, open their **identity** page,
 see which signal did it, and set an **allow** override — it takes effect on their
 next request. The step-by-step operational checklist is in
-[`ROLLOUT.md`](ROLLOUT.md).
+[`ROLLOUT.md`](../ROLLOUT.md).
 
 ## Configuration
 
@@ -200,7 +200,7 @@ All request-path configuration is in `guard/config.php`. The essentials:
 | `limits.*` | Fixed-window rate counters (ship deliberately generous for CGNAT), plus hourly and daily per-device budgets for slow clients on changing addresses. |
 | `preview_bots` | Link-preview fetchers; pass inside one small site-wide budget per name. |
 
-The full table with defaults is in [`docs/03-SETUP.md`](docs/03-SETUP.md). The
+The full table with defaults is in [`docs/03-SETUP.md`](03-SETUP.md). The
 panel can edit most of these live (writing a validated JSON overlay in
 `guard/config.local.json` that layers over `config.php`); the `secret`,
 `holdout_salt`, and panel credentials deliberately have no UI and no overlay path.
@@ -262,18 +262,25 @@ Python (`analyzer/decision.py`); the parity test fails until they agree exactly
 
 ## Documentation
 
-- [`docs/01-OVERVIEW.md`](docs/01-OVERVIEW.md) — what the tool is and why.
-- [`docs/02-ARCHITECTURE.md`](docs/02-ARCHITECTURE.md) — how the three parts fit
+- [`docs/01-OVERVIEW.md`](01-OVERVIEW.md) — what the tool is and why.
+- [`docs/02-ARCHITECTURE.md`](02-ARCHITECTURE.md) — how the three parts fit
   together and what happens on a single request.
-- [`docs/03-SETUP.md`](docs/03-SETUP.md) — exact install and configuration steps.
-- [`docs/04-CMS-INTEGRATION.md`](docs/04-CMS-INTEGRATION.md) — bolting the guard
+- [`docs/03-SETUP.md`](03-SETUP.md) — exact install and configuration steps.
+- [`docs/04-CMS-INTEGRATION.md`](04-CMS-INTEGRATION.md) — bolting the guard
   onto any PHP CMS, with per-platform exemption lists.
-- [`ROLLOUT.md`](ROLLOUT.md) — the operational, day-by-day rollout checklist.
-- [`analyzer/README.md`](analyzer/README.md) — analyzer internals in depth.
-- [`docs/05-ACCESS-LOG-REPORT.md`](docs/05-ACCESS-LOG-REPORT.md) — the daily
+- [`ROLLOUT.md`](../ROLLOUT.md) — the operational, day-by-day rollout checklist.
+- [`analyzer/README.md`](../analyzer/README.md) — analyzer internals in depth.
+- [`docs/05-ACCESS-LOG-REPORT.md`](05-ACCESS-LOG-REPORT.md) — the daily
   access-log report that finds slow scrapers on changing addresses.
-- [`docs/06-KNOWN-LIMITS.md`](docs/06-KNOWN-LIMITS.md) — what the guard cannot do,
+- [`docs/06-KNOWN-LIMITS.md`](06-KNOWN-LIMITS.md) — what the guard cannot do,
   what degraded mode switches off, and what Redis and the server must provide.
+- [`docs/07-CONFIG-REFERENCE.md`](07-CONFIG-REFERENCE.md) — every `guard/config.php`
+  setting, platform notes, honeypot, log rotation and KPI commands.
+- [`docs/08-ANALYZER-PHASES.md`](08-ANALYZER-PHASES.md) — phases 2 to 4: analyzer
+  verdicts, holdout group, operator overrides, outcome capture.
+- [`docs/09-ADMIN-PANEL.md`](09-ADMIN-PANEL.md) — panel install, security model,
+  settings overlay.
+- [`docs/10-UPGRADE-NOTES.md`](10-UPGRADE-NOTES.md) — what changed in each release.
 
 ## Requirements
 
@@ -281,6 +288,6 @@ Python (`analyzer/decision.py`); the parity test fails until they agree exactly
   client is a raw socket).
 - **Redis** reachable from PHP (default `127.0.0.1:6379`). The guard runs without
   it, degraded to allow-only.
-- **Python 3.8+** with `redis`, `scikit-learn`, `numpy` for the analyzer (it
+- **Python 3.9+** with `redis`, `scikit-learn`, `numpy` for the analyzer (it
   degrades gracefully without scikit-learn — just no ML that run).
 - **Cron** for the analyzer, and a **local filesystem** for the log directory.
