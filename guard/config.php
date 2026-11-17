@@ -82,6 +82,10 @@ return array(
 		'trust_headers' => false,             // false: every GET needs a token. true: only a
 		                                      // GET that asks for HTML does (the old rule; any
 		                                      // client that omits Accept: text/html walks past)
+		'test_key' => '',                     // operator test switch, off while empty. With a key
+		                                      // set, opening /?gv_test=KEY shows the real challenge
+		                                      // page to THAT browser only (10 minutes, or until it
+		                                      // is solved). Use a long random value; see docs
 	),
 	'honeypot_path'    => '/old-archive',     // change per site; must 404 today
 	'exempt_paths'     => array(),            // URI prefixes, e.g. '/wp-cron.php', '/wp-json/'

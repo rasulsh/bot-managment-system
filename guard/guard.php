@@ -72,7 +72,7 @@ function gv_cfg_defaults(array $cfg) {
 	// trust_headers restores the old rule where only a GET that asks for HTML
 	// is challenged; see gv_is_gate.
 	$challenge = array('pow_bits' => 16, 'bind_ip' => true, 'trust_headers' => false,
-		'gate_post' => false);
+		'gate_post' => false, 'test_key' => '');
 	if (!isset($cfg['challenge']) || !is_array($cfg['challenge'])) { $cfg['challenge'] = array(); }
 	$cfg['challenge'] = array_merge($challenge, $cfg['challenge']);
 	$redis = array('host' => '127.0.0.1', 'port' => 6379, 'socket' => '',
@@ -457,6 +457,7 @@ function gv_facts(array $server, array $get, array $cookie, array $cfg) {
 		'https'   => $https,
 		'cookie'  => $cookies ? $cookies[0] : '',
 		'cookies' => $cookies,
+		'testck'  => (isset($cookie[$name . 't']) && is_string($cookie[$name . 't'])) ? $cookie[$name . 't'] : '',
 	);
 }
 
@@ -1111,6 +1112,7 @@ function gv_run($t0) {
 		$token = gv_tok_make($cfg['secret'], $parsed ? $parsed[0] : '');
 		$dev   = gv_tok_check($token, $cfg['secret'], $cfg['token_ttl']);
 		gv_set_token_cookie($cfg, $token, $f['https']);
+		if ($f['testck'] !== '') { gv_test_cookie($cfg, '', time() - 3600, $f['https']); }
 		$st['tok'] = 'v';
 		$st['dev'] = ($dev === false) ? '' : $dev;
 		// One log line per request. A shadowed rejection still issues the token,
@@ -1118,6 +1120,36 @@ function gv_run($t0) {
 		gv_emit($f, $st, $act, $sh, $t0, $log);
 		if (!headers_sent()) { http_response_code(204); }
 		exit;
+	}
+
+	// 2b. Operator test switch (challenge.test_key). Needs the key AND a real
+	// secret. The key sets a signed 10 minute cookie and redirects to the same URL
+	// without it; while the cookie is valid this browser gets the real challenge
+	// page on every GET, whatever its token or the enforce mode. Nobody else is
+	// affected and nothing is exempted or relaxed. Solving the page clears it.
+	$tkey = (string)$cfg['challenge']['test_key'];
+	if ($tkey !== '' && $cfg['secret'] !== 'CHANGE_ME' && $f['method'] === 'GET') {
+		if (isset($f['params']['gv_test']) && is_string($f['params']['gv_test'])
+			&& hash_equals($tkey, $f['params']['gv_test'])) {
+			gv_test_cookie($cfg, gv_test_make($cfg['secret']), time() + 600, $f['https']);
+			$keep = array();
+			foreach (explode('&', $f['query']) as $kv) {
+				if ($kv !== '' && strncmp($kv, 'gv_test=', 8) !== 0) { $keep[] = $kv; }
+			}
+			if (!headers_sent()) {
+				header('Cache-Control: no-store');
+				header('Location: /' . ltrim($f['path'], '/') . ($keep ? '?' . implode('&', $keep) : ''), true, 302);
+			}
+			exit;
+		}
+		if ($f['testck'] !== '' && gv_test_ok($f['testck'], $cfg['secret'])) {
+			$st['rs'][] = 'TEST';
+			gv_emit($f, $st, 'challenge', 0, $t0, $log);
+			$bits  = max(0, min(24, (int)$cfg['challenge']['pow_bits']));
+			$nonce = gv_nonce_make($cfg['secret'], $f['ua'], !empty($cfg['challenge']['bind_ip']) ? $f['ip'] : '', $bits);
+			gv_challenge_render($nonce, $cfg['strings'], $bits);
+			exit;
+		}
 	}
 
 	// 3. Exemptions. CLI was already excluded by prepend.php.
