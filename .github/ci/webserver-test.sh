@@ -244,7 +244,13 @@ start_server /var/www/site /var/www/bot-guard
 body="$(curl -s "http://127.0.0.1:$PORT/")"
 if [ "$body" = "host app OK" ]; then echo "PASS  host application still answers"; else echo "FAIL  host application: $body"; fail=1; fi
 run_checks symlink /gv-admin
-if ls /var/www/bot-guard/logs/guard-*.jsonl >/dev/null 2>&1; then echo "PASS  the guard (auto_prepend_file) logged the requests"; else echo "FAIL  no guard log was written"; fail=1; fi
+if ls /var/www/bot-guard/logs/guard-*.jsonl >/dev/null 2>&1; then echo "PASS  the guard (auto_prepend_file) logged the requests"; else
+	echo "FAIL  no guard log was written"; fail=1
+	# Say why: without this the job only reports that nothing was logged.
+	ls -la /var/www/bot-guard/logs /var/www/bot-guard | head -40 || true
+	cat /var/www/bot-guard/logs/guard-errors.log 2>/dev/null || echo "(no guard-errors.log)"
+	tail -n 30 "$LSWS/logs/stderr.log" "$LSWS/logs/error.log" "$WORK/apache-error.log" 2>/dev/null || true
+fi
 stop_server
 
 # --- layout 3: Alias (Apache; LiteSpeed has no Alias directive in .htaccess) ----
