@@ -120,7 +120,7 @@ EXP=$(( $(date +%s) - 10 ))
 eq "F2 unsigned expired cookie -> 200" "$(code -b "$J3" -b "_gvt=$EXP.deadbeef" "$B1/")" 200
 
 echo "== G. Switch is off while test_key is empty"
-J4="$WORK/g.jar"; B3="http://127.0.0.1:$P3"
+J4="$WORK/g.jar"
 N=$(page $P3 $J4 / | nonce_of); solve "$N" $P3 $J4 >/dev/null
 eq "G1 key ignored when disabled -> 200" "$(status $P3 $J4 "/?gv_test=$KEY")" 200
 eq "G2 no switch cookie was set -> 200" "$(status $P3 $J4 /)" 200
