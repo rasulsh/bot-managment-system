@@ -68,8 +68,11 @@ tail -1 logs/guard-*.jsonl
 You should see one JSON line per request, and your site should answer as usual.
 A line with `"sh":1` ("shadow") shows what the guard *would* do once you turn
 enforcement on, for example `"act":"challenge"`. In monitor mode nothing is
-actually done. If no line appears, the `auto_prepend_file` path is wrong or PHP
-has not reloaded yet. Look at `logs/guard-errors.log` for hints.
+actually done. If no line appears, the `auto_prepend_file` path is wrong, PHP
+has not reloaded yet (a `.user.ini` change takes up to 5 minutes), or the page
+came from a cache without running PHP. Look at `logs/guard-errors.log` for hints
+and at [docs/11-TESTING-PIPELINE.md](docs/11-TESTING-PIPELINE.md), which lists
+every cause in order and has an exact test.
 
 Also check that the guard files cannot be opened from the internet:
 
@@ -117,7 +120,14 @@ to the guard it needs Redis, reachable from both PHP and Python.
 
 ```bash
 python3 -m pip install -r analyzer/requirements.txt
+chmod +x scripts/*.sh        # cron runs these files directly; without this they fail silently
 ```
+
+If `python3 --version` shows less than 3.9 (common on older CloudLinux), install a
+newer Python, create a virtual environment with it
+(`/path/to/python3.11 -m venv .venv`, then `.venv/bin/pip install -r analyzer/requirements.txt`)
+and put `GV_PYTHON=/home/youruser/bot-guard/.venv/bin/python` at the top of the
+crontab. The cron wrapper uses that interpreter.
 
 Add two cron jobs (use your own path):
 
@@ -139,6 +149,14 @@ Then add the panel's URL path to `exempt_paths` in `guard/config.php`
 (for example `array('/gv-admin/')`), so the guard does not block your own panel.
 Add two more cron jobs: `analyzer-cron.sh snapshot` every 15 minutes and
 `analyzer-cron.sh worker` every minute. Details: [docs/09-ADMIN-PANEL.md](docs/09-ADMIN-PANEL.md).
+
+The panel has light, dark and automatic themes (switcher in the header, remembered
+per browser) and sends `noindex` headers on every response.
+**Restrict it by IP:** set `ip_allowlist` in `panel/panel.config.php` to IPv4/IPv6
+addresses or CIDR ranges, for example `array('203.0.113.7', '2001:db8::/32')`.
+Empty means open to everyone (the dashboard warns); a non-empty list with no valid
+entry locks everyone out. Behind your own proxy or CDN, also set `trusted_proxies`.
+The dashboard card **Data pipeline** shows whether requests are being logged.
 
 **Add the honeypot.** A hidden link that only bots follow. See
 [docs/07-CONFIG-REFERENCE.md](docs/07-CONFIG-REFERENCE.md#honeypot).
@@ -222,6 +240,10 @@ php scripts/redis-selftest.php           # Redis layer
 php scripts/panel-selftest.php           # admin panel
 python3 -m analyzer.selftest             # analyzer
 python3 scripts/accesslog_selftest.py    # access-log report
+bash scripts/e2e-pipeline.sh             # end to end: real HTTP traffic -> log -> snapshot -> panel
 ```
 
-Each one exits with code 0 when everything passes.
+Each one exits with code 0 when everything passes. The last one needs `php`, `curl`,
+`python3` and `redis-server`; it starts its own temporary server and Redis and
+checks several client addresses, parallel tabs and concurrent requests
+([docs/11-TESTING-PIPELINE.md](docs/11-TESTING-PIPELINE.md)).
