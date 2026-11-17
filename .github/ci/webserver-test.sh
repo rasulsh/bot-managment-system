@@ -249,7 +249,22 @@ if ls /var/www/bot-guard/logs/guard-*.jsonl >/dev/null 2>&1; then echo "PASS  th
 	# Say why: without this the job only reports that nothing was logged.
 	ls -la /var/www/bot-guard/logs /var/www/bot-guard | head -40 || true
 	cat /var/www/bot-guard/logs/guard-errors.log 2>/dev/null || echo "(no guard-errors.log)"
-	tail -n 30 "$LSWS/logs/stderr.log" "$LSWS/logs/error.log" "$WORK/apache-error.log" 2>/dev/null || true
+	cat > /var/www/site/gv-diag.php <<'DIAG'
+<?php
+header('Content-Type: text/plain');
+error_reporting(-1); ini_set('display_errors', '1');
+echo 'sapi=', PHP_SAPI, ' prepend=', var_export(ini_get('auto_prepend_file'), true), ' boot=', var_export(defined('GV_BOOT'), true),
+	' run=', var_export(function_exists('gv_run'), true), "\n";
+if (function_exists('gv_cfg_load')) {
+	$c = gv_cfg_load();
+	echo 'log_dir=', $c['log_dir'], ' writable=', var_export(is_writable($c['log_dir']), true), "\n";
+	try { gv_run(microtime(true)); echo "gv_run returned\n"; } catch (\Throwable $e) { echo get_class($e), ': ', $e->getMessage(), ' @ ', $e->getFile(), ':', $e->getLine(), "\n"; }
+	echo 'files=', implode(',', (array)scandir($c['log_dir'])), "\n";
+}
+var_dump(error_get_last());
+DIAG
+	curl -s "http://127.0.0.1:$PORT/gv-diag.php" | head -40 || true
+	rm -f /var/www/site/gv-diag.php
 fi
 stop_server
 
