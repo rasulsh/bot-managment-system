@@ -210,6 +210,7 @@ Four rules shape the whole design:
 | [docs/09-ADMIN-PANEL.md](docs/09-ADMIN-PANEL.md) | Panel install, security model, settings overlay |
 | [docs/05-ACCESS-LOG-REPORT.md](docs/05-ACCESS-LOG-REPORT.md) | Finding slow scrapers in your web server's access log |
 | [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md) | What changed in each release and what to do about it |
+| [docs/11-TESTING-PIPELINE.md](docs/11-TESTING-PIPELINE.md) | "Nothing shows in the panel": how the data flows, why it may not arrive, how to test it end to end |
 | [docs/CODE-REVIEW.md](docs/CODE-REVIEW.md) | Performance and workflow review notes |
 | [docs/README.md](docs/README.md) | The documentation index |
 

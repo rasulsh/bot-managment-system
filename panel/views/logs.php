@@ -126,7 +126,10 @@ $reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR'
 <?php endif; ?>
 
 <?php if (!$rows): ?>
-<div class="gp-card"><p class="gp-help"><?= gp_e(gp_t('no_results')) ?></p></div>
+<div class="gp-card"><p class="gp-help"><?= gp_e(gp_t('no_results')) ?></p>
+	<?php if (!empty($pipeline) && is_array($pipeline) && $pipeline['verdict'] !== 'ok'): ?>
+	<p class="gp-help"><span class="gp-badge gp-badge-bad"><?= gp_e(gp_t('pipe_' . $pipeline['verdict'])) ?></span></p>
+	<?php endif; ?></div>
 <?php else: ?>
 <div class="gp-rows">
 	<?php foreach ($rows as $i => $row):

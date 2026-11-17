@@ -144,6 +144,8 @@ jobs:
         run: php scripts/redis-selftest.php
       - name: analyzer redis matrix (auth, ACL, socket, db, prefix, PHP<->Python)
         run: python analyzer/selftest.py
+      - name: end-to-end pipeline (addresses, tabs, concurrency, log, snapshot, panel readers)
+        run: PATH="$(dirname "$GV_REDIS_BIN"):$PATH" bash scripts/e2e-pipeline.sh
 
   # -------------------------------------------------------- HTTP and browser
   http:

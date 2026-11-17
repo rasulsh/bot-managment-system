@@ -35,6 +35,26 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 </div>
 <?php endif; ?>
 
+<?php if (!empty($pipeline) && is_array($pipeline)):
+	$pv = (string)$pipeline['verdict']; ?>
+<div class="gp-card">
+	<div class="gp-card-title"><?= gp_e(gp_t('pipe_title')) ?>
+		<span class="gp-badge <?= $pv === 'ok' ? 'gp-badge-on' : 'gp-badge-bad' ?>"><?= gp_e(gp_t('pipe_' . $pv)) ?></span>
+	</div>
+	<?php if ($pipeline['last_age'] !== null): ?>
+	<div class="gp-stat-row">
+		<span class="gp-stat-key"><?= gp_e(gp_t('pipe_last')) ?></span>
+		<span class="gp-stat-val"><?= gp_e(gp_age((float)$pipeline['last_ts'])) ?> <?= gp_e(gp_t('ago')) ?></span>
+	</div>
+	<?php endif; ?>
+	<div class="gp-stat-row">
+		<span class="gp-stat-key"><?= gp_e(gp_t('pipe_dir')) ?></span>
+		<span class="gp-mono" dir="ltr"><?= gp_e($pipeline['dir']) ?></span>
+	</div>
+	<p class="gp-help"><?= gp_e(gp_t('pipe_snapshot_note')) ?></p>
+</div>
+<?php endif; ?>
+
 <?php if (!empty($ip_open)): ?>
 <div class="gp-note"><?= gp_e(gp_t('dash_ip_open')) ?></div>
 <?php endif; ?>
