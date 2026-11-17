@@ -30,7 +30,12 @@ function gv_log(array $row, $log_dir) {
 		$line = json_encode($row, $flags);
 		if ($line === false) { return; }
 		$file = rtrim($log_dir, '/\\') . '/guard-' . date('Ymd') . '.jsonl';
-		@file_put_contents($file, $line . "\n", FILE_APPEND | LOCK_EX);
+		$n = @file_put_contents($file, $line . "\n", FILE_APPEND | LOCK_EX);
+		// A log that cannot be written is otherwise invisible: the guard keeps
+		// deciding and nothing records it. gv_errlog throttles itself.
+		if ($n === false && function_exists('gv_errlog')) {
+			gv_errlog('log_write_failed', 'cannot append to ' . basename($file), $log_dir);
+		}
 	} catch (\Throwable $e) {
 		// silent: the guard may fail, the site may not
 	}
@@ -54,7 +59,12 @@ function gv_log_outcome(array $row, $log_dir) {
 		$line = json_encode($row, $flags);
 		if ($line === false) { return; }
 		$file = rtrim($log_dir, '/\\') . '/guard-' . date('Ymd') . '.jsonl';
-		@file_put_contents($file, $line . "\n", FILE_APPEND | LOCK_EX);
+		$n = @file_put_contents($file, $line . "\n", FILE_APPEND | LOCK_EX);
+		// A log that cannot be written is otherwise invisible: the guard keeps
+		// deciding and nothing records it. gv_errlog throttles itself.
+		if ($n === false && function_exists('gv_errlog')) {
+			gv_errlog('log_write_failed', 'cannot append to ' . basename($file), $log_dir);
+		}
 	} catch (\Throwable $e) {
 		// silent: the response is already on its way to the client
 	}

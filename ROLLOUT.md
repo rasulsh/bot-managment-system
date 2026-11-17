@@ -4,7 +4,9 @@ Development is finished. Everything below is operations. Each stage has a pass
 criterion; do not start a stage until the previous one has met it. The whole
 sequence is roughly 8–10 weeks, and almost all of that is waiting for data.
 
-Rollback at any point: `touch <guard>/guard.off` — instant, no deploy, no restart.
+Rollback at any point: `touch /full/path/bot-guard/guard.off` — instant, no deploy, no restart.
+The file goes in the project's top directory (next to `prepend.php`), **not** inside
+`guard/`: a `guard/guard.off` does nothing.
 
 ---
 
@@ -18,7 +20,8 @@ python3 -m pip install -r analyzer/requirements.txt
 php panel/setpass.php         # admin panel credentials (optional, recommended)
 ```
 
-- **Required:** run `bash scripts/exposure-check.sh https://your-site/ /your-panel-path` and
+- **Required:** run `bash scripts/exposure-check.sh https://your-site/ /your-panel-path`
+  (or `... https://your-site/ none` when the panel is not installed) and
   get `OK` before anything else. It is GET-only and safe on production.
 - `redis`: if the server needs a password / db / socket / prefix, set them in the `redis`
   block of `guard/config.php`; the analyzer and panel pick them up from there.
@@ -36,14 +39,21 @@ php panel/setpass.php         # admin panel credentials (optional, recommended)
   `capture_outcomes` false, `holdout_pct` 0.
 - Cron:
   ```
-  */10 * * * *  /bin/bash /path/scripts/analyzer-cron.sh verify
-  17 3   * * *  /bin/bash /path/scripts/analyzer-cron.sh nightly
-  40 3   * * 0  /bin/bash /path/scripts/analyzer-cron.sh train
-  10 0   * * *  /bin/bash /path/scripts/guard-logrotate.sh
+  */10 * * * *  /bin/bash /path/scripts/analyzer-cron.sh verify   >/dev/null 2>&1
+  17 3   * * *  /bin/bash /path/scripts/analyzer-cron.sh nightly  >/dev/null 2>&1
+  40 3   * * 0  /bin/bash /path/scripts/analyzer-cron.sh train    >/dev/null 2>&1
+  10 3   * * *  /bin/bash /path/scripts/guard-logrotate.sh
   0  8   * * 1  /bin/bash /path/scripts/analyzer-cron.sh report
-  */15 * * * *  /bin/bash /path/scripts/analyzer-cron.sh snapshot   # panel dashboard
-  *    * * * *  /bin/bash /path/scripts/analyzer-cron.sh worker     # panel job queue
+  */15 * * * *  /bin/bash /path/scripts/analyzer-cron.sh snapshot >/dev/null 2>&1   # panel dashboard
+  *    * * * *  /bin/bash /path/scripts/analyzer-cron.sh worker   >/dev/null 2>&1   # panel job queue
   ```
+  The redirects matter: verify, snapshot and worker print a line on every run, and cron
+  mails every line. `guard-logrotate.sh` is left unredirected on purpose: it exits non-zero
+  when something could not be rotated, and that mail is one you want. If the analyzer's
+  Python packages live in a virtualenv, put `GV_PYTHON=/path/.venv/bin/python` at the top of
+  the crontab; without it the jobs run the system `python3`, find no packages and store
+  nothing. `verify` alone needs only the `redis` package and is the one job the guard relies
+  on: it is what moves a real crawler out of `limits.bot_unverified`.
   The last two are only needed if you installed the panel. Without `snapshot` the
   dashboard has nothing to read; without `worker` its action buttons queue jobs
   that nobody runs.
@@ -187,7 +197,7 @@ and enforced populations tells you what enforcement is actually catching.
   audit view — after anyone else has been in the panel.
 
 **Emergency:** the kill switch is the dashboard's most prominent control (behind
-a confirm step) and `touch <guard>/guard.off` from a shell. Either takes effect
+a confirm step) and `touch /full/path/bot-guard/guard.off` (the project's top directory) from a shell. Either takes effect
 on the very next request. If the panel itself is what is broken, use the shell —
 the panel is not in the request path and cannot prevent the file being created.
 

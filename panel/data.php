@@ -544,7 +544,13 @@ function gp_overrides_list($limit = 200) {
 	$out = array();
 	$conn = gp_redis();
 	if (!$conn) { return $out; }
-	foreach (array('allow', 'deny') as $kind) {
+	// Deny first: a block that is hurting customers must never be the entry that
+	// fell off the end of the list. And scan until Redis says the keyspace is
+	// done (bounded by time, not by a fixed number of steps): with a few hundred
+	// thousand counter keys in Redis the old 64-step limit ended before it had
+	// seen the overrides at all, and the page showed none.
+	$deadline = microtime(true) + 2.0;
+	foreach (array('deny', 'allow') as $kind) {
 		$cursor = '0';
 		$guard = 0;
 		do {
@@ -558,9 +564,18 @@ function gp_overrides_list($limit = 200) {
 				if (count($out) >= $limit) { return $out; }
 			}
 			$guard++;
-		} while ($cursor !== '0' && $guard < 64);
+		} while ($cursor !== '0' && microtime(true) < $deadline);
 	}
 	return $out;
+}
+
+// One spelling per address, the same one the guard keys on (gv_ip_canon), so an
+// override typed as 2001:DB8::5 or ::ffff:1.2.3.4 lands on the key the guard
+// reads. A device id or anything that is not an address is returned unchanged.
+function gp_identity_canon($identity) {
+	$identity = (string)$identity;
+	if (filter_var($identity, FILTER_VALIDATE_IP) !== false) { return gv_ip_canon($identity); }
+	return $identity;
 }
 
 // One SCAN step. Returns array(next_cursor, keys) or null. The shared client
@@ -583,7 +598,7 @@ define('GP_OVERRIDE_MAX_TTL', 2592000);
 
 function gp_override_set($kind, $identity, $ttl) {
 	if (!in_array($kind, array('allow', 'deny'), true)) { return false; }
-	$identity = (string)$identity;
+	$identity = gp_identity_canon(is_string($identity) ? $identity : '');
 	if ($identity === '' || strlen($identity) > 128) { return false; }
 	if (!preg_match('/^[A-Za-z0-9._:-]+$/', $identity)) { return false; }
 	$ttl = (int)$ttl;
@@ -596,7 +611,7 @@ function gp_override_set($kind, $identity, $ttl) {
 function gp_override_clear($identity) {
 	$conn = gp_redis();
 	if (!$conn) { return false; }
-	if (!preg_match('/^[A-Za-z0-9._:-]+$/', (string)$identity)) { return false; }
+	if (!is_string($identity) || !preg_match('/^[A-Za-z0-9._:-]+$/', $identity)) { return false; }
 	gv_redis_cmd($conn, array('DEL', gv_key('allow:' . $identity)));
 	gv_redis_cmd($conn, array('DEL', gv_key('deny:' . $identity)));
 	return true;

@@ -12,13 +12,18 @@ and fetches a page every few seconds: no single address ever looks busy.
 
 ## Run it
 
+One day at a time. The signals are tuned for a day; over a week every busy
+network reads many pages and covers the clock.
+
 ```bash
 python3 scripts/accesslog_report.py /path/to/access.log
-python3 scripts/accesslog_report.py --rdns --json /tmp/report.json yesterday.log.gz today.log
+python3 scripts/accesslog_report.py --date 2026-11-15 --rdns archive-Nov-2026.gz live.log
+python3 scripts/accesslog_report.py --ignore 192.0.2.10,198.51.100.0/24 --json /tmp/report.json access.log
 ```
 
 | option | meaning |
 |--------|---------|
+| `--date YYYY-MM-DD` | analyse only this day (the log's own time zone); for monthly archives |
 | `--min-pages N` | page requests an actor needs before it is scored (default 30) |
 | `--top N` | rows per section (default 20) |
 | `--catalog-regex RE` | which URLs are catalogue pages (default fits OpenCart, with and without SEO URLs) |
@@ -31,29 +36,40 @@ Give it the **whole** log, static files included. A log already filtered down to
 page requests still works, but the strongest signal (pages without assets) turns
 itself off and the report says so.
 
+Exit status: 0 normally, 1 when the report is partial (a file was cut short, or
+more than a fifth of the lines were not in the combined log format), 2 on a
+usage or read error.
+
 ## How it decides
+
+Only what was **served** counts: a page is a GET answered 2xx or 304, an asset
+one answered 200, 206 or 304. A page is identified by its path plus the
+parameters that select content (`route`, `product_id`, `path`, ...); tracking
+tags and cache-busting values are dropped.
 
 1. **Client** = one (address, User-Agent) pair. The User-Agent is used only to
    tell apart people who share a carrier address; nothing is concluded from what
    it claims.
-2. **Candidate** = a client that requested pages and not one stylesheet, script
-   or image (or that read 150+ pages).
-3. **Actor** = the candidates of one `/24` (IPv6 `/48`) together. Actors whose
-   page lists overlap by half or more are merged: one crawl list fetched from two
-   networks is one crawler. Candidates left in groups too small to score are
-   regrouped per `/16` (`/32`), which is where a carrier's address pool shows up.
+2. **Candidate** = a client that was served pages and (almost) no stylesheet,
+   script or image: at most 2% as many assets as pages. A reader of 150+ pages
+   with under 20% is a candidate too.
+3. **Actor** = the candidates of one `/24` (IPv6 `/48`) together. Actors that
+   already score 40+ and whose page lists overlap by half or more are merged:
+   one crawl list fetched from two networks is one crawler. Candidates left in
+   groups too small to score are regrouped per `/16` (`/32`), which is where a
+   carrier's address pool shows up.
 4. **Score** on behaviour:
 
 | signal | points | kind |
 |--------|-------:|------|
-| `no_assets` pages but never an asset | 10 | shape |
+| `no_assets` pages but (almost) never an asset | 10 | shape |
 | `no_referer` 90%+ of page requests without a Referer | 10 | shape |
 | `breadth` 30+ different catalogue pages | 10 | shape |
 | `breadth_wide` 100+ | 5 | shape |
-| `deep` 100+ different catalogue pages per address it used | 25 | machine |
-| `repoll` 30%+ of its pages fetched 3+ times | 20 | machine |
-| `cadence` steady interval, or 60+ pages in a minute | 20 | machine |
-| `hours` active in 18+ hours of the day | 10 | machine |
+| `deep` one client read 100+ different catalogue pages | 25 | machine |
+| `repoll` comes back to its pages on a schedule | 20 | machine |
+| `cadence` a steady interval, or one client bursting 60+/minute | 20 | machine |
+| `hours` one client active in 18+ hours of the day | 10 | machine |
 | `hours_all` 22+ | 5 | machine |
 | `http1` 90%+ HTTP/1.x while the browsers in the log use HTTP/2 or 3 | 10 | machine |
 | `declared` the User-Agent names a program | 5 | low weight |
@@ -64,7 +80,16 @@ The *shape* signals add up to 35 at most, on purpose. A crowd of real customers
 on one carrier network can show all of them at once (cached site, arriving from
 an app that sends no Referer, many different products between them), and that
 must never be enough. An actor is only listed when it also does something only a
-program does.
+program does, and each machine signal is measured so that many independent people
+cannot produce it together:
+
+- `repoll`: a crowd also "re-fetches" popular products, at random times. A page
+  counts only when the gaps between its fetches are regular; half of the actor's
+  pages must have been fetched 3+ times and half of those must be regular.
+- `cadence`: one client keeps a steady interval, or the actor as a whole does at
+  3 seconds or slower. Faster than that, the random arrivals of a busy network
+  look steady and are not counted.
+- `deep` and `hours` are per client, not per network.
 
 ## Reading the result
 
@@ -81,9 +106,13 @@ program does.
 - A scraper that runs a real browser, loads every asset, and reads fewer than 150
   pages per address-and-browser pair is not a candidate here. That client is the
   guard's job: it needs a token, and the token has an hourly and a daily budget.
-- An actor that claims to be a search engine is listed separately as unverified.
-  With `--rdns` a confirmed claim moves to "verified crawlers" and a failed one
-  stays where its behaviour put it.
+- A User-Agent that claims to be a search engine changes nothing: the actor is
+  judged on its behaviour and the claim is shown as not verified. With `--rdns`
+  a confirmed claim moves to "verified crawlers".
+- Evasions that work, stated plainly: a scraper spread thinly over many `/16`s
+  (a few pages from each), one with random pauses that reads under 100 pages
+  once, and one that runs a real browser and loads the assets. Those are the
+  guard's job, not this report's.
 
 ## Test
 
@@ -91,7 +120,8 @@ program does.
 python3 scripts/accesslog_selftest.py
 ```
 
-It builds a synthetic day (ordinary customers, returning customers with a full
-cache, a campaign crowd, customers behind the same carrier addresses as a
-scraper, and three kinds of scraper on changing addresses with browser
-User-Agents) and checks both directions.
+It builds synthetic days (ordinary customers, returning customers with a full
+cache, a campaign crowd, a busy carrier network of 250 cached customers, a
+week-long log, 600 people behind one address, customers behind the same carrier
+addresses as a scraper, and several kinds of scraper on changing addresses with
+browser User-Agents) and checks both directions.

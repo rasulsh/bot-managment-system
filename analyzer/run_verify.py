@@ -25,6 +25,33 @@ from analyzer import snapshot as snapshot_mod
 # DNS is a shared resource and these lookups are not urgent.
 DNS_SLEEP_S = 0.05
 MAX_LOOKUPS_PER_RUN = 200
+MAX_SECONDS_PER_RUN = 240          # the job runs every ten minutes; never overlap the next one
+
+
+def claim_counts(rows, known_bots):
+    """Map ip -> number of requests that claimed a known bot from it."""
+    counts = {}
+    known = set(str(b).lower() for b in known_bots or [])
+    for row in rows:
+        bot = str(row.get('bot') or '').lower()
+        ip = str(row.get('ip') or '')
+        if not bot or not ip or (known and bot not in known):
+            continue
+        counts[ip] = counts.get(ip, 0) + 1
+    return counts
+
+
+def lookup_order(claims, counts):
+    """Busiest addresses first.
+
+    The run is capped, so the order decides who gets a verdict. In address order
+    a flood of fake claims from thousands of addresses filled every run with the
+    same first few hundred, and a real crawler that sorted after them was never
+    reached. A real crawler makes many requests from few addresses; a rotating
+    impersonator makes few from each. Sorting by volume reaches the crawler
+    first whatever the impersonators do.
+    """
+    return sorted(claims, key=lambda ip: (-int(counts.get(ip, 0)), ip))
 
 
 def collect_bot_ips(rows, known_bots):
@@ -79,6 +106,8 @@ def main(argv=None, resolver=None):
 
     rows = logs_mod.read_lines(cfg['log_dir'], cfg['window_days'])
     claims = collect_bot_ips(rows, cfg['known_bots'])
+    counts = claim_counts(rows, cfg['known_bots'])
+    started = time.time()
 
     client = redis_io.connect(cfg, write=not args.dry_run)
     verified = 0
@@ -86,8 +115,9 @@ def main(argv=None, resolver=None):
     unknown = 0
     skipped = 0
 
-    for ip in sorted(claims):
-        if (verified + flagged + unknown) >= int(args.max_lookups):
+    for ip in lookup_order(claims, counts):
+        if ((verified + flagged + unknown) >= int(args.max_lookups)
+                or (time.time() - started) > MAX_SECONDS_PER_RUN):
             skipped += 1
             continue
         # A fresh verdict is still valid; do not re-resolve it.

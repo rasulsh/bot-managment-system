@@ -183,8 +183,16 @@ and `redis` match the guard's; you only need to override if you moved things.
 
 ## Step 4 — Schedule the analyzer (cron)
 
-Use the wrapper `scripts/analyzer-cron.sh`, which takes a `flock` per mode so
-overlapping firings skip cleanly. A complete crontab (adjust the absolute path):
+Use the wrapper `scripts/analyzer-cron.sh`, which takes a `flock` so overlapping
+firings skip cleanly (the modes that write models or verdicts share one lock). If
+you installed the Python packages in `.venv` as above, add this line at the top of
+the crontab, or the jobs run the system `python3`, find no packages and store
+nothing while exiting 0:
+
+```cron
+GV_PYTHON=/home/youruser/bot-guard/.venv/bin/python
+```
+ A complete crontab (adjust the absolute path):
 
 ```cron
 # reverse-DNS bot verification, frequent
@@ -334,7 +342,7 @@ panel) — it takes effect on their next request.
 | `capture_outcomes` | record status/size of allowed requests (Phase 4) | `false` until you want outcome signals |
 | `limits.window` / `.device` / `.ip_ua` / `.ip` / `.bot` | fixed-window rate counters | shipped generous |
 | `limits.device_hour` / `.device_day` | per-device budgets over an hour and a day, for slow clients on changing addresses | `400` / `1500`; exempt the admin path first |
-| `limits.preview` / `preview_bots` | site-wide budget per link-preview fetcher name | `60`; Telegram, WhatsApp, Facebook, X, LinkedIn |
+| `limits.preview` / `preview_bots` | site-wide budget per link-preview fetcher name | `20`; Telegram, WhatsApp, Facebook, X, LinkedIn |
 | `challenge.trust_headers` | `true` = old rule, challenge only GETs that ask for HTML (bypassable) | `false` |
 | `honeypot_path` | the invisible 404 trap path | `/old-archive` (change per site) |
 | `exempt_paths` | URI prefixes the guard never touches | add payment/cron/webhook/admin paths |

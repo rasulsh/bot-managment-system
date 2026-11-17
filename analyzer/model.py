@@ -70,9 +70,28 @@ def train(vectors, contamination, model_path, min_train=200):
     model = IsolationForest(contamination=float(contamination), random_state=0)
     model.fit(scaled)
 
-    joblib.dump({'scaler': scaler, 'model': model, 'feature_order': list(FEATURE_ORDER)},
-                model_path)
+    _dump_atomic({'scaler': scaler, 'model': model, 'feature_order': list(FEATURE_ORDER)},
+                 model_path)
     return True
+
+
+def _dump_atomic(bundle, path):
+    """Write a model next to its destination, then rename it into place.
+
+    A dump straight to the live path that is cut short (disk full, a kill)
+    leaves a truncated file that is neither missing nor loadable: nothing
+    retrains it and verdicts quietly stop. A rename is all-or-nothing.
+    """
+    tmp = '%s.tmp.%d' % (path, os.getpid())
+    try:
+        joblib.dump(bundle, tmp)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def load(model_path):

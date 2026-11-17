@@ -6,9 +6,10 @@ every GET without a valid token is challenged to complete
 a small cookie handshake before it reaches the app, every request is written to
 a JSONL log, and an
 instant kill switch is one `touch` away. Redis is **optional** — without it the
-guard runs in degraded mode where rate limiting and honeypot history are off but
-logging, static scoring and the whole token/challenge handshake keep working
-(both are stateless by design). Every path fails open: a Throwable, a missing
+guard runs in degraded mode: rate limiting, device budgets, operator allow/deny
+overrides, bot verdicts, honeypot history and nonce single-use are all off (the
+full list is in `docs/06-KNOWN-LIMITS.md`), while logging, static scoring and the
+whole token/challenge handshake keep working (both are stateless by design). Every path fails open: a Throwable, a missing
 Redis or an unwritable log directory results in a silent allow. The guard may
 fail; the site may not. IP is treated as a weak signal throughout (CGNAT, mobile
 carriers and shared VPN egress are normal), so the guard never hard-blocks on IP
@@ -48,13 +49,16 @@ cache layer and needs zero host-app changes. Then set a real secret in
 | `enforce.ratelimit` | Serve 429 over the limits. Stage 3. |
 | `hard_block_score` | Score at or above which a GET is a block candidate. |
 | `limits.window` | Fixed counter window in seconds. |
-| `limits.mint` | Tokens minted per IP per window (default 60). Over it: 429 with `enforce.ratelimit`, logged `mint_limited` with `sh=1` otherwise. An allow-listed IP is never refused. |
+| `limits.mint` | Tokens minted per IP (IPv6: per /64) per window (default 300; a carrier address is shared by many new visitors). Over it: 429 with `enforce.ratelimit`, logged `mint_limited` with `sh=1` otherwise. An allow-listed IP is never refused. |
 | `challenge.pow_bits` | Proof-of-work difficulty of the challenge, 0-24 (default 16, 0 = off). Panel-tunable. |
 | `challenge.bind_ip` | Bind a nonce to the IP it was issued to (default true). |
 | `challenge.trust_headers` | Default false. `true` restores the old rule (only a GET that asks for HTML is challenged), which any client walks past by not sending `Accept: text/html`. A rollback switch, file-only. |
 | `limits.device` / `ip_ua` / `ip` / `bot` | Requests per window per device token, per IP+UA pair, per IP, per known bot. The IP limit is deliberately generous. |
 | `limits.device_hour` / `device_day` | Requests per device token per hour (400) and per day (1500), fixed windows. They catch the client that paces itself under `limits.device` and keeps changing address: the count follows the token, not the IP. Over either: 429 with `enforce.ratelimit`, otherwise logged with `sh=1` and `DEV_HOUR` / `DEV_DAY` in `rs`. Exempt your admin path before enforcing. |
-| `limits.preview` | Requests per `preview_bots` name per window, **site-wide** (default 60). |
+| `limits.preview` | Requests per `preview_bots` name per window, **site-wide** (default 20). |
+| `limits.bot_unverified` | Requests per `known_bots` name per window, **site-wide**, from addresses the verifier has not confirmed (default 300). Past it an unverified claim is handled like any client. A verified crawler (`botok`) is outside it, so `analyzer-cron.sh verify` must be running. |
+| `challenge.gate_post` | Default false: a token-less POST is served and logged as a shadow challenge (`act=challenge, sh=1, m=POST`). True: it is challenged like a GET. Turn it on once the shadow rows show only endpoints you have exempted. |
+| `exempt_params_paths` | The exact paths on which `exempt_params` count (default `/` and `/index.php`). On any other path the parameter is something the client added and exempts nothing. |
 | `honeypot_path` | Hidden path that must 404 today. A hit marks the IP for 7 days. |
 | `exempt_paths` | URI prefixes the guard skips entirely. |
 | `exempt_params` | `param => array of value prefixes` the guard skips, e.g. `'route' => array('payment/')`. |
@@ -634,6 +638,68 @@ expiry and tampering, CSRF, the login rate limit with Redis up *and* down, store
 XSS (asserted by parsing the rendered HTML with `DOMDocument` and counting what a
 browser would actually execute, not by matching a regex), and a token-level scan
 proving no shell function, backtick or `eval` exists under `panel/`.
+
+# Upgrade notes (review-hardening release)
+
+A full review with concurrent testing found the problems below. Behaviour changes are listed
+first; everything is covered by tests.
+
+**Behaviour that changed**
+
+* **A rule in shadow no longer cancels the rules below it.** With `enforce.ratelimit` off and
+  `enforce.challenge` on, a token-less client that went over a limit was served unchallenged
+  for the rest of the window; with `enforce.block` off the worst-scoring clients skipped the
+  challenge. Now the first rule that matches *and is enforced* is served. The row carries the
+  served action and names the shadowed one in `rs` (`SH_429`, `SH_403`).
+* **`exempt_params` only count on the front controller** (`exempt_params_paths`, default `/`
+  and `/index.php`). `?route=payment/x` appended to a product URL used to exempt it from
+  everything. A path with a dot segment, a doubled slash or an encoded slash/dot is never
+  exempt by prefix either. If your callbacks arrive on another path, add it to
+  `exempt_params_paths` or use `exempt_paths`.
+* **HEAD is gated like GET.** Uptime monitors that use HEAD need an exemption or an allow.
+* **POST is shadow-gated.** Most applications render a page for a POST as well, which made
+  POST the next way round the challenge. Token-less POSTs are now logged as
+  `act=challenge, sh=1`; set `challenge.gate_post` to enforce, after checking
+  `jq -r 'select(.m=="POST" and .act=="challenge")|.p+"?"+.q' logs/guard-*.jsonl | sort | uniq -c | sort -rn | head -30`.
+* **Unverified crawler claims share one budget** (`limits.bot_unverified`) and an operator deny
+  now beats the crawler pass. Run `analyzer-cron.sh verify`.
+* **IPv6 clients are counted per /64**, and every address is stored in one canonical spelling
+  (an IPv4-mapped address as its IPv4 address), in the guard, the panel and the verifier.
+* **Defaults:** `limits.mint` 60 → 300, `limits.preview` 60 → 20, `challenge.pow_bits` maximum
+  24 → 22 in the panel.
+* **The breaker needs two timeouts within ten seconds** before it switches Redis off for
+  `breaker_ttl`; one slow reply used to open a site-wide gap. A refused connection still arms
+  it at once. Its marker falls back to the system temp directory when `logs/` is not writable.
+* **Monitor mode refuses nothing:** a bad handshake nonce is logged (`nonce_bad`, `sh=1`) and
+  the request runs.
+
+**Fixed without a behaviour change you need to act on**
+
+* `Cookie: _gv[]=x` raised a PHP warning; a stale `_gv` cookie in front of a valid one caused
+  an endless challenge loop.
+* A Redis that answers but refuses writes (read-only replica, out of memory, loading) left
+  every counter at 0 with no sign of it: rows are now `rd=1` and `guard-errors.log` says
+  `redis_cmd_error`.
+* A reply line without an end could exhaust PHP's memory (uncatchable); a breaker marker dated
+  in the future kept Redis off; a log that cannot be written now reports `log_write_failed`.
+* `config.php` values are sanity-checked: a limit or lifetime that is not a positive whole
+  number falls back to its default, `'false'`/`'off'` read as off, an empty secret forces
+  monitor mode.
+* The panel refuses settings that switch the guard or the shop off in one click (`/` as an
+  exempt path or honeypot, a bot fragment like `mozilla`), saves under a lock and writes only
+  the keys that changed, bounds audit rows, counts login attempts atomically, lists deny
+  overrides first and completely, and neutralises spreadsheet formulas in the CSV export.
+* `guard-logrotate.sh` no longer compresses a file that is still being written, never
+  overwrites an archive, skips anything that is not a regular file and exits non-zero on
+  failure. `GV_LOG_DIR` points it at a non-default directory.
+* Analyzer: a DNS failure right after a successful health check can no longer mark a real
+  crawler as fake; verification looks at the busiest claimants first; a wrong-typed log field
+  no longer kills every job; models are written atomically; rounding matches PHP exactly;
+  all writing cron modes share one lock; reputation expires in 14 days.
+* `scripts/accesslog_report.py`: see `docs/05-ACCESS-LOG-REPORT.md` (served-only counting,
+  per-client machine signals, `--date`, format and truncation warnings).
+
+**Known and not changed** (see `docs/06-KNOWN-LIMITS.md`)
 
 # Upgrade notes (slow-scraper release)
 

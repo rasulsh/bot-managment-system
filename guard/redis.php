@@ -47,7 +47,7 @@ function gv_resp_encode(array $args) {
 // probe: this request is the one probing a Redis the breaker had marked down.
 function gv_redis_ctx($set = null) {
 	static $ctx = array('log_dir' => '', 'breaker' => false, 'breaker_ttl' => 0,
-		'rt' => 0, 'probe' => false);
+		'rt' => 0, 'probe' => false, 'cmd_err' => false);
 	if (is_array($set)) { $ctx = array_merge($ctx, $set); }
 	return $ctx;
 }
@@ -130,10 +130,18 @@ function gv_errlog($code, $msg = '', $log_dir = null) {
 	}
 }
 
-function gv_breaker_path() {
+// Where the breaker keeps its marker. Normally the log directory. When PHP
+// cannot write there (a tree unpacked as root, a full quota) the marker moves
+// to the system temp directory: without a marker there is no breaker, and every
+// request would pay the full Redis timeout for as long as Redis is down.
+function gv_breaker_path($name = '.redis-down') {
 	$c = gv_redis_ctx();
 	$d = rtrim((string)$c['log_dir'], '/\\');
-	return $d === '' ? '' : $d . '/.redis-down';
+	if ($d === '') { return ''; }
+	if (@is_dir($d) && !@is_writable($d)) {
+		return rtrim(sys_get_temp_dir(), '/\\') . '/gv-' . substr(md5($d), 0, 12) . $name;
+	}
+	return $d . '/' . $name;
 }
 
 // True when this request must skip Redis. One stat per healthy request.
@@ -153,14 +161,18 @@ function gv_breaker_skip() {
 	$t = @filemtime($m);
 	if ($t === false) { return false; }
 	$ttl = (int)$c['breaker_ttl'];
-	if ((time() - $t) < $ttl) { return true; }
+	$age = time() - $t;
+	// A marker dated in the future (clock stepped back, restored snapshot) is
+	// stale, not fresh: without the lower bound it would keep Redis switched
+	// off until the clock caught up.
+	if ($age >= 0 && $age < $ttl) { return true; }
 	$fh = @fopen($m, 'c');
 	if (!$fh) { return false; }                      // cannot coordinate: just probe
 	$skip = true;
 	if (@flock($fh, LOCK_EX | LOCK_NB)) {
 		clearstatcache(true, $m);
 		$t2 = @filemtime($m);
-		if ($t2 === false || (time() - $t2) >= $ttl) {
+		if ($t2 === false || (time() - $t2) >= $ttl || (time() - $t2) < 0) {
 			@touch($m);
 			gv_redis_ctx(array('probe' => true));
 			$skip = false;
@@ -171,13 +183,27 @@ function gv_breaker_skip() {
 	return $skip;
 }
 
-function gv_breaker_arm() {
+// Arm the breaker. $soft is a failure that may be a one-off: a single read
+// that timed out. Redis pauses for longer than 50 ms now and then (a snapshot
+// fork, an fsync), and arming on the first such pause switched every Redis
+// feature off site-wide for breaker_ttl - limits, overrides, replay protection.
+// A soft failure therefore only leaves a strike; the breaker arms on the second
+// one within ten seconds. A refused or failed connection arms at once.
+function gv_breaker_arm($soft = false) {
 	$c = gv_redis_ctx();
 	if (empty($c['breaker']) || (int)$c['breaker_ttl'] <= 0) { return; }
 	$m = gv_breaker_path();
 	if ($m === '') { return; }
 	$d = dirname($m);
 	if (!is_dir($d)) { @mkdir($d, 0775, true); }
+	if ($soft) {
+		$s = gv_breaker_path('.redis-slow');
+		clearstatcache(true, $s);
+		$t = @filemtime($s);
+		@touch($s);
+		$age = ($t === false) ? -1 : time() - $t;
+		if ($age < 0 || $age > 10) { return; }       // first strike
+	}
 	@touch($m);
 }
 
@@ -186,7 +212,7 @@ function gv_breaker_arm() {
 function gv_redis_fail($conn, $e, $detail = '') {
 	if ($conn && is_resource($conn)) { @fclose($conn); }
 	$code = ($e instanceof GvRedisFail) ? $e->getMessage() : 'redis_error';
-	gv_breaker_arm();
+	gv_breaker_arm($code === 'redis_timeout');
 	gv_errlog($code, $detail);
 	gv_redis_ctx(array('probe' => false));
 }
@@ -311,10 +337,14 @@ function gv_redis_timed_out($conn) {
 // Read one reply. Returns string, int, null, array or GvRedisErr; throws
 // GvRedisFail on any transport problem or malformed data.
 function gv_redis_read($conn, $depth = 0) {
-	$line = @fgets($conn);
+	// A reply line is short. Capped, because an uncapped read from something
+	// that is not Redis (a wrong port) grows until PHP hits memory_limit, and
+	// that fatal cannot be caught: it would break the page.
+	$line = @fgets($conn, 65537);
 	if ($line === false || $line === '') {
 		throw new GvRedisFail(gv_redis_timed_out($conn) ? 'redis_timeout' : 'redis_io');
 	}
+	if (substr($line, -1) !== "\n") { throw new GvRedisFail('redis_proto'); }
 	$line = rtrim($line, "\r\n");
 	if ($line === '') { throw new GvRedisFail('redis_proto'); }
 	$type = $line[0];
@@ -449,7 +479,14 @@ function gv_bump_cmds($key, $window) {
 // only happen when the key expired between SET NX and INCR: INCR then
 // re-creates it with no TTL, and a counter without a TTL would 429 the
 // identity forever once it crossed the limit. A failed read folds to 0.
+//
+// An INCR that came back as an error (Redis read-only after a failover, out of
+// memory, still loading) is recorded: the connection is alive, so nothing else
+// would notice that every counter now reads 0 and no limit can fire.
 function gv_bump_result($incr, $ttl) {
-	if (!is_int($incr)) { return array(0, false); }
+	if (!is_int($incr)) {
+		if ($incr === false) { gv_redis_ctx(array('cmd_err' => true)); }
+		return array(0, false);
+	}
 	return array($incr, $ttl === -1);
 }

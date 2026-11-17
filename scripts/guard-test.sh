@@ -145,6 +145,20 @@ row '7d GET with no Accept header, no cookie' "$got" '200' '503'
 got=$(curl -sk -o /dev/null -w '%{http_code}' -H 'User-Agent: TelegramBot (like TwitterBot)' -H 'Accept: text/html' "$BASE_URL/product/7e")
 row '7e link preview (TelegramBot UA)' "$got" '200' '200 (503 without Redis)'
 
+# 7f-7h. HEAD runs the application like GET, so it is challenged like GET. A
+# token-less POST is served (payment callbacks) and only logged as a shadow
+# challenge until challenge.gate_post is on. And a parameter exemption cannot be
+# borrowed by appending it to an ordinary page URL.
+got=$(curl -sk -o /dev/null -w '%{http_code}' -I -H "User-Agent: $CHROME_UA" -H 'Accept-Language: en-US,en;q=0.9' \
+	-H 'Accept-Encoding: gzip' -H 'Sec-Fetch-Mode: navigate' "$BASE_URL/product/7f")
+row '7f HEAD, no cookie' "$got" '200' '503'
+got=$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H "User-Agent: $CHROME_UA" -H 'Accept-Language: en-US,en;q=0.9' \
+	-H 'Accept-Encoding: gzip' -H 'Sec-Fetch-Mode: cors' -d 'a=1' "$BASE_URL/product/7g")
+row '7g POST, no cookie (gate_post off)' "$got" '200' '200'
+got=$(curl -sk -o /dev/null -w '%{http_code}' -H "User-Agent: $CHROME_UA" -H 'Accept: text/html' -H 'Accept-Language: en-US,en;q=0.9' \
+	-H 'Accept-Encoding: gzip' -H 'Sec-Fetch-Mode: navigate' "$BASE_URL/product/7h?route=payment/x")
+row '7h exempt param on a page URL' "$got" '200' '503'
+
 # 8. Rate limit: 30 rapid navigations from one UA. Needs Redis.
 codes=''
 saw429=0

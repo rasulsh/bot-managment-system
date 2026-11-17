@@ -210,9 +210,10 @@ try:
        slow is not None and slow['addresses'] >= 200 and max(n for _, n in slow['top_addresses']) <= 12)
     ok('...and its User-Agent is a plain browser: the finding does not rest on it',
        slow is not None and 'declared' not in slow['signals'])
-    ok('...on behaviour: no assets, breadth, re-polling, steady pace, round the clock',
-       slow is not None and set(['no_assets', 'breadth_wide', 'repoll', 'cadence', 'hours_all'])
+    ok('...on behaviour: no assets, breadth, scheduled re-polling, steady pace, HTTP/1.x',
+       slow is not None and set(['no_assets', 'breadth_wide', 'repoll', 'cadence', 'http1'])
        <= set(slow['signals']))
+    ok('...and not on hours: no single address of it is active for long', 'hours' not in slow['signals'])
     ok('customers sharing those carrier addresses are not part of the actor',
        slow is not None and all(c.ua == CHROME for c in slow['members'])
        and slow['pages'] == sum(1 for l in lines if '/product/sku-' in l))
@@ -232,8 +233,8 @@ try:
     section('Customers are left alone')
     flagged = [a for a in actors if a['verdict'] in ('scraper', 'review')]
     flagged_ips = set(c.ip for a in flagged for c in a['members'])
-    ok('the three scrapers, the one-pass walker and the unlisted own tool are flagged (%d)'
-       % len(flagged), len(flagged) == 5)
+    ok('the three scrapers, the walker, the unlisted own tool and the unverified "Googlebot" are flagged (%d)'
+       % len(flagged), len(flagged) == 6)
     walker = actor_of(actors, '46.245.89.90')
     ok('one address walking 400 products once is a scraper on depth alone (score %s)'
        % (walker and walker['score']),
@@ -255,7 +256,7 @@ try:
     ok('--ignore drops it from actors and from the address table',
        actor_of(a_ign, '198.51.100.7') is None and '198.51.100.7' not in d_ign['by_ip']
        and d_ign['ignored'] == 605)
-    ok('...and nothing else changes', len([a for a in a_ign if a['verdict'] in ('scraper', 'review')]) == 4)
+    ok('...and nothing else changes', len([a for a in a_ign if a['verdict'] in ('scraper', 'review')]) == 5)
     ok('a bad --ignore value is refused', rep.main([log, '--ignore', 'not-a-network']) == 2)
     ok('no ordinary customer network is flagged', not any(ip.startswith('31.') for ip in flagged_ips))
     ok('returning customers with a full cache (pages only) are not flagged',
@@ -276,8 +277,10 @@ try:
     # -----------------------------------------------------------------------
     section('Search-engine claims')
     google = actor_of(actors, '66.249.66.1')
-    ok('a Googlebot claim is set apart as unverified, not called a scraper',
-       google is not None and google['verdict'] == 'crawler-claimed' and google['claims'] == 'google')
+    ok('a Googlebot User-Agent buys nothing: unverified, the actor is judged on its behaviour',
+       google is not None and google['verdict'] in ('scraper', 'review') and google['claims'] == 'google')
+    ok('...and the report says the claim is not verified',
+       'claims to be google: NOT verified' in rep.render(data, actors, env, 50, False))
 
     class Dns(object):
         def __init__(self, good):
@@ -328,10 +331,180 @@ try:
                for c in a['members']))
 
     # -----------------------------------------------------------------------
+    section('Only what was served counts')
+
+    def run(lines_, **kw):
+        path = os.path.join(tmp, 'case-%d.log' % len(os.listdir(tmp)))
+        with io.open(path, 'w', encoding='utf-8') as fh2:
+            fh2.write(u'\n'.join(text for _, text in sorted(lines_)) + u'\n')
+        return rep.analyse([path], **kw)
+
+    def flagged_of(actors_):
+        return [a for a in actors_ if a['verdict'] in ('scraper', 'review')]
+
+    base_humans = []
+    for i in range(120):                                  # so the log has assets and HTTP/2 browsers
+        human_visit(rng, base_humans, '31.9.%d.%d' % (i % 200, 2 + i % 250), CHROME, DAY0 + 30000 + i * 97, 3)
+
+    scan = list(base_humans)
+    for n in range(300):
+        scan.append(line(DAY0 + 1000 + n * 6, '203.0.113.9', '/product/guess-%d' % n, CHROME, proto='HTTP/1.1', status=404))
+    _, a_scan, _ = run(scan)
+    ok('a scanner collecting 300 x 404 is not a catalogue reader', actor_of(a_scan, '203.0.113.9') is None)
+
+    redir = list(base_humans)
+    for n in range(60):
+        redir.append(line(DAY0 + 1000 + n * 20, '203.0.113.10', '/product/old-%d' % n, CHROME, proto='HTTP/1.1', status=301))
+        redir.append(line(DAY0 + 1001 + n * 20, '203.0.113.10', '/product/new-%d' % n, CHROME, proto='HTTP/1.1'))
+    d_r, a_r, _ = run(redir)
+    ok('a redirect is not a second page', actor_of(a_r, '203.0.113.10')['pages'] == 60)
+
+    css = list(base_humans)
+    for n in range(300):
+        css.append(line(DAY0 + 1000 + n * 6, '203.0.113.11', '/product/c-%d' % n, CHROME, proto='HTTP/1.1'))
+    css.append(line(DAY0 + 999, '203.0.113.11', '/favicon.ico', CHROME, proto='HTTP/1.1', size=300))
+    css.append(line(DAY0 + 998, '203.0.113.11', '/does-not-exist.css', CHROME, proto='HTTP/1.1', status=404))
+    _, a_css, _ = run(css)
+    one = actor_of(a_css, '203.0.113.11')
+    ok('one stray asset request no longer hides a crawler', one is not None and one['verdict'] == 'scraper'
+       and 'no_assets' in one['signals'])
+
+    bust = list(base_humans)
+    for n in range(400):
+        bust.append(line(DAY0 + 1000 + n * 5, '203.0.113.12', '/product/b-%d?utm=%d&x=%d' % (n % 10, n, n * 7), CHROME,
+                         proto='HTTP/1.1'))
+    d_b, a_b, _ = run(bust)
+    ok('cache-busting query strings do not make new pages (10, not 400)',
+       actor_of(a_b, '203.0.113.12')['unique_pages'] == 10)
+    ok('content-selecting parameters are kept, the rest dropped',
+       rep.page_key('/index.php?route=product/product&product_id=7&utm=1&x=2') == '/index.php?route=product/product&product_id=7'
+       and rep.page_key('/product/a?fbclid=zzz') == '/product/a' and rep.page_key('/product/a') == '/product/a')
+
+    # -----------------------------------------------------------------------
+    section('Crowds of real customers')
+
+    def crowd(net, users, per_user, products, start, span, ua_pool, days=1):
+        out_ = []
+        for d in range(days):
+            for u in range(users):
+                ip = '%s.%d' % (net, 2 + u % 250)
+                t = DAY0 + d * 86400 + start + rng.randint(0, span)
+                for _ in range(per_user):
+                    # popularity is skewed: a few hot products, a long tail
+                    prod = int(products * (rng.random() ** 3))
+                    out_.append(line(t, ip, '/product/hot-%d' % prod, rng.choice(ua_pool)))
+                    t += rng.randint(5, 180)
+        return out_
+
+    busy = base_humans + crowd('100.64.7', 250, 6, 60, 6 * 3600, 17 * 3600, (CHROME, SAFARI))
+    _, a_busy, _ = run(busy)
+    hit = actor_of(a_busy, '100.64.7.10')
+    ok('a busy carrier /24 (250 cached customers, hot products, all day) is not flagged (score %s)'
+       % (hit and hit['score']), hit is not None and hit['verdict'] == '')
+    ok('...many people arriving close together are not a "steady interval"', 'cadence' not in hit['signals'])
+    ok('...and returning to a few hot products is not polling', 'repoll' not in hit['signals'])
+
+    week = base_humans + crowd('100.64.8', 60, 5, 80, 6 * 3600, 17 * 3600, (CHROME, SAFARI), days=7)
+    d_w, a_w, env_w = run(week)
+    hit = actor_of(a_w, '100.64.8.10')
+    ok('the same crowd over a 7-day log is still not flagged (score %s)' % (hit and hit['score']),
+       hit is not None and hit['verdict'] == '')
+    ok('a multi-day log switches the hour signals off and says so',
+       env_w['single_day'] is False and 'hours' not in hit['signals']
+       and 'one day at a time with --date' in rep.render(d_w, a_w, env_w, 5, False))
+    d_1, a_1, env_1 = run(week, day='2026-11-15')
+    ok('--date keeps one day of it', env_1['single_day'] is True and d_1['other_days'] > 0 and d_1['pages'] < d_w['pages'])
+
+    campus = list(base_humans)
+    for u in range(600):                                  # one address, one User-Agent, real browsing
+        human_visit(rng, campus, '198.18.0.1', CHROME, DAY0 + rng.randint(7 * 3600, 23 * 3600), 6)
+    _, a_c, _ = run(campus)
+    ok('600 people behind one address with one User-Agent, loading assets, are not a candidate',
+       actor_of(a_c, '198.18.0.1') is None)
+
+    spread = []
+    for net in range(6):                                  # no assets logged; six unrelated networks, same hot products
+        for u in range(120):
+            ip = '172.16.%d.%d' % (20 + net, 2 + u)
+            t = DAY0 + rng.randint(6 * 3600, 23 * 3600)
+            prev = 'https://www.google.com/'
+            for _ in range(8):
+                url = '/product/hot-%d' % int(40 * (rng.random() ** 2))
+                spread.append(line(t, ip, url, rng.choice((CHROME, SAFARI)), ref=prev))
+                prev = 'https://shop.example' + url
+                t += rng.randint(5, 200)
+    _, a_s, env_s = run(spread)
+    ok('with no assets in the log, customers who click through (Referer) are not candidates',
+       env_s['assets_logged'] is False and flagged_of(a_s) == [])
+
+    # -----------------------------------------------------------------------
+    section('Parsing')
+    ok('a vhost:port prefix is accepted',
+       rep.LINE_RE.match('shop.example:443 1.2.3.4 - - [15/Nov/2026:10:00:00 +0330] "GET /product/a HTTP/2" 200 5 "-" "x"')
+       .group('ip') == '1.2.3.4')
+    ok('a basic-auth user with a space, a lower-case method and an escaped quote in the User-Agent parse',
+       rep.LINE_RE.match('1.2.3.4 - john doe [15/Nov/2026:10:00:00 +0330] "get /a HTTP/1.1" 200 5 "-" "a \\"b\\" c"')
+       .group('ua') == 'a \\"b\\" c')
+    ok('an IPv4-mapped IPv6 client is the IPv4 address', rep.canon_ip('::ffff:198.51.100.7') == '198.51.100.7'
+       and rep.canon_ip('2001:DB8::1') == '2001:db8::1' and rep.canon_ip('1.2.3.4') == '1.2.3.4')
+    mapped = list(base_humans)
+    for n in range(200):
+        mapped.append(line(DAY0 + 500 + n * 30, '::ffff:198.51.100.7', '/product/m-%d' % (n % 50), 'Monitor/1', proto='HTTP/1.1'))
+    d_m, a_m, _ = run(mapped, ignore=rep.parse_networks(['198.51.100.0/24']))
+    ok('--ignore with an IPv4 network also covers its IPv4-mapped spelling', d_m['ignored'] == 200)
+
+    junk = os.path.join(tmp, 'junk.log')
+    with io.open(junk, 'w', encoding='utf-8') as fh2:
+        fh2.write(u''.join(u'2026-11-15T10:00:00Z 1.2.3.4 GET /product/%d 200\n' % i for i in range(500)))
+    real_stdout, sys.stdout = sys.stdout, io.StringIO()
+    try:
+        junk_code = rep.main([junk])
+        junk_out = sys.stdout.getvalue()
+    finally:
+        sys.stdout = real_stdout
+    ok('a log in another format is reported as such and exits non-zero, not "0 findings, all fine"',
+       junk_code == 1 and 'could not be parsed' in junk_out)
+
+    cut = os.path.join(tmp, 'cut.log.gz')
+    with gzip.open(cut, 'wt', encoding='utf-8') as fh2:
+        fh2.write(u'\n'.join(lines) + u'\n')
+    with open(cut, 'rb') as fh2:
+        blob = fh2.read()
+    with open(cut, 'wb') as fh2:
+        fh2.write(blob[:len(blob) // 2])
+    d_cut, a_cut, env_cut = rep.analyse([cut])
+    ok('a .gz cut short yields what could be read, a warning and no traceback',
+       d_cut['lines'] > 100 and len(d_cut['truncated']) == 1
+       and 'cut short' in rep.render(d_cut, a_cut, env_cut, 5, False))
+
+    esc = list(base_humans)
+    for n in range(120):
+        esc.append(line(DAY0 + 1000 + n * 6, '203.0.113.13', '/product/e-%d' % n, u'Evil\x1b]0;owned\x07\u202eBot', proto='HTTP/1.1'))
+    d_e, a_e, env_e = run(esc)
+    text_e = rep.render(d_e, a_e, env_e, 20, False)
+    ok('control and direction-override characters from a User-Agent never reach the terminal',
+       u'\x1b' not in text_e and u'\x07' not in text_e and u'\u202e' not in text_e and 'Evil?' in text_e)
+
+    class SlowDns(object):
+        def gethostbyaddr(self, ip):
+            time.sleep(30)
+
+        def getaddrinfo(self, host, port):
+            time.sleep(30)
+
+    import time
+    t_start = time.time()
+    rep.classify(list(actors), True, SlowDns(), timeout=0.2)
+    ok('--rdns against a resolver that never answers gives up (%.1f s), verifying nothing'
+       % (time.time() - t_start), time.time() - t_start < 5
+       and not any(a['verdict'] == 'verified-crawler' for a in actors))
+    rep.classify(actors, False)
+
     section('Output')
     text = rep.render(data, actors, env, 20, False)
     ok('the report names the sections and the old top-address table',
-       'LIKELY SCRAPERS' in text and 'TOP ADDRESSES BY REQUESTS' in text and 'not a block list' in text)
+       'LIKELY SCRAPERS' in text and 'TOP ADDRESSES BY REQUESTS' in text and 'not a block list' in text
+       and 'CLAIM TO BE' not in text)
     ok('the address table shows the catalogue share', ' cat% ' in text)
     ok('times are printed in the log zone', "UTC+03:30" in text)
     ok('--all adds the low scorers', 'BELOW THE REVIEW SCORE' in rep.render(data, actors, env, 20, True))

@@ -83,7 +83,7 @@ if (!gp_ip_allowed($gp_cfg)) {
 	exit;
 }
 
-$gp_route = isset($_GET['r']) ? (string)$_GET['r'] : 'dashboard';
+$gp_route = (isset($_GET['r']) && is_string($_GET['r'])) ? $_GET['r'] : 'dashboard';
 $gp_user = gp_current_user();
 $gp_flash = array();          // array of array(kind, message)
 gp_flash_load_from_cookie();  // pick up any flash left by the previous redirect
@@ -206,6 +206,10 @@ switch ($gp_route) {
 				gp_audit_append(array('event' => 'killswitch', 'actor' => $gp_user,
 					'ip' => $gp_ip, 'key' => 'guard.off',
 					'old' => $stop ? false : true, 'new' => $stop ? true : false));
+			} else {
+				// The emergency button did nothing (the project directory is not
+				// writable by PHP). Saying so is the whole point of the button.
+				gp_flash('error', gp_t('write_failed'));
 			}
 			gp_redirect('dashboard');
 		}
@@ -293,10 +297,11 @@ switch ($gp_route) {
 				gp_flash('ok', $save['applied'] ? gp_t('set_saved') : gp_t('set_nochange'));
 				gp_redirect('settings');
 			}
-			gp_flash('error', gp_t('set_invalid'));
+			gp_flash('error', gp_t(isset($save['errors']['_write']) ? 'write_failed' : 'set_invalid'));
 		}
 		if ($gp_post && ($_POST['action'] ?? '') === 'reset' && isset($_POST['key'])) {
-			gp_config_reset((string)$_POST['key'], $gp_user, $gp_ip);
+			$reset_key = is_string($_POST['key']) ? $_POST['key'] : '';
+			if (!gp_config_reset($reset_key, $gp_user, $gp_ip)) { gp_flash('error', gp_t('write_failed')); }
 			gp_redirect('settings');
 		}
 		gp_render('settings', array(
@@ -385,6 +390,13 @@ function gp_logs_export_csv(array $rows) {
 				$line[] = isset($row[$col]) ? (is_array($row[$col]) ? json_encode($row[$col]) : $row[$col]) : '';
 			}
 		}
+		// A cell that starts with = + - @ is a formula to a spreadsheet, and the
+		// path and query columns are whatever a visitor typed. Neutralise it.
+		foreach ($line as $i => $cell) {
+			if (is_string($cell) && $cell !== '' && strpos("=+-@\t\r", $cell[0]) !== false) {
+				$line[$i] = "'" . $cell;
+			}
+		}
 		fputcsv($out, $line);
 	}
 	fclose($out);
@@ -426,14 +438,14 @@ function gp_settings_from_request() {
 	$post = $_POST;
 	$out = array();
 	$bools = array('enforce.block', 'enforce.challenge', 'enforce.ratelimit',
-		'signals.reputation', 'signals.ml', 'signals.clf', 'capture_outcomes');
+		'signals.reputation', 'signals.ml', 'signals.clf', 'capture_outcomes', 'challenge.gate_post');
 	foreach ($bools as $key) {
 		if (!isset($post['present'][$key])) { continue; }
 		$out[$key] = !empty($post['f'][$key]);
 	}
 	$ints = array('hard_block_score', 'limits.window', 'limits.device', 'limits.ip_ua',
 		'limits.ip', 'limits.bot', 'limits.mint', 'limits.device_hour', 'limits.device_day',
-		'limits.preview', 'challenge.pow_bits', 'holdout_pct');
+		'limits.preview', 'limits.bot_unverified', 'challenge.pow_bits', 'holdout_pct');
 	foreach ($ints as $key) {
 		if (!isset($post['f'][$key]) || $post['f'][$key] === '') { continue; }
 		$raw = trim((string)$post['f'][$key]);

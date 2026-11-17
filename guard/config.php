@@ -52,13 +52,20 @@ return array(
 		'ip_ua'  => 400,
 		'ip'     => 1200,                     // deliberately generous: CGNAT reality
 		'bot'    => 600,
-		'mint'   => 60,                       // tokens minted per IP per window (see challenge)
+		'mint'   => 300,                      // tokens minted per IP per window (see challenge).
+		                                      // Generous on purpose: a carrier address is shared
+		                                      // by many new visitors, and anyone on it could
+		                                      // otherwise use the budget up and lock them out
 		'device_hour' => 400,                 // requests per device token per hour and per
 		'device_day'  => 1500,                // day (fixed windows). These catch the scraper
 		                                      // that paces itself under 'device' and keeps
 		                                      // changing address. Exempt your admin path first.
-		'preview'     => 60,                  // requests per preview_bots name per window,
+		'preview'     => 20,                  // requests per preview_bots name per window,
 		                                      // site-wide (not per IP)
+		'bot_unverified' => 300,              // requests per known_bots name per window, site-wide,
+		                                      // from addresses the verifier has not confirmed yet.
+		                                      // Needs `analyzer-cron.sh verify` running, or real
+		                                      // crawlers stay inside this budget for ever
 	),
 	'challenge'        => array(
 		'pow_bits' => 16,                     // proof-of-work difficulty, 0-24; 0 disables
@@ -66,6 +73,12 @@ return array(
 		                                      // second in a current browser)
 		'bind_ip'  => true,                   // tie a nonce to the IP it was issued to; set
 		                                      // false on networks that rotate IPs mid-page-load
+		'gate_post' => false,                 // false: a token-less POST is served and logged as a
+		                                      // shadow challenge (act=challenge, sh=1, m=POST).
+		                                      // true: it is challenged like a GET. Most shops
+		                                      // render a product page for a POST too, so leave it
+		                                      // off only until the shadow rows show which POST
+		                                      // endpoints (gateway callbacks) still need exempting
 		'trust_headers' => false,             // false: every GET needs a token. true: only a
 		                                      // GET that asks for HTML does (the old rule; any
 		                                      // client that omits Accept: text/html walks past)
@@ -74,6 +87,9 @@ return array(
 	'exempt_paths'     => array(),            // URI prefixes, e.g. '/wp-cron.php', '/wp-json/'
 	'exempt_params'    => array(),            // param => array of value prefixes,
 	                                          // e.g. 'route' => array('payment/', 'api/')
+	'exempt_params_paths' => array('/', '/index.php'),  // exempt_params only count on these exact
+	                                          // paths (the front controller). On an SEO URL
+	                                          // the parameter is just something the client added
 	'known_bots'       => array(              // lowercase UA substrings. Each one needs a
 	                                          // bot_suffixes entry: the pass is revoked for
 	                                          // an address that fails reverse-DNS verification

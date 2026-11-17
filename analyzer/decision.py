@@ -19,7 +19,10 @@ def php_round(value):
     exactly 0.5, so this is not a theoretical difference - it is the first
     case that breaks a naive port, and the parity matrix tests it directly.
     """
-    value = float(value)
+    # PHP pre-rounds to the precision a double can hold before it rounds, so
+    # 0.7 * 85 (59.49999999999999 in binary) is 60 there. Without the same step
+    # this port said 59, one short of a hard_block_score of 60.
+    value = round(float(value), 12)
     if value >= 0:
         return int(math.floor(value + 0.5))
     return int(math.ceil(value - 0.5))

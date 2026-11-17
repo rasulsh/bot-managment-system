@@ -197,6 +197,21 @@ phpIniOverride {
 $( [ -n "${2:-}" ] && echo "  php_admin_value auto_prepend_file $2/prepend.php" )
 }
 CONF
+	# The vhost phpIniOverride above stopped being applied on a newer OpenLiteSpeed
+	# build (auto_prepend_file came back empty). A .user.ini in the document root is
+	# how a cPanel/LiteSpeed account sets it anyway, so set it both ways.
+	if [ -n "${2:-}" ]; then
+		printf 'auto_prepend_file = %s/prepend.php\n' "$2" > "$1/.user.ini"
+		chown www-data:www-data "$1/.user.ini"
+	fi
+	# ...and, as the setting of last resort, in every php.ini lsphp could load. The
+	# line is removed again for a layout that runs without the guard.
+	while IFS= read -r ini; do
+		sed -i '/^auto_prepend_file *= *.*bot-guard-ci$/d' "$ini"
+		if [ -n "${2:-}" ]; then
+			printf 'auto_prepend_file = %s/prepend.php ; bot-guard-ci\n' "$2" >> "$ini"
+		fi
+	done < <(find "$LSWS" /etc/php -name php.ini -path '*litespeed*' 2>/dev/null; find "$LSWS" -name php.ini 2>/dev/null | sort -u)
 	chown -R www-data:www-data "$LSWS/gv" "$LSWS/conf/vhosts/gv" /tmp/lshttpd
 	"$LSWS/bin/lswsctrl" start >/dev/null 2>&1 </dev/null
 	wait_http
@@ -244,7 +259,30 @@ start_server /var/www/site /var/www/bot-guard
 body="$(curl -s "http://127.0.0.1:$PORT/")"
 if [ "$body" = "host app OK" ]; then echo "PASS  host application still answers"; else echo "FAIL  host application: $body"; fail=1; fi
 run_checks symlink /gv-admin
-if ls /var/www/bot-guard/logs/guard-*.jsonl >/dev/null 2>&1; then echo "PASS  the guard (auto_prepend_file) logged the requests"; else echo "FAIL  no guard log was written"; fail=1; fi
+if ls /var/www/bot-guard/logs/guard-*.jsonl >/dev/null 2>&1; then echo "PASS  the guard (auto_prepend_file) logged the requests"; else
+	echo "FAIL  no guard log was written"; fail=1
+	# Say why: without this the job only reports that nothing was logged.
+	ls -la /var/www/bot-guard/logs /var/www/bot-guard | head -40 || true
+	cat /var/www/bot-guard/logs/guard-errors.log 2>/dev/null || echo "(no guard-errors.log)"
+	cat > /var/www/site/gv-diag.php <<'DIAG'
+<?php
+header('Content-Type: text/plain');
+error_reporting(-1); ini_set('display_errors', '1');
+echo 'php=', PHP_VERSION, ' ini=', var_export(php_ini_loaded_file(), true), ' scanned=', var_export(php_ini_scanned_files(), true),
+	' user_ini=', var_export(ini_get('user_ini.filename'), true), ' bin=', PHP_BINARY, "\n";
+echo 'sapi=', PHP_SAPI, ' prepend=', var_export(ini_get('auto_prepend_file'), true), ' boot=', var_export(defined('GV_BOOT'), true),
+	' run=', var_export(function_exists('gv_run'), true), "\n";
+if (function_exists('gv_cfg_load')) {
+	$c = gv_cfg_load();
+	echo 'log_dir=', $c['log_dir'], ' writable=', var_export(is_writable($c['log_dir']), true), "\n";
+	try { gv_run(microtime(true)); echo "gv_run returned\n"; } catch (\Throwable $e) { echo get_class($e), ': ', $e->getMessage(), ' @ ', $e->getFile(), ':', $e->getLine(), "\n"; }
+	echo 'files=', implode(',', (array)scandir($c['log_dir'])), "\n";
+}
+var_dump(error_get_last());
+DIAG
+	curl -s "http://127.0.0.1:$PORT/gv-diag.php" | head -40 || true
+	rm -f /var/www/site/gv-diag.php
+fi
 stop_server
 
 # --- layout 3: Alias (Apache; LiteSpeed has no Alias directive in .htaccess) ----

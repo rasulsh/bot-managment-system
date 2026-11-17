@@ -82,7 +82,8 @@
 				<form method="post" action="index.php?r=overrides" style="display:inline">
 					<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 					<input type="hidden" name="identity" value="<?= gp_e($item['identity']) ?>">
-					<input type="hidden" name="ttl" value="86400">
+					<?php // "Extend" must never shorten: keep what is left when that is more than a day. ?>
+					<input type="hidden" name="ttl" value="<?= (int)max(86400, (int)($item['ttl'] ?? 0)) ?>">
 					<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit"
 						name="override" value="<?= gp_e($item['kind']) ?>">
 						<?= gp_e(gp_t('ovr_extend')) ?></button>

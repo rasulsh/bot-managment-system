@@ -19,6 +19,10 @@ $_SERVER = array_merge(array(
 ), isset($gv_in['server']) ? $gv_in['server'] : array());
 $_COOKIE = isset($gv_in['cookie']) ? $gv_in['cookie'] : array();
 $_GET = array();
+// The query string becomes $_GET, as it would under a real SAPI.
+if (isset($_SERVER['QUERY_STRING']) && is_string($_SERVER['QUERY_STRING']) && $_SERVER['QUERY_STRING'] !== '') {
+	parse_str($_SERVER['QUERY_STRING'], $_GET);
+}
 
 $gv_start = microtime(true);
 ob_start();

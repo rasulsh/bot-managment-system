@@ -103,8 +103,10 @@ daily budgets (`limits.device_hour` / `device_day`) exist to stop elsewhere.
 
 If you run WooCommerce, also exempt the payment gateway callback/IPN paths — they
 vary by gateway, but they live under `/wc-api/` or `/?wc-api=...` (use
-`exempt_params` for the query-string form: `'wc-api' => array('')` exempts any
-value, or list the specific gateway prefixes).
+`exempt_params` for the query-string form and list the gateway prefixes, e.g.
+`'wc-api' => array('WC_Gateway_')`; an empty prefix matches nothing). Parameter
+exemptions only count on the front-controller paths in `exempt_params_paths`
+(default `/` and `/index.php`).
 
 ### OpenCart
 

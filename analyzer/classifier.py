@@ -138,9 +138,10 @@ def train(X, y, model_path, min_positive=50, test_size=0.25,
         'n_negative': int(negatives),
     }
 
-    joblib.dump({'model': model, 'feature_order': list(FEATURE_ORDER),
-                 'threshold': chosen['threshold'], 'metrics': metrics,
-                 'trained_at': None}, model_path)
+    from analyzer.model import _dump_atomic
+    _dump_atomic({'model': model, 'feature_order': list(FEATURE_ORDER),
+                            'threshold': chosen['threshold'], 'metrics': metrics,
+                            'trained_at': None}, model_path)
     return True
 
 

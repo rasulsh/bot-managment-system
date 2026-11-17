@@ -326,7 +326,12 @@ $row = t_lastrow($cfgH);
 t_ok('black hole: the request pays about one timeout, not N (' . $p1['ms'] . ' ms)', $p1['ms'] < 400);
 t_ok('black hole: logged degraded (rd=1) and still allowed with zero output',
 	$row['rd'] === 1 && $row['act'] === 'allow' && $p1['bytes'] === 0);
-t_ok('black hole: the breaker marker exists', is_file($T_DIR . '/hole/.redis-down'));
+// One read that timed out may be a pause, not an outage: it leaves a strike and
+// the breaker arms on the second one.
+t_ok('black hole: one timeout leaves a strike, the breaker is not armed yet',
+	is_file($T_DIR . '/hole/.redis-slow') && !is_file($T_DIR . '/hole/.redis-down'));
+$p1b = t_probe($cfgH, t_nav(), array('_gv' => $tok));
+t_ok('black hole: the second timeout arms the breaker', is_file($T_DIR . '/hole/.redis-down') && $p1b['bytes'] === 0);
 $p2 = t_probe($cfgH, t_nav(), array('_gv' => $tok));
 t_ok('black hole: the next request skips Redis entirely (' . $p2['ms'] . ' ms, rt ' . $p2['rt'] . ')',
 	$p2['rt'] === 0 && $p2['ms'] < $p1['ms'] && $p2['ms'] < 30);
@@ -813,7 +818,18 @@ $p = t_probe($cfgG, $noacc);
 t_ok('sending no Accept header does not skip the challenge', $p['code'] === 503);
 $p = t_probe($cfgG, array_merge($bare, array('REQUEST_METHOD' => 'POST')));
 $row = t_lastrow($cfgG);
-t_ok('a token-less POST is still never challenged', $p['bytes'] === 0 && $row['act'] === 'allow' && $row['gate'] === 0);
+t_ok('a token-less POST is served untouched and logged as a shadow challenge',
+	$p['bytes'] === 0 && $row['act'] === 'challenge' && $row['sh'] === 1 && $row['gate'] === 1);
+$cfgGP = $cfgG; $cfgGP['challenge'] = array('gate_post' => true); $cfgGP['log_dir'] = t_mkdir_log('gate-post');
+$p = t_probe($cfgGP, array_merge($bare, array('REQUEST_METHOD' => 'POST')));
+t_ok('with challenge.gate_post a token-less POST is challenged', $p['code'] === 503);
+$p = t_probe($cfgGP, array_merge($bare, array('REQUEST_METHOD' => 'POST')), array('_gv' => gv_tok_make('rt-secret')));
+t_ok('...and a POST carrying a token is not', $p['bytes'] === 0);
+$p = t_probe($cfgG, array_merge($bare, array('REQUEST_METHOD' => 'HEAD')));
+t_ok('a token-less HEAD is challenged like a GET', $p['code'] === 503);
+$p = t_probe($cfgG, array_merge($bare, array('REQUEST_METHOD' => 'OPTIONS')));
+$row = t_lastrow($cfgG);
+t_ok('OPTIONS (CORS preflight) is never challenged', $p['bytes'] === 0 && $row['act'] === 'allow' && $row['gate'] === 0);
 $tokG = gv_tok_make('rt-secret');
 $p = t_probe($cfgG, $xhr, array('_gv' => $tokG));
 $row = t_lastrow($cfgG);
@@ -897,6 +913,167 @@ gv_redis_cmd($cx, array('SET', 'gv:botbad:198.51.100.9', '1', 'EX', '60'));
 $p = t_probe($cfgG, $ads);
 $row = t_lastrow($cfgG);
 t_ok('a forged AdsBot-Google (failed reverse DNS) loses the pass', $row['act'] !== 'allow_bot' && $row['botv'] === 'bad' && $p['bytes'] > 0);
+gv_redis_cmd($cx, array('FLUSHALL'));
+
+// --------------------------------------------------------------------------
+t_section('Review hardening: shadowed rules, exemptions, networks, bot pass, cookies');
+
+// A rule in shadow must not cancel the rules below it.
+gv_redis_cmd($cx, array('FLUSHALL'));
+$cfgS = t_cfg(array(), array('log_dir' => t_mkdir_log('shadow-rl'), 'limits' => array('ip_ua' => 3),
+	'enforce' => array('block' => true, 'challenge' => true, 'ratelimit' => false)));
+$codes = array();
+for ($i = 0; $i < 6; $i++) { $p = t_probe($cfgS, t_nav()); $codes[] = $p['code']; }
+$row = t_lastrow($cfgS);
+t_ok('rate limit in shadow: a token-less client over the limit is STILL challenged (' . implode(',', $codes) . ')',
+	$codes === array(503, 503, 503, 503, 503, 503));
+t_ok('...and the row says what was served and what was shadowed', $row['act'] === 'challenge' && $row['sh'] === 0 && in_array('SH_429', $row['rs'], true));
+$cfgB = t_cfg(array(), array('log_dir' => t_mkdir_log('shadow-bl'),
+	'enforce' => array('block' => false, 'challenge' => true, 'ratelimit' => true)));
+$p = t_probe($cfgB, array('HTTP_ACCEPT' => 'text/html', 'HTTP_HOST' => 'x'));        // empty UA: score >= 60
+$row = t_lastrow($cfgB);
+t_ok('block in shadow: the worst-scoring client is still challenged', $p['code'] === 503 && $row['act'] === 'challenge' && in_array('SH_403', $row['rs'], true));
+$cfgM2 = t_cfg(array(), array('log_dir' => t_mkdir_log('shadow-all'),
+	'enforce' => array('block' => false, 'challenge' => false, 'ratelimit' => false)));
+$p = t_probe($cfgM2, array('HTTP_ACCEPT' => 'text/html', 'HTTP_HOST' => 'x'));
+$row = t_lastrow($cfgM2);
+t_ok('everything in shadow: zero output, the highest would-be action logged', $p['bytes'] === 0 && $row['act'] === '403' && $row['sh'] === 1);
+
+// Exemptions a client cannot award itself.
+$cfgE = t_cfg(array(), array('log_dir' => t_mkdir_log('exempt2'), 'exempt_paths' => array('/admin/'),
+	'exempt_params' => array('route' => array('payment/'))));
+$get = function ($cfg, $uri, $qs, $extra = array()) {
+	parse_str($qs, $g);
+	return t_probe($cfg, array_merge(t_nav(), array('REQUEST_URI' => $uri . ($qs !== '' ? '?' . $qs : ''), 'QUERY_STRING' => $qs), $extra));
+};
+$p = $get($cfgE, '/index.php', 'route=payment/zarinpal/callback');
+$probe_has_get = (t_lastrow($cfgE)['act'] === 'exempt');
+if ($probe_has_get) {
+	t_ok('a callback on the front controller is exempt', $p['bytes'] === 0);
+	$p = $get($cfgE, '/product/ps5-slim', 'route=payment/x');
+	t_ok('the same parameter appended to a product URL is challenged', $p['code'] === 503 && t_lastrow($cfgE)['act'] === 'challenge');
+} else {
+	t_skip('exempt_params end to end', 'the probe does not populate $_GET');
+}
+$p = $get($cfgE, '/admin/../product/x', '');
+t_ok('a dot-segment path under an exempt prefix is challenged', $p['code'] === 503);
+$p = $get($cfgE, '/admin/index.php', '');
+t_ok('the real exempt path still is exempt', $p['bytes'] === 0 && t_lastrow($cfgE)['act'] === 'exempt');
+
+// IPv6: one /64, one counter.
+gv_redis_cmd($cx, array('FLUSHALL'));
+$cfg6 = t_cfg(array(), array('log_dir' => t_mkdir_log('v6'), 'limits' => array('ip' => 3)));
+$tok6 = gv_tok_make('rt-secret');
+$acts = array();
+for ($i = 1; $i <= 5; $i++) {
+	$srv = t_nav(); $srv['REMOTE_ADDR'] = '2001:db8:aa:bb::' . dechex($i * 7919);
+	$srv['HTTP_USER_AGENT'] .= ' v' . $i;                       // a new UA too: only the network counter is shared
+	t_probe($cfg6, $srv, array('_gv' => $tok6));
+	$acts[] = t_lastrow($cfg6)['act'];
+}
+t_ok('addresses of one IPv6 /64 share the per-IP limit (' . implode(',', $acts) . ')',
+	$acts === array('allow', 'allow', 'allow', '429', '429'));
+t_ok('the counter key is the /64, and the row keeps the full address',
+	gv_redis_cmd($cx, array('GET', 'gv:ri:2001:db8:aa:bb::/64')) === '5' && strpos(t_lastrow($cfg6)['ip'], '2001:db8:aa:bb::') === 0);
+$srv = t_nav(); $srv['REMOTE_ADDR'] = '2001:db8:aa:cc::1';
+t_probe($cfg6, $srv, array('_gv' => $tok6));
+t_ok('a different /64 has its own counter', t_lastrow($cfg6)['ci'] === 1);
+gv_redis_cmd($cx, array('SET', 'gv:deny:203.0.113.77', '1', 'EX', '60'));
+$srv = t_nav(); $srv['REMOTE_ADDR'] = '::ffff:203.0.113.77';
+$p = t_probe($cfg6, $srv, array('_gv' => $tok6));
+t_ok('an IPv4-mapped address meets the override set on the IPv4 address', $p['code'] === 403 && t_lastrow($cfg6)['ip'] === '203.0.113.77');
+
+// Bot pass: an operator deny wins, and unverified claims share one budget.
+gv_redis_cmd($cx, array('FLUSHALL'));
+$cfgK = t_cfg(array(), array('log_dir' => t_mkdir_log('botpass'), 'known_bots' => array('googlebot'),
+	'limits' => array('bot_unverified' => 3)));
+$gb = function ($ip) { return array('HTTP_USER_AGENT' => 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+	'HTTP_ACCEPT' => 'text/html', 'HTTP_HOST' => 'x', 'REMOTE_ADDR' => $ip); };
+$acts = array();
+for ($i = 1; $i <= 5; $i++) { t_probe($cfgK, $gb('198.51.100.' . $i)); $acts[] = t_lastrow($cfgK)['act']; }
+t_ok('unverified Googlebot claims from changing addresses share ONE budget (' . implode(',', $acts) . ')',
+	$acts === array('allow_bot', 'allow_bot', 'allow_bot', 'challenge', 'challenge'));
+$row = t_lastrow($cfgK);
+t_ok('past the budget the claim is judged like any client, and still logged for verification',
+	$row['bot'] === 'googlebot' && in_array('BOT_UNVERIFIED', $row['rs'], true));
+gv_redis_cmd($cx, array('SET', 'gv:botok:66.249.66.1', '1', 'EX', '60'));
+$acts = array();
+for ($i = 0; $i < 4; $i++) { $p = t_probe($cfgK, $gb('66.249.66.1')); $acts[] = t_lastrow($cfgK)['act']; }
+t_ok('a VERIFIED crawler is outside that budget', $acts === array('allow_bot', 'allow_bot', 'allow_bot', 'allow_bot') && $p['bytes'] === 0);
+t_ok('...and does not draw on it', gv_redis_cmd($cx, array('GET', 'gv:rbu:googlebot')) === '5');
+gv_redis_cmd($cx, array('SET', 'gv:deny:66.249.66.1', '1', 'EX', '60'));
+$p = t_probe($cfgK, $gb('66.249.66.1'));
+t_ok('an operator deny beats the bot pass', $p['code'] === 403 && t_lastrow($cfgK)['ovr'] === 'deny');
+$cfgKD = t_cfg(array('port' => 63997), array('log_dir' => t_mkdir_log('botpass-down'), 'known_bots' => array('googlebot')));
+$p = t_probe($cfgKD, $gb('198.51.100.9'));
+t_ok('Redis down: the crawler pass stays open (documented)', $p['bytes'] === 0 && t_lastrow($cfgKD)['act'] === 'allow_bot');
+
+// Cookies.
+$cfgC = t_cfg(array(), array('log_dir' => t_mkdir_log('cookie')));
+$good = gv_tok_make('rt-secret');
+$p = t_probe($cfgC, array_merge(t_nav(), array('HTTP_COOKIE' => '_gv[]=x')), array('_gv' => array('x')));
+t_ok('Cookie: _gv[]=x raises no warning: just the challenge page', $p['code'] === 503 && $p['bytes'] > 1000);
+$out_len = $p['bytes'];
+$p = t_probe($cfgC, t_nav());
+t_ok('...byte for byte the size of an ordinary challenge', abs($p['bytes'] - $out_len) < 8);
+$p = t_probe($cfgC, array_merge(t_nav(), array('HTTP_COOKIE' => '_gv=stale-junk; _gv=' . $good)), array('_gv' => 'stale-junk'));
+t_ok('a stale cookie in front of a valid one no longer locks the visitor in a challenge loop',
+	$p['bytes'] === 0 && t_lastrow($cfgC)['act'] === 'allow' && t_lastrow($cfgC)['tok'] === 'v');
+$p = t_probe($cfgC, array_merge(t_nav(), array('HTTP_COOKIE' => '_gv=junk1; _gv=junk2')), array('_gv' => 'junk1'));
+t_ok('two invalid cookies are still a challenge', $p['code'] === 503 && t_lastrow($cfgC)['tok'] === 'b');
+
+// Handshake in monitor mode.
+$cfgHM = t_cfg(array(), array('log_dir' => t_mkdir_log('hs-mon'),
+	'enforce' => array('block' => false, 'challenge' => false, 'ratelimit' => false)));
+$p = t_probe($cfgHM, array('REQUEST_METHOD' => 'POST', 'HTTP_USER_AGENT' => 'x', 'HTTP_X_GV' => 'garbage', 'HTTP_X_GV_P' => '1'));
+$row = t_lastrow($cfgHM);
+t_ok('monitor mode refuses nothing: a bad nonce is logged in shadow and the request runs',
+	$p['bytes'] === 0 && ($p['code'] ?? 200) !== 403 && $row['act'] === 'nonce_bad' && $row['sh'] === 1);
+$p = t_probe($cfgC, array('REQUEST_METHOD' => 'POST', 'HTTP_USER_AGENT' => 'x', 'HTTP_X_GV' => 'garbage', 'HTTP_X_GV_P' => '1'));
+t_ok('with the challenge enforced a bad nonce is still a 403', $p['code'] === 403 && t_lastrow($cfgC)['sh'] === 0);
+
+// Guard answers must not be cacheable by LiteSpeed.
+t_ok('403, 429 and the challenge page send X-LiteSpeed-Cache-Control: no-cache',
+	substr_count(file_get_contents(__DIR__ . '/../guard/guard.php'), "header('X-LiteSpeed-Cache-Control: no-cache')") === 2
+	&& substr_count(file_get_contents(__DIR__ . '/../guard/challenge.php'), "header('X-LiteSpeed-Cache-Control: no-cache')") === 1);
+
+// --------------------------------------------------------------------------
+t_section('Review hardening: a Redis that answers but will not count');
+
+gv_redis_cmd($cx, array('FLUSHALL'));
+$cfgO = t_cfg(array(), array('log_dir' => t_mkdir_log('oom')));
+$tokO = gv_tok_make('rt-secret');
+$old_policy = gv_redis_cmd($cx, array('CONFIG', 'GET', 'maxmemory-policy'));
+gv_redis_cmd($cx, array('CONFIG', 'SET', 'maxmemory-policy', 'noeviction'));
+gv_redis_cmd($cx, array('CONFIG', 'SET', 'maxmemory', '1'));
+$p = t_probe($cfgO, t_nav(), array('_gv' => $tokO));
+$row = t_lastrow($cfgO);
+gv_redis_cmd($cx, array('CONFIG', 'SET', 'maxmemory', '0'));
+if (is_array($old_policy) && isset($old_policy[1])) { gv_redis_cmd($cx, array('CONFIG', 'SET', 'maxmemory-policy', $old_policy[1])); }
+t_ok('out-of-memory Redis: the request is allowed with zero output', $p['bytes'] === 0 && $row['act'] === 'allow');
+t_ok('...but the row is marked degraded instead of looking healthy (rd=1, counters 0)', $row['rd'] === 1 && $row['ci'] === 0);
+t_ok('...and guard-errors.log names it', is_file($cfgO['log_dir'] . '/guard-errors.log')
+	&& strpos(file_get_contents($cfgO['log_dir'] . '/guard-errors.log'), 'redis_cmd_error') !== false);
+$p = t_probe($cfgO, t_nav(), array('_gv' => $tokO));
+t_ok('once Redis counts again the row is healthy', t_lastrow($cfgO)['rd'] === 0 && t_lastrow($cfgO)['ci'] === 1);
+
+// Breaker marker: a future mtime is stale, and an unwritable log dir moves it.
+$cfgF = t_cfg(array(), array('log_dir' => t_mkdir_log('future')));
+touch($cfgF['log_dir'] . '/.redis-down', time() + 3600);
+$p = t_probe($cfgF, t_nav(), array('_gv' => $tokO));
+t_ok('a breaker marker dated in the future does not switch Redis off', t_lastrow($cfgF)['rd'] === 0 && $p['rt'] >= 1);
+gv_redis_ctx(array('log_dir' => $cfgF['log_dir']));
+t_ok('the marker lives in the log directory when it is writable', gv_breaker_path() === $cfgF['log_dir'] . '/.redis-down');
+if (function_exists('posix_geteuid') && posix_geteuid() !== 0) {
+	$ro = t_mkdir_log('readonly'); chmod($ro, 0555);
+	gv_redis_ctx(array('log_dir' => $ro));
+	t_ok('...and moves to the temp directory when it is not',
+		strpos(gv_breaker_path(), rtrim(sys_get_temp_dir(), '/')) === 0 && strpos(gv_breaker_path(), $ro) === false);
+	chmod($ro, 0755);
+} else {
+	t_skip('breaker marker fallback', 'running as root: every directory is writable');
+}
+gv_redis_ctx(array('log_dir' => $T_DIR));
 gv_redis_cmd($cx, array('FLUSHALL'));
 
 echo "\nPASS $GV_PASS  FAIL $GV_FAIL  SKIP $GV_SKIP\n";
