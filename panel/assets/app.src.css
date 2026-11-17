@@ -33,20 +33,161 @@
 	font-display: swap;
 }
 
-@layer base {
-	:root {
-		color-scheme: light dark;
+/* ------------------------------------------------------------------------
+ * Design tokens.
+ *
+ * Every colour in the panel comes from one of these variables, as an "R G B"
+ * triplet so Tailwind can still apply an alpha (bg-surface/90). Nothing else in
+ * this file or in the PHP views may contain a colour literal.
+ *
+ * Two themes:
+ *   light   the :root defaults
+ *   dark    chosen by the operator (data-theme="dark" on <html>) or, when the
+ *           operator has not chosen ("system"), by prefers-color-scheme
+ * The dark values are written twice, once for each selector, because plain CSS
+ * has no way to share one block between a media query and an attribute selector.
+ * scripts/panel-selftest.php fails if the two copies ever differ, and checks the
+ * WCAG contrast of every text/background pair listed there.
+ *
+ * Meaning of the names:
+ *   page      the page background          surface   cards, inputs, the top bar
+ *   sunken    a quiet area inside a card   line      decorative borders
+ *   field     borders of controls (3:1)    ink       body text
+ *   muted     secondary text               subtle    hints and captions
+ *   accent    text-level brand colour      brand     solid brand fill (buttons)
+ *   danger    solid destructive fill       ok/warn/bad/info -bg/-fg/-line
+ *                                          status badges and messages
+ *   chart-*   data colours, >= 3:1 on surface
+ * ---------------------------------------------------------------------- */
+:root {
+	--gp-page: 243 245 248;
+	--gp-surface: 255 255 255;
+	--gp-sunken: 238 241 245;
+	--gp-line: 217 222 230;
+	--gp-field: 122 132 151;
+	--gp-ink: 22 28 39;
+	--gp-muted: 74 85 101;
+	--gp-subtle: 93 104 120;
+	--gp-accent: 11 122 90;
+	--gp-brand: 11 122 90;
+	--gp-brand-hover: 9 99 73;
+	--gp-on-brand: 255 255 255;
+	--gp-danger: 180 35 24;
+	--gp-danger-hover: 145 32 24;
+	--gp-on-danger: 255 255 255;
+	--gp-ok-bg: 227 243 234;
+	--gp-ok-fg: 20 99 63;
+	--gp-ok-line: 169 214 188;
+	--gp-warn-bg: 253 241 211;
+	--gp-warn-fg: 122 74 12;
+	--gp-warn-line: 230 196 118;
+	--gp-bad-bg: 251 228 226;
+	--gp-bad-fg: 155 28 28;
+	--gp-bad-line: 235 167 162;
+	--gp-info-bg: 226 238 251;
+	--gp-info-fg: 12 90 143;
+	--gp-info-line: 163 200 234;
+	--gp-chart-ok: 11 138 100;
+	--gp-chart-info: 2 132 199;
+	--gp-chart-warn: 202 111 6;
+	--gp-chart-bad: 225 29 72;
+	--gp-chart-accent: 124 58 237;
+	--gp-chart-neutral: 100 116 139;
+	color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--gp-page: 14 18 24;
+		--gp-surface: 22 28 37;
+		--gp-sunken: 28 36 48;
+		--gp-line: 43 53 69;
+		--gp-field: 122 132 151;
+		--gp-ink: 232 235 240;
+		--gp-muted: 167 177 192;
+		--gp-subtle: 146 156 171;
+		--gp-accent: 79 207 159;
+		--gp-brand: 11 122 90;
+		--gp-brand-hover: 9 105 78;
+		--gp-on-brand: 255 255 255;
+		--gp-danger: 200 64 47;
+		--gp-danger-hover: 171 52 39;
+		--gp-on-danger: 255 255 255;
+		--gp-ok-bg: 18 56 42;
+		--gp-ok-fg: 143 224 184;
+		--gp-ok-line: 37 98 74;
+		--gp-warn-bg: 59 45 16;
+		--gp-warn-fg: 241 201 113;
+		--gp-warn-line: 109 83 26;
+		--gp-bad-bg: 67 25 29;
+		--gp-bad-fg: 246 169 165;
+		--gp-bad-line: 122 46 51;
+		--gp-info-bg: 17 47 74;
+		--gp-info-fg: 140 198 242;
+		--gp-info-line: 37 85 125;
+		--gp-chart-ok: 52 211 153;
+		--gp-chart-info: 56 189 248;
+		--gp-chart-warn: 251 191 36;
+		--gp-chart-bad: 251 113 133;
+		--gp-chart-accent: 167 139 250;
+		--gp-chart-neutral: 148 163 184;
+		color-scheme: dark;
 	}
+}
+:root[data-theme="dark"] {
+	--gp-page: 14 18 24;
+	--gp-surface: 22 28 37;
+	--gp-sunken: 28 36 48;
+	--gp-line: 43 53 69;
+	--gp-field: 122 132 151;
+	--gp-ink: 232 235 240;
+	--gp-muted: 167 177 192;
+	--gp-subtle: 146 156 171;
+	--gp-accent: 79 207 159;
+	--gp-brand: 11 122 90;
+	--gp-brand-hover: 9 105 78;
+	--gp-on-brand: 255 255 255;
+	--gp-danger: 200 64 47;
+	--gp-danger-hover: 171 52 39;
+	--gp-on-danger: 255 255 255;
+	--gp-ok-bg: 18 56 42;
+	--gp-ok-fg: 143 224 184;
+	--gp-ok-line: 37 98 74;
+	--gp-warn-bg: 59 45 16;
+	--gp-warn-fg: 241 201 113;
+	--gp-warn-line: 109 83 26;
+	--gp-bad-bg: 67 25 29;
+	--gp-bad-fg: 246 169 165;
+	--gp-bad-line: 122 46 51;
+	--gp-info-bg: 17 47 74;
+	--gp-info-fg: 140 198 242;
+	--gp-info-line: 37 85 125;
+	--gp-chart-ok: 52 211 153;
+	--gp-chart-info: 56 189 248;
+	--gp-chart-warn: 251 191 36;
+	--gp-chart-bad: 251 113 133;
+	--gp-chart-accent: 167 139 250;
+	--gp-chart-neutral: 148 163 184;
+	color-scheme: dark;
+}
+
+@layer base {
 	html {
 		font-family: 'Vazirmatn', system-ui, -apple-system, Segoe UI, Tahoma, sans-serif;
 	}
 	body {
-		@apply bg-slate-100 text-slate-800 antialiased;
+		@apply bg-page text-ink antialiased;
 	}
-	@media (prefers-color-scheme: dark) {
-		body {
-			@apply bg-slate-950 text-slate-200;
-		}
+	::placeholder {
+		color: rgb(var(--gp-subtle));
+		opacity: 1;
+	}
+	::selection {
+		background: rgb(var(--gp-accent) / 0.3);
+	}
+	/* One visible keyboard focus ring for every control, in both themes. */
+	:focus-visible {
+		outline: 2px solid rgb(var(--gp-accent));
+		outline-offset: 2px;
 	}
 	/* Every animation in this panel is decorative; honour the preference. */
 	@media (prefers-reduced-motion: reduce) {
@@ -82,16 +223,15 @@
 /* --- shell --------------------------------------------------------- */
 .gp-body { @apply min-h-screen pb-20 lg:pb-0; }
 
-.gp-topbar { @apply sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur
-	dark:border-slate-800 dark:bg-slate-900/90; }
-.gp-topbar-inner { @apply mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3; }
+.gp-topbar { @apply sticky top-0 z-30 border-b border-line bg-surface/90 backdrop-blur; }
+.gp-topbar-inner { @apply mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3; }
 .gp-brand { @apply flex items-center gap-2 no-underline; }
-.gp-brand-mark { @apply text-emerald-500 text-lg leading-none; }
+.gp-brand-mark { @apply text-accent text-lg leading-none; }
 .gp-brand-text { @apply flex flex-col leading-tight; }
-.gp-brand-text strong { @apply text-sm font-bold text-slate-900 dark:text-slate-100; }
-.gp-brand-text small { @apply text-xs text-slate-500 dark:text-slate-400; }
-.gp-topbar-actions { @apply flex items-center gap-2; }
-.gp-user { @apply hidden text-xs text-slate-500 sm:inline dark:text-slate-400; }
+.gp-brand-text strong { @apply text-sm font-bold text-ink; }
+.gp-brand-text small { @apply text-xs text-subtle; }
+.gp-topbar-actions { @apply flex flex-wrap items-center gap-2; }
+.gp-user { @apply hidden text-xs text-subtle sm:inline; }
 
 .gp-shell { @apply mx-auto flex w-full max-w-7xl gap-6 px-4 py-5; }
 .gp-shell-bare { @apply justify-center; }
@@ -100,151 +240,150 @@
 
 .gp-sidenav { @apply hidden w-56 shrink-0 flex-col gap-1 lg:flex; }
 .gp-nav-item { @apply flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm
-	text-slate-600 no-underline transition-colors hover:bg-white hover:text-slate-900
-	dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-slate-100; }
-.gp-nav-active { @apply bg-white font-bold text-slate-900 shadow-sm
-	dark:bg-slate-900 dark:text-slate-100; }
+	text-muted no-underline transition-colors hover:bg-surface hover:text-ink; }
+.gp-nav-active { @apply bg-surface font-bold text-ink shadow-sm; }
 .gp-nav-icon { @apply text-base leading-none opacity-70; }
 
-.gp-bottomnav { @apply fixed inset-x-0 bottom-0 z-30 flex border-t border-slate-200
-	bg-white/95 backdrop-blur lg:hidden dark:border-slate-800 dark:bg-slate-900/95; }
+.gp-bottomnav { @apply fixed inset-x-0 bottom-0 z-30 flex border-t border-line
+	bg-surface/95 backdrop-blur lg:hidden; }
 .gp-bottom-item { @apply flex min-h-[56px] flex-1 flex-col items-center justify-center
-	gap-0.5 py-2 text-[11px] text-slate-500 no-underline dark:text-slate-400; }
-.gp-bottom-item.gp-nav-active { @apply bg-transparent text-emerald-600 shadow-none
-	dark:text-emerald-400; }
+	gap-0.5 py-2 text-[11px] text-muted no-underline; }
+.gp-bottom-item.gp-nav-active { @apply bg-transparent text-accent shadow-none; }
 .gp-bottom-label { @apply leading-none; }
 
+/* --- theme switcher ------------------------------------------------ */
+.gp-theme { @apply inline-flex overflow-hidden rounded-lg border border-field bg-surface; }
+.gp-theme-btn { @apply min-h-[36px] cursor-pointer border-0 bg-transparent px-3 text-xs
+	text-muted transition-colors hover:bg-sunken hover:text-ink; }
+.gp-theme-btn + .gp-theme-btn { @apply border-s border-line; }
+.gp-theme-btn[aria-pressed="true"] { @apply bg-brand font-bold text-on-brand hover:bg-brand-hover hover:text-on-brand; }
+.gp-theme-bare { @apply mb-4 flex justify-center; }
+
 /* --- surfaces ------------------------------------------------------ */
-.gp-card { @apply rounded-xl border border-slate-200 bg-white p-4 shadow-sm
-	dark:border-slate-800 dark:bg-slate-900; }
+.gp-card { @apply rounded-xl border border-line bg-surface p-4 shadow-sm; }
+.gp-card-danger { @apply border-2 border-danger; }
 .gp-card-title { @apply mb-3 flex items-center justify-between gap-2 text-sm
-	font-bold text-slate-900 dark:text-slate-100; }
-.gp-card-sub { @apply text-xs font-normal text-slate-500 dark:text-slate-400; }
+	font-bold text-ink; }
+.gp-card-sub { @apply text-xs font-normal text-subtle; }
 .gp-grid { @apply grid gap-4; }
 .gp-grid-2 { @apply grid gap-4 sm:grid-cols-2; }
 .gp-grid-3 { @apply grid gap-4 sm:grid-cols-2 lg:grid-cols-3; }
 .gp-grid-4 { @apply grid gap-4 grid-cols-2 lg:grid-cols-4; }
 
-.gp-page-title { @apply text-lg font-bold text-slate-900 dark:text-slate-100; }
-.gp-page-sub { @apply mt-1 text-xs text-slate-500 dark:text-slate-400; }
+.gp-page-title { @apply text-lg font-bold text-ink; }
+.gp-page-sub { @apply mt-1 text-xs text-subtle; }
 .gp-section { @apply space-y-3; }
 
 /* --- stats --------------------------------------------------------- */
-.gp-kpi { @apply rounded-xl border border-slate-200 bg-white p-4
-	dark:border-slate-800 dark:bg-slate-900; }
-.gp-kpi-label { @apply text-xs text-slate-500 dark:text-slate-400; }
-.gp-kpi-value { @apply mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100; }
-.gp-kpi-hint { @apply mt-1 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400; }
+.gp-kpi { @apply rounded-xl border border-line bg-surface p-4; }
+.gp-kpi-label { @apply text-xs text-subtle; }
+.gp-kpi-value { @apply mt-1 text-2xl font-bold text-ink; }
+.gp-kpi-hint { @apply mt-1 text-[11px] leading-relaxed text-subtle; }
+.gp-text-bad { @apply text-bad-fg; }
 
 .gp-stat-row { @apply flex items-center justify-between gap-3 border-b
-	border-slate-100 py-2 text-sm last:border-0 dark:border-slate-800; }
-.gp-stat-key { @apply text-slate-500 dark:text-slate-400; }
-.gp-stat-val { @apply font-bold text-slate-900 dark:text-slate-100; }
+	border-line py-2 text-sm last:border-0; }
+.gp-stat-key { @apply text-muted; }
+.gp-stat-val { @apply font-bold text-ink; }
 
 /* --- badges -------------------------------------------------------- */
-.gp-badge { @apply inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px]
+.gp-badge { @apply inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px]
 	font-bold leading-none; }
-.gp-badge-on { @apply bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300; }
-.gp-badge-off { @apply bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400; }
-.gp-badge-warn { @apply bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300; }
-.gp-badge-bad { @apply bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300; }
-.gp-badge-info { @apply bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300; }
+.gp-badge-on { @apply border-ok-line bg-ok-bg text-ok-fg; }
+.gp-badge-off { @apply border-line bg-sunken text-muted; }
+.gp-badge-warn { @apply border-warn-line bg-warn-bg text-warn-fg; }
+.gp-badge-bad { @apply border-bad-line bg-bad-bg text-bad-fg; }
+.gp-badge-info { @apply border-info-line bg-info-bg text-info-fg; }
 
 /* --- buttons ------------------------------------------------------- */
 .gp-btn { @apply inline-flex min-h-[44px] cursor-pointer items-center justify-center
 	gap-2 rounded-lg border border-transparent px-4 py-2 text-sm font-bold
 	no-underline transition-colors; }
-.gp-btn-primary { @apply bg-emerald-600 text-white hover:bg-emerald-700; }
-.gp-btn-ghost { @apply border-slate-200 bg-white text-slate-700 hover:bg-slate-50
-	dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800; }
-.gp-btn-danger { @apply bg-rose-600 text-white hover:bg-rose-700; }
+.gp-btn:disabled, .gp-btn[aria-disabled="true"] { @apply cursor-not-allowed opacity-50; }
+.gp-btn-primary { @apply bg-brand text-on-brand hover:bg-brand-hover active:bg-brand-hover; }
+.gp-btn-ghost { @apply border-field bg-surface text-ink hover:bg-sunken active:bg-sunken; }
+.gp-btn-danger { @apply bg-danger text-on-danger hover:bg-danger-hover active:bg-danger-hover; }
 .gp-btn-block { @apply w-full; }
 .gp-btn-sm { @apply min-h-[36px] px-3 py-1.5 text-xs; }
 
 /* --- forms --------------------------------------------------------- */
 .gp-form { @apply space-y-4; }
 .gp-field { @apply block space-y-1.5; }
-.gp-label { @apply block text-xs font-bold text-slate-700 dark:text-slate-300; }
-.gp-help { @apply block text-[11px] leading-relaxed text-slate-500 dark:text-slate-400; }
-.gp-input { @apply block min-h-[44px] w-full rounded-lg border border-slate-300
-	bg-white px-3 py-2 text-sm text-slate-900 outline-none transition
-	focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20
-	dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100; }
-.gp-textarea { @apply block w-full rounded-lg border border-slate-300 bg-white px-3
-	py-2 font-mono text-xs text-slate-900 outline-none focus:border-emerald-500
-	dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100; }
+.gp-label { @apply block text-xs font-bold text-ink; }
+.gp-help { @apply block text-[11px] leading-relaxed text-subtle; }
+.gp-input { @apply block min-h-[44px] w-full rounded-lg border border-field
+	bg-surface px-3 py-2 text-sm text-ink outline-none transition
+	focus:border-accent focus:ring-2 focus:ring-accent/30; }
+.gp-textarea { @apply block w-full rounded-lg border border-field bg-surface px-3
+	py-2 font-mono text-xs text-ink outline-none focus:border-accent
+	focus:ring-2 focus:ring-accent/30; }
+.gp-input:disabled, .gp-textarea:disabled { @apply cursor-not-allowed bg-sunken text-subtle; }
 .gp-check { @apply flex min-h-[44px] items-center gap-3 rounded-lg border
-	border-slate-200 px-3 py-2 dark:border-slate-800; }
-.gp-check input { @apply h-5 w-5 shrink-0 accent-emerald-600; }
-.gp-range { @apply h-2 w-full cursor-pointer accent-emerald-600; }
+	border-line px-3 py-2; }
+.gp-check input { @apply h-5 w-5 shrink-0 accent-brand; }
+.gp-range { @apply h-2 w-full cursor-pointer accent-brand; }
 .gp-filters { @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-4; }
-.gp-error { @apply mt-1 block text-[11px] font-bold text-rose-600 dark:text-rose-400; }
+.gp-error { @apply mt-1 block text-[11px] font-bold text-bad-fg; }
 
 /* --- tables that become cards -------------------------------------- */
 .gp-table { @apply w-full border-collapse text-sm; }
-.gp-table th { @apply border-b border-slate-200 py-2 text-start text-xs font-bold
-	text-slate-500 dark:border-slate-800 dark:text-slate-400; }
-.gp-table td { @apply border-b border-slate-100 py-2 align-top text-slate-700
-	dark:border-slate-800 dark:text-slate-300; }
+.gp-table th { @apply border-b border-line py-2 text-start text-xs font-bold
+	text-muted; }
+.gp-table td { @apply border-b border-line py-2 align-top text-ink; }
 .gp-table-wrap { @apply -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0; }
 
 .gp-rows { @apply space-y-2; }
-.gp-row { @apply rounded-lg border border-slate-200 bg-white p-3
-	dark:border-slate-800 dark:bg-slate-900; }
+.gp-row { @apply rounded-lg border border-line bg-surface p-3; }
 .gp-row-head { @apply flex flex-wrap items-center gap-2 text-xs; }
-.gp-row-main { @apply mt-1 break-all text-sm text-slate-800 dark:text-slate-200; }
-.gp-row-meta { @apply mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500
-	dark:text-slate-400; }
-.gp-detail { @apply mt-2 rounded-lg bg-slate-50 p-3 dark:bg-slate-950; }
+.gp-row-main { @apply mt-1 break-all text-sm text-ink; }
+.gp-row-meta { @apply mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-subtle; }
+.gp-detail { @apply mt-2 rounded-lg bg-sunken p-3; }
 .gp-dl { @apply grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]; }
-.gp-dl dt { @apply text-slate-500 dark:text-slate-400; }
-.gp-dl dd { @apply m-0 break-all font-mono text-slate-700 dark:text-slate-300; }
+.gp-dl dt { @apply text-subtle; }
+.gp-dl dd { @apply m-0 break-all font-mono text-ink; }
 
 /* --- flash --------------------------------------------------------- */
 .gp-flash { @apply rounded-lg border px-4 py-3 text-sm; }
-.gp-flash-ok { @apply border-emerald-200 bg-emerald-50 text-emerald-900
-	dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200; }
-.gp-flash-error { @apply border-rose-200 bg-rose-50 text-rose-900
-	dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200; }
-.gp-flash-warn { @apply border-amber-200 bg-amber-50 text-amber-900
-	dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200; }
+.gp-flash-ok { @apply border-ok-line bg-ok-bg text-ok-fg; }
+.gp-flash-error { @apply border-bad-line bg-bad-bg text-bad-fg; }
+.gp-flash-warn { @apply border-warn-line bg-warn-bg text-warn-fg; }
 
-.gp-note { @apply rounded-lg border border-slate-200 bg-slate-50 px-3 py-2
-	text-[11px] leading-relaxed text-slate-600 dark:border-slate-800
-	dark:bg-slate-950 dark:text-slate-400; }
-.gp-note-strong { @apply border-amber-300 bg-amber-50 text-amber-900
-	dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200; }
+.gp-note { @apply rounded-lg border border-line bg-sunken px-3 py-2
+	text-[11px] leading-relaxed text-muted; }
+.gp-note-strong { @apply border-warn-line bg-warn-bg text-warn-fg; }
 
 /* --- kill switch: the single most important control here ----------- */
 .gp-kill { @apply rounded-xl border-2 p-4; }
-.gp-kill-armed { @apply border-emerald-300 bg-emerald-50 dark:border-emerald-900
-	dark:bg-emerald-950; }
-.gp-kill-stopped { @apply border-rose-400 bg-rose-50 dark:border-rose-800
-	dark:bg-rose-950; }
+.gp-kill-armed { @apply border-ok-line bg-ok-bg text-ok-fg; }
+.gp-kill-stopped { @apply border-danger bg-bad-bg text-bad-fg; }
 .gp-kill-title { @apply flex items-center gap-2 text-sm font-bold; }
+/* Text inside the kill-switch box takes the box's own colour, which is the one
+ * guaranteed to be readable on its background in both themes. */
+.gp-kill .gp-card-title, .gp-kill .gp-card-sub, .gp-kill .gp-help { color: inherit; }
 .gp-pulse { @apply inline-block h-2.5 w-2.5 rounded-full; }
-.gp-pulse-ok { @apply bg-emerald-500; animation: gp-pulse 2.4s ease-in-out infinite; }
-.gp-pulse-bad { @apply bg-rose-500; animation: gp-pulse 1.2s ease-in-out infinite; }
+.gp-pulse-ok { @apply bg-chart-ok; animation: gp-pulse 2.4s ease-in-out infinite; }
+.gp-pulse-bad { @apply bg-chart-bad; animation: gp-pulse 1.2s ease-in-out infinite; }
 
 /* --- login --------------------------------------------------------- */
-.gp-login { @apply flex min-h-[70vh] w-full items-center justify-center; }
-.gp-login-card { @apply w-full max-w-sm rounded-2xl border border-slate-200 bg-white
-	p-6 shadow-lg dark:border-slate-800 dark:bg-slate-900; }
+.gp-login { @apply flex min-h-[70vh] w-full flex-col items-center justify-center; }
+.gp-login-card { @apply w-full max-w-sm rounded-2xl border border-line bg-surface
+	p-6 shadow-lg; }
 .gp-login-brand { @apply mb-6 flex flex-col items-center gap-1 text-center; }
-.gp-login-brand strong { @apply text-base font-bold; }
-.gp-login-brand small { @apply text-xs text-slate-500 dark:text-slate-400; }
+.gp-login-brand strong { @apply text-base font-bold text-ink; }
+.gp-login-brand small { @apply text-xs text-subtle; }
 
 /* --- charts (inline SVG generated in PHP) -------------------------- */
 .gp-chart { @apply w-full overflow-hidden; }
 .gp-chart svg { @apply block h-auto w-full; }
-.gp-legend { @apply mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500
-	dark:text-slate-400; }
+.gp-chart-axis { stroke: rgb(var(--gp-field)); stroke-width: 1; }
+.gp-chart-label { fill: rgb(var(--gp-subtle)); font-size: 9px; text-anchor: middle; }
+.gp-legend { @apply mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-subtle; }
 .gp-legend-dot { @apply inline-block h-2 w-2 rounded-sm align-middle; }
 
-.gp-bar-track { @apply h-2 w-full overflow-hidden rounded bg-slate-100 dark:bg-slate-800; }
-.gp-bar-fill { @apply h-full rounded bg-emerald-500 transition-[width] duration-500; }
-.gp-bar-fill-warn { @apply bg-amber-500; }
-.gp-bar-fill-bad { @apply bg-rose-500; }
+.gp-bar-track { @apply h-2 w-full overflow-hidden rounded bg-sunken; }
+.gp-bar-fill { @apply h-full rounded bg-chart-ok transition-[width] duration-500; }
+.gp-bar-fill-warn { @apply bg-chart-warn; }
+.gp-bar-fill-bad { @apply bg-chart-bad; }
 
 .gp-mono { @apply font-mono text-xs; }
 .gp-ltr { direction: ltr; text-align: start; }

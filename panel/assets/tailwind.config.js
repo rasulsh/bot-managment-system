@@ -20,9 +20,31 @@ module.exports = {
 	content: [
 		'./panel/**/*.php',
 	],
+	/* No dark: variants are used. Both themes come from the CSS variables in
+	 * app.src.css, so a component is written once and works in either theme. */
 	darkMode: 'media',
 	theme: {
 		extend: {
+			/* Semantic colours, each backed by a CSS variable ("R G B"). */
+			colors: (function () {
+				var v = function (name) { return 'rgb(var(--gp-' + name + ') / <alpha-value>)'; };
+				var out = {};
+				['page', 'surface', 'sunken', 'line', 'field', 'ink', 'muted', 'subtle',
+				 'accent', 'brand', 'danger'].forEach(function (n) { out[n] = v(n); });
+				out['brand-hover'] = v('brand-hover');
+				out['on-brand'] = v('on-brand');
+				out['danger-hover'] = v('danger-hover');
+				out['on-danger'] = v('on-danger');
+				['ok', 'warn', 'bad', 'info'].forEach(function (k) {
+					out[k + '-bg'] = v(k + '-bg');
+					out[k + '-fg'] = v(k + '-fg');
+					out[k + '-line'] = v(k + '-line');
+				});
+				['ok', 'info', 'warn', 'bad', 'accent', 'neutral'].forEach(function (k) {
+					out['chart-' + k] = v('chart-' + k);
+				});
+				return out;
+			})(),
 			fontFamily: {
 				sans: ['Vazirmatn', 'system-ui', '-apple-system', 'Segoe UI', 'Tahoma', 'sans-serif'],
 			},

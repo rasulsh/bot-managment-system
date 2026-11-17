@@ -890,6 +890,125 @@ if ($h_audit !== null) { file_put_contents(gp_audit_path(), $h_audit); } else { 
 
 if ($overlay_backup !== null) { file_put_contents($overlay, $overlay_backup); }
 
+// --------------------------------------------------------------------------
+t_section('Theme tokens: contrast and the two dark copies');
+$th_css = file_get_contents(__DIR__ . '/../panel/assets/app.src.css');
+$th_tokens = function ($block) {
+	$m = array();
+	preg_match_all('/--gp-([a-z-]+):\s*(\d+) (\d+) (\d+);/', $block, $m, PREG_SET_ORDER);
+	$o = array();
+	foreach ($m as $r) { $o[$r[1]] = array((int)$r[2], (int)$r[3], (int)$r[4]); }
+	return $o;
+};
+preg_match('/\n:root \{(.*?)\n\}/s', $th_css, $th_l);
+preg_match('/:root:not\(\[data-theme="light"\]\) \{(.*?)\n\t\}/s', $th_css, $th_d1);
+preg_match('/\n:root\[data-theme="dark"\] \{(.*?)\n\}/s', $th_css, $th_d2);
+$th_light = $th_tokens($th_l[1] ?? '');
+$th_dark1 = $th_tokens($th_d1[1] ?? '');
+$th_dark2 = $th_tokens($th_d2[1] ?? '');
+t_ok('light and dark token sets were found', count($th_light) > 15 && count($th_dark2) > 15);
+t_ok('the media-query dark copy equals the data-theme="dark" copy', $th_dark1 === $th_dark2);
+$th_dark = array_merge($th_light, $th_dark2);
+$th_lum = function ($c) {
+	$f = function ($v) { $v /= 255; return $v <= 0.03928 ? $v / 12.92 : pow(($v + 0.055) / 1.055, 2.4); };
+	return 0.2126 * $f($c[0]) + 0.7152 * $f($c[1]) + 0.0722 * $f($c[2]);
+};
+$th_ratio = function ($a, $b) use ($th_lum) {
+	$x = $th_lum($a); $y = $th_lum($b);
+	return (max($x, $y) + 0.05) / (min($x, $y) + 0.05);
+};
+$th_pairs = array(
+	array('ink', 'surface', 4.5), array('ink', 'page', 4.5), array('ink', 'sunken', 4.5),
+	array('muted', 'surface', 4.5), array('muted', 'page', 4.5), array('subtle', 'surface', 4.5),
+	array('on-brand', 'brand', 4.5), array('on-danger', 'danger', 4.5),
+	array('ok-fg', 'ok-bg', 4.5), array('warn-fg', 'warn-bg', 4.5),
+	array('bad-fg', 'bad-bg', 4.5), array('info-fg', 'info-bg', 4.5),
+	array('field', 'surface', 3.0),
+);
+foreach (array('light' => $th_light, 'dark' => $th_dark) as $th_name => $th_set) {
+	foreach ($th_pairs as $th_p) {
+		if (!isset($th_set[$th_p[0]], $th_set[$th_p[1]])) { t_ok($th_name . ' token ' . $th_p[0] . '/' . $th_p[1] . ' exists', false); continue; }
+		$r = $th_ratio($th_set[$th_p[0]], $th_set[$th_p[1]]);
+		t_ok(sprintf('%s %s on %s >= %.1f (%.2f)', $th_name, $th_p[0], $th_p[1], $th_p[2], $r), $r >= $th_p[2]);
+	}
+}
+$th_layout = file_get_contents(__DIR__ . '/../panel/views/layout.php');
+t_ok('layout applies the stored theme before first paint', strpos($th_layout, 'gp_theme') !== false);
+t_ok('layout carries a robots noindex meta', strpos($th_layout, 'name="robots"') !== false && strpos($th_layout, 'noindex') !== false);
+
+t_section('IP allowlist and client address');
+$ip_ok = function ($ip, $cidr) { return gp_ip_in($ip, $cidr); };
+t_ok('IPv4 single address', $ip_ok('203.0.113.7', '203.0.113.7') && !$ip_ok('203.0.113.8', '203.0.113.7'));
+t_ok('IPv4 /24 inside and outside', $ip_ok('198.51.100.200', '198.51.100.0/24') && !$ip_ok('198.51.101.1', '198.51.100.0/24'));
+t_ok('IPv4 /20 and /32 and /0', $ip_ok('10.0.15.255', '10.0.0.0/20') && !$ip_ok('10.0.16.0', '10.0.0.0/20')
+	&& $ip_ok('1.2.3.4', '1.2.3.4/32') && !$ip_ok('1.2.3.5', '1.2.3.4/32') && $ip_ok('9.9.9.9', '0.0.0.0/0'));
+t_ok('IPv6 single address, compressed or not', $ip_ok('2001:db8::1', '2001:0db8:0:0:0:0:0:1') && !$ip_ok('2001:db8::2', '2001:db8::1'));
+t_ok('IPv6 /32, /64 and /128', $ip_ok('2001:db8:ffff::1', '2001:db8::/32') && !$ip_ok('2001:db9::1', '2001:db8::/32')
+	&& $ip_ok('2001:db8:0:1::5', '2001:db8:0:1::/64') && !$ip_ok('2001:db8:0:2::5', '2001:db8:0:1::/64')
+	&& $ip_ok('::1', '::1/128'));
+t_ok('IPv4 never matches an IPv6 range and the reverse', !$ip_ok('1.2.3.4', '::/0') && !$ip_ok('::1', '0.0.0.0/0'));
+t_ok('IPv4-mapped IPv6 matches the IPv4 entry', $ip_ok('::ffff:203.0.113.7', '203.0.113.0/24'));
+t_ok('invalid prefixes and garbage are refused',
+	gp_ip_parse('1.2.3.4/33') === null && gp_ip_parse('::1/129') === null && gp_ip_parse('1.2.3.4/') === null
+	&& gp_ip_parse('1.2.3.4/-1') === null && gp_ip_parse('1.2.3.4/8x') === null && gp_ip_parse('example.com') === null
+	&& gp_ip_parse('1.2.3.4 ') !== null && gp_ip_parse('1.2.3') === null && gp_ip_parse('') === null
+	&& gp_ip_parse('fe80::1%eth0') === null && gp_ip_parse('1.2.3.4-1.2.3.9') === null);
+
+$ip_cfg = function ($list) { return array('ip_allowlist' => $list); };
+$_SERVER['REMOTE_ADDR'] = '203.0.113.7';
+unset($_SERVER['HTTP_X_FORWARDED_FOR']);
+t_ok('no ip_allowlist key: not restricted', gp_ip_allowed(array()) === true);
+t_ok('empty list: not restricted (documented default)', gp_ip_allowed($ip_cfg(array())) === true);
+t_ok('listed client is allowed', gp_ip_allowed($ip_cfg(array('203.0.113.0/24'))) === true);
+t_ok('unlisted client is refused', gp_ip_allowed($ip_cfg(array('198.51.100.0/24'))) === false);
+t_ok('a list with only invalid entries refuses everybody (fail closed)', gp_ip_allowed($ip_cfg(array('nonsense', '1.2.3.4/99'))) === false);
+t_ok('a valid entry still works next to an invalid one', gp_ip_allowed($ip_cfg(array('nonsense', '203.0.113.7'))) === true);
+t_ok('a non-list value refuses everybody', gp_ip_allowed($ip_cfg(null)) === false);
+$_SERVER['REMOTE_ADDR'] = '';
+t_ok('no usable client address is refused when a list exists', gp_ip_allowed($ip_cfg(array('0.0.0.0/0'))) === false);
+t_ok('gp_ip_list accepts a string and rejects non-strings', gp_ip_list('1.2.3.4') === array('1.2.3.4')
+	&& gp_ip_list(array(1)) === null && gp_ip_list(5) === null && gp_ip_list('') === array());
+
+$px = array('10.0.0.0/8', '2001:db8:aaaa::/48');
+$px_res = function ($remote, $xff) use ($px) {
+	$s = array('REMOTE_ADDR' => $remote);
+	if ($xff !== null) { $s['HTTP_X_FORWARDED_FOR'] = $xff; }
+	return gp_resolve_client_ip($s, $px);
+};
+t_ok('XFF is ignored when the peer is not a trusted proxy', $px_res('203.0.113.7', '198.51.100.9') === '203.0.113.7');
+t_ok('XFF is used when the peer is a trusted proxy', $px_res('10.1.2.3', '198.51.100.9') === '198.51.100.9');
+t_ok('a forged left-hand entry is not believed', $px_res('10.1.2.3', '1.1.1.1, 198.51.100.9') === '198.51.100.9');
+t_ok('trusted hops on the right are skipped', $px_res('10.1.2.3', '198.51.100.9, 10.9.9.9') === '198.51.100.9');
+t_ok('an IPv6 trusted proxy works', $px_res('2001:db8:aaaa::1', '198.51.100.9') === '198.51.100.9');
+t_ok('a malformed header is ignored as a whole', $px_res('10.1.2.3', '198.51.100.9, not-an-ip') === '10.1.2.3');
+t_ok('a missing header gives the peer', $px_res('10.1.2.3', null) === '10.1.2.3');
+t_ok('no trusted proxies configured: header never read', gp_resolve_client_ip(array('REMOTE_ADDR' => '10.1.2.3', 'HTTP_X_FORWARDED_FOR' => '1.1.1.1'), array()) === '10.1.2.3');
+t_ok('mapped IPv6 peer is canonicalised', gp_resolve_client_ip(array('REMOTE_ADDR' => '::ffff:203.0.113.7'), array()) === '203.0.113.7');
+$_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+
+t_section('noindex headers and routing');
+$nx_src = file_get_contents(__DIR__ . '/../panel/index.php');
+t_ok('PHP sends X-Robots-Tag with noindex on every panel response', strpos($nx_src, "X-Robots-Tag: noindex, nofollow, noarchive, nosnippet") !== false);
+$nx_ht = file_get_contents(__DIR__ . '/../panel/.htaccess');
+t_ok('.htaccess adds X-Robots-Tag for static files and Apache errors', preg_match('/Header always set X-Robots-Tag "noindex/', $nx_ht) === 1);
+t_ok('the allowlist check runs before any route, including login', strpos($nx_src, 'gp_ip_allowed($gp_cfg)') < strpos($nx_src, 'switch ($gp_route)'));
+t_ok('no robots.txt is shipped inside the panel', !is_file(__DIR__ . '/../panel/robots.txt'));
+
+t_section('Translations');
+$tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');
+t_ok('"پوشش احکام" is gone and "تأثیر قوانین" is used', strpos($tr_lang, 'پوشش احکام') === false && strpos($tr_lang, 'تأثیر قوانین') !== false);
+t_ok('no Arabic ي or ك in the panel strings', preg_match('/[يك]/u', $tr_lang) === 0);
+t_ok('no "کران" (cron) typo and no word "حکم" left', strpos($tr_lang, 'کران') === false && strpos($tr_lang, 'حکم') === false);
+$tr_keys = array();
+preg_match_all("/^\t'([a-z0-9_]+)'\s*=>/m", $tr_lang, $tr_keys);
+t_ok('every translation key is unique', count($tr_keys[1]) === count(array_unique($tr_keys[1])));
+$tr_missing = array();
+foreach (array_merge(glob(__DIR__ . '/../panel/*.php'), glob(__DIR__ . '/../panel/views/*.php')) as $tr_f) {
+	preg_match_all("/gp_t\('([a-z0-9_]+)'\s*[,)]/", file_get_contents($tr_f), $tr_u);
+	foreach ($tr_u[1] as $tr_k) { if (!in_array($tr_k, $tr_keys[1], true)) { $tr_missing[$tr_k] = basename($tr_f); } }
+}
+t_ok('every gp_t() key used in the panel exists in lang.php' . ($tr_missing ? ' (missing: ' . implode(',', array_keys($tr_missing)) . ')' : ''), !$tr_missing);
+
 echo "\n";
 // Say so out loud. A green run on a host missing the extension must never be
 // mistakable for full coverage.

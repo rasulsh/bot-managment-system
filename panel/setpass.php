@@ -100,6 +100,19 @@ if (!hash_equals($password, $confirm)) {
 	exit(2);
 }
 
+// Re-running this script rotates the credentials only. The two address lists are
+// settings the operator wrote by hand, so they are carried over rather than reset.
+$gp_keep = array('ip_allowlist' => array(), 'trusted_proxies' => array());
+if (is_file($gp_target)) {
+	define('GP_BOOT', 1);
+	$gp_old = @include $gp_target;
+	if (is_array($gp_old)) {
+		foreach ($gp_keep as $gp_key => $gp_unused) {
+			if (isset($gp_old[$gp_key])) { $gp_keep[$gp_key] = $gp_old[$gp_key]; }
+		}
+	}
+}
+
 $config = array(
 	'username'       => $username,
 	'password_hash'  => password_hash($password, PASSWORD_DEFAULT),
@@ -107,7 +120,8 @@ $config = array(
 	// not become a guard token forgery, and rotating one must not touch the other.
 	'session_secret' => bin2hex(random_bytes(32)),
 	'session_ttl'    => 43200,
-	'ip_allowlist'   => array(),
+	'ip_allowlist'   => $gp_keep['ip_allowlist'],
+	'trusted_proxies' => $gp_keep['trusted_proxies'],
 );
 
 // The emitted file carries the same direct-access guard every other file under
@@ -120,7 +134,13 @@ $config = array(
 $body = "<?php\n"
 	. "// Bot Guard admin panel credentials. Written by panel/setpass.php.\n"
 	. "// NEVER commit this file. Re-run setpass.php to rotate.\n"
-	. "// ip_allowlist takes IPv4 CIDRs, e.g. array('203.0.113.0/24'); empty disables it.\n"
+	. "// ip_allowlist: who may open the panel. Single IPv4/IPv6 addresses or CIDR ranges,\n"
+	. "//   e.g. array('203.0.113.7', '198.51.100.0/24', '2001:db8::/32').\n"
+	. "//   Empty = no IP restriction (the login still applies). If the list is not\n"
+	. "//   empty but nothing in it is valid, nobody can open the panel.\n"
+	. "// trusted_proxies: addresses of your own reverse proxy / load balancer / CDN. Only a\n"
+	. "//   request that arrives FROM one of these may name the client in X-Forwarded-For.\n"
+	. "//   Leave empty unless the panel really is behind a proxy.\n"
 	. "if (!defined('GP_BOOT')) { http_response_code(404); exit; }\n"
 	. "return " . var_export($config, true) . ";\n";
 
@@ -144,4 +164,8 @@ fwrite(STDOUT, "  1. Add the panel path to exempt_paths in guard/config.php, so 
 fwrite(STDOUT, "     bot guard cannot challenge you out of your own admin panel.\n");
 fwrite(STDOUT, "  2. Add the snapshot and worker cron modes (see README).\n");
 fwrite(STDOUT, "  3. Open panel/index.php in a browser and sign in.\n");
+if (!$config['ip_allowlist']) {
+	fwrite(STDOUT, "  4. RECOMMENDED: the panel is open to every IP address. Add your own address\n"
+		. "     to 'ip_allowlist' in " . $gp_target . " (IPv4, IPv6 or CIDR).\n");
+}
 exit(0);

@@ -80,8 +80,15 @@ function gp_num_raw($text) {
 // gp_e() like everything else, because series names can come from log data.
 // --------------------------------------------------------------------------
 
+// Chart colours are CSS variables (see the --gp-chart-* tokens in app.src.css),
+// so the same markup is right in the light and the dark theme.
+function gp_chart_color($name) {
+	return 'rgb(var(--gp-chart-' . $name . '))';
+}
+
 function gp_chart_palette() {
-	return array('#059669', '#0284c7', '#d97706', '#e11d48', '#7c3aed', '#64748b');
+	return array(gp_chart_color('ok'), gp_chart_color('info'), gp_chart_color('warn'),
+		gp_chart_color('bad'), gp_chart_color('accent'), gp_chart_color('neutral'));
 }
 
 // A horizontal bar chart. $items is array(label => value).
@@ -89,7 +96,7 @@ function gp_chart_bars(array $items, $options = array()) {
 	if (!$items) { return '<p class="gp-help">' . gp_e(gp_t_or('no_results')) . '</p>'; }
 	$max = max(1, max(array_map('intval', array_values($items))));
 	$colors = isset($options['colors']) ? $options['colors'] : array();
-	$default = isset($options['color']) ? $options['color'] : '#059669';
+	$default = isset($options['color']) ? $options['color'] : gp_chart_color('ok');
 	$out = '<div class="gp-section">';
 	foreach ($items as $label => $value) {
 		$width = max(1.0, 100.0 * (int)$value / $max);
@@ -133,7 +140,7 @@ function gp_chart_stacked(array $buckets, array $series) {
 	$svg = '<svg viewBox="0 0 ' . $w . ' ' . $h . '" role="img" preserveAspectRatio="none">';
 	// Baseline.
 	$svg .= '<line x1="' . $pad . '" y1="' . ($h - $pad) . '" x2="' . ($w - $pad)
-		. '" y2="' . ($h - $pad) . '" stroke="#cbd5e1" stroke-width="1"/>';
+		. '" y2="' . ($h - $pad) . '" class="gp-chart-axis"/>';
 	$index = 0;
 	foreach ($buckets as $bucket) {
 		// RTL: the newest bucket sits on the right, so x runs from the right edge.
@@ -146,13 +153,13 @@ function gp_chart_stacked(array $buckets, array $series) {
 			$y -= $height;
 			$svg .= '<rect x="' . number_format($x, 2, '.', '') . '" y="'
 				. number_format($y, 2, '.', '') . '" width="' . number_format($bar, 2, '.', '')
-				. '" height="' . number_format($height, 2, '.', '') . '" fill="'
+				. '" height="' . number_format($height, 2, '.', '') . '" style="fill:'
 				. $colors[$name] . '" rx="2"><title>' . gp_e($name . ' ' . $value)
 				. '</title></rect>';
 		}
 		if ($count <= 26 || $index % 2 === 0) {
 			$svg .= '<text x="' . number_format($x + $bar / 2, 2, '.', '') . '" y="' . ($h - 6)
-				. '" font-size="9" fill="#94a3b8" text-anchor="middle">'
+				. '" class="gp-chart-label">'
 				. gp_e($bucket['label']) . '</text>';
 		}
 		$index++;
@@ -184,31 +191,31 @@ function gp_chart_histogram(array $a, array $b, $label_a, $label_b) {
 
 	$svg = '<svg viewBox="0 0 ' . $w . ' ' . $h . '" role="img" preserveAspectRatio="none">';
 	$svg .= '<line x1="' . $pad . '" y1="' . ($h - $pad) . '" x2="' . ($w - $pad)
-		. '" y2="' . ($h - $pad) . '" stroke="#cbd5e1" stroke-width="1"/>';
+		. '" y2="' . ($h - $pad) . '" class="gp-chart-axis"/>';
 	$index = 0;
 	foreach ($labels as $label) {
 		$x = $w - $pad - ($index + 1) * $slot + ($slot - $bar * 2.2) / 2;
-		foreach (array(array($a, '#0284c7', 0.0), array($b, '#d97706', $bar * 1.15)) as $pair) {
+		foreach (array(array($a, gp_chart_color('info'), 0.0), array($b, gp_chart_color('warn'), $bar * 1.15)) as $pair) {
 			$value = (int)($pair[0][$label] ?? 0);
 			$height = ($h - $pad * 2) * $value / $max;
 			if ($height < 0.5 && $value > 0) { $height = 0.5; }
 			$svg .= '<rect x="' . number_format($x + $pair[2], 2, '.', '') . '" y="'
 				. number_format($h - $pad - $height, 2, '.', '') . '" width="'
 				. number_format($bar, 2, '.', '') . '" height="'
-				. number_format($height, 2, '.', '') . '" fill="' . $pair[1] . '" rx="1">'
+				. number_format($height, 2, '.', '') . '" style="fill:' . $pair[1] . '" rx="1">'
 				. '<title>' . gp_e($label . ': ' . $value) . '</title></rect>';
 		}
 		$svg .= '<text x="' . number_format($x + $bar, 2, '.', '') . '" y="' . ($h - 6)
-			. '" font-size="9" fill="#94a3b8" text-anchor="middle">'
+			. '" class="gp-chart-label">'
 			. gp_e($label) . '</text>';
 		$index++;
 	}
 	$svg .= '</svg>';
 	return '<div class="gp-chart">' . $svg . '</div>'
 		. '<div class="gp-legend">'
-		. '<span><span class="gp-legend-dot" style="background:#0284c7"></span> '
+		. '<span><span class="gp-legend-dot" style="background:' . gp_chart_color('info') . '"></span> '
 		. gp_e($label_a) . '</span>'
-		. '<span><span class="gp-legend-dot" style="background:#d97706"></span> '
+		. '<span><span class="gp-legend-dot" style="background:' . gp_chart_color('warn') . '"></span> '
 		. gp_e($label_b) . '</span></div>';
 }
 
