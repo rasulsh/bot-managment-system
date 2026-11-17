@@ -803,17 +803,17 @@ else:
         return code, out.getvalue(), err.getvalue()
 
     def rv_clear():
-        rv_client.delete('gv:botok:' + rv_ip, 'gv:botbad:' + rv_ip)
+        rv_client.delete(redis_io.key('botok:' + rv_ip), redis_io.key('botbad:' + rv_ip))
 
     def rv_botbad_keys():
-        return list(rv_client.scan_iter(match='gv:botbad:*', count=500))
+        return list(rv_client.scan_iter(match=redis_io.key('botbad:*'), count=500))
 
     rv_clear()
     before = set(rv_botbad_keys())
     outage = StubResolver({}, {}, raise_on_ptr=botverify.DnsTransient('resolver outage'))
     code, out, _err = run_rv(outage)
     ok('a simulated resolver outage writes zero gv:botbad keys',
-       code == 0 and set(rv_botbad_keys()) == before and rv_client.get('gv:botok:' + rv_ip) is None)
+       code == 0 and set(rv_botbad_keys()) == before and rv_client.get(redis_io.key('botok:' + rv_ip)) is None)
     ok('the outage run reports the address as unknown', 'unknown 1' in out and 'could not be verified' in out)
     ok('the outage is recorded for the panel and report',
        run_verify_mod.snapshot_mod.read_stats(config_mod.load(rv_cfg), 'run_verify').get('unknown') == 1)
@@ -822,28 +822,28 @@ else:
     redis_io.set_botv(rv_client, rv_ip, 'ok', 600)
     run_rv(outage, '--recheck')
     ok('an existing ok verdict stays ok through a transient failure',
-       rv_client.get('gv:botok:' + rv_ip) == '1' and rv_client.get('gv:botbad:' + rv_ip) is None)
+       rv_client.get(redis_io.key('botok:' + rv_ip)) == '1' and rv_client.get(redis_io.key('botbad:' + rv_ip)) is None)
 
     # A forged claim: PTR resolves under googlebot.com but forward does not confirm.
     forged = StubResolver({rv_ip: ['fake.googlebot.com']}, {'fake.googlebot.com': ['203.0.113.250']})
     run_rv(forged, '--recheck')
-    ok('a definitive mismatch still flips ok to bad', rv_client.get('gv:botbad:' + rv_ip) == '1'
-       and rv_client.get('gv:botok:' + rv_ip) is None)
+    ok('a definitive mismatch still flips ok to bad', rv_client.get(redis_io.key('botbad:' + rv_ip)) == '1'
+       and rv_client.get(redis_io.key('botok:' + rv_ip)) is None)
     ok('a bad verdict uses the short botbad_ttl so it self-heals',
-       0 < rv_client.ttl('gv:botbad:' + rv_ip) <= 3600)
+       0 < rv_client.ttl(redis_io.key('botbad:' + rv_ip)) <= 3600)
     genuine = StubResolver({rv_ip: ['crawl.googlebot.com']}, {'crawl.googlebot.com': [rv_ip]})
     run_rv(genuine, '--recheck')
     ok('a confirmed address flips bad back to ok with the long TTL',
-       rv_client.get('gv:botok:' + rv_ip) == '1' and rv_client.get('gv:botbad:' + rv_ip) is None
-       and rv_client.ttl('gv:botok:' + rv_ip) > 3600)
+       rv_client.get(redis_io.key('botok:' + rv_ip)) == '1' and rv_client.get(redis_io.key('botbad:' + rv_ip)) is None
+       and rv_client.ttl(redis_io.key('botok:' + rv_ip)) > 3600)
     rv_clear()
     run_rv(forged, '--dry-run')
-    ok('--dry-run writes nothing', rv_client.get('gv:botbad:' + rv_ip) is None)
+    ok('--dry-run writes nothing', rv_client.get(redis_io.key('botbad:' + rv_ip)) is None)
     rv_clear()
     # Without --recheck a fresh verdict is not re-resolved.
     redis_io.set_botv(rv_client, rv_ip, 'ok', 600)
     run_rv(forged)
-    ok('a fresh verdict is not re-resolved without --recheck', rv_client.get('gv:botok:' + rv_ip) == '1')
+    ok('a fresh verdict is not re-resolved without --recheck', rv_client.get(redis_io.key('botok:' + rv_ip)) == '1')
     rv_clear()
 
     # A known bot with no suffix list: one warning, never bad.
@@ -853,7 +853,7 @@ else:
     code, out, err = run_rv(forged)
     ok('a bot without a suffix list warns by name and writes nothing',
        "'googlebot'" in err and 'no entry in bot_suffixes' in err
-       and rv_client.get('gv:botbad:' + rv_ip) is None and 'unknown 1' in out)
+       and rv_client.get(redis_io.key('botbad:' + rv_ip)) is None and 'unknown 1' in out)
     rv_clear()
     shutil.rmtree(rv_dir, ignore_errors=True)
 
@@ -878,16 +878,16 @@ else:
     ok('a bad verdict clears the previous ok verdict',
        redis_io.set_botv(client, ip, 'bad', 60)
        and redis_io.get_botv(client, ip) == 'bad'
-       and client.get('gv:botok:' + ip) is None)
+       and client.get(redis_io.key('botok:' + ip)) is None)
     ok('an unknown verdict is refused', redis_io.set_botv(client, ip, 'maybe', 60) is False)
     ok('every verdict key carries a TTL',
-       client.ttl('gv:rep:' + dev) > 0 and client.ttl('gv:ml:' + dev) > 0
-       and client.ttl('gv:botbad:' + ip) > 0)
+       client.ttl(redis_io.key('rep:' + dev)) > 0 and client.ttl(redis_io.key('ml:' + dev)) > 0
+       and client.ttl(redis_io.key('botbad:' + ip)) > 0)
     ok('writes against a dead client return False rather than raising',
        redis_io.set_rep(None, dev, 1, 60) is False)
     ok('reads against a dead client return None',
        redis_io.get_rep(None, dev) is None)
-    for key in ('gv:rep:' + dev, 'gv:ml:' + dev, 'gv:botok:' + ip, 'gv:botbad:' + ip):
+    for key in (redis_io.key('rep:' + dev), redis_io.key('ml:' + dev), redis_io.key('botok:' + ip), redis_io.key('botbad:' + ip)):
         client.delete(key)
 
 # ---------------------------------------------------------------------------
@@ -2190,8 +2190,12 @@ ok('rounding matches PHP at the binary-fraction boundaries',
    and dec_h.php_round(59.4) == 59)
 hr_php = shutil.which('php')
 if hr_php:
-    hr_code = ('$o=[];for($w=0;$w<=200;$w++){for($l=0;$l<=100;$l++){$o[]=(int)round($l*($w/100));}}'
-               'echo implode(",",$o);')
+    # The guard's own gv_round_int(), not PHP's round(): round() differs between PHP
+    # versions (8.4 dropped its pre-rounding), the guard's function does not.
+    hr_guard = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'guard', 'guard.php')
+    hr_code = ('define("GV_BOOT",1);define("GV_NO_AUTORUN",1);require %s;'
+               '$o=[];for($w=0;$w<=200;$w++){for($l=0;$l<=100;$l++){$o[]=gv_round_int($l*($w/100));}}'
+               'echo implode(",",$o);') % json_mod.dumps(hr_guard)
     hr_out = subprocess.run([hr_php, '-r', hr_code], stdout=subprocess.PIPE, universal_newlines=True).stdout
     hr_php_vals = [int(x) for x in hr_out.split(',')]
     hr_py_vals = [dec_h.php_round(l * (w / 100.0)) for w in range(201) for l in range(101)]
