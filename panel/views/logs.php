@@ -16,57 +16,56 @@ $reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR'
 	'HP_HIST', 'BOT_FAKE');
 ?>
 
+<?php
+// Numbers in this section are ALWAYS Latin digits (0-9): timestamps, addresses,
+// counters, durations. gp_latin() formats a number; nothing here goes through
+// gp_num() / gp_num_raw(), which are the Persian-digit helpers.
+$adv_keys = array('reason', 'dev', 'tok', 'sh', 'hold', 'sc_min', 'sc_max');
+$adv_open = false;
+foreach ($adv_keys as $k) { if (isset($f[$k]) && $f[$k] !== '') { $adv_open = true; } }
+$dash = '—';
+function gp_log_status_badge($st) {
+	$st = (int)$st;
+	if ($st >= 500) { return 'gp-badge-bad'; }
+	if ($st >= 400) { return 'gp-badge-warn'; }
+	if ($st >= 300) { return 'gp-badge-info'; }
+	if ($st >= 200) { return 'gp-badge-on'; }
+	return 'gp-badge-off';
+}
+?>
+
 <div>
 	<h1 class="gp-page-title"><?= gp_e(gp_t('logs_title')) ?></h1>
-	<p class="gp-page-sub gp-mono">
-		<?= gp_e($meta['file']) ?> ·
-		<?= gp_e(gp_t('logs_scanned')) ?>: <?= gp_num((int)$meta['scanned_lines']) ?>
+	<p class="gp-page-sub gp-latin">
+		<bdi class="gp-mono"><?= gp_e($meta['file']) ?></bdi>
+		<span class="gp-sep">·</span>
+		<span><?= gp_e(gp_t('logs_scanned')) ?>: <?= gp_e(gp_latin((int)$meta['scanned_lines'])) ?></span>
+		<span class="gp-sep">·</span>
+		<span><?= gp_e(gp_t('logs_shown')) ?>: <?= gp_e(gp_latin(count($rows))) ?></span>
 	</p>
 </div>
 
 <form method="get" action="index.php" class="gp-card gp-form">
 	<input type="hidden" name="r" value="logs">
-	<div class="gp-filters">
+	<div class="gp-filters gp-filters-5">
 		<label class="gp-field">
 			<span class="gp-label"><?= gp_e(gp_t('logs_date')) ?></span>
-			<select class="gp-input" name="date">
+			<select class="gp-input gp-ltr" name="date">
 				<?php foreach ($dates as $d): ?>
 				<option value="<?= gp_e($d) ?>" <?= (($f['date'] ?? '') === $d) ? 'selected' : '' ?>>
-					<?= gp_e(gp_num_raw(substr($d, 0, 4) . '-' . substr($d, 4, 2) . '-' . substr($d, 6, 2))) ?>
+					<?= gp_e(substr($d, 0, 4) . '-' . substr($d, 4, 2) . '-' . substr($d, 6, 2)) ?>
 				</option>
 				<?php endforeach; ?>
 			</select>
 		</label>
 		<label class="gp-field">
 			<span class="gp-label"><?= gp_e(gp_t('logs_act')) ?></span>
-			<select class="gp-input" name="act">
+			<select class="gp-input gp-ltr" name="act">
 				<?php foreach ($act_options as $opt): ?>
 				<option value="<?= gp_e($opt) ?>" <?= (($f['act'] ?? '') === $opt) ? 'selected' : '' ?>>
 					<?= $opt === '' ? gp_e(gp_t('none')) : gp_e($opt) ?></option>
 				<?php endforeach; ?>
 			</select>
-		</label>
-		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('logs_reason')) ?></span>
-			<select class="gp-input" name="reason">
-				<?php foreach ($reason_options as $opt): ?>
-				<option value="<?= gp_e($opt) ?>" <?= (($f['reason'] ?? '') === $opt) ? 'selected' : '' ?>>
-					<?= $opt === '' ? gp_e(gp_t('none')) : gp_e($opt) ?></option>
-				<?php endforeach; ?>
-			</select>
-		</label>
-		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('logs_status')) ?></span>
-			<select class="gp-input" name="status">
-				<?php foreach (array('', '2xx', '3xx', '404', '4xx', '5xx') as $opt): ?>
-				<option value="<?= gp_e($opt) ?>" <?= (($f['status'] ?? '') === $opt) ? 'selected' : '' ?>>
-					<?= $opt === '' ? gp_e(gp_t('none')) : gp_e($opt) ?></option>
-				<?php endforeach; ?>
-			</select>
-		</label>
-		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('logs_device')) ?></span>
-			<input class="gp-input gp-ltr" type="text" name="dev" value="<?= gp_e($f['dev'] ?? '') ?>">
 		</label>
 		<label class="gp-field">
 			<span class="gp-label"><?= gp_e(gp_t('logs_ip')) ?></span>
@@ -77,41 +76,70 @@ $reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR'
 			<input class="gp-input gp-ltr" type="text" name="path" value="<?= gp_e($f['path'] ?? '') ?>">
 		</label>
 		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('logs_token')) ?></span>
-			<select class="gp-input" name="tok">
-				<?php foreach (array('', 'v', 'm', 'b') as $opt): ?>
-				<option value="<?= gp_e($opt) ?>" <?= (($f['tok'] ?? '') === $opt) ? 'selected' : '' ?>>
+			<span class="gp-label"><?= gp_e(gp_t('logs_status')) ?></span>
+			<select class="gp-input gp-ltr" name="status">
+				<?php foreach (array('', '2xx', '3xx', '404', '4xx', '5xx') as $opt): ?>
+				<option value="<?= gp_e($opt) ?>" <?= (($f['status'] ?? '') === $opt) ? 'selected' : '' ?>>
 					<?= $opt === '' ? gp_e(gp_t('none')) : gp_e($opt) ?></option>
 				<?php endforeach; ?>
 			</select>
 		</label>
-		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('logs_shadow')) ?></span>
-			<select class="gp-input" name="sh">
-				<option value=""><?= gp_e(gp_t('none')) ?></option>
-				<option value="1" <?= (($f['sh'] ?? '') === 1) ? 'selected' : '' ?>><?= gp_e(gp_t('yes')) ?></option>
-				<option value="0" <?= (isset($f['sh']) && $f['sh'] === 0) ? 'selected' : '' ?>><?= gp_e(gp_t('no')) ?></option>
-			</select>
-		</label>
-		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('logs_holdout')) ?></span>
-			<select class="gp-input" name="hold">
-				<option value=""><?= gp_e(gp_t('none')) ?></option>
-				<option value="1" <?= (($f['hold'] ?? '') === 1) ? 'selected' : '' ?>><?= gp_e(gp_t('yes')) ?></option>
-				<option value="0" <?= (isset($f['hold']) && $f['hold'] === 0) ? 'selected' : '' ?>><?= gp_e(gp_t('no')) ?></option>
-			</select>
-		</label>
-		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('logs_score_min')) ?></span>
-			<input class="gp-input gp-ltr" type="number" name="sc_min" inputmode="numeric"
-				value="<?= gp_e((string)($f['sc_min'] ?? '')) ?>">
-		</label>
-		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('logs_score_max')) ?></span>
-			<input class="gp-input gp-ltr" type="number" name="sc_max" inputmode="numeric"
-				value="<?= gp_e((string)($f['sc_max'] ?? '')) ?>">
-		</label>
 	</div>
+
+	<details class="gp-more" <?= $adv_open ? 'open' : '' ?>>
+		<summary><?= gp_e(gp_t('logs_more_filters')) ?></summary>
+		<div class="gp-filters">
+			<label class="gp-field">
+				<span class="gp-label"><?= gp_e(gp_t('logs_reason')) ?></span>
+				<select class="gp-input gp-ltr" name="reason">
+					<?php foreach ($reason_options as $opt): ?>
+					<option value="<?= gp_e($opt) ?>" <?= (($f['reason'] ?? '') === $opt) ? 'selected' : '' ?>>
+						<?= $opt === '' ? gp_e(gp_t('none')) : gp_e($opt) ?></option>
+					<?php endforeach; ?>
+				</select>
+			</label>
+			<label class="gp-field">
+				<span class="gp-label"><?= gp_e(gp_t('logs_device')) ?></span>
+				<input class="gp-input gp-ltr" type="text" name="dev" value="<?= gp_e($f['dev'] ?? '') ?>">
+			</label>
+			<label class="gp-field">
+				<span class="gp-label"><?= gp_e(gp_t('logs_token')) ?></span>
+				<select class="gp-input gp-ltr" name="tok">
+					<?php foreach (array('', 'v', 'm', 'b') as $opt): ?>
+					<option value="<?= gp_e($opt) ?>" <?= (($f['tok'] ?? '') === $opt) ? 'selected' : '' ?>>
+						<?= $opt === '' ? gp_e(gp_t('none')) : gp_e($opt) ?></option>
+					<?php endforeach; ?>
+				</select>
+			</label>
+			<label class="gp-field">
+				<span class="gp-label"><?= gp_e(gp_t('logs_shadow')) ?></span>
+				<select class="gp-input" name="sh">
+					<option value=""><?= gp_e(gp_t('none')) ?></option>
+					<option value="1" <?= (($f['sh'] ?? '') === 1) ? 'selected' : '' ?>><?= gp_e(gp_t('yes')) ?></option>
+					<option value="0" <?= (isset($f['sh']) && $f['sh'] === 0) ? 'selected' : '' ?>><?= gp_e(gp_t('no')) ?></option>
+				</select>
+			</label>
+			<label class="gp-field">
+				<span class="gp-label"><?= gp_e(gp_t('logs_holdout')) ?></span>
+				<select class="gp-input" name="hold">
+					<option value=""><?= gp_e(gp_t('none')) ?></option>
+					<option value="1" <?= (($f['hold'] ?? '') === 1) ? 'selected' : '' ?>><?= gp_e(gp_t('yes')) ?></option>
+					<option value="0" <?= (isset($f['hold']) && $f['hold'] === 0) ? 'selected' : '' ?>><?= gp_e(gp_t('no')) ?></option>
+				</select>
+			</label>
+			<label class="gp-field">
+				<span class="gp-label"><?= gp_e(gp_t('logs_score_min')) ?></span>
+				<input class="gp-input gp-ltr" type="number" name="sc_min" inputmode="numeric"
+					value="<?= gp_e((string)($f['sc_min'] ?? '')) ?>">
+			</label>
+			<label class="gp-field">
+				<span class="gp-label"><?= gp_e(gp_t('logs_score_max')) ?></span>
+				<input class="gp-input gp-ltr" type="number" name="sc_max" inputmode="numeric"
+					value="<?= gp_e((string)($f['sc_max'] ?? '')) ?>">
+			</label>
+		</div>
+	</details>
+
 	<div class="gp-row-head">
 		<button class="gp-btn gp-btn-primary" type="submit"><?= gp_e(gp_t('filter')) ?></button>
 		<a class="gp-btn gp-btn-ghost" href="index.php?r=logs"><?= gp_e(gp_t('reset')) ?></a>
@@ -131,7 +159,17 @@ $reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR'
 	<p class="gp-help"><span class="gp-badge gp-badge-bad"><?= gp_e(gp_t('pipe_' . $pipeline['verdict'])) ?></span></p>
 	<?php endif; ?></div>
 <?php else: ?>
-<div class="gp-rows">
+
+<div class="gp-log-list gp-latin">
+	<div class="gp-log-line gp-log-head" aria-hidden="true">
+		<span><?= gp_e(gp_t('logs_time')) ?></span>
+		<span><?= gp_e(gp_t('logs_act')) ?></span>
+		<span><?= gp_e(gp_t('logs_request')) ?></span>
+		<span><?= gp_e(gp_t('logs_ip')) ?></span>
+		<span><?= gp_e(gp_t('logs_score')) ?></span>
+		<span>HTTP</span>
+		<span></span>
+	</div>
 	<?php foreach ($rows as $i => $row):
 		$act = (string)($row['act'] ?? '');
 		$badge = 'gp-badge-off';
@@ -141,80 +179,150 @@ $reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR'
 		$out = isset($row['_out']) && is_array($row['_out']) ? $row['_out'] : null;
 		$detail_id = 'gp-d-' . (int)$i;
 		$identity = (string)($row['dev'] ?? '') !== '' ? (string)$row['dev'] : (string)($row['ip'] ?? '');
+		$ts = (int)($row['ts'] ?? 0);
+		$sc = (int)($row['sc'] ?? 0);
+		$esc = (int)($row['esc'] ?? 0);
+		$score_cls = $esc >= 60 ? 'gp-badge-bad' : ($esc >= 30 ? 'gp-badge-warn' : 'gp-badge-off');
+		$reasons = array_values(array_filter((array)($row['rs'] ?? array()), 'is_string'));
 	?>
-	<article class="gp-row">
-		<div class="gp-row-head">
-			<span class="gp-badge <?= $badge ?>"><?= gp_e($act) ?></span>
-			<?php if ((int)($row['sh'] ?? 0) === 1): ?>
-				<span class="gp-badge gp-badge-info"><?= gp_e(gp_t('logs_shadow')) ?></span>
-			<?php endif; ?>
-			<?php if ((int)($row['hold'] ?? 0) === 1): ?>
-				<span class="gp-badge gp-badge-info"><?= gp_e(gp_t('logs_holdout')) ?></span>
-			<?php endif; ?>
-			<?php if ((string)($row['ovr'] ?? '') !== ''): ?>
-				<span class="gp-badge gp-badge-warn"><?= gp_e($row['ovr']) ?></span>
-			<?php endif; ?>
-			<?php if ($out !== null): ?>
-				<span class="gp-badge gp-badge-off"><?= gp_e((string)($out['st'] ?? '')) ?></span>
-			<?php endif; ?>
-			<span class="gp-mono" style="margin-inline-start:auto">
-				<?= gp_e(gp_num_raw(date('H:i:s', (int)($row['ts'] ?? 0)))) ?></span>
+	<article class="gp-log">
+		<div class="gp-log-line">
+			<time class="gp-log-time gp-ltr" datetime="<?= gp_e(gmdate('c', $ts)) ?>"
+				title="<?= gp_e(date('Y-m-d H:i:s', $ts)) ?>"><?= gp_e(date('H:i:s', $ts)) ?></time>
+			<div class="gp-log-acts">
+				<span class="gp-badge <?= $badge ?> gp-ltr"><?= gp_e($act) ?></span>
+				<?php if ((int)($row['sh'] ?? 0) === 1): ?>
+					<span class="gp-badge gp-badge-info"><?= gp_e(gp_t('logs_shadow')) ?></span>
+				<?php endif; ?>
+				<?php if ((int)($row['hold'] ?? 0) === 1): ?>
+					<span class="gp-badge gp-badge-info"><?= gp_e(gp_t('logs_holdout')) ?></span>
+				<?php endif; ?>
+				<?php if ((string)($row['ovr'] ?? '') !== ''): ?>
+					<span class="gp-badge gp-badge-warn gp-ltr"><?= gp_e($row['ovr']) ?></span>
+				<?php endif; ?>
+			</div>
+			<div class="gp-log-req gp-ltr">
+				<span class="gp-log-method"><?= gp_e($row['m'] ?? '') ?></span>
+				<span class="gp-log-path"><?= gp_e($row['p'] ?? '') ?></span>
+			</div>
+			<div class="gp-log-ip gp-ltr"><?= gp_e($row['ip'] ?? '') ?></div>
+			<div class="gp-log-score gp-ltr"
+				title="<?= gp_e(gp_t('logs_sc')) ?> / <?= gp_e(gp_t('logs_esc')) ?>">
+				<?php if ($sc !== $esc): ?><span class="gp-log-base"><?= gp_e(gp_latin($sc)) ?> →</span><?php endif; ?>
+				<span class="gp-badge <?= $score_cls ?>"><?= gp_e(gp_latin($esc)) ?></span>
+			</div>
+			<div class="gp-log-status gp-ltr">
+				<?php if ($out !== null && isset($out['st'])): ?>
+					<span class="gp-badge <?= gp_log_status_badge($out['st']) ?>"><?= gp_e(gp_latin((int)$out['st'])) ?></span>
+				<?php else: ?><span class="gp-log-none"><?= $dash ?></span><?php endif; ?>
+			</div>
+			<div class="gp-log-actions">
+				<button class="gp-btn gp-btn-ghost gp-btn-sm" type="button"
+					data-toggle="<?= gp_e($detail_id) ?>" aria-expanded="false" aria-controls="<?= gp_e($detail_id) ?>">
+					<?= gp_e(gp_t('logs_detail')) ?></button>
+				<?php if ($identity !== ''): ?>
+				<a class="gp-btn gp-btn-ghost gp-btn-sm"
+					href="index.php?r=identity&amp;id=<?= gp_u($identity) ?>">
+					<?= gp_e(gp_t('id_title')) ?></a>
+				<?php endif; ?>
+			</div>
 		</div>
-
-		<div class="gp-row-main gp-mono gp-ltr gp-truncate"><?= gp_e($row['p'] ?? '') ?></div>
-
-		<div class="gp-row-meta">
-			<span class="gp-ltr"><?= gp_e($row['ip'] ?? '') ?></span>
-			<span><?= gp_e(gp_t('logs_sc')) ?>: <?= gp_num((int)($row['sc'] ?? 0)) ?></span>
-			<span><?= gp_e(gp_t('logs_esc')) ?>: <?= gp_num((int)($row['esc'] ?? 0)) ?></span>
-			<?php foreach ((array)($row['rs'] ?? array()) as $reason): ?>
+		<?php if ($reasons): ?>
+		<div class="gp-log-reasons gp-ltr">
+			<?php foreach ($reasons as $reason): ?>
 				<span class="gp-badge gp-badge-off"><?= gp_e($reason) ?></span>
 			<?php endforeach; ?>
-			<button class="gp-btn gp-btn-ghost gp-btn-sm" type="button"
-				data-toggle="<?= gp_e($detail_id) ?>" aria-expanded="false">
-				<?= gp_e(gp_t('logs_detail')) ?></button>
-			<?php if ($identity !== ''): ?>
-			<a class="gp-btn gp-btn-ghost gp-btn-sm"
-				href="index.php?r=identity&amp;id=<?= gp_u($identity) ?>">
-				<?= gp_e(gp_t('id_title')) ?></a>
-			<?php endif; ?>
 		</div>
+		<?php endif; ?>
 
-		<div class="gp-detail" id="<?= gp_e($detail_id) ?>" hidden>
-			<dl class="gp-dl">
-				<?php
-				$fields = array('rid' => 'rid', 'ts' => gp_t('logs_time'), 'ip' => gp_t('logs_ip'),
-					'dev' => gp_t('logs_device'), 'm' => 'method', 'p' => gp_t('logs_path'),
-					'q' => 'query', 'ua' => 'user agent', 'uah' => 'ua hash',
-					'ref' => 'referer', 'tok' => gp_t('logs_token'), 'sf' => 'sec-fetch',
-					'hc' => 'headers', 'nav' => 'nav', 'aj' => 'ajax',
-					'sc' => gp_t('logs_sc'), 'esc' => gp_t('logs_esc'),
-					'rep' => gp_t('id_reputation'), 'ml' => gp_t('id_ml'),
-					'clf' => gp_t('id_clf'), 'botv' => gp_t('id_botv'),
-					'bot' => 'bot', 'hp' => gp_t('id_honeypot'),
-					'cd' => 'cd', 'ciu' => 'ciu', 'ci' => 'ci', 'rd' => 'redis down',
-					'ms' => 'ms', 'v' => 'schema');
-				foreach ($fields as $key => $label):
+		<div class="gp-log-detail" id="<?= gp_e($detail_id) ?>" hidden>
+			<?php
+			// Each section: title => list of key => array(label, kind[, wide]).
+			// kinds: str (as is), int, float, bool, time. Only int/float are formatted
+			// as numbers; ids such as rid are strings even when they happen to be digits.
+			$sections = array(
+				gp_t('logs_sec_request') => array(
+					'ts'  => array(gp_t('logs_time'), 'time'),
+					'm'   => array(gp_t('logs_method'), 'str'),
+					'p'   => array(gp_t('logs_path'), 'str', true),
+					'q'   => array(gp_t('logs_query'), 'str', true),
+					'ua'  => array(gp_t('logs_ua'), 'str', true),
+					'ref' => array(gp_t('logs_referer'), 'str'),
+					'sf'  => array('sec-fetch', 'str'),
+					'hc'  => array(gp_t('logs_headers'), 'int'),
+					'nav' => array(gp_t('logs_nav'), 'bool'),
+					'aj'  => array('Ajax', 'bool'),
+					'uah' => array(gp_t('logs_uah'), 'str'),
+				),
+				gp_t('logs_sec_identity') => array(
+					'ip'   => array(gp_t('logs_ip'), 'str'),
+					'dev'  => array(gp_t('logs_device'), 'str', true),
+					'tok'  => array(gp_t('logs_token'), 'str'),
+					'bot'  => array(gp_t('logs_bot'), 'str'),
+					'botv' => array(gp_t('id_botv'), 'str'),
+					'hp'   => array(gp_t('id_honeypot'), 'bool'),
+				),
+				gp_t('logs_sec_score') => array(
+					'sc'  => array(gp_t('logs_sc'), 'int'),
+					'esc' => array(gp_t('logs_esc'), 'int'),
+					'rep' => array(gp_t('id_reputation'), 'int'),
+					'ml'  => array(gp_t('id_ml'), 'int'),
+					'clf' => array(gp_t('id_clf'), 'int'),
+					'rs'  => array(gp_t('logs_reason'), 'list', true),
+				),
+				gp_t('logs_sec_counters') => array(
+					'cd'  => array(gp_t('logs_c_cd'), 'int'),
+					'cdh' => array(gp_t('logs_c_cdh'), 'int'),
+					'cdd' => array(gp_t('logs_c_cdd'), 'int'),
+					'ciu' => array(gp_t('logs_c_ciu'), 'int'),
+					'ci'  => array(gp_t('logs_c_ci'), 'int'),
+					'rd'  => array(gp_t('logs_c_rd'), 'bool'),
+					'ms'  => array(gp_t('logs_c_ms'), 'float'),
+					'v'   => array(gp_t('logs_c_v'), 'int'),
+					'rid' => array('rid', 'str'),
+				),
+			);
+			foreach ($sections as $title => $items): ?>
+			<section class="gp-log-sec">
+				<h3 class="gp-log-sec-title"><?= gp_e($title) ?></h3>
+				<dl class="gp-log-dl">
+				<?php foreach ($items as $key => $def):
 					if (!array_key_exists($key, $row)) { continue; }
 					$value = $row[$key];
-					if ($key === 'ts') { $value = gp_num_raw(date('Y-m-d H:i:s', (int)$value)); }
+					switch ($def[1]) {
+						case 'time':  $text = date('Y-m-d H:i:s', (int)$value); break;
+						case 'int':   $text = gp_latin((int)$value); break;
+						case 'float': $text = gp_latin((float)$value, 2, true); break;
+						case 'bool':  $text = ((int)$value) ? gp_t('yes') : gp_t('no'); break;
+						case 'list':  $text = is_array($value) ? implode('  ', array_filter($value, 'is_string')) : ''; break;
+						default:      $text = is_scalar($value) ? (string)$value : '';
+					}
+					if ($text === '') { $text = $dash; }
 				?>
-				<dt><?= gp_e($label) ?></dt>
-				<dd class="gp-ltr"><?= gp_e(is_array($value) ? implode(' ', $value) : $value) ?></dd>
+					<div class="gp-log-kv<?= !empty($def[2]) ? ' gp-log-kv-wide' : '' ?>">
+						<dt><?= gp_e($def[0]) ?></dt>
+						<dd class="gp-ltr"><?= gp_e($text) ?></dd>
+					</div>
 				<?php endforeach; ?>
+				</dl>
+			</section>
+			<?php endforeach; ?>
 
+			<section class="gp-log-sec">
+				<h3 class="gp-log-sec-title"><?= gp_e(gp_t('logs_outcome')) ?></h3>
 				<?php if ($out !== null): ?>
-				<dt><?= gp_e(gp_t('logs_outcome')) ?></dt>
-				<dd class="gp-ltr">
-					<?= gp_e(gp_t('logs_status')) ?>=<?= gp_e($out['st'] ?? '') ?>
-					<?= gp_e(gp_t('logs_bytes')) ?>=<?= gp_e($out['by'] === null ? '-' : $out['by']) ?>
-					<?= gp_e(gp_t('logs_duration')) ?>=<?= gp_e($out['dur'] === null ? '-' : $out['dur']) ?>
-				</dd>
+				<dl class="gp-log-dl">
+					<div class="gp-log-kv"><dt><?= gp_e(gp_t('logs_status')) ?></dt>
+						<dd class="gp-ltr"><?= gp_e(isset($out['st']) ? gp_latin((int)$out['st']) : $dash) ?></dd></div>
+					<div class="gp-log-kv"><dt><?= gp_e(gp_t('logs_bytes')) ?></dt>
+						<dd class="gp-ltr"><?= gp_e(($out['by'] ?? null) === null ? $dash : gp_latin((int)$out['by'])) ?></dd></div>
+					<div class="gp-log-kv"><dt><?= gp_e(gp_t('logs_duration')) ?> (ms)</dt>
+						<dd class="gp-ltr"><?= gp_e(($out['dur'] ?? null) === null ? $dash : gp_latin((float)$out['dur'], 2, true)) ?></dd></div>
+				</dl>
 				<?php else: ?>
-				<dt><?= gp_e(gp_t('logs_outcome')) ?></dt>
-				<dd><?= gp_e(gp_t('logs_no_outcome')) ?></dd>
+				<p class="gp-help"><?= gp_e(gp_t('logs_no_outcome')) ?></p>
 				<?php endif; ?>
-			</dl>
+			</section>
 		</div>
 	</article>
 	<?php endforeach; ?>

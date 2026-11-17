@@ -48,6 +48,15 @@ function gp_num($value, $decimals = 0) {
 		'5' => '۵', '6' => '۶', '7' => '۷', '8' => '۸', '9' => '۹'));
 }
 
+// Latin digits (0-9), for the Logs section, which must never show Persian digits.
+// No thousands separator: the same text can be copied into a shell or a filter.
+// $trim drops trailing zeros of a decimal ("1.50" -> "1.5", "2.00" -> "2").
+function gp_latin($value, $decimals = 0, $trim = false) {
+	$text = number_format((float)$value, (int)$decimals, '.', '');
+	if ($trim && strpos($text, '.') !== false) { $text = rtrim(rtrim($text, '0'), '.'); }
+	return $text === '-0' ? '0' : $text;
+}
+
 function gp_pct($part, $whole, $decimals = 1) {
 	if (!$whole) { return gp_num(0, $decimals) . '٪'; }
 	return gp_num(100.0 * $part / $whole, $decimals) . '٪';

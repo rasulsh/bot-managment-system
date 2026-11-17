@@ -692,6 +692,11 @@ function t_dom_findings($html) {
 
 $dom = t_dom_findings($rendered);
 t_ok('the log explorer rendered output', strlen($rendered) > 500);
+t_ok('the log explorer shows no Persian or Arabic-Indic digit anywhere (Latin digits only)',
+	preg_match('/[\x{06F0}-\x{06F9}\x{0660}-\x{0669}]/u', $rendered) === 0);
+t_ok('the log explorer uses the grouped row layout', strpos($rendered, 'gp-log-line') !== false && strpos($rendered, 'gp-log-detail') !== false);
+t_ok('gp_latin formats with Latin digits, no grouping', gp_latin(1234567) === '1234567' && gp_latin(1.5, 2) === '1.50' && gp_latin(2.0, 2, true) === '2' && gp_latin(1.50, 2, true) === '1.5' && gp_latin(-0.0) === '0');
+t_ok('gp_latin never emits a Persian digit', preg_match('/[\x{06F0}-\x{06F9}]/u', gp_latin(9876543210)) === 0);
 t_dom_ok('the browser sees no script element from log data', $dom['scripts'] === 0);
 t_dom_ok('the browser sees no img element from log data',
 	!isset($dom['tags']['img']));
