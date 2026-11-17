@@ -204,6 +204,14 @@ CONF
 		printf 'auto_prepend_file = %s/prepend.php\n' "$2" > "$1/.user.ini"
 		chown www-data:www-data "$1/.user.ini"
 	fi
+	# ...and, as the setting of last resort, in every php.ini lsphp could load. The
+	# line is removed again for a layout that runs without the guard.
+	while IFS= read -r ini; do
+		sed -i '/^auto_prepend_file *= *.*bot-guard-ci$/d' "$ini"
+		if [ -n "${2:-}" ]; then
+			printf 'auto_prepend_file = %s/prepend.php ; bot-guard-ci\n' "$2" >> "$ini"
+		fi
+	done < <(find "$LSWS" /etc/php -name php.ini -path '*litespeed*' 2>/dev/null; find "$LSWS" -name php.ini 2>/dev/null | sort -u)
 	chown -R www-data:www-data "$LSWS/gv" "$LSWS/conf/vhosts/gv" /tmp/lshttpd
 	"$LSWS/bin/lswsctrl" start >/dev/null 2>&1 </dev/null
 	wait_http
@@ -260,6 +268,8 @@ if ls /var/www/bot-guard/logs/guard-*.jsonl >/dev/null 2>&1; then echo "PASS  th
 <?php
 header('Content-Type: text/plain');
 error_reporting(-1); ini_set('display_errors', '1');
+echo 'php=', PHP_VERSION, ' ini=', var_export(php_ini_loaded_file(), true), ' scanned=', var_export(php_ini_scanned_files(), true),
+	' user_ini=', var_export(ini_get('user_ini.filename'), true), ' bin=', PHP_BINARY, "\n";
 echo 'sapi=', PHP_SAPI, ' prepend=', var_export(ini_get('auto_prepend_file'), true), ' boot=', var_export(defined('GV_BOOT'), true),
 	' run=', var_export(function_exists('gv_run'), true), "\n";
 if (function_exists('gv_cfg_load')) {
