@@ -994,6 +994,64 @@ t_ok('.htaccess adds X-Robots-Tag for static files and Apache errors', preg_matc
 t_ok('the allowlist check runs before any route, including login', strpos($nx_src, 'gp_ip_allowed($gp_cfg)') < strpos($nx_src, 'switch ($gp_route)'));
 t_ok('no robots.txt is shipped inside the panel', !is_file(__DIR__ . '/../panel/robots.txt'));
 
+t_section('Data pipeline: status verdicts and the log readers');
+// Point the guard at a scratch log directory for these checks.
+$pl_dir = sys_get_temp_dir() . '/gp-pipe-' . bin2hex(random_bytes(4));
+$pl_cfg = sys_get_temp_dir() . '/gp-pipe-cfg-' . bin2hex(random_bytes(4)) . '.php';
+file_put_contents($pl_cfg, "<?php\nif (!defined('GV_BOOT')) { exit; }\n\$c = require " . var_export(realpath(__DIR__ . '/../scripts/config.dev.php'), true) . ";\n\$c['log_dir'] = " . var_export($pl_dir, true) . ";\nreturn \$c;\n");
+$pl_prev = getenv('GV_CONFIG');
+putenv('GV_CONFIG=' . $pl_cfg);
+$ks_was = gp_killswitch_on();
+if ($ks_was) { @unlink(gp_killswitch_path()); }
+t_ok('missing log directory is reported as no_dir', gp_pipeline_status()['verdict'] === 'no_dir');
+mkdir($pl_dir, 0775, true);
+t_ok('an empty log directory is reported as never', gp_pipeline_status()['verdict'] === 'never');
+$pl_now = time();
+gv_log(array('v' => 5, 'rid' => 'r1', 'ts' => $pl_now - 30, 'ip' => '203.0.113.9', 'm' => 'GET', 'p' => '/', 'q' => '', 'act' => 'allow', 'sh' => 0), $pl_dir);
+$pl_s = gp_pipeline_status($pl_now);
+t_ok('a row written 30 s ago is ok, with its age', $pl_s['verdict'] === 'ok' && $pl_s['last_age'] >= 29 && $pl_s['last_age'] <= 31);
+t_ok('the same row two hours later is quiet', gp_pipeline_status($pl_now + 7200)['verdict'] === 'quiet');
+// An outcome line is newer than its decision row and must count as activity too.
+gv_log_outcome(array('o' => 1, 'rid' => 'r1', 'ts' => $pl_now - 10, 'st' => 200, 'by' => 10, 'dur' => 3.0), $pl_dir);
+t_ok('the newest line of either kind sets the last activity', (int)gp_pipeline_status($pl_now)['last_age'] <= 11);
+file_put_contents(gp_killswitch_path(), '1');
+t_ok('with the kill switch on and no recent row the verdict is killed', gp_pipeline_status($pl_now + 7200)['verdict'] === 'killed');
+t_ok('a recent row still reads ok even with the kill switch on', gp_pipeline_status($pl_now)['verdict'] === 'ok');
+@unlink(gp_killswitch_path());
+if ($ks_was) { file_put_contents(gp_killswitch_path(), '1'); }
+@chmod($pl_dir, 0555);
+if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+	t_skip('read-only log directory is reported as not_writable', 'running as root, which ignores directory modes');
+} else {
+	t_ok('a read-only log directory is reported as not_writable', gp_pipeline_status()['verdict'] === 'not_writable');
+}
+@chmod($pl_dir, 0775);
+
+// The status filter must see the outcome that was written AFTER the decision row.
+gv_log(array('v' => 5, 'rid' => 'r404', 'ts' => $pl_now, 'ip' => '203.0.113.10', 'm' => 'GET', 'p' => '/gone', 'q' => '', 'act' => 'allow', 'sh' => 0), $pl_dir);
+gv_log_outcome(array('o' => 1, 'rid' => 'r404', 'ts' => $pl_now, 'st' => 404, 'by' => 5, 'dur' => 1.0), $pl_dir);
+gv_log(array('v' => 5, 'rid' => 'r200', 'ts' => $pl_now, 'ip' => '203.0.113.11', 'm' => 'GET', 'p' => '/ok', 'q' => '', 'act' => 'allow', 'sh' => 0), $pl_dir);
+gv_log_outcome(array('o' => 1, 'rid' => 'r200', 'ts' => $pl_now, 'st' => 200, 'by' => 5, 'dur' => 1.0), $pl_dir);
+$pl_404 = gp_log_query(array('status' => '404'), 0, 50)[0];
+t_ok('the status filter 404 returns exactly the 404 row', count($pl_404) === 1 && $pl_404[0]['rid'] === 'r404');
+t_ok('the status filter 2xx returns the 200 rows, not the 404', count(gp_log_query(array('status' => '2xx'), 0, 50)[0]) === 2);
+t_ok('a row without an outcome never matches a status filter', count(gp_log_query(array('status' => '5xx'), 0, 50)[0]) === 0);
+t_ok('without a filter every decision row comes back once', count(gp_log_query(array(), 0, 50)[0]) === 3);
+
+// Many processes appending at once must not tear a line.
+$pl_code = 'define("GV_BOOT",1);require ' . var_export(realpath(__DIR__ . '/../guard/log.php'), true) . ';'
+	. 'for($i=0;$i<50;$i++){gv_log(array("v"=>5,"rid"=>getmypid()."-".$i,"ts"=>microtime(true),"ip"=>"203.0.113.1","m"=>"GET","p"=>"/c","q"=>"","ua"=>str_repeat("x",100),"act"=>"allow","sh"=>0),' . var_export($pl_dir, true) . ');}';
+$pl_procs = array();
+for ($i = 0; $i < 8; $i++) { $pl_procs[] = proc_open(array(PHP_BINARY, '-r', $pl_code), array(1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $pl_pipes); }
+foreach ($pl_procs as $pl_p) { if (is_resource($pl_p)) { proc_close($pl_p); } }
+$pl_lines = file(gp_log_file(), FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+$pl_bad = 0; foreach ($pl_lines as $pl_l) { if (!is_array(json_decode($pl_l, true))) { $pl_bad++; } }
+t_ok('8 processes x 50 rows: all 400 are present and none is torn (' . count($pl_lines) . ' lines, ' . $pl_bad . ' bad)', $pl_bad === 0 && count($pl_lines) === 400 + 6);
+
+foreach (glob($pl_dir . '/*') as $pl_f) { @unlink($pl_f); }
+@rmdir($pl_dir); @unlink($pl_cfg);
+putenv($pl_prev === false ? 'GV_CONFIG' : 'GV_CONFIG=' . $pl_prev);
+
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');
 t_ok('"پوشش احکام" is gone and "تأثیر قوانین" is used', strpos($tr_lang, 'پوشش احکام') === false && strpos($tr_lang, 'تأثیر قوانین') !== false);

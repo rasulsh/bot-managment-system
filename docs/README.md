@@ -281,6 +281,7 @@ Python (`analyzer/decision.py`); the parity test fails until they agree exactly
 - [`docs/09-ADMIN-PANEL.md`](09-ADMIN-PANEL.md) — panel install, security model,
   settings overlay.
 - [`docs/10-UPGRADE-NOTES.md`](10-UPGRADE-NOTES.md) — what changed in each release.
+- [`docs/11-TESTING-PIPELINE.md`](11-TESTING-PIPELINE.md) — why nothing shows in the panel, and how to test the whole pipeline.
 
 ## Requirements
 

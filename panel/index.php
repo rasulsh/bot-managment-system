@@ -227,6 +227,7 @@ switch ($gp_route) {
 			'health'   => gp_guard_health(),
 			'rinfo'    => gp_redis_info(),
 			'exposed'  => gp_exposure_warning(),
+			'pipeline' => gp_pipeline_status(),
 			'ip_open'  => empty($gp_cfg['ip_allowlist']),
 		));
 
@@ -240,6 +241,7 @@ switch ($gp_route) {
 		gp_render('logs', array(
 			'filter' => $filter, 'rows' => $page[0], 'meta' => $page[1],
 			'dates' => gp_log_dates(),
+			'pipeline' => $page[0] ? null : gp_pipeline_status(),
 		));
 
 	case 'identity':

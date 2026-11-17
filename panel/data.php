@@ -346,9 +346,13 @@ function gp_log_query(array $filter, $cursor = 0, $limit = 50) {
 				if (isset($row['rid'])) { $outcomes[(string)$row['rid']] = $row; }
 				continue;
 			}
-			if (!gp_log_match($row, $filter)) { continue; }
+			// Join the outcome BEFORE filtering: the 'status' filter looks at it, and
+			// matching first made that filter reject every row. Outcome lines are
+			// written after their decision row, so newest-first reading has already
+			// seen the outcome by now.
 			$rid = isset($row['rid']) ? (string)$row['rid'] : '';
 			$row['_out'] = ($rid !== '' && isset($outcomes[$rid])) ? $outcomes[$rid] : null;
+			if (!gp_log_match($row, $filter)) { continue; }
 			$rows[] = $row;
 			$last_row_start = $starts[$i];     // decreases as we accept older rows
 			if (count($rows) >= $limit) { break; }
@@ -463,6 +467,63 @@ function gp_guard_health() {
 			if ($lines) { $out['last_error'] = substr((string)end($lines), 0, 300); }
 		}
 	}
+	return $out;
+}
+
+// Where does the data pipeline stand? The panel can only SHOW what the guard
+// wrote, so "nothing appears" has a handful of distinct causes that look the
+// same on screen. This tells them apart from the filesystem alone (no Redis,
+// no outbound request) and returns one verdict:
+//
+//   no_dir        the log directory does not exist
+//   not_writable  it exists but PHP cannot write to it
+//   killed        guard.off exists: the guard is switched off and logs nothing
+//   never         no log file has ever received a request row
+//   quiet         the newest row is more than an hour old
+//   ok            a request was logged within the last hour
+//
+// 'never' and 'quiet' mean the guard is not seeing traffic: not loaded by PHP
+// (auto_prepend_file), a stale .user.ini, or pages served from a cache
+// without running PHP. docs/03-SETUP.md has the checks.
+function gp_pipeline_status($now = null) {
+	$now = $now === null ? time() : (int)$now;
+	$cfg = gv_cfg_load();
+	$dir = rtrim((string)$cfg['log_dir'], '/\\');
+	$out = array('verdict' => 'never', 'dir' => $dir, 'writable' => false, 'last_ts' => 0.0,
+		'last_age' => null, 'file' => '', 'bytes' => 0, 'days' => 0, 'killed' => false);
+	$out['killed'] = gp_killswitch_on();
+	if (!is_dir($dir)) { $out['verdict'] = 'no_dir'; return $out; }
+	$out['writable'] = is_writable($dir);
+	if (!$out['writable']) { $out['verdict'] = 'not_writable'; return $out; }
+	$dates = gp_log_dates(30);
+	$out['days'] = count($dates);
+	foreach ($dates as $date) {
+		$file = $dir . '/guard-' . $date . '.jsonl';
+		$size = @filesize($file);
+		if ($size === false || $size < 1) { continue; }
+		$h = @fopen($file, 'rb');
+		if (!$h) { continue; }
+		if ($size > 16384) { fseek($h, -16384, SEEK_END); }
+		$tail = (string)stream_get_contents($h);
+		fclose($h);
+		$lines = explode("\n", $tail);
+		for ($i = count($lines) - 1; $i >= 0; $i--) {
+			$row = json_decode(trim($lines[$i]), true);
+			if (is_array($row) && isset($row['ts']) && is_numeric($row['ts'])) {
+				$out['last_ts'] = (float)$row['ts'];
+				$out['file'] = basename($file);
+				$out['bytes'] = (int)$size;
+				break;
+			}
+		}
+		if ($out['last_ts'] > 0) { break; }
+	}
+	if ($out['last_ts'] > 0) {
+		$out['last_age'] = max(0, $now - (int)$out['last_ts']);
+		$out['verdict'] = $out['last_age'] <= 3600 ? 'ok' : 'quiet';
+	}
+	// A switched-off guard explains silence better than anything else does.
+	if ($out['killed'] && $out['verdict'] !== 'ok') { $out['verdict'] = 'killed'; }
 	return $out;
 }
 
