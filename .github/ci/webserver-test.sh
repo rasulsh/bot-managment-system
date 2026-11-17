@@ -197,6 +197,13 @@ phpIniOverride {
 $( [ -n "${2:-}" ] && echo "  php_admin_value auto_prepend_file $2/prepend.php" )
 }
 CONF
+	# The vhost phpIniOverride above stopped being applied on a newer OpenLiteSpeed
+	# build (auto_prepend_file came back empty). A .user.ini in the document root is
+	# how a cPanel/LiteSpeed account sets it anyway, so set it both ways.
+	if [ -n "${2:-}" ]; then
+		printf 'auto_prepend_file = %s/prepend.php\n' "$2" > "$1/.user.ini"
+		chown www-data:www-data "$1/.user.ini"
+	fi
 	chown -R www-data:www-data "$LSWS/gv" "$LSWS/conf/vhosts/gv" /tmp/lshttpd
 	"$LSWS/bin/lswsctrl" start >/dev/null 2>&1 </dev/null
 	wait_http
