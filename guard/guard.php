@@ -832,6 +832,20 @@ function gv_is_holdout($ident, $salt, $pct) {
 // BOT_FAKE is deliberately not gated here - it is already part of the static
 // score, because an impersonator is a hard signal, not a shadow one.
 //
+// Round half away from zero, to an int, the same on every PHP version.
+//
+// PHP's own round() is not: up to 8.3 it pre-rounds to the precision a double
+// holds (0.7 * 85 = 59.49999999999999 becomes 60), and 8.4 removed that step (it
+// gives 59). The guard and the analyzer's replay must agree to the point, because
+// a score one short of hard_block_score is the difference between a block and a
+// pass. So the noise is removed explicitly, by taking the decimal text of the
+// value at 12 places, and only then is it rounded. analyzer/decision.py php_round()
+// does exactly the same, and scripts/panel and analyzer selftests compare the two.
+function gv_round_int($x) {
+	$v = (float)sprintf('%.12F', (float)$x);
+	return (int)($v >= 0 ? floor($v + 0.5) : ceil($v - 0.5));
+}
+
 // The signature stays plain values on purpose: this function is mirrored in
 // analyzer/decision.py and parity-tested case by case against it.
 function gv_effective_score($sc, $rep, $ml, $clf, array $cfg) {
@@ -840,10 +854,10 @@ function gv_effective_score($sc, $rep, $ml, $clf, array $cfg) {
 		$esc += (int)$rep;
 	}
 	if (!empty($cfg['signals']['ml']) && (int)$ml >= 0) {
-		$esc += (int)round((int)$ml * (float)$cfg['ml_weight']);
+		$esc += gv_round_int((int)$ml * (float)$cfg['ml_weight']);
 	}
 	if (!empty($cfg['signals']['clf']) && (int)$clf >= 0) {
-		$esc += (int)round((int)$clf * (float)$cfg['clf_weight']);
+		$esc += gv_round_int((int)$clf * (float)$cfg['clf_weight']);
 	}
 	return $esc;
 }

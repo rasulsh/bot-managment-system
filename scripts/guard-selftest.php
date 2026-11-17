@@ -483,6 +483,14 @@ t_ok('bot_suffixes defaults cover googlebot and bingbot',
 t_ok('a phase 1 config without signals still merges cleanly',
 	gv_cfg_defaults(array('secret' => 'x'))['signals']['ml'] === false);
 
+// Rounding must not depend on the PHP version (8.4 removed round()'s pre-rounding).
+t_ok('gv_round_int: 0.7 * 85 is 60, not 59 (binary noise below .5)', gv_round_int(0.7 * 85) === 60);
+t_ok('gv_round_int: the boundaries that differ between PHP versions',
+	gv_round_int(50 * 0.29) === 15 && gv_round_int(90 * 0.35) === 32 && gv_round_int(25 * 0.58) === 15 && gv_round_int(45 * 0.70) === 32);
+t_ok('gv_round_int: halves go away from zero', gv_round_int(0.5) === 1 && gv_round_int(1.5) === 2 && gv_round_int(-0.5) === -1 && gv_round_int(-1.5) === -2);
+t_ok('gv_round_int: ordinary values', gv_round_int(59.4) === 59 && gv_round_int(59.6) === 60 && gv_round_int(0) === 0 && gv_round_int(-59.4) === -59);
+$rnd_cfg = array('signals' => array('reputation' => false, 'ml' => true, 'clf' => false), 'ml_weight' => 0.7, 'clf_weight' => 0.5);
+t_ok('effective score: ml level 85 at weight 0.7 reaches 60 on every PHP version', gv_effective_score(0, 0, 85, -1, $rnd_cfg) === 60);
 t_ok('with signals off a positive reputation does not move the score',
 	gv_effective_score(20, 60, -1, -1, $shadow_cfg) === 20);
 t_ok('with signals off an anomaly level does not move the score',
