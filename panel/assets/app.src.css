@@ -323,6 +323,8 @@
 .gp-check input { @apply h-5 w-5 shrink-0 accent-brand; }
 .gp-range { @apply h-2 w-full cursor-pointer accent-brand; }
 .gp-filters { @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-4; }
+/* the five always-visible log filters fit one row on wide screens */
+.gp-filters-5 { @apply lg:grid-cols-5; }
 .gp-error { @apply mt-1 block text-[11px] font-bold text-bad-fg; }
 
 /* --- tables that become cards -------------------------------------- */
@@ -338,6 +340,39 @@
 .gp-row-main { @apply mt-1 break-all text-sm text-ink; }
 .gp-row-meta { @apply mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-subtle; }
 .gp-detail { @apply mt-2 rounded-lg bg-sunken p-3; }
+/* --- log explorer ---------------------------------------------------
+ * One row per request: time, action, request, address, score, HTTP status.
+ * Wide screens get a column grid with a header; narrow ones stack the same
+ * cells. Numbers are Latin digits and tabular, so columns line up. */
+.gp-latin { font-variant-numeric: tabular-nums lining-nums; }
+.gp-sep { @apply px-1 text-subtle; }
+.gp-more { @apply mt-3 border-t border-line pt-3; }
+.gp-more > summary { @apply mb-3 cursor-pointer text-sm font-bold text-accent; user-select: none; }
+.gp-log-list { @apply overflow-hidden rounded-lg border border-line bg-surface; }
+.gp-log { @apply border-t border-line px-3 py-2 first:border-t-0; }
+.gp-log-line { @apply grid grid-cols-1 items-center gap-x-3 gap-y-1 text-sm
+	md:grid-cols-[5rem_minmax(7rem,11rem)_minmax(0,1fr)_9.5rem_4.5rem_3.5rem_auto]; }
+.gp-log-head { @apply hidden border-b border-line bg-sunken px-3 py-2 text-xs font-bold text-muted md:grid; }
+.gp-log-time { @apply font-mono text-xs text-muted; }
+.gp-log-acts { @apply flex flex-wrap items-center gap-1; }
+.gp-log-req { @apply flex min-w-0 items-baseline gap-2 font-mono text-xs; }
+.gp-log-method { @apply shrink-0 font-bold text-muted; }
+.gp-log-path { @apply min-w-0 break-all text-ink; }
+.gp-log-ip { @apply font-mono text-xs text-ink; }
+.gp-log-score { @apply flex items-center gap-1 text-xs; }
+.gp-log-base { @apply text-subtle; }
+.gp-log-status, .gp-log-none { @apply text-xs text-subtle; }
+.gp-log-actions { @apply flex flex-wrap gap-1 md:justify-end; }
+.gp-log-reasons { @apply mt-1 flex flex-wrap gap-1 md:ps-[5.75rem]; }
+.gp-log-detail { @apply mt-2 grid gap-3 rounded-lg border border-line bg-sunken p-3 lg:grid-cols-2; direction: ltr; text-align: left; }
+.gp-log-sec { @apply min-w-0; }
+.gp-log-sec-title { @apply mb-2 border-b border-line pb-1 text-xs font-bold text-muted; }
+.gp-log-dl { @apply grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-2; }
+.gp-log-kv { @apply min-w-0; }
+.gp-log-kv-wide { @apply sm:col-span-2; }
+.gp-log-kv dt { @apply text-[11px] text-subtle; }
+.gp-log-kv dd { @apply m-0 break-all font-mono text-xs text-ink; }
+.gp-log-detail[hidden] { display: none; }
 .gp-dl { @apply grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]; }
 .gp-dl dt { @apply text-subtle; }
 .gp-dl dd { @apply m-0 break-all font-mono text-ink; }
