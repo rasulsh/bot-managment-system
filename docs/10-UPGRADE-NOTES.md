@@ -2,6 +2,32 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Admin panel: themes, IP allowlist, pipeline status
+
+**Behaviour that changed**
+
+* **`ip_allowlist` now takes IPv4 and IPv6 addresses and CIDR ranges.** Empty or absent still means
+  no IP restriction. A non-empty list with no valid entry, or a value that is not a list, now
+  refuses everyone (it used to be ignored). Check the file after upgrading.
+* **New `trusted_proxies`.** `X-Forwarded-For` is read only when the connection comes from one of
+  these addresses. Behind your own proxy or CDN, add its address, or the panel sees the proxy as
+  the client (login rate limit and audit trail included). Re-running `setpass.php` keeps both lists.
+* **Every panel response sends `X-Robots-Tag: noindex, nofollow, noarchive, nosnippet`.** Do not add the
+  panel path to `robots.txt`.
+* **Logs page: the "Response status" filter works.** It returned nothing before.
+
+**New**
+
+* Light, dark and automatic themes, chosen in the panel header and remembered per browser.
+* Dashboard card **Data pipeline**: whether the guard is logging, and when the last request was seen.
+* `scripts/e2e-pipeline.sh`, an end-to-end test, and [11-TESTING-PIPELINE.md](11-TESTING-PIPELINE.md).
+* Persian wording fixes in the panel (for example "تأثیر قوانین").
+
+**What to do**
+
+* `chmod +x scripts/*.sh` if your copy lost the execute bit, otherwise cron jobs fail silently.
+* Review `ip_allowlist` and, behind a proxy, set `trusted_proxies` in `panel/panel.config.php`.
+
 ## Review-hardening release
 
 A full review with concurrent testing found the problems below. Behaviour changes are listed
