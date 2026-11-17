@@ -105,6 +105,27 @@ function gv_pow_ok($nonce, $counter, $bits) {
 	return true;
 }
 
+// Operator test cookie (see challenge.test_key): "expiry.signature". It only
+// asks THIS browser to be shown the challenge; it grants nothing.
+function gv_test_make($secret, $ttl = 600) {
+	$p = (string)(time() + (int)$ttl);
+	return $p . '.' . hash_hmac('sha256', 'test|' . $p, $secret);
+}
+
+function gv_test_ok($v, $secret) {
+	$x = explode('.', (string)$v);
+	if (count($x) !== 2 || !ctype_digit($x[0]) || (int)$x[0] < time()) return false;
+	return hash_equals(hash_hmac('sha256', 'test|' . $x[0], $secret), $x[1]);
+}
+
+function gv_test_cookie(array $cfg, $value, $expires, $https) {
+	if (headers_sent()) { return; }
+	setcookie((string)$cfg['cookie_name'] . 't', (string)$value, array(
+		'expires' => $expires, 'path' => '/', 'secure' => (bool)$https,
+		'httponly' => true, 'samesite' => 'Lax',
+	));
+}
+
 // Send the token cookie. Secure is set only on HTTPS so the handshake still
 // completes on plain-HTTP staging hosts.
 function gv_set_token_cookie(array $cfg, $token, $https) {

@@ -95,6 +95,12 @@ $oldn  = (time() - 500) . '.' . bin2hex(random_bytes(8));
 $oldn .= '.' . hash_hmac('sha256', $oldn, $secret);
 t_ok('nonce expired by ttl fails', gv_nonce_check($oldn, $secret, 120) === false);
 t_ok('nonce with tampered signature fails', gv_nonce_check($nonce . 'x', $secret, 120) === false);
+$tv = gv_test_make($secret, 600);
+t_ok('test-switch cookie roundtrip passes', gv_test_ok($tv, $secret) === true);
+t_ok('test-switch cookie fails with another secret', gv_test_ok($tv, $secret . 'x') === false);
+t_ok('test-switch cookie expired fails', gv_test_ok(gv_test_make($secret, -5), $secret) === false);
+t_ok('test-switch cookie tampered/garbage fails', gv_test_ok($tv . 'x', $secret) === false && gv_test_ok('', $secret) === false && gv_test_ok('1.2.3', $secret) === false);
+t_ok('a nonce is not a valid test-switch cookie', gv_test_ok($nonce, $secret) === false);
 t_ok('malformed nonce fails', gv_nonce_check('abc', $secret, 120) === false);
 
 // --------------------------------------------------------------------------
