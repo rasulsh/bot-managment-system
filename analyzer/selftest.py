@@ -101,6 +101,47 @@ ok('a json override merges nested redis settings',
    override['redis']['port'] == 6399 and override['redis']['host'] == '127.0.0.1')
 os.unlink(json_path)
 
+# Settings saved in the admin panel (guard overlay analyzer.*).
+pan = config_mod.apply_panel(dict(cfg), {
+    'window_days': 14, 'contamination': 0.1, 'clf_target_precision': 1,
+    'path_listing': ['^/category/', '(unclosed'], 'worker_max_jobs': True,
+    'model_path': '/tmp/evil', 'session_gap_s': '60'})
+ok('panel settings: typed values apply, an int is accepted for a float',
+   pan['window_days'] == 14 and pan['contamination'] == 0.1 and pan['clf_target_precision'] == 1.0)
+ok('panel settings: a pattern Python cannot compile is dropped, the rest kept',
+   pan['path_listing'] == ['^/category/'])
+ok('panel settings: wrong types, bools and keys outside PANEL_KEYS are ignored',
+   pan['worker_max_jobs'] == cfg['worker_max_jobs'] and pan['model_path'] == cfg['model_path']
+   and pan['session_gap_s'] == cfg['session_gap_s'])
+
+# End to end through PHP: a value written to the overlay reaches config.load(),
+# over an explicit analyzer config file (defaults < file < panel).
+overlay_path = os.path.join(config_mod.REPO_ROOT, 'guard', 'config.local.json')
+saved_overlay = open(overlay_path).read() if os.path.isfile(overlay_path) else None
+try:
+    with open(overlay_path, 'w') as fh:
+        fh.write('{"analyzer.window_days": 21, "analyzer.report_top_n": 5, "analyzer.window_days_typo": 1}')
+    config_mod.bridge._REDIS_CACHE.clear()
+    config_mod.bridge._PANEL_CACHE.clear()
+    handle, json_path = tempfile.mkstemp(suffix='.json')
+    with os.fdopen(handle, 'w') as fh:
+        fh.write('{"window_days": 3, "report_days": 9}')
+    via_php = config_mod.load(json_path)
+    os.unlink(json_path)
+    if config_mod.bridge.last_error:
+        skip('panel settings reach the analyzer through PHP', 'php not available: ' + config_mod.bridge.last_error)
+    else:
+        ok('panel settings reach the analyzer through PHP and win over the analyzer file',
+           via_php['window_days'] == 21 and via_php['report_top_n'] == 5 and via_php['report_days'] == 9)
+finally:
+    if saved_overlay is None:
+        os.unlink(overlay_path)
+    else:
+        with open(overlay_path, 'w') as fh:
+            fh.write(saved_overlay)
+    config_mod.bridge._REDIS_CACHE.clear()
+    config_mod.bridge._PANEL_CACHE.clear()
+
 # ---------------------------------------------------------------------------
 section('Sessionization')
 

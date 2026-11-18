@@ -52,6 +52,7 @@
 			'replay'    => array('nav_replay', '&#8644;'),
 			'models'    => array('nav_models', '&#9707;'),
 			'settings'  => array('nav_settings', '&#9881;'),
+			'config_file' => array('nav_config_file', '&#123;&#125;'),
 			'jobs'      => array('nav_jobs', '&#8635;'),
 			'audit'     => array('nav_audit', '&#9998;'),
 		);

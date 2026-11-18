@@ -184,7 +184,48 @@ $cases = array(
 	array('challenge.pow_bits', 23, false),
 	array('challenge.pow_bits', -1, false),
 	array('challenge.pow_bits', '16', false),
-	array('challenge.bind_ip', false, false),
+	array('challenge.bind_ip', false, true),
+	array('challenge.bind_ip', 0, false),
+	array('token_ttl', 3600, true),
+	array('token_ttl', 3599, false),
+	array('nonce_ttl', 901, false),
+	array('cdn_ranges', array('203.0.113.0/24'), true),
+	array('cdn_ranges', array('203.0.113.0/7'), false),
+	array('cdn_ranges', array('2001:db8::/32'), false),
+	array('cdn_ranges', array('300.0.0.0/24'), false),
+	array('exempt_params_paths', array('/', '/index.php'), true),
+	array('exempt_params_paths', array('index.php'), false),
+	array('bot_suffixes', array('googlebot' => array('.googlebot.com', '.google.com')), true),
+	array('bot_suffixes', array('googlebot' => array('googlebot.com')), false),
+	array('bot_suffixes', array('googlebot' => array('.com')), false),
+	array('bot_suffixes', array('googlebot' => array()), false),
+	array('bot_suffixes', array(array('.x.com')), false),
+	array('strings.dir', 'rtl', true),
+	array('strings.dir', 'up', false),
+	array('strings.lang', 'fa', true),
+	array('strings.lang', 'fa"><', false),
+	array('strings.title', 'Please wait', true),
+	array('strings.title', '', false),
+	array('strings.title', "two\nlines", false),
+	array('strings.title', str_repeat('a', 201), false),
+	array('analyzer.window_days', 7, true),
+	array('analyzer.window_days', 61, false),
+	array('analyzer.contamination', 0.05, true),
+	array('analyzer.contamination', 0.5, false),
+	array('analyzer.dns_canary', 'www.google.com', true),
+	array('analyzer.dns_canary', 'not a host', false),
+	array('analyzer.path_listing', array('^/category/'), true),
+	array('analyzer.path_listing', array('(unclosed'), false),
+	// File-only (Category A): never reachable through the overlay.
+	array('secret', 'x', false),
+	array('holdout_salt', 'x', false),
+	array('cookie_name', '_x', false),
+	array('log_dir', '/tmp', false),
+	array('challenge.test_key', 'abcdefabcdefabcdef', false),
+	array('redis.timeout', 1, false),
+	array('challenge.trust_headers', true, false),
+	array('analyzer.model_path', '/tmp/x', false),
+	array('analyzer.php_bin', '/usr/bin/php', false),
 	array('holdout_pct', 0, true),
 	array('holdout_pct', 5, true),
 	array('holdout_pct', 6, false),
@@ -921,6 +962,166 @@ foreach ($h_procs as $h_p) { if (is_resource($h_p)) { proc_close($h_p); } }
 $h_n = gp_attempts_get_file($h_bucket, 900);
 t_ok('8 processes x 25 attempts are all counted by the file limiter (' . $h_n . ' of 200)', $h_n === 200);
 @unlink(gp_attempts_file($h_bucket));
+
+// Every library the front controller loads must load together (a function
+// declared twice is a fatal error on every panel request, not just in a test).
+$ld_code = 'define("GP_BOOT",1);foreach(array("config_io","auth","data","jobs","replay") as $f){require "' . addslashes(dirname(__DIR__)) . '/panel/".$f.".php";}echo "LOADED";';
+$ld_out = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($ld_code) . ' 2>&1');
+t_ok('all panel library files load together without a redeclared function', trim($ld_out) === 'LOADED');
+
+// --------------------------------------------------------------------------
+t_section('Settings management: form parsing, analyzer keys, file editor, backups');
+
+$bk_before = array_map('basename', (array)glob(gp_backup_dir() . '/*'));
+t_clear_overlay();
+
+// The form posts every whitelisted key; parsing is driven by the whitelist.
+$_POST = array('present' => array('challenge.bind_ip' => 1), 'f' => array(
+	'token_ttl' => '7200', 'cdn_ranges' => "203.0.113.0/24\n\n198.51.100.0/24 ",
+	'bot_suffixes' => "googlebot: .googlebot.com, .google.com\nbingbot: .search.msn.com",
+	'strings.title' => '  Please wait  ', 'strings.dir' => 'rtl', 'analyzer.contamination' => '0.1',
+	'analyzer.path_listing' => "^/category/\n^/c/\\d+"));
+// gp_settings_from_request() lives in index.php, which cannot be included here
+// (it dispatches a request); load just the three functions from its source.
+$sm_src = file_get_contents(__DIR__ . '/../panel/index.php');
+preg_match('/function gp_settings_from_request\(\) \{.*?\n\}\n/s', $sm_src, $sm_fn);
+preg_match('/function gp_lines_to_list\(\$text\) \{.*?\n\}\n/s', $sm_src, $sm_fn2);
+preg_match('/function gp_parse_params\(\$text\) \{.*?\n\}\n/s', $sm_src, $sm_fn3);
+if (!function_exists('gp_settings_from_request')) { eval($sm_fn[0] . $sm_fn2[0] . $sm_fn3[0]); }
+$sm = gp_settings_from_request();
+t_ok('form parsing: numbers, lists, name: values maps and trimmed text are typed from the whitelist',
+	$sm['token_ttl'] === 7200 && $sm['cdn_ranges'] === array('203.0.113.0/24', '198.51.100.0/24')
+	&& $sm['bot_suffixes'] === array('googlebot' => array('.googlebot.com', '.google.com'), 'bingbot' => array('.search.msn.com'))
+	&& $sm['strings.title'] === 'Please wait' && $sm['challenge.bind_ip'] === false
+	&& $sm['analyzer.contamination'] === 0.1 && $sm['analyzer.path_listing'] === array('^/category/', '^/c/\d+'));
+t_ok('form parsing: a bool without its "present" marker is not touched', !isset($sm['enforce.block']));
+$_POST = array();
+
+$sv = gp_config_save(array('token_ttl' => 7200, 'challenge.bind_ip' => true, 'analyzer.window_days' => 7), 'tester', '127.0.0.1');
+$sv_file = json_decode(file_get_contents(gv_overlay_path()), true);
+t_ok('a save writes only what differs from the value in force (bind_ip true and window_days 7 are defaults)',
+	$sv['ok'] && $sv_file === array('token_ttl' => 7200));
+$sv2 = gp_config_save(array('token_ttl' => 7200, 'analyzer.window_days' => 'abc'), 'tester', '127.0.0.1');
+t_ok('a changed invalid value is refused by name and nothing is written',
+	!$sv2['ok'] && ($sv2['errors']['analyzer.window_days'] ?? '') === 'not_int'
+	&& json_decode(file_get_contents(gv_overlay_path()), true) === array('token_ttl' => 7200));
+$sm_cfg = gv_cfg_load();
+t_ok('overlay keys reach the guard config (token_ttl, nested analyzer block)', $sm_cfg['token_ttl'] === 7200);
+gp_config_save(array('analyzer.window_days' => 14, 'strings.dir' => 'rtl'), 'tester', '127.0.0.1');
+$sm_cfg = gv_cfg_load();
+t_ok('analyzer.* lands in $cfg["analyzer"] and strings.* in $cfg["strings"]',
+	($sm_cfg['analyzer']['window_days'] ?? null) === 14 && $sm_cfg['strings']['dir'] === 'rtl' && $sm_cfg['strings']['title'] !== '');
+$sm_pc = gv_cfg_load();
+t_ok('a value from config.php outside the panel range does not block other saves',
+	(function () {
+		$tmpc = tempnam(sys_get_temp_dir(), 'gvcfg');
+		file_put_contents($tmpc, '<?php return array("secret" => "x", "challenge" => array("pow_bits" => 24));');
+		putenv('GV_CONFIG=' . $tmpc);
+		$r = gp_config_save(array('challenge.pow_bits' => 24, 'nonce_ttl' => 300), 'tester', '127.0.0.1');
+		putenv('GV_CONFIG');
+		@unlink($tmpc);
+		return $r['ok'] && !isset($r['errors']['challenge.pow_bits']);
+	})());
+
+// Analyzer defaults in PHP mirror analyzer/config.py.
+$py = trim((string)@shell_exec('cd ' . escapeshellarg(dirname(__DIR__)) . ' && python3 -c '
+	. escapeshellarg('import json,sys; sys.path.insert(0,"."); from analyzer import config as c; print(json.dumps({k: c.DEFAULTS[k] for k in c.PANEL_KEYS}))') . ' 2>/dev/null'));
+$py_d = $py !== '' ? json_decode($py, true) : null;
+if (is_array($py_d)) {
+	$php_d = gp_analyzer_defaults();
+	$diff_d = array();
+	foreach ($py_d as $k => $v) { if (!array_key_exists($k, $php_d) || $php_d[$k] != $v) { $diff_d[] = $k; } }
+	foreach ($php_d as $k => $v) { if (!array_key_exists($k, $py_d)) { $diff_d[] = $k; } }
+	t_ok('gp_analyzer_defaults() matches analyzer/config.py DEFAULTS for every panel key' . ($diff_d ? ' (' . implode(',', $diff_d) . ')' : ''), !$diff_d);
+	$wl_an = array();
+	foreach (array_keys(gv_overlay_whitelist()) as $k) { if (strpos($k, 'analyzer.') === 0) { $wl_an[] = substr($k, 9); } }
+	sort($wl_an); $pk = array_keys($py_d); sort($pk);
+	t_ok('the analyzer.* whitelist and analyzer PANEL_KEYS list the same keys', $wl_an === $pk);
+} else {
+	t_skip('analyzer defaults parity', 'python3 not available');
+}
+
+// JSON scan: line and column of the first error, duplicates, structure.
+$js = gp_overlay_file_check("{\n  \"token_ttl\": 7200,\n  \"nonce_ttl\": 300,\n}\n");
+t_ok('file check: a trailing comma is reported on its line with a clear message',
+	!$js['ok'] && $js['errors'][0]['line'] === 4 && stripos($js['errors'][0]['message'], 'trailing comma') !== false);
+$js = gp_overlay_file_check("{\n  \"token_ttl\": 7200\n  \"nonce_ttl\": 300\n}");
+t_ok('file check: a missing comma points at the next key (line 3)', !$js['ok'] && $js['errors'][0]['line'] === 3);
+$js = gp_overlay_file_check("{\n  'token_ttl': 7200\n}");
+t_ok('file check: single quotes are explained', !$js['ok'] && stripos($js['errors'][0]['message'], 'double quotes') !== false);
+$js = gp_overlay_file_check("{\n  \"token_ttl\": 7200,\n  \"token_ttl\": 9000\n}");
+t_ok('file check: a duplicate key is refused (json_decode would silently keep the last one)',
+	!$js['ok'] && $js['errors'][0]['key'] === 'token_ttl' && $js['errors'][0]['line'] === 3);
+$js = gp_overlay_file_check("{\n  \"token_ttl\": 1,\n  \"secret\": \"x\",\n  \"strings.dir\": \"up\"\n}");
+$js_keys = array_map(function ($e) { return $e['key'] . '@' . $e['line']; }, $js['errors']);
+t_ok('file check: every bad key is listed with its line (out of range, file-only key, enum)',
+	!$js['ok'] && $js_keys === array('token_ttl@2', 'secret@3', 'strings.dir@4')
+	&& strpos($js['errors'][0]['message'], '3600') !== false && strpos($js['errors'][2]['message'], 'ltr, rtl') !== false);
+t_ok('file check: a list or a scalar is not an overlay', !gp_overlay_file_check('[1,2]')['ok'] && !gp_overlay_file_check('42')['ok']);
+t_ok('file check: {} and a valid object pass', gp_overlay_file_check("{}\n")['ok']
+	&& gp_overlay_file_check("{\"cdn_ranges\": [\"203.0.113.0/24\"], \"strings.title\": \"\\u0633\\u0644\\u0627\\u0645\"}")['ok']);
+t_ok('file check: unclosed string and garbage after the object are caught',
+	!gp_overlay_file_check("{\"a\": \"x}")['ok'] && !gp_overlay_file_check("{} x")['ok']);
+
+// Saving through the editor: hash guard, atomic write, backup, audit.
+$fe_before = gp_overlay_file_raw();
+$fe_bad = gp_overlay_file_save("{\"token_ttl\": 5}", hash('sha256', $fe_before), 'tester', '127.0.0.1');
+t_ok('editor: an invalid file is not written and the file on disk is unchanged',
+	!$fe_bad['ok'] && gp_overlay_file_raw() === $fe_before);
+$fe_conf = gp_overlay_file_save("{\"token_ttl\": 9000}", hash('sha256', 'something else'), 'tester', '127.0.0.1');
+t_ok('editor: a stale base hash (file changed meanwhile) is refused', !$fe_conf['ok'] && $fe_conf['conflict'] && gp_overlay_file_raw() === $fe_before);
+$bk_n = count(gp_overlay_backups());
+$fe_ok = gp_overlay_file_save("{\r\n  \"token_ttl\": 9000,\r\n  \"cdn_ranges\": [\"203.0.113.0/24\"]\r\n}", hash('sha256', $fe_before), 'tester', '127.0.0.1');
+$fe_cfg = gv_cfg_load();
+t_ok('editor: a valid file is saved as written (CRLF normalized) and the guard reads it',
+	$fe_ok['ok'] && $fe_ok['changed'] && strpos(gp_overlay_file_raw(), "\r") === false
+	&& $fe_cfg['token_ttl'] === 9000 && $fe_cfg['cdn_ranges'] === array('203.0.113.0/24'));
+$bk_list = gp_overlay_backups();
+t_ok('editor: the previous file was backed up and the backup reads back identical',
+	count($bk_list) === $bk_n + 1 && gp_overlay_backup_read($bk_list[0]['name']) === $fe_before);
+t_ok('backups are not readable by path tricks', gp_overlay_backup_read('../config.php') === null
+	&& gp_overlay_backup_read('config.local.20260101-000000-000000-zzzzzz.json') === null);
+$fe_aud = gp_audit_read(20);
+t_ok('editor: each changed key is audited as config_file', (function () use ($fe_aud) {
+	$keys = array(); foreach ($fe_aud as $r) { if (($r['event'] ?? '') === 'config_file') { $keys[] = $r['key']; } }
+	return in_array('cdn_ranges', $keys, true) && in_array('token_ttl', $keys, true);
+})());
+$fe_same = gp_overlay_file_save(gp_overlay_file_raw(), hash('sha256', gp_overlay_file_raw()), 'tester', '127.0.0.1');
+t_ok('editor: saving an unchanged file writes nothing and makes no backup',
+	$fe_same['ok'] && !$fe_same['changed'] && count(gp_overlay_backups()) === $bk_n + 1);
+for ($bk_i = 0; $bk_i < GP_BACKUP_KEEP + 3; $bk_i++) { gp_config_save(array('nonce_ttl' => 100 + $bk_i), 'tester', '127.0.0.1'); }
+t_ok('backups are capped at ' . GP_BACKUP_KEEP, count(gp_overlay_backups()) === GP_BACKUP_KEEP);
+t_ok('the backup directory is denied to the web by guard/.htaccess (inherited) and git-ignored',
+	strpos(file_get_contents(__DIR__ . '/../.gitignore'), 'guard/config-backups/') !== false);
+
+// The settings and editor views render, escape hostile values and show errors.
+$cfg = gp_effective_config();
+$cfg['strings']['title'] = '"><script>alert(1)</script>';
+$overlay = array('token_ttl' => 9000);
+$errors = array('nonce_ttl' => 'out_of_range');
+$pending = array('nonce_ttl' => 5);
+$diff = array();
+$route = 'settings';
+ob_start(); require __DIR__ . '/../panel/views/settings.php'; $set_html = ob_get_clean();
+$set_dom = t_dom_findings($set_html);
+t_dom_ok('settings view: a hostile config value is escaped', $set_dom['scripts'] === 0 && strpos($set_html, '&quot;&gt;&lt;script&gt;') !== false);
+t_ok('settings view: every whitelisted key has a field', (function () use ($set_html) {
+	foreach (array_keys(gv_overlay_whitelist()) as $k) { if (strpos($set_html, 'name="f[' . $k . ']"') === false) { return false; } }
+	return true; })());
+t_ok('settings view: a rejected value is shown as typed, with a message naming the range',
+	strpos($set_html, 'name="f[nonce_ttl]"') !== false && preg_match('/name="f\[nonce_ttl\]"[^>]*value="5"|value="5"[^>]*name="f\[nonce_ttl\]"/s', $set_html) === 1
+	&& strpos($set_html, 'Allowed: 30 to 900.') !== false);
+t_ok('settings view: number fields carry the whitelist range', strpos($set_html, 'min="10" max="200"') !== false);
+t_ok('settings view: secrets are never printed, only their state', strpos($set_html, (string)gv_cfg_load()['secret']) === false || gv_cfg_load()['secret'] === 'CHANGE_ME');
+$text = "{\n  \"strings.title\": \"</textarea><script>alert(1)</script>\"\n}";
+$base_hash = 'x'; $check = gp_overlay_file_check($text); $from_backup = ''; $backups = gp_overlay_backups(); $path = gv_overlay_path();
+ob_start(); require __DIR__ . '/../panel/views/config_file.php'; $cf_html = ob_get_clean();
+t_ok('editor view: file content cannot break out of the textarea', strpos($cf_html, '</textarea><script>alert(1)') === false
+	&& strpos($cf_html, '&lt;/textarea&gt;&lt;script&gt;') !== false);
+t_ok('editor view: lists the allowed keys and the backups', strpos($cf_html, 'analyzer.window_days') !== false && strpos($cf_html, 'Open in editor') !== false);
+
+foreach ((array)glob(gp_backup_dir() . '/*') as $bk_f) { if (!in_array(basename($bk_f), $bk_before, true)) { @unlink($bk_f); } }
+if (!$bk_before) { @rmdir(gp_backup_dir()); }
 
 t_clear_overlay();
 @unlink(gv_overlay_path() . '.lock');

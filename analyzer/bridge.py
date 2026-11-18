@@ -139,12 +139,28 @@ def redis_block_status(php='php', config_path=None):
         data = dump_config(php=php, config_path=config_path,
                            extra=['--redis-credentials'], quiet=True)
         block = data.get('redis') if isinstance(data, dict) else None
+        panel = data.get('analyzer') if isinstance(data, dict) else None
+        _PANEL_CACHE[key] = dict(panel) if isinstance(panel, dict) else {}
         if isinstance(block, dict):
             _REDIS_CACHE[key] = (dict(block), '')
         else:
             _REDIS_CACHE[key] = ({}, last_error or 'the config dump produced no redis block')
     block, err = _REDIS_CACHE[key]
     return dict(block), err
+
+
+_PANEL_CACHE = {}
+
+
+def panel_analyzer_settings(php='php', config_path=None):
+    """Analyzer settings saved in the admin panel ({} when none or unavailable).
+
+    They are the guard overlay's analyzer.* keys, already validated by PHP's
+    gv_overlay_validate() when the panel wrote them and again when the guard
+    read them. Read with the same PHP process as the Redis block.
+    """
+    redis_block_status(php, config_path)
+    return dict(_PANEL_CACHE.get((php, config_path or ''), {}))
 
 
 def guard_config(cfg=None, php=None, config_path=None):

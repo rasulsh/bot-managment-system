@@ -2,6 +2,26 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Settings managed in the panel
+
+**New**
+
+* **Settings** now covers every operational setting: tokens and challenge (`token_ttl`, `nonce_ttl`,
+  `challenge.bind_ip`), the challenge page text (`strings.*`),
+  `exempt_params_paths`, `cdn_ranges`, `bot_suffixes`, and the analyzer (`analyzer.*`). Only install
+  settings and secrets stay in `guard/config.php` ([09-ADMIN-PANEL.md](09-ADMIN-PANEL.md#where-each-setting-lives)).
+* **Config file** page: edit `guard/config.local.json` as JSON with highlighting and validation.
+  Invalid files are never written.
+* Every overlay write backs up the previous file to `guard/config-backups/` (newest 20).
+
+**Behaviour that changed**
+
+* The settings form writes only the keys you changed. A value that came from `guard/config.php` is
+  no longer copied into the overlay, and no longer blocks a save when it is outside the panel's range.
+* Analyzer precedence: defaults → `GV_ANALYZER_CONFIG` → panel. A key set in both the analyzer file
+  and the panel now takes the panel value.
+* PHP must be able to create `guard/config-backups/` (it already writes `guard/config.local.json`).
+
 ## Admin panel in English
 
 **Behaviour that changed**

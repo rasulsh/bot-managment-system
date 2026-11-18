@@ -314,11 +314,40 @@ switch ($gp_route) {
 			gp_redirect('settings');
 		}
 		gp_render('settings', array(
-			'cfg'     => gv_cfg_load(),
+			'cfg'     => gp_effective_config(),
 			'overlay' => gp_overlay_current(),
 			'errors'  => isset($save) ? $save['errors'] : array(),
 			'pending' => $gp_post ? $pending : array(),
 			'diff'    => $gp_post ? gp_overlay_diff($pending) : array(),
+		));
+
+	case 'config_file':
+		$cf_text = null;
+		$cf_check = null;
+		if ($gp_post && ($_POST['action'] ?? '') === 'save_file') {
+			$cf_text = is_string($_POST['content'] ?? null) ? $_POST['content'] : '';
+			$cf_check = gp_overlay_file_save($cf_text, (string)($_POST['base_hash'] ?? ''), $gp_user, $gp_ip);
+			if ($cf_check['ok']) {
+				gp_flash('ok', $cf_check['changed'] ? gp_t('cf_saved') : gp_t('set_nochange'));
+				gp_redirect('config_file');
+			}
+			gp_flash('error', gp_t('cf_not_saved'));
+		}
+		$cf_backup = is_string($_GET['backup'] ?? null) ? $_GET['backup'] : '';
+		$cf_from_backup = false;
+		if ($cf_text === null && $cf_backup !== '') {
+			$cf_text = gp_overlay_backup_read($cf_backup);
+			$cf_from_backup = $cf_text !== null;
+		}
+		$cf_current = gp_overlay_file_raw();
+		gp_render('config_file', array(
+			'text'        => $cf_text === null ? $cf_current : $cf_text,
+			'base_hash'   => $cf_check !== null && isset($_POST['base_hash']) && is_string($_POST['base_hash'])
+				? $_POST['base_hash'] : hash('sha256', $cf_current),
+			'check'       => $cf_check,
+			'from_backup' => $cf_from_backup ? $cf_backup : '',
+			'backups'     => gp_overlay_backups(),
+			'path'        => gv_overlay_path(),
 		));
 
 	case 'audit':
@@ -443,39 +472,49 @@ function gp_handle_override_post($user, $ip) {
 // Read the settings form into a proposed overlay. Types are coerced here so
 // gv_overlay_validate() sees the right shapes; anything invalid is refused
 // there, never clamped.
+// Read the settings form into a flat array of overlay keys, driven by the
+// whitelist so a new key needs no parsing code here. Values are typed only as
+// far as the form can tell; gv_overlay_validate() decides what is valid.
+// A field that was not on the form is not in the result, so it stays unchanged.
 function gp_settings_from_request() {
 	$post = $_POST;
+	$fields = isset($post['f']) && is_array($post['f']) ? $post['f'] : array();
+	$present = isset($post['present']) && is_array($post['present']) ? $post['present'] : array();
 	$out = array();
-	$bools = array('enforce.block', 'enforce.challenge', 'enforce.ratelimit',
-		'signals.reputation', 'signals.ml', 'signals.clf', 'capture_outcomes', 'challenge.gate_post');
-	foreach ($bools as $key) {
-		if (!isset($post['present'][$key])) { continue; }
-		$out[$key] = !empty($post['f'][$key]);
-	}
-	$ints = array('hard_block_score', 'limits.window', 'limits.device', 'limits.ip_ua',
-		'limits.ip', 'limits.bot', 'limits.mint', 'limits.device_hour', 'limits.device_day',
-		'limits.preview', 'limits.bot_unverified', 'challenge.pow_bits', 'holdout_pct');
-	foreach ($ints as $key) {
-		if (!isset($post['f'][$key]) || $post['f'][$key] === '') { continue; }
-		$raw = trim((string)$post['f'][$key]);
-		// A non-numeric string must reach the validator as a string so it is
-		// refused by name, not silently cast to 0.
-		$out[$key] = preg_match('/^-?\d+$/', $raw) ? (int)$raw : $raw;
-	}
-	foreach (array('ml_weight', 'clf_weight') as $key) {
-		if (!isset($post['f'][$key]) || $post['f'][$key] === '') { continue; }
-		$raw = trim((string)$post['f'][$key]);
-		$out[$key] = is_numeric($raw) ? (float)$raw : $raw;
-	}
-	if (isset($post['f']['honeypot_path'])) {
-		$out['honeypot_path'] = trim((string)$post['f']['honeypot_path']);
-	}
-	foreach (array('exempt_paths', 'known_bots', 'preview_bots') as $key) {
-		if (!isset($post['f'][$key])) { continue; }
-		$out[$key] = gp_lines_to_list((string)$post['f'][$key]);
-	}
-	if (isset($post['f']['exempt_params'])) {
-		$out['exempt_params'] = gp_parse_params((string)$post['f']['exempt_params']);
+	foreach (gv_overlay_whitelist() as $key => $spec) {
+		$type = $spec[0];
+		if ($type === 'bool') {
+			if (isset($present[$key])) { $out[$key] = !empty($fields[$key]); }
+			continue;
+		}
+		if (!isset($fields[$key]) || is_array($fields[$key])) { continue; }
+		$raw = (string)$fields[$key];
+		switch ($type) {
+			case 'int':
+				$raw = trim($raw);
+				if ($raw === '') { break; }
+				// A non-numeric string must reach the validator as a string so it is
+				// refused by name, not silently cast to 0.
+				$out[$key] = preg_match('/^-?\d+$/', $raw) ? (int)$raw : $raw;
+				break;
+			case 'float':
+				$raw = trim($raw);
+				if ($raw === '') { break; }
+				$out[$key] = is_numeric($raw) ? (float)$raw : $raw;
+				break;
+			case 'paths': case 'exactpaths': case 'bots': case 'cidrs4': case 'regexes':
+				$out[$key] = gp_lines_to_list($raw);
+				break;
+			case 'params': case 'suffixes':
+				$out[$key] = gp_parse_params($raw);
+				break;
+			case 'text':
+				// Keep inner spaces; only line breaks are not allowed in one line.
+				$out[$key] = trim($raw);
+				break;
+			default:   // hppath, lang, enum, host
+				$out[$key] = trim($raw);
+		}
 	}
 	return $out;
 }

@@ -14,7 +14,7 @@
 // print them: this output is meant to be piped, logged and pasted into issues.
 // redis.password and redis.username are removed by default for the same reason.
 // The ONE exception is --redis-credentials, which prints nothing but the redis
-// block (credentials included) for analyzer/bridge.py to read over a pipe so
+// block (credentials included) and the panel's analyzer settings for analyzer/bridge.py to read over a pipe so
 // the analyzer connects with the same settings as the guard. It is not meant
 // to be run by hand, logged or captured.
 if (PHP_SAPI !== 'cli') { exit; }
@@ -57,7 +57,12 @@ $gv_cfg = gv_cfg_load();
 // panel/panel.config.php and they can never reach the guard config, but an
 // operator who pastes something into the wrong file should not publish a hash.
 if ($gv_creds) {
-	$gv_cfg = array('redis' => isset($gv_cfg['redis']) && is_array($gv_cfg['redis']) ? $gv_cfg['redis'] : array());
+	// The analyzer settings saved in the panel ride along: config.load() needs
+	// both, and one PHP process per load is enough.
+	$gv_cfg = array(
+		'redis'    => isset($gv_cfg['redis']) && is_array($gv_cfg['redis']) ? $gv_cfg['redis'] : array(),
+		'analyzer' => isset($gv_cfg['analyzer']) && is_array($gv_cfg['analyzer']) ? $gv_cfg['analyzer'] : array(),
+	);
 } else {
 	if (isset($gv_cfg['redis']) && is_array($gv_cfg['redis'])) {
 		unset($gv_cfg['redis']['password'], $gv_cfg['redis']['username']);

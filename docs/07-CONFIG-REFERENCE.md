@@ -22,6 +22,13 @@ before any application code or page cache layer and needs zero host-app changes.
 
 ## Configuration table (`guard/config.php`)
 
+**Where each setting lives.** Only these stay in `guard/config.php`, because the guard
+needs them before it can start or because they are secrets: `secret`, `holdout_salt`,
+`redis` (all of it), `log_dir`, `cookie_name`, `challenge.test_key`, and `challenge.trust_headers` (a rollback switch that weakens the challenge). Every other key below
+can be changed in the admin panel (**Settings**, or **Config file** for the raw JSON). A
+panel value overrides the file value key by key; **Reset to file value** removes it again.
+See [09-ADMIN-PANEL.md](09-ADMIN-PANEL.md#where-each-setting-lives).
+
 | key | meaning |
 |-----|---------|
 | `secret` | HMAC key for tokens and nonces. While it equals `CHANGE_ME` every enforce toggle is forced off (monitor only). |
