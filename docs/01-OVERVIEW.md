@@ -17,7 +17,7 @@ It is built in three cooperating parts:
   guard's logs, verifies bot claims via reverse DNS, computes a behavioural
   reputation per visitor, trains and runs machine-learning models, and writes its
   verdicts back to Redis for the guard to read cheaply.
-- **The admin panel** (PHP) — a Persian/RTL web console for one operator. It shows
+- **The admin panel** (PHP) — an English web console for one operator. It shows
   traffic, lets the operator tune thresholds, override decisions for a specific
   visitor, replay "what would this config change have done," and trigger analyzer
   jobs. It writes configuration as validated JSON; it never rewrites executable

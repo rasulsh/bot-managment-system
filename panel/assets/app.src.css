@@ -9,7 +9,7 @@
  * subsets, and nothing else.
  *
  * Components are declared with @apply rather than sprayed across the markup:
- * the views stay readable, the RTL logical properties live in one place, and
+ * the views stay readable, the logical properties live in one place, and
  * the built file stays small.
  */
 
@@ -172,7 +172,9 @@
 
 @layer base {
 	html {
-		font-family: 'Vazirmatn', system-ui, -apple-system, Segoe UI, Tahoma, sans-serif;
+		/* English UI: the system font. Vazirmatn stays as the fallback for
+		 * Persian or Arabic text that arrives in log data (paths, referers). */
+		font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Vazirmatn', Tahoma, sans-serif;
 	}
 	body {
 		@apply bg-page text-ink antialiased;
@@ -351,7 +353,7 @@
 .gp-log-list { @apply overflow-hidden rounded-lg border border-line bg-surface; }
 .gp-log { @apply border-t border-line px-3 py-2 first:border-t-0; }
 .gp-log-line { @apply grid grid-cols-1 items-center gap-x-3 gap-y-1 text-sm
-	md:grid-cols-[5rem_minmax(7rem,11rem)_minmax(0,1fr)_9.5rem_4.5rem_3.5rem_auto]; }
+	md:grid-cols-[5rem_10rem_minmax(0,1fr)_9.5rem_4.5rem_3.5rem_11.5rem]; }
 .gp-log-head { @apply hidden border-b border-line bg-sunken px-3 py-2 text-xs font-bold text-muted md:grid; }
 .gp-log-time { @apply font-mono text-xs text-muted; }
 .gp-log-acts { @apply flex flex-wrap items-center gap-1; }
@@ -364,15 +366,32 @@
 .gp-log-status, .gp-log-none { @apply text-xs text-subtle; }
 .gp-log-actions { @apply flex flex-wrap gap-1 md:justify-end; }
 .gp-log-reasons { @apply mt-1 flex flex-wrap gap-1 md:ps-[5.75rem]; }
-.gp-log-detail { @apply mt-2 grid gap-3 rounded-lg border border-line bg-sunken p-3 lg:grid-cols-2; direction: ltr; text-align: left; }
-.gp-log-sec { @apply min-w-0; }
-.gp-log-sec-title { @apply mb-2 border-b border-line pb-1 text-xs font-bold text-muted; }
-.gp-log-dl { @apply grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-2; }
-.gp-log-kv { @apply min-w-0; }
-.gp-log-kv-wide { @apply sm:col-span-2; }
-.gp-log-kv dt { @apply text-[11px] text-subtle; }
-.gp-log-kv dd { @apply m-0 break-all font-mono text-xs text-ink; }
+/* Detail panel of one log entry: a property list per section. Each row is
+ * "label (with the raw log key) | value"; the label column is fixed so values
+ * line up and it is always clear which value belongs to which field. Values
+ * wrap anywhere (URLs and user agents have no spaces) and keep the layout. */
+.gp-log-detail { @apply mt-2 grid gap-3 lg:grid-cols-2; }
 .gp-log-detail[hidden] { display: none; }
+.gp-log-sec { @apply min-w-0 rounded-lg border border-line bg-sunken px-3 py-2; }
+.gp-log-sec-wide { @apply lg:col-span-2; }
+.gp-log-sec-title { @apply border-b border-line pb-2 pt-1 text-[11px] font-bold uppercase tracking-wide text-muted; }
+.gp-props { @apply m-0; }
+.gp-prop { @apply grid grid-cols-1 gap-x-4 gap-y-1 border-b border-line py-2 last:border-b-0
+	sm:grid-cols-[minmax(9rem,14rem)_minmax(0,1fr)]; }
+.gp-prop-name { @apply flex flex-wrap items-baseline gap-x-2 text-xs font-bold text-muted; }
+.gp-prop-key { @apply rounded bg-surface px-1 font-mono text-[10px] font-normal text-subtle; }
+.gp-prop-val { @apply m-0 flex min-w-0 flex-wrap items-start gap-1 font-mono text-xs leading-relaxed text-ink; }
+.gp-prop-text { @apply min-w-0 whitespace-pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.gp-prop-empty { @apply text-subtle; }
+.gp-prop-more { @apply min-w-0; }
+.gp-prop-more > summary { @apply cursor-pointer; list-style: none; overflow-wrap: anywhere; }
+.gp-prop-more > summary::-webkit-details-marker { display: none; }
+.gp-prop-more[open] .gp-prop-preview { display: none; }
+.gp-prop-toggle { @apply ms-2 whitespace-nowrap font-sans text-[11px] font-bold text-accent underline; }
+.gp-prop-more[open] > summary { @apply mb-1; }
+.gp-params { @apply mt-1 w-full border-collapse text-xs; }
+.gp-params th { @apply w-px whitespace-nowrap border-t border-line py-1 pe-3 text-start align-top font-bold text-muted; }
+.gp-params td { @apply min-w-0 border-t border-line py-1 align-top; overflow-wrap: anywhere; }
 .gp-dl { @apply grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]; }
 .gp-dl dt { @apply text-subtle; }
 .gp-dl dd { @apply m-0 break-all font-mono text-ink; }

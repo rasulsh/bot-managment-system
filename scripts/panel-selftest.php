@@ -697,6 +697,39 @@ t_ok('the log explorer shows no Persian or Arabic-Indic digit anywhere (Latin di
 t_ok('the log explorer uses the grouped row layout', strpos($rendered, 'gp-log-line') !== false && strpos($rendered, 'gp-log-detail') !== false);
 t_ok('gp_latin formats with Latin digits, no grouping', gp_latin(1234567) === '1234567' && gp_latin(1.5, 2) === '1.50' && gp_latin(2.0, 2, true) === '2' && gp_latin(1.50, 2, true) === '1.5' && gp_latin(-0.0) === '0');
 t_ok('gp_latin never emits a Persian digit', preg_match('/[\x{06F0}-\x{06F9}]/u', gp_latin(9876543210)) === 0);
+t_ok('gp_num uses Latin digits with thousands grouping', gp_num(1234567) === '1,234,567' && gp_num(0.5, 1) === '0.5' && gp_num(-0.0) === '0');
+t_ok('gp_pct uses Latin digits and the ASCII percent sign', gp_pct(1, 3) === '33.3%' && gp_pct(0, 0) === '0.0%');
+t_ok('gp_num_raw turns Persian and Arabic-Indic digits into Latin ones',
+	gp_num_raw("\u{06F1}\u{06F4}\u{06F0}\u{06F5}-\u{0660}\u{0669} 12:30") === '1405-09 12:30');
+t_ok('gp_datetime is Latin', preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', gp_datetime(1700000000)) === 1);
+t_ok('gp_plural picks singular and plural', gp_plural(1, 'hour') === '1 hour' && gp_plural(6, 'hour') === '6 hours' && gp_plural(1000, 'day') === '1,000 days');
+t_ok('gp_age is English with Latin digits', gp_age(time() - 180) === '3 minutes' && gp_age(time() - 1) === '1 second');
+
+// Log detail redesign: every value sits under a label that names it, with the
+// raw log key next to the label, and long values collapse instead of flooding.
+t_ok('log detail: every field is a label/value pair with its log key',
+	substr_count($rendered, 'class="gp-prop"') >= 20 && strpos($rendered, '<code class="gp-prop-key" title="Log field">ua</code>') !== false);
+t_ok('log detail: section titles are English', strpos($rendered, '>Request</h3>') !== false && strpos($rendered, '>Identity</h3>') !== false
+	&& strpos($rendered, '>Counters and internals</h3>') !== false);
+t_ok('log detail: booleans are Yes/No badges', preg_match('/gp-badge-(on|off)">(Yes|No)</', $rendered) === 1);
+$lg_long = $xss_row;
+$lg_long['ua'] = str_repeat('Mozilla/5.0 (X11; Linux x86_64) ', 20);
+$lg_long['q'] = 'route=product%2Fproduct&product_id=42&search=a+b&' . rawurlencode('<b>') . '=' . rawurlencode('"><script>x</script>');
+$rows = array($lg_long);
+ob_start();
+require __DIR__ . '/../panel/views/logs.php';
+$lg_html = ob_get_clean();
+t_ok('log detail: a long value is collapsed with a "Show full value" toggle and keeps the full text',
+	strpos($lg_html, 'gp-prop-more') !== false && strpos($lg_html, 'Show full value (' . strlen($lg_long['ua']) . ' characters)') !== false
+	&& strpos($lg_html, gp_e($lg_long['ua'])) !== false);
+t_ok('log detail: the query string is split into decoded parameters',
+	strpos($lg_html, '<th scope="row">route</th>') !== false && strpos($lg_html, 'product/product') !== false
+	&& strpos($lg_html, '<th scope="row">search</th>') !== false && strpos($lg_html, '>a b<') !== false);
+t_ok('log detail: a decoded parameter name or value is still escaped',
+	strpos($lg_html, '<th scope="row">&lt;b&gt;</th>') !== false && strpos($lg_html, '<script>x') === false);
+$lg_dom = t_dom_findings($lg_html);
+t_dom_ok('log detail: the browser sees no script element from decoded parameters', $lg_dom['scripts'] === 0 && !isset($lg_dom['tags']['b']));
+$rows = array($xss_row);
 t_dom_ok('the browser sees no script element from log data', $dom['scripts'] === 0);
 t_dom_ok('the browser sees no img element from log data',
 	!isset($dom['tags']['img']));
@@ -1059,9 +1092,24 @@ putenv($pl_prev === false ? 'GV_CONFIG' : 'GV_CONFIG=' . $pl_prev);
 
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');
-t_ok('"پوشش احکام" is gone and "تأثیر قوانین" is used', strpos($tr_lang, 'پوشش احکام') === false && strpos($tr_lang, 'تأثیر قوانین') !== false);
-t_ok('no Arabic ي or ك in the panel strings', preg_match('/[يك]/u', $tr_lang) === 0);
-t_ok('no "کران" (cron) typo and no word "حکم" left', strpos($tr_lang, 'کران') === false && strpos($tr_lang, 'حکم') === false);
+// The panel is English and left-to-right. No Persian or Arabic script (letters
+// or digits) may be written in its strings or its markup; text of that script
+// can only reach a page from log data, which is shown as received.
+t_ok('the panel strings are English: no Persian or Arabic script in lang.php', preg_match('/[\x{0600}-\x{06FF}]/u', $tr_lang) === 0);
+$tr_src_bad = array();
+foreach (array_merge(glob(__DIR__ . '/../panel/*.php'), glob(__DIR__ . '/../panel/views/*.php'), array(__DIR__ . '/../panel/assets/app.src.css')) as $tr_f) {
+	if (preg_match('/[\x{0600}-\x{06FF}]/u', file_get_contents($tr_f))) { $tr_src_bad[] = basename($tr_f); }
+}
+t_ok('no Persian or Arabic script in any panel source file' . ($tr_src_bad ? ' (' . implode(',', $tr_src_bad) . ')' : ''), !$tr_src_bad);
+$tr_dir_bad = array();
+foreach (array_merge(glob(__DIR__ . '/../panel/*.php'), glob(__DIR__ . '/../panel/views/*.php')) as $tr_f) {
+	$tr_src = file_get_contents($tr_f);
+	if (stripos($tr_src, 'dir="rtl"') !== false || stripos($tr_src, 'lang="fa"') !== false) { $tr_dir_bad[] = basename($tr_f); }
+}
+t_ok('no page is declared Persian or right-to-left' . ($tr_dir_bad ? ' (' . implode(',', $tr_dir_bad) . ')' : ''), !$tr_dir_bad);
+t_ok('the layout declares lang="en" dir="ltr"', strpos(file_get_contents(__DIR__ . '/../panel/views/layout.php'), '<html lang="en" dir="ltr">') !== false);
+t_ok('settings: number fields take their range from the whitelist (no empty "global $rules")',
+	strpos(file_get_contents(__DIR__ . '/../panel/views/settings.php'), 'global $rules') === false);
 $tr_keys = array();
 preg_match_all("/^\t'([a-z0-9_]+)'\s*=>/m", $tr_lang, $tr_keys);
 t_ok('every translation key is unique', count($tr_keys[1]) === count(array_unique($tr_keys[1])));

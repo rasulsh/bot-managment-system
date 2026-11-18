@@ -32,7 +32,7 @@ $r = is_array($result) ? $result : null;
 			<select class="gp-input" name="days">
 				<?php foreach (array(1, 3, 7, 14) as $d): ?>
 				<option value="<?= (int)$d ?>" <?= ((int)$p['days'] === $d) ? 'selected' : '' ?>>
-					<?= gp_num($d) ?> روز</option>
+					<?= gp_e(gp_plural($d, 'day')) ?></option>
 				<?php endforeach; ?>
 			</select>
 		</label>
@@ -152,7 +152,7 @@ $r = is_array($result) ? $result : null;
 
 <div class="gp-card">
 	<form method="post" action="index.php?r=replay" class="gp-form"
-		data-confirm="<?= gp_e(gp_t('rep_apply')) ?>؟">
+		data-confirm="<?= gp_e(gp_t('rep_apply')) ?>?">
 		<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 		<?php foreach (array('hard_block_score', 'ml_weight', 'clf_weight', 'days') as $k): ?>
 		<input type="hidden" name="<?= gp_e($k) ?>" value="<?= gp_e((string)$p[$k]) ?>">

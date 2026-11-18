@@ -53,6 +53,16 @@ if printf '%s' "$ov" | grep -qi 'name="identity"'; then
 	fi
 fi
 
+# Every page is English and left-to-right, with Latin digits only. The logs and
+# identity pages are checked for direction only: they show request data as it
+# was received, and that may contain any script.
+for r in dashboard logs identity overrides replay models settings jobs audit; do
+	page="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=$r")"
+	check "page $r is English and left-to-right" "$(grep -q '<html lang="en" dir="ltr">' <<<"$page" && echo 1 || echo 0)"
+	case "$r" in logs|identity) continue ;; esac
+	check "page $r shows no Persian or Arabic script or digits" "$(LC_ALL=C.UTF-8 grep -qP '[\x{0600}-\x{06FF}]' <<<"$page" && echo 0 || echo 1)"
+done
+
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"; tok="$(printf '%s' "$dash" | csrf)"
 curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'killswitch=stop' "$URL?r=dashboard"
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"

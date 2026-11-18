@@ -1,6 +1,6 @@
 <?php if (!defined('GP_BOOT')) { http_response_code(404); exit; } ?>
 <!doctype html>
-<html lang="fa" dir="rtl">
+<html lang="en" dir="ltr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">

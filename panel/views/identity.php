@@ -93,11 +93,11 @@ $v = is_array($verdicts) ? $verdicts : array();
 			<label class="gp-field">
 				<span class="gp-label"><?= gp_e(gp_t('id_ttl')) ?></span>
 				<select class="gp-input" name="ttl">
-					<option value="3600"><?= gp_e(gp_num(1)) ?> ساعت</option>
-					<option value="21600"><?= gp_e(gp_num(6)) ?> ساعت</option>
-					<option value="86400" selected><?= gp_e(gp_num(1)) ?> روز</option>
-					<option value="604800"><?= gp_e(gp_num(7)) ?> روز</option>
-					<option value="2592000"><?= gp_e(gp_num(30)) ?> روز</option>
+					<option value="3600"><?= gp_e(gp_plural(1, 'hour')) ?></option>
+					<option value="21600"><?= gp_e(gp_plural(6, 'hour')) ?></option>
+					<option value="86400" selected><?= gp_e(gp_plural(1, 'day')) ?></option>
+					<option value="604800"><?= gp_e(gp_plural(7, 'day')) ?></option>
+					<option value="2592000"><?= gp_e(gp_plural(30, 'day')) ?></option>
 				</select>
 			</label>
 			<div class="gp-row-head">

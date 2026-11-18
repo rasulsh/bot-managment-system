@@ -141,7 +141,7 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 		</div>
 		<div class="gp-stat-row">
 			<span class="gp-stat-key"><?= gp_e(gp_t('dash_holdout')) ?></span>
-			<span class="gp-stat-val"><?= gp_num((int)($cfg['holdout_pct'] ?? 0)) ?>٪</span>
+			<span class="gp-stat-val"><?= gp_num((int)($cfg['holdout_pct'] ?? 0)) ?>%</span>
 		</div>
 	</div>
 </div>
@@ -195,7 +195,7 @@ if (!empty($bv['unknown'])): ?>
 	<div class="gp-kpi">
 		<div class="gp-kpi-label"><?= gp_e(gp_t('dash_challenge_rate')) ?></div>
 		<div class="gp-kpi-value">
-			<?= $rate === null ? gp_e(gp_t('unknown')) : gp_num($rate, 1) . '٪' ?>
+			<?= $rate === null ? gp_e(gp_t('unknown')) : gp_num($rate, 1) . '%' ?>
 		</div>
 		<?php if ($rate !== null && $rate < 95): ?>
 		<div class="gp-kpi-hint gp-text-bad">
@@ -215,11 +215,11 @@ if (!empty($bv['unknown'])): ?>
 		<?php else: ?>
 			<div class="gp-stat-row">
 				<span class="gp-stat-key"><?= gp_e(gp_t('logs_holdout')) ?></span>
-				<span class="gp-stat-val"><?= gp_num((float)($holdout['holdout_challenge_rate'] ?? 0), 1) ?>٪</span>
+				<span class="gp-stat-val"><?= gp_num((float)($holdout['holdout_challenge_rate'] ?? 0), 1) ?>%</span>
 			</div>
 			<div class="gp-stat-row">
 				<span class="gp-stat-key"><?= gp_e(gp_t('dash_enforce')) ?></span>
-				<span class="gp-stat-val"><?= gp_num((float)($holdout['enforced_challenge_rate'] ?? 0), 1) ?>٪</span>
+				<span class="gp-stat-val"><?= gp_num((float)($holdout['enforced_challenge_rate'] ?? 0), 1) ?>%</span>
 			</div>
 		<?php endif; ?>
 	</div>
@@ -231,7 +231,7 @@ if (!empty($bv['unknown'])): ?>
 		<div style="margin-bottom:.5rem">
 			<div class="gp-row-head" style="justify-content:space-between">
 				<span class="gp-mono"><?= gp_e($k) ?></span>
-				<span class="gp-stat-val"><?= gp_num($pc, 1) ?>٪</span>
+				<span class="gp-stat-val"><?= gp_num($pc, 1) ?>%</span>
 			</div>
 			<div class="gp-bar-track"><div class="gp-bar-fill<?= $pc < 20 ? ' gp-bar-fill-warn' : '' ?>"
 				style="width:<?= number_format(max(0, min(100, $pc)), 1, '.', '') ?>%"></div></div>
