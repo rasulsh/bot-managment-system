@@ -145,8 +145,19 @@ share one small request budget with anyone who copies its name.
 php panel/setpass.php        # asks for a username and a password (12+ characters)
 ```
 
-Then add the panel's URL path to `exempt_paths` in `guard/config.php`
+Then make it reachable from the browser. The repository stays outside the web
+root; a symlink in `public_html` exposes only `panel/`. Run this as the account
+user (not `root`), with your own paths:
+
+```bash
+ln -s /home/youruser/bot-guard/panel /home/youruser/public_html/gv-admin
+```
+
+Add the panel's URL path to `exempt_paths` in `guard/config.php`
 (for example `array('/gv-admin/')`), so the guard does not block your own panel.
+Open `https://your-site.example/gv-admin/` (with the trailing slash) and sign in.
+Permissions, Apache/LiteSpeed settings, checks and troubleshooting:
+[docs/13-PANEL-WEB-ACCESS.md](docs/13-PANEL-WEB-ACCESS.md).
 Add two more cron jobs: `analyzer-cron.sh snapshot` every 15 minutes and
 `analyzer-cron.sh worker` every minute. Details: [docs/09-ADMIN-PANEL.md](docs/09-ADMIN-PANEL.md).
 
@@ -226,6 +237,7 @@ Four rules shape the whole design:
 | [docs/08-ANALYZER-PHASES.md](docs/08-ANALYZER-PHASES.md) | Phases 2 to 4: analyzer, verdicts, holdout group, overrides, outcome capture |
 | [analyzer/README.md](analyzer/README.md) | Analyzer internals and the model migration runbook |
 | [docs/09-ADMIN-PANEL.md](docs/09-ADMIN-PANEL.md) | Panel install, security model, settings overlay |
+| [docs/13-PANEL-WEB-ACCESS.md](docs/13-PANEL-WEB-ACCESS.md) | Making the panel reachable in a browser: symlink, permissions, Apache/LiteSpeed, troubleshooting |
 | [docs/05-ACCESS-LOG-REPORT.md](docs/05-ACCESS-LOG-REPORT.md) | Finding slow scrapers in your web server's access log |
 | [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md) | What changed in each release and what to do about it |
 | [docs/11-TESTING-PIPELINE.md](docs/11-TESTING-PIPELINE.md) | "Nothing shows in the panel": how the data flows, why it may not arrive, how to test it end to end |
