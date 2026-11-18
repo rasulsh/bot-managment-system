@@ -2,6 +2,20 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Admin panel in English
+
+**Behaviour that changed**
+
+* **The panel is English and left-to-right.** Every page, the menu, the login page and the messages.
+  The visitor-facing challenge page is unchanged (its text is `strings` in `guard/config.php`).
+* **Every number uses Latin digits (0-9)**, grouped by thousands where it is read (`12,345`),
+  ungrouped in the log explorer so it can be copied into a filter. Percentages use `%`.
+* **Log details redesigned.** Each field is a row: label, raw log key (`ua`, `q`, ...), value. Long
+  values wrap without breaking the layout and very long ones collapse behind "Show full value". The
+  query string is also shown as a decoded parameter table. Raw request data is shown as received.
+* **Settings: number fields had `min="0" max="0"`**, so a browser refused to submit the form. Fixed.
+* The panel font is the system font; Vazirmatn stays as the fallback for Persian text in log data.
+
 ## Admin panel: themes, IP allowlist, pipeline status
 
 **Behaviour that changed**

@@ -41,16 +41,16 @@ function gp_json($value) {
 		| JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE);
 }
 
-// Persian digits for display only. Anything submitted back stays ASCII.
+// Every number the panel shows uses Latin digits (0-9), whatever the browser's
+// language. gp_num() groups thousands for reading ("12,345"); gp_latin() does
+// not, so the text can be pasted into a shell or a filter.
 function gp_num($value, $decimals = 0) {
 	$text = number_format((float)$value, (int)$decimals, '.', ',');
-	return strtr($text, array('0' => '۰', '1' => '۱', '2' => '۲', '3' => '۳', '4' => '۴',
-		'5' => '۵', '6' => '۶', '7' => '۷', '8' => '۸', '9' => '۹'));
+	return $text === '-0' ? '0' : $text;
 }
 
-// Latin digits (0-9), for the Logs section, which must never show Persian digits.
-// No thousands separator: the same text can be copied into a shell or a filter.
-// $trim drops trailing zeros of a decimal ("1.50" -> "1.5", "2.00" -> "2").
+// Latin digits, no thousands separator. $trim drops trailing zeros of a decimal
+// ("1.50" -> "1.5", "2.00" -> "2").
 function gp_latin($value, $decimals = 0, $trim = false) {
 	$text = number_format((float)$value, (int)$decimals, '.', '');
 	if ($trim && strpos($text, '.') !== false) { $text = rtrim(rtrim($text, '0'), '.'); }
@@ -58,28 +58,97 @@ function gp_latin($value, $decimals = 0, $trim = false) {
 }
 
 function gp_pct($part, $whole, $decimals = 1) {
-	if (!$whole) { return gp_num(0, $decimals) . '٪'; }
-	return gp_num(100.0 * $part / $whole, $decimals) . '٪';
+	if (!$whole) { return gp_num(0, $decimals) . '%'; }
+	return gp_num(100.0 * $part / $whole, $decimals) . '%';
 }
 
-// A short relative age, e.g. "۳ دقیقه".
+// "1 hour", "6 hours": a count with its unit, singular or plural.
+// $unit is one of second, minute, hour, day (lang.php: unit_<unit>_1 / _n).
+function gp_plural($count, $unit) {
+	$count = (int)$count;
+	return gp_num($count) . ' ' . gp_t_or('unit_' . $unit . ($count === 1 ? '_1' : '_n'));
+}
+
+// A short relative age, e.g. "3 minutes".
 function gp_age($timestamp) {
 	$seconds = max(0, time() - (int)$timestamp);
-	if ($seconds < 60) { return gp_num($seconds) . ' ثانیه'; }
-	if ($seconds < 3600) { return gp_num(intdiv($seconds, 60)) . ' دقیقه'; }
-	if ($seconds < 86400) { return gp_num(intdiv($seconds, 3600)) . ' ساعت'; }
-	return gp_num(intdiv($seconds, 86400)) . ' روز';
+	if ($seconds < 60) { return gp_plural($seconds, 'second'); }
+	if ($seconds < 3600) { return gp_plural(intdiv($seconds, 60), 'minute'); }
+	if ($seconds < 86400) { return gp_plural(intdiv($seconds, 3600), 'hour'); }
+	return gp_plural(intdiv($seconds, 86400), 'day');
 }
 
 function gp_datetime($timestamp) {
 	if (!$timestamp) { return ''; }
-	return gp_num_raw(date('Y-m-d H:i:s', (int)$timestamp));
+	return date('Y-m-d H:i:s', (int)$timestamp);
 }
 
-// Digit substitution without number formatting, for timestamps.
+// Latin digits in text that may carry another script's digits: Persian
+// (U+06F0-U+06F9) and Arabic-Indic (U+0660-U+0669) become 0-9. Used for
+// formatted timestamps and stored values. Raw request data in the log explorer
+// (paths, query strings, user agents) is shown exactly as received instead,
+// because it is evidence: rewriting it would show a URL that was never requested.
 function gp_num_raw($text) {
-	return strtr((string)$text, array('0' => '۰', '1' => '۱', '2' => '۲', '3' => '۳',
-		'4' => '۴', '5' => '۵', '6' => '۶', '7' => '۷', '8' => '۸', '9' => '۹'));
+	static $map = null;
+	if ($map === null) {
+		$map = array();
+		for ($i = 0; $i < 10; $i++) {
+			$map[html_entity_decode('&#' . (0x06F0 + $i) . ';', ENT_QUOTES, 'UTF-8')] = (string)$i;
+			$map[html_entity_decode('&#' . (0x0660 + $i) . ';', ENT_QUOTES, 'UTF-8')] = (string)$i;
+		}
+	}
+	return strtr((string)$text, $map);
+}
+
+// --------------------------------------------------------------------------
+// Log explorer helpers (used by views/logs.php)
+// --------------------------------------------------------------------------
+
+function gp_logs_qs(array $filter, array $extra = array()) {
+	$query = array_merge(array('r' => 'logs'), $filter, $extra);
+	return 'index.php?' . http_build_query($query);
+}
+
+function gp_log_status_badge($st) {
+	$st = (int)$st;
+	if ($st >= 500) { return 'gp-badge-bad'; }
+	if ($st >= 400) { return 'gp-badge-warn'; }
+	if ($st >= 300) { return 'gp-badge-info'; }
+	if ($st >= 200) { return 'gp-badge-on'; }
+	return 'gp-badge-off';
+}
+
+// One value of the detail panel. Short values print as they are; long ones
+// (user agents, query strings, referers) show a preview and expand in place,
+// so one long value never pushes the rest of the entry off the screen. The
+// value is escaped here and nowhere else in the detail panel.
+function gp_log_value($text, $limit = 160) {
+	$text = (string)$text;
+	if ($text === '') { return '<span class="gp-prop-empty">—</span>'; }
+	$len = function_exists('mb_strlen') ? mb_strlen($text, 'UTF-8') : strlen($text);
+	if ($len <= $limit) { return '<span class="gp-prop-text">' . gp_e($text) . '</span>'; }
+	$preview = function_exists('mb_substr') ? mb_substr($text, 0, $limit, 'UTF-8') : substr($text, 0, $limit);
+	return '<details class="gp-prop-more"><summary>'
+		. '<span class="gp-prop-preview">' . gp_e($preview) . '…</span>'
+		. '<span class="gp-prop-toggle">' . gp_e(gp_t('logs_show_full')) . ' (' . gp_e(gp_latin($len)) . ' '
+		. gp_e(gp_t('logs_chars')) . ')</span></summary>'
+		. '<span class="gp-prop-text">' . gp_e($text) . '</span></details>';
+}
+
+// Split a raw query string into name/value pairs for display. Decoding is for
+// reading only; the raw string is shown next to it, unchanged. Bounded, so a
+// query with thousands of parameters cannot blow up the page.
+function gp_log_query_pairs($q, $max = 50) {
+	$out = array();
+	foreach (explode('&', (string)$q) as $part) {
+		if ($part === '') { continue; }
+		$eq = strpos($part, '=');
+		$name = $eq === false ? $part : substr($part, 0, $eq);
+		$value = $eq === false ? '' : substr($part, $eq + 1);
+		$out[] = array(rawurldecode(str_replace('+', ' ', $name)), rawurldecode(str_replace('+', ' ', $value)));
+		if (count($out) >= $max) { break; }
+	}
+	return $out;
 }
 
 // --------------------------------------------------------------------------

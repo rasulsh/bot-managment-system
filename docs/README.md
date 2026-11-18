@@ -43,7 +43,7 @@ Three cooperating parts, communicating only through Redis and daily log files:
   reputation per visitor, trains and runs two ML models (an anomaly detector and a
   supervised classifier), and writes verdicts back to Redis. It never touches the
   request path.
-- **The panel** (`panel/`) — an optional Persian/RTL web console for one operator:
+- **The panel** (`panel/`) — an optional English web console for one operator:
   traffic dashboards, a log explorer, per-visitor override controls, a "what would
   this config change have done" replay, and analyzer job controls. It writes config
   as validated JSON; it never writes PHP and never runs a shell command.

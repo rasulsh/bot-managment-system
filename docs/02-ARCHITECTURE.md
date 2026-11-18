@@ -247,7 +247,7 @@ live model has gone stale.
 
 Files: `panel/*.php`, `panel/views/*.php`.
 
-A single-operator web console, in Persian/RTL. It reads the logs, the analyzer
+A single-operator web console, in English (left-to-right). It reads the logs, the analyzer
 snapshot, and Redis; it writes configuration (as validated JSON) and analyzer job
 requests. It is built around two rules:
 

@@ -5,10 +5,6 @@
 // was written by the clients this system is fighting. Every single value goes
 // through gp_e(). There is no field here that is "safe".
 $f = is_array($filter) ? $filter : array();
-function gp_logs_qs(array $filter, array $extra = array()) {
-	$query = array_merge(array('r' => 'logs'), $filter, $extra);
-	return 'index.php?' . http_build_query($query);
-}
 $act_options = array('', 'allow', 'challenge', '403', '429', 'exempt', 'allow_bot',
 	'allow_preview', 'allow_override', '404_hp', 'token_issued', 'nonce_bad', 'nonce_replay', 'pow_bad',
 	'mint_limited');
@@ -17,21 +13,12 @@ $reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR'
 ?>
 
 <?php
-// Numbers in this section are ALWAYS Latin digits (0-9): timestamps, addresses,
-// counters, durations. gp_latin() formats a number; nothing here goes through
-// gp_num() / gp_num_raw(), which are the Persian-digit helpers.
+// Numbers here are Latin digits without grouping (gp_latin()), so a value can
+// be copied straight into a filter or a shell.
 $adv_keys = array('reason', 'dev', 'tok', 'sh', 'hold', 'sc_min', 'sc_max');
 $adv_open = false;
 foreach ($adv_keys as $k) { if (isset($f[$k]) && $f[$k] !== '') { $adv_open = true; } }
 $dash = '—';
-function gp_log_status_badge($st) {
-	$st = (int)$st;
-	if ($st >= 500) { return 'gp-badge-bad'; }
-	if ($st >= 400) { return 'gp-badge-warn'; }
-	if ($st >= 300) { return 'gp-badge-info'; }
-	if ($st >= 200) { return 'gp-badge-on'; }
-	return 'gp-badge-off';
-}
 ?>
 
 <div>
@@ -63,7 +50,7 @@ function gp_log_status_badge($st) {
 			<select class="gp-input gp-ltr" name="act">
 				<?php foreach ($act_options as $opt): ?>
 				<option value="<?= gp_e($opt) ?>" <?= (($f['act'] ?? '') === $opt) ? 'selected' : '' ?>>
-					<?= $opt === '' ? gp_e(gp_t('none')) : gp_e($opt) ?></option>
+					<?= $opt === '' ? gp_e(gp_t('any')) : gp_e($opt) ?></option>
 				<?php endforeach; ?>
 			</select>
 		</label>
@@ -80,7 +67,7 @@ function gp_log_status_badge($st) {
 			<select class="gp-input gp-ltr" name="status">
 				<?php foreach (array('', '2xx', '3xx', '404', '4xx', '5xx') as $opt): ?>
 				<option value="<?= gp_e($opt) ?>" <?= (($f['status'] ?? '') === $opt) ? 'selected' : '' ?>>
-					<?= $opt === '' ? gp_e(gp_t('none')) : gp_e($opt) ?></option>
+					<?= $opt === '' ? gp_e(gp_t('any')) : gp_e($opt) ?></option>
 				<?php endforeach; ?>
 			</select>
 		</label>
@@ -94,7 +81,7 @@ function gp_log_status_badge($st) {
 				<select class="gp-input gp-ltr" name="reason">
 					<?php foreach ($reason_options as $opt): ?>
 					<option value="<?= gp_e($opt) ?>" <?= (($f['reason'] ?? '') === $opt) ? 'selected' : '' ?>>
-						<?= $opt === '' ? gp_e(gp_t('none')) : gp_e($opt) ?></option>
+						<?= $opt === '' ? gp_e(gp_t('any')) : gp_e($opt) ?></option>
 					<?php endforeach; ?>
 				</select>
 			</label>
@@ -107,14 +94,14 @@ function gp_log_status_badge($st) {
 				<select class="gp-input gp-ltr" name="tok">
 					<?php foreach (array('', 'v', 'm', 'b') as $opt): ?>
 					<option value="<?= gp_e($opt) ?>" <?= (($f['tok'] ?? '') === $opt) ? 'selected' : '' ?>>
-						<?= $opt === '' ? gp_e(gp_t('none')) : gp_e($opt) ?></option>
+						<?= $opt === '' ? gp_e(gp_t('any')) : gp_e($opt) ?></option>
 					<?php endforeach; ?>
 				</select>
 			</label>
 			<label class="gp-field">
 				<span class="gp-label"><?= gp_e(gp_t('logs_shadow')) ?></span>
 				<select class="gp-input" name="sh">
-					<option value=""><?= gp_e(gp_t('none')) ?></option>
+					<option value=""><?= gp_e(gp_t('any')) ?></option>
 					<option value="1" <?= (($f['sh'] ?? '') === 1) ? 'selected' : '' ?>><?= gp_e(gp_t('yes')) ?></option>
 					<option value="0" <?= (isset($f['sh']) && $f['sh'] === 0) ? 'selected' : '' ?>><?= gp_e(gp_t('no')) ?></option>
 				</select>
@@ -122,7 +109,7 @@ function gp_log_status_badge($st) {
 			<label class="gp-field">
 				<span class="gp-label"><?= gp_e(gp_t('logs_holdout')) ?></span>
 				<select class="gp-input" name="hold">
-					<option value=""><?= gp_e(gp_t('none')) ?></option>
+					<option value=""><?= gp_e(gp_t('any')) ?></option>
 					<option value="1" <?= (($f['hold'] ?? '') === 1) ? 'selected' : '' ?>><?= gp_e(gp_t('yes')) ?></option>
 					<option value="0" <?= (isset($f['hold']) && $f['hold'] === 0) ? 'selected' : '' ?>><?= gp_e(gp_t('no')) ?></option>
 				</select>
@@ -237,40 +224,42 @@ function gp_log_status_badge($st) {
 
 		<div class="gp-log-detail" id="<?= gp_e($detail_id) ?>" hidden>
 			<?php
-			// Each section: title => list of key => array(label, kind[, wide]).
-			// kinds: str (as is), int, float, bool, time. Only int/float are formatted
-			// as numbers; ids such as rid are strings even when they happen to be digits.
+			// Each section: title => list of log key => array(label, kind).
+			// kinds: str (as is), int, float, bool, time, list, query. Only int and
+			// float are formatted as numbers; ids such as rid stay strings even when
+			// they happen to be digits. The raw log key is shown next to every label
+			// so a value can be matched to the JSONL line (jq, grep) without guessing.
 			$sections = array(
-				gp_t('logs_sec_request') => array(
+				array('logs_sec_request', 'gp-log-sec-wide', array(
 					'ts'  => array(gp_t('logs_time'), 'time'),
 					'm'   => array(gp_t('logs_method'), 'str'),
-					'p'   => array(gp_t('logs_path'), 'str', true),
-					'q'   => array(gp_t('logs_query'), 'str', true),
-					'ua'  => array(gp_t('logs_ua'), 'str', true),
+					'p'   => array(gp_t('logs_path'), 'str'),
+					'q'   => array(gp_t('logs_query'), 'query'),
+					'ua'  => array(gp_t('logs_ua'), 'str'),
 					'ref' => array(gp_t('logs_referer'), 'str'),
-					'sf'  => array('sec-fetch', 'str'),
+					'sf'  => array(gp_t('logs_sec_fetch'), 'str'),
 					'hc'  => array(gp_t('logs_headers'), 'int'),
 					'nav' => array(gp_t('logs_nav'), 'bool'),
-					'aj'  => array('Ajax', 'bool'),
+					'aj'  => array(gp_t('logs_ajax'), 'bool'),
 					'uah' => array(gp_t('logs_uah'), 'str'),
-				),
-				gp_t('logs_sec_identity') => array(
+				)),
+				array('logs_sec_identity', '', array(
 					'ip'   => array(gp_t('logs_ip'), 'str'),
-					'dev'  => array(gp_t('logs_device'), 'str', true),
+					'dev'  => array(gp_t('logs_device'), 'str'),
 					'tok'  => array(gp_t('logs_token'), 'str'),
 					'bot'  => array(gp_t('logs_bot'), 'str'),
 					'botv' => array(gp_t('id_botv'), 'str'),
 					'hp'   => array(gp_t('id_honeypot'), 'bool'),
-				),
-				gp_t('logs_sec_score') => array(
+				)),
+				array('logs_sec_score', '', array(
 					'sc'  => array(gp_t('logs_sc'), 'int'),
 					'esc' => array(gp_t('logs_esc'), 'int'),
 					'rep' => array(gp_t('id_reputation'), 'int'),
 					'ml'  => array(gp_t('id_ml'), 'int'),
 					'clf' => array(gp_t('id_clf'), 'int'),
-					'rs'  => array(gp_t('logs_reason'), 'list', true),
-				),
-				gp_t('logs_sec_counters') => array(
+					'rs'  => array(gp_t('logs_reason'), 'list'),
+				)),
+				array('logs_sec_counters', '', array(
 					'cd'  => array(gp_t('logs_c_cd'), 'int'),
 					'cdh' => array(gp_t('logs_c_cdh'), 'int'),
 					'cdd' => array(gp_t('logs_c_cdd'), 'int'),
@@ -279,29 +268,49 @@ function gp_log_status_badge($st) {
 					'rd'  => array(gp_t('logs_c_rd'), 'bool'),
 					'ms'  => array(gp_t('logs_c_ms'), 'float'),
 					'v'   => array(gp_t('logs_c_v'), 'int'),
-					'rid' => array('rid', 'str'),
-				),
+					'rid' => array(gp_t('logs_rid'), 'str'),
+				)),
 			);
-			foreach ($sections as $title => $items): ?>
-			<section class="gp-log-sec">
-				<h3 class="gp-log-sec-title"><?= gp_e($title) ?></h3>
-				<dl class="gp-log-dl">
-				<?php foreach ($items as $key => $def):
-					if (!array_key_exists($key, $row)) { continue; }
-					$value = $row[$key];
-					switch ($def[1]) {
-						case 'time':  $text = date('Y-m-d H:i:s', (int)$value); break;
-						case 'int':   $text = gp_latin((int)$value); break;
-						case 'float': $text = gp_latin((float)$value, 2, true); break;
-						case 'bool':  $text = ((int)$value) ? gp_t('yes') : gp_t('no'); break;
-						case 'list':  $text = is_array($value) ? implode('  ', array_filter($value, 'is_string')) : ''; break;
-						default:      $text = is_scalar($value) ? (string)$value : '';
-					}
-					if ($text === '') { $text = $dash; }
-				?>
-					<div class="gp-log-kv<?= !empty($def[2]) ? ' gp-log-kv-wide' : '' ?>">
-						<dt><?= gp_e($def[0]) ?></dt>
-						<dd class="gp-ltr"><?= gp_e($text) ?></dd>
+			foreach ($sections as $sec):
+				$present = array_intersect_key($sec[2], $row);
+				if (!$present) { continue; } ?>
+			<section class="gp-log-sec <?= $sec[1] ?>">
+				<h3 class="gp-log-sec-title"><?= gp_e(gp_t($sec[0])) ?></h3>
+				<dl class="gp-props">
+				<?php foreach ($present as $key => $def):
+					$value = $row[$key]; ?>
+					<div class="gp-prop">
+						<dt class="gp-prop-name"><?= gp_e($def[0]) ?>
+							<code class="gp-prop-key" title="<?= gp_e(gp_t('logs_field_key')) ?>"><?= gp_e($key) ?></code></dt>
+						<dd class="gp-prop-val">
+						<?php switch ($def[1]):
+							case 'bool': ?>
+							<span class="gp-badge <?= ((int)$value) ? 'gp-badge-on' : 'gp-badge-off' ?>"><?= gp_e(((int)$value) ? gp_t('yes') : gp_t('no')) ?></span>
+							<?php break;
+							case 'list':
+								$items = is_array($value) ? array_values(array_filter($value, 'is_string')) : array();
+								if (!$items) { echo '<span class="gp-prop-empty">—</span>'; }
+								foreach ($items as $item): ?>
+							<span class="gp-badge gp-badge-off"><?= gp_e($item) ?></span>
+								<?php endforeach;
+								break;
+							case 'query':
+								echo gp_log_value(is_scalar($value) ? (string)$value : '');
+								$pairs = is_scalar($value) ? gp_log_query_pairs((string)$value) : array();
+								if ($pairs): ?>
+							<table class="gp-params" aria-label="<?= gp_e(gp_t('logs_query_params')) ?>">
+								<?php foreach ($pairs as $pair): ?>
+								<tr><th scope="row"><?= gp_e($pair[0]) ?></th><td><?= gp_log_value($pair[1], 120) ?></td></tr>
+								<?php endforeach; ?>
+							</table>
+								<?php endif;
+								break;
+							case 'time':  echo gp_log_value(date('Y-m-d H:i:s', (int)$value)); break;
+							case 'int':   echo gp_log_value(gp_latin((int)$value)); break;
+							case 'float': echo gp_log_value(gp_latin((float)$value, 2, true)); break;
+							default:      echo gp_log_value(is_scalar($value) ? (string)$value : '');
+						endswitch; ?>
+						</dd>
 					</div>
 				<?php endforeach; ?>
 				</dl>
@@ -311,13 +320,13 @@ function gp_log_status_badge($st) {
 			<section class="gp-log-sec">
 				<h3 class="gp-log-sec-title"><?= gp_e(gp_t('logs_outcome')) ?></h3>
 				<?php if ($out !== null): ?>
-				<dl class="gp-log-dl">
-					<div class="gp-log-kv"><dt><?= gp_e(gp_t('logs_status')) ?></dt>
-						<dd class="gp-ltr"><?= gp_e(isset($out['st']) ? gp_latin((int)$out['st']) : $dash) ?></dd></div>
-					<div class="gp-log-kv"><dt><?= gp_e(gp_t('logs_bytes')) ?></dt>
-						<dd class="gp-ltr"><?= gp_e(($out['by'] ?? null) === null ? $dash : gp_latin((int)$out['by'])) ?></dd></div>
-					<div class="gp-log-kv"><dt><?= gp_e(gp_t('logs_duration')) ?> (ms)</dt>
-						<dd class="gp-ltr"><?= gp_e(($out['dur'] ?? null) === null ? $dash : gp_latin((float)$out['dur'], 2, true)) ?></dd></div>
+				<dl class="gp-props">
+					<div class="gp-prop"><dt class="gp-prop-name"><?= gp_e(gp_t('logs_status')) ?> <code class="gp-prop-key">st</code></dt>
+						<dd class="gp-prop-val"><?= gp_log_value(isset($out['st']) ? gp_latin((int)$out['st']) : '') ?></dd></div>
+					<div class="gp-prop"><dt class="gp-prop-name"><?= gp_e(gp_t('logs_bytes')) ?> <code class="gp-prop-key">by</code></dt>
+						<dd class="gp-prop-val"><?= gp_log_value(($out['by'] ?? null) === null ? '' : gp_latin((int)$out['by'])) ?></dd></div>
+					<div class="gp-prop"><dt class="gp-prop-name"><?= gp_e(gp_t('logs_duration')) ?> (ms) <code class="gp-prop-key">dur</code></dt>
+						<dd class="gp-prop-val"><?= gp_log_value(($out['dur'] ?? null) === null ? '' : gp_latin((float)$out['dur'], 2, true)) ?></dd></div>
 				</dl>
 				<?php else: ?>
 				<p class="gp-help"><?= gp_e(gp_t('logs_no_outcome')) ?></p>

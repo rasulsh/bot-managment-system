@@ -84,7 +84,7 @@ if ($gp_cfg === null) {
 if (!gp_ip_allowed($gp_cfg)) {
 	gp_send_headers();
 	http_response_code(403);
-	echo '<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8"><body>'
+	echo '<!doctype html><html lang="en" dir="ltr"><meta charset="utf-8"><body>'
 		. gp_e(gp_t('login_ip_blocked')) . '</body></html>';
 	exit;
 }
@@ -341,7 +341,7 @@ switch ($gp_route) {
 // status both masked the status and did work the request never asked for.
 gp_send_headers();
 http_response_code(404);
-echo '<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8">'
+echo '<!doctype html><html lang="en" dir="ltr"><meta charset="utf-8">'
 	. '<title>404</title><body style="font-family:sans-serif;padding:2rem">'
 	. gp_e(gp_t('err_notfound')) . ' '
 	. '<a href="index.php?r=dashboard">' . gp_e(gp_t('nav_dashboard')) . '</a>'

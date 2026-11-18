@@ -30,7 +30,11 @@ function gp_field_bool($key, $cfg, $overlay, $errors) {
 
 // Render one numeric field with its documented range.
 function gp_field_num($key, $cfg, $overlay, $errors, $step = '1') {
-	global $rules;
+	// Read the whitelist here: this view is required inside gp_render(), so its
+	// top-level variables are that function's locals, not globals. The global
+	// declaration used before was always empty and every field rendered
+	// min="0" max="0", which made a browser refuse to submit the form.
+	$rules = gv_overlay_whitelist();
 	$spec = isset($rules[$key]) ? $rules[$key] : array('int', 0, 0);
 	$current = gp_effective_value($cfg, $key);
 	$from_panel = array_key_exists($key, $overlay);

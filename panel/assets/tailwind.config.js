@@ -46,13 +46,13 @@ module.exports = {
 				return out;
 			})(),
 			fontFamily: {
-				sans: ['Vazirmatn', 'system-ui', '-apple-system', 'Segoe UI', 'Tahoma', 'sans-serif'],
+				sans: ['system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'Vazirmatn', 'Tahoma', 'sans-serif'],
 			},
 		},
 	},
 	corePlugins: {
-		// The panel is RTL and uses logical properties throughout, so the
-		// directional float/clear utilities are dead weight.
+		// The panel uses logical properties throughout, so the directional
+		// float/clear utilities are dead weight.
 		float: false,
 		clear: false,
 		// Nothing in the panel transforms, filters or animates an element -

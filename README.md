@@ -195,7 +195,7 @@ Three parts that talk to each other only through Redis and the daily log files:
   with reverse DNS, scores visitors, and leaves small verdicts in Redis for the
   guard to read. It never touches live requests.
 - **The panel** (`panel/`): an optional web console for one operator, in
-  Persian (RTL). It has dashboards, a log search, per-visitor overrides and
+  English, with Latin digits everywhere. It has dashboards, a log search, per-visitor overrides and
   settings. It writes settings as validated JSON and never runs shell commands.
 
 Four rules shape the whole design:
