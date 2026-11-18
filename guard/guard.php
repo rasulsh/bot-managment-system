@@ -34,6 +34,14 @@ function gv_cfg_defaults(array $cfg) {
 		'exempt_params_paths' => array('/', '/index.php'),
 		'cdn_ranges'       => array(),
 		'log_dir'          => dirname(__DIR__) . '/logs',
+		// Log storage. log_skip_paths: path prefixes never written to the log
+		// (the guard still decides for them). The rest is read by
+		// scripts/guard-logrotate.sh (retention, total size cap) and by the
+		// logger (min free space, 0 = off).
+		'log_skip_paths'   => array(),
+		'log_retention_days' => 60,
+		'log_max_mb'       => 0,
+		'log_min_free_mb'  => 200,
 		'ml_weight'        => 0.4,
 		'clf_weight'       => 0.5,
 		'holdout_pct'      => 0,
@@ -104,6 +112,12 @@ function gv_cfg_defaults(array $cfg) {
 		$cur = isset($cfg[$k]) ? $cfg[$k] : $v;
 		$cfg[$k] = ((is_int($cur) || (is_string($cur) && ctype_digit($cur))) && (int)$cur >= 1) ? (int)$cur : $v;
 	}
+	// Log storage numbers: retention at least one day, the two MiB limits at
+	// least 0 (0 = off). Anything else falls back to the default.
+	foreach (array('log_retention_days' => array(60, 1), 'log_max_mb' => array(0, 0), 'log_min_free_mb' => array(200, 0)) as $k => $d) {
+		$cur = isset($cfg[$k]) ? $cfg[$k] : $d[0];
+		$cfg[$k] = ((is_int($cur) || (is_string($cur) && ctype_digit($cur))) && (int)$cur >= $d[1]) ? (int)$cur : $d[0];
+	}
 	// 'false' and 'off' are non-empty strings: without this they read as ON.
 	foreach (array('enforce', 'signals') as $grp) {
 		if (!isset($cfg[$grp]) || !is_array($cfg[$grp])) { continue; }
@@ -111,7 +125,7 @@ function gv_cfg_defaults(array $cfg) {
 			if (!is_bool($v)) { $cfg[$grp][$k] = (bool)filter_var($v, FILTER_VALIDATE_BOOLEAN); }
 		}
 	}
-	foreach (array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'known_bots', 'preview_bots', 'cdn_ranges', 'bot_suffixes') as $k) {
+	foreach (array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'known_bots', 'preview_bots', 'cdn_ranges', 'bot_suffixes', 'log_skip_paths') as $k) {
 		if (!is_array($cfg[$k])) { $cfg[$k] = array(); }
 	}
 	return $cfg;
@@ -172,6 +186,11 @@ function gv_overlay_whitelist() {
 		// Where exempt_params count, which proxies may name the client, and the
 		// reverse-DNS suffixes that verify each known bot (read by the analyzer).
 		'exempt_params_paths' => array('exactpaths'),
+		// Log storage.
+		'log_skip_paths'     => array('paths'),
+		'log_retention_days' => array('int', 1, 3650),
+		'log_max_mb'         => array('int', 0, 10000000),
+		'log_min_free_mb'    => array('int', 0, 1000000),
 		'cdn_ranges'         => array('cidrs4'),
 		'bot_suffixes'       => array('suffixes'),
 		// The visitor-facing challenge page. Rendered escaped by challenge.php.
@@ -730,15 +749,7 @@ function gv_score(array $f, $hp_hist) {
 //     where the parameter really selects what runs.
 function gv_is_exempt(array $f, array $exempt_paths, array $exempt_params, $param_paths = null) {
 	$path = (string)$f['path'];
-	$odd  = (strpos($path, '/.') !== false || strpos($path, '//') !== false
-		|| stripos($path, '%2f') !== false || stripos($path, '%2e') !== false
-		|| stripos($path, '%5c') !== false || strpos($path, '\\') !== false);
-	if (!$odd) {
-		foreach ($exempt_paths as $p) {
-			$p = (string)$p;
-			if ($p !== '' && strncmp($path, $p, strlen($p)) === 0) { return true; }
-		}
-	}
+	if (gv_path_has_prefix($path, $exempt_paths)) { return true; }
 	if (is_array($param_paths) && !in_array($path, $param_paths, true)) { return false; }
 	$params = isset($f['params']) && is_array($f['params']) ? $f['params'] : array();
 	foreach ($exempt_params as $name => $prefixes) {
@@ -748,6 +759,23 @@ function gv_is_exempt(array $f, array $exempt_paths, array $exempt_params, $para
 			$pre = (string)$pre;
 			if ($pre !== '' && strncmp($value, $pre, strlen($pre)) === 0) { return true; }
 		}
+	}
+	return false;
+}
+
+// Prefix match for exempt_paths and log_skip_paths. A path with a dot
+// segment, an empty segment or an encoded slash, dot or backslash never
+// matches (see gv_is_exempt): "/gv-admin/../product/x" is not under /gv-admin/.
+function gv_path_has_prefix($path, array $prefixes) {
+	$path = (string)$path;
+	if (strpos($path, '/.') !== false || strpos($path, '//') !== false
+		|| stripos($path, '%2f') !== false || stripos($path, '%2e') !== false
+		|| stripos($path, '%5c') !== false || strpos($path, '\\') !== false) {
+		return false;
+	}
+	foreach ($prefixes as $p) {
+		$p = (string)$p;
+		if ($p !== '' && strncmp($path, $p, strlen($p)) === 0) { return true; }
 	}
 	return false;
 }
@@ -1134,6 +1162,10 @@ function gv_run($t0) {
 	$cfg = gv_cfg_load();
 	$f   = gv_facts($_SERVER, $_GET, $_COOKIE, $cfg);
 	$log = (string)$cfg['log_dir'];
+	gv_log_policy(array(
+		'skip'     => gv_path_has_prefix($f['path'], (array)$cfg['log_skip_paths']),
+		'min_free' => max(0, (int)$cfg['log_min_free_mb']),
+	));
 	$st  = gv_state_new();
 	gv_redis_ctx(array('log_dir' => $log));       // where swallowed errors are reported
 

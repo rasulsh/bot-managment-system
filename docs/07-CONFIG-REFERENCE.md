@@ -99,11 +99,30 @@ Real users never see it; a client that follows it is labelled for 7 days.
 
 ## Log rotation
 
-Compresses finished days and drops archives after 60 days. Cron example:
+`scripts/guard-logrotate.sh` compresses finished days (gzip, roughly a tenth of the size),
+deletes archives older than `log_retention_days` (default 60) and, when `log_max_mb` is
+set, deletes the oldest archives until all log files fit under it. It reads these from the
+effective config (`guard/config.php` plus the panel), so changes in **Settings → Log
+storage** apply on its next run. Install it once (as the account user):
 
 ```
 10 3 * * * /full/path/bot-guard/scripts/guard-logrotate.sh >/dev/null 2>&1
 ```
+
+If `php` is not on cron's PATH, put `GV_PHP=/full/path/to/php` at the top of the crontab;
+without PHP the script uses the defaults (60 days, no cap). Each run writes
+`logs/.last-rotate`; the dashboard card **Log storage** warns when rotation never ran or
+is more than two days old.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `log_skip_paths` | none | Path prefixes never written to the log (e.g. `/gv-admin/`). The guard still checks them; `exempt_paths` is what skips the checks, and those requests are still logged as `exempt`. |
+| `log_retention_days` | 60 | Archives older than this are deleted (1-3650). |
+| `log_max_mb` | 0 (off) | Total size cap for all `guard-*` files. Oldest archives go first; today's file is never deleted, and a run where it alone is over the cap says so. |
+| `log_min_free_mb` | 200 | Below this much free space on the log disk the guard stops writing request logs (the site keeps answering) and writes `disk_low` to `guard-errors.log` (at most once a minute). 0 = off. It sees the file system, not a cPanel quota: use `log_max_mb` for a quota. |
+
+Rough size: a decision line is 450-650 bytes, an outcome line about 80. One million PHP
+requests a day is about 0.6 GB for the live day and 60-90 MB per compressed day.
 
 ## KPIs
 

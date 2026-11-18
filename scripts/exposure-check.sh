@@ -37,6 +37,7 @@ SENSITIVE=(
 	"/logs/guard-$TODAY.jsonl"
 	"/logs/guard-errors.log"
 	"/logs/.redis-down"
+	"/logs/.last-rotate"
 	"/guard/config.php"
 	"/guard/config.local.json"
 	"/guard/config-backups/"

@@ -2,6 +2,22 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Log storage limits
+
+**New**
+
+* `log_skip_paths`: path prefixes that are never logged (add `/gv-admin/` so the panel stops
+  filling the log). `exempt_paths` still skips the checks and still logs `exempt`.
+* `log_retention_days` (default 60) and `log_max_mb` (default 0 = off), applied by
+  `guard-logrotate.sh`, which now reads them and `log_dir` from the effective config.
+* `log_min_free_mb` (default 200): below this free disk space the guard pauses request logging.
+* Dashboard card **Log storage**: sizes, free disk, last rotation, warnings.
+
+**What to do**
+
+* Make sure the `guard-logrotate.sh` cron job exists (the new card says so if it does not).
+* If cron cannot find `php`, set `GV_PHP=/full/path/to/php` in the crontab.
+
 ## Settings managed in the panel
 
 **New**

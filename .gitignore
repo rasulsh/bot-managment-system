@@ -39,6 +39,8 @@ logs/guard-errors-*.log
 logs/guard-errors-*.log.gz
 logs/.err-*
 logs/.redis-down
+logs/.last-rotate
+logs/.last-rotate.tmp
 # Analyzer run statistics (next to the model).
 analyzer/.laststats-*
 analyzer/*.tmp

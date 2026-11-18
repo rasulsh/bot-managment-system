@@ -228,6 +228,7 @@ switch ($gp_route) {
 			'rinfo'    => gp_redis_info(),
 			'exposed'  => gp_exposure_warning(),
 			'pipeline' => gp_pipeline_status(),
+			'storage'  => gp_log_storage(),
 			'ip_open'  => empty($gp_cfg['ip_allowlist']),
 		));
 
