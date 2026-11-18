@@ -21,12 +21,12 @@ check() { if [ "$2" = "1" ]; then echo "PASS  $1"; else echo "FAIL  $1"; failed=
 csrf() { grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//'; }
 
 page="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=login")"
-check "login page renders" "$(printf '%s' "$page" | grep -q 'name="password"' && echo 1 || echo 0)"
+check "login page renders" "$(grep -q 'name="password"' <<<"$page" && echo 1 || echo 0)"
 
 code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "username=$USER_NAME" --data-urlencode "password=$PASS" "$URL?r=login")"
 check "login answers 303" "$([ "$code" = 303 ] && echo 1 || echo 0)"
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
-check "dashboard is shown after login (session cookie works on this path)" "$(printf '%s' "$dash" | grep -q 'name="killswitch"' && echo 1 || echo 0)"
+check "dashboard is shown after login (session cookie works on this path)" "$(grep -q 'name="killswitch"' <<<"$dash" && echo 1 || echo 0)"
 cpath="$(awk '$6 ~ /^gp_/ {print $3; exit}' "$JAR")"
 check "the session cookie path is the panel path ($cpath)" "$([ "$cpath" = "$PANEL/" ] && echo 1 || echo 0)"
 
@@ -34,17 +34,17 @@ tok="$(printf '%s' "$dash" | csrf)"
 code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'action=save' -d 'f[hard_block_score]=61' "$URL?r=settings")"
 check "settings save answers 303" "$([ "$code" = 303 ] && echo 1 || echo 0)"
 settings="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=settings")"
-check "the saved value is shown" "$(printf '%s' "$settings" | grep -q 'value="61"' && echo 1 || echo 0)"
+check "the saved value is shown" "$(grep -q 'value="61"' <<<"$settings" && echo 1 || echo 0)"
 tok="$(printf '%s' "$settings" | csrf)"
 curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'action=reset' -d 'key=hard_block_score' "$URL?r=settings"
 
 ov="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=overrides")"
 tok="$(printf '%s' "$ov" | csrf)"
-if printf '%s' "$ov" | grep -qi 'name="identity"'; then
+if grep -qi 'name="identity"' <<<"$ov"; then
 	code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'identity=203.0.113.250' -d 'ttl=3600' -d 'override=allow' "$URL?r=overrides")"
 	check "override add answers 303" "$([ "$code" = 303 ] && echo 1 || echo 0)"
 	ov="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=overrides")"
-	if printf '%s' "$ov" | grep -q '203.0.113.250'; then
+	if grep -q '203.0.113.250' <<<"$ov"; then
 		check "the override is listed (Redis reachable from the panel)" 1
 		tok="$(printf '%s' "$ov" | csrf)"
 		curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'identity=203.0.113.250' -d 'ttl=60' -d 'clear=1' "$URL?r=overrides"
@@ -77,11 +77,11 @@ check "config editor left the file unchanged" "$([ "$(grep -o 'name="base_hash" 
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"; tok="$(printf '%s' "$dash" | csrf)"
 curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'killswitch=stop' "$URL?r=dashboard"
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
-check "kill switch can be engaged" "$(printf '%s' "$dash" | grep -q 'value="start"' && echo 1 || echo 0)"
+check "kill switch can be engaged" "$(grep -q 'value="start"' <<<"$dash" && echo 1 || echo 0)"
 tok="$(printf '%s' "$dash" | csrf)"
 curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'killswitch=start' "$URL?r=dashboard"
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
-check "kill switch can be released" "$(printf '%s' "$dash" | grep -q 'value="stop"' && echo 1 || echo 0)"
+check "kill switch can be released" "$(grep -q 'value="stop"' <<<"$dash" && echo 1 || echo 0)"
 
 tok="$(printf '%s' "$dash" | csrf)"
 curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" "$URL?r=logout"
