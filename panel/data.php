@@ -563,6 +563,69 @@ function gp_guard_health() {
 // 'never' and 'quiet' mean the guard is not seeing traffic: not loaded by PHP
 // (auto_prepend_file), a stale .user.ini, or pages served from a cache
 // without running PHP. docs/03-SETUP.md has the checks.
+// Log storage for the dashboard: how big the logs are, how much disk is left,
+// and whether guard-logrotate.sh is running. Reads directory metadata and the
+// one-line logs/.last-rotate marker; never opens a log file.
+// warnings: rotate_never, rotate_stale, rotate_failed, disk_low, over_cap.
+function gp_log_storage($now = null) {
+	$now = $now === null ? time() : (int)$now;
+	$cfg = gv_cfg_load();
+	$dir = rtrim((string)$cfg['log_dir'], '/\\');
+	$out = array('dir' => $dir, 'total' => 0, 'today' => 0, 'live_files' => 0, 'archives' => 0,
+		'oldest' => '', 'free' => null, 'disk' => null, 'min_free_mb' => (int)$cfg['log_min_free_mb'],
+		'max_mb' => (int)$cfg['log_max_mb'], 'retention_days' => (int)$cfg['log_retention_days'],
+		'skip_paths' => (array)$cfg['log_skip_paths'], 'rotate' => null, 'warnings' => array());
+	if (!is_dir($dir)) { return $out; }
+	$today = 'guard-' . date('Ymd', $now) . '.jsonl';
+	$oldest_old = 0;
+	foreach ((array)glob($dir . '/guard-*') as $file) {
+		if (!is_file($file) || is_link($file)) { continue; }
+		$size = (int)@filesize($file);
+		$name = basename($file);
+		$out['total'] += $size;
+		if ($name === $today) { $out['today'] = $size; }
+		if (substr($name, -6) === '.jsonl') {
+			$out['live_files']++;
+			// A finished day still uncompressed two days later means no rotation ran.
+			$mt = (int)@filemtime($file);
+			if ($name !== $today && $mt > 0 && ($now - $mt) > 2 * 86400) { $oldest_old = max($oldest_old, 1); }
+		} elseif (substr($name, -9) === '.jsonl.gz') {
+			$out['archives']++;
+			$day = substr($name, 6, 8);
+			if ($out['oldest'] === '' || strcmp($day, $out['oldest']) < 0) { $out['oldest'] = $day; }
+		}
+	}
+	$free = @disk_free_space($dir);
+	$disk = @disk_total_space($dir);
+	$out['free'] = $free === false ? null : (float)$free;
+	$out['disk'] = $disk === false ? null : (float)$disk;
+	$raw = @file_get_contents($dir . '/.last-rotate');
+	$rot = is_string($raw) ? json_decode(trim($raw), true) : null;
+	if (is_array($rot) && isset($rot['ts']) && is_numeric($rot['ts'])) { $out['rotate'] = $rot; }
+
+	if ($out['rotate'] === null) {
+		if ($oldest_old || $out['live_files'] > 2) { $out['warnings'][] = 'rotate_never'; }
+	} else {
+		if ($now - (int)$out['rotate']['ts'] > 2 * 86400) { $out['warnings'][] = 'rotate_stale'; }
+		if (!empty($out['rotate']['failures'])) { $out['warnings'][] = 'rotate_failed'; }
+	}
+	if ($out['free'] !== null && $out['min_free_mb'] > 0 && $out['free'] < $out['min_free_mb'] * 1048576) {
+		$out['warnings'][] = 'disk_low';
+	}
+	if ($out['max_mb'] > 0 && $out['total'] > $out['max_mb'] * 1048576) { $out['warnings'][] = 'over_cap'; }
+	return $out;
+}
+
+// Bytes for people: "1.4 GB". Binary units, Latin digits.
+function gp_bytes($n) {
+	$n = (float)$n;
+	foreach (array('B', 'KB', 'MB', 'GB', 'TB') as $i => $unit) {
+		if ($n < 1024 || $unit === 'TB') { return gp_num($n, $i === 0 ? 0 : 1) . ' ' . $unit; }
+		$n /= 1024;
+	}
+	return gp_num($n) . ' TB';
+}
+
 function gp_pipeline_status($now = null) {
 	$now = $now === null ? time() : (int)$now;
 	$cfg = gv_cfg_load();

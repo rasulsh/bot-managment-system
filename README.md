@@ -172,8 +172,11 @@ The dashboard card **Data pipeline** shows whether requests are being logged.
 **Add the honeypot.** A hidden link that only bots follow. See
 [docs/07-CONFIG-REFERENCE.md](docs/07-CONFIG-REFERENCE.md#honeypot).
 
-**Rotate the logs.** Add one cron job for `scripts/guard-logrotate.sh`
-(example in [docs/07-CONFIG-REFERENCE.md](docs/07-CONFIG-REFERENCE.md#log-rotation)).
+**Rotate the logs.** Every PHP request writes one line (about 0.5 KB), so a busy site
+needs this. Add one cron job for `scripts/guard-logrotate.sh`: it compresses finished
+days, keeps 60 days and can cap the total size. Limits, a free-disk floor and paths that
+are never logged (such as the panel) are in **Settings → Log storage**
+([docs/07-CONFIG-REFERENCE.md](docs/07-CONFIG-REFERENCE.md#log-rotation)).
 
 ## Turning enforcement on
 

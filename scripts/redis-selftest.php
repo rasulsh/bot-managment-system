@@ -1073,6 +1073,34 @@ if (function_exists('posix_geteuid') && posix_geteuid() !== 0) {
 } else {
 	t_skip('breaker marker fallback', 'running as root: every directory is writable');
 }
+// --------------------------------------------------------------------------
+t_section('Log storage: skipped paths and the free-space floor (real requests)');
+
+$cfgL = t_cfg(array(), array('log_dir' => t_mkdir_log('skip1'), 'capture_outcomes' => true,
+	'exempt_paths' => array('/gv-admin/', '/pay/'), 'log_skip_paths' => array('/gv-admin/'), 'log_min_free_mb' => 0));
+$r1 = t_nav(); $r1['REQUEST_URI'] = '/gv-admin/index.php?r=logs';
+$p = t_probe($cfgL, $r1);
+t_ok('a log_skip_paths request writes no line at all (decision or outcome)', t_rows($cfgL) === array() && $p['bytes'] === 0);
+$r2 = t_nav(); $r2['REQUEST_URI'] = '/pay/callback';
+t_probe($cfgL, $r2);
+$rows = t_rows($cfgL);
+t_ok('an exempt path that is not skipped is still logged (act=exempt)', count($rows) >= 1 && $rows[0]['act'] === 'exempt' && $rows[0]['p'] === '/pay/callback');
+$r3 = t_nav(); $r3['REQUEST_URI'] = '/gv-admin/../product/1';
+t_probe($cfgL, $r3);
+t_ok('a dot-segment path cannot hide itself under a skipped prefix', (bool)array_filter(t_rows($cfgL), function ($r) { return isset($r['p']) && $r['p'] === '/gv-admin/../product/1'; }));
+$r4 = t_nav(); $r4['REQUEST_URI'] = '/product/2';
+t_probe($cfgL, $r4);
+t_ok('ordinary requests are logged as before', t_lastrow($cfgL)['p'] === '/product/2');
+
+$cfgD = t_cfg(array(), array('log_dir' => t_mkdir_log('diskfloor'), 'log_min_free_mb' => 1000000));
+$p = t_probe($cfgD, t_nav());
+t_ok('below the free-space floor nothing is logged and the guard still answers', t_rows($cfgD) === array() && $p['rt'] !== -1);
+t_ok('...and guard-errors.log says why (disk_low)', is_file($cfgD['log_dir'] . '/guard-errors.log')
+	&& strpos(file_get_contents($cfgD['log_dir'] . '/guard-errors.log'), 'disk_low') !== false);
+$cfgD['log_min_free_mb'] = 0;
+t_probe($cfgD, t_nav());
+t_ok('with the floor off (0) the same request is logged', count(t_rows($cfgD)) >= 1);
+
 gv_redis_ctx(array('log_dir' => $T_DIR));
 gv_redis_cmd($cx, array('FLUSHALL'));
 

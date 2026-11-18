@@ -970,6 +970,35 @@ $ld_out = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellar
 t_ok('all panel library files load together without a redeclared function', trim($ld_out) === 'LOADED');
 
 // --------------------------------------------------------------------------
+t_section('Log storage card');
+$lsd = sys_get_temp_dir() . '/gp-ls-' . getmypid();
+@mkdir($lsd);
+$lsc = tempnam(sys_get_temp_dir(), 'gvcfg');
+file_put_contents($lsc, '<?php return array("secret" => "x", "log_dir" => "' . $lsd . '", "log_max_mb" => 1, "log_min_free_mb" => 0, "log_skip_paths" => array("/gv-admin/"));');
+putenv('GV_CONFIG=' . $lsc);
+$now = time();
+file_put_contents($lsd . '/guard-' . date('Ymd', $now) . '.jsonl', str_repeat('x', 1000));
+file_put_contents($lsd . '/guard-' . date('Ymd', $now - 5 * 86400) . '.jsonl', str_repeat('x', 2000));
+touch($lsd . '/guard-' . date('Ymd', $now - 5 * 86400) . '.jsonl', $now - 5 * 86400);
+file_put_contents($lsd . '/guard-20260101.jsonl.gz', str_repeat('y', 2 * 1048576));
+$ls = gp_log_storage($now);
+t_ok('log storage: sizes, archive count and oldest day', $ls['total'] === 1000 + 2000 + 2 * 1048576 && $ls['today'] === 1000
+	&& $ls['archives'] === 1 && $ls['oldest'] === '20260101' && $ls['skip_paths'] === array('/gv-admin/'));
+t_ok('log storage: an old uncompressed day and no marker means rotation never ran', in_array('rotate_never', $ls['warnings'], true));
+t_ok('log storage: over the size cap is reported', in_array('over_cap', $ls['warnings'], true));
+file_put_contents($lsd . '/.last-rotate', json_encode(array('ts' => $now - 3 * 86400, 'failures' => 1)) . "\n");
+$ls = gp_log_storage($now);
+t_ok('log storage: a stale and failed rotation is reported', in_array('rotate_stale', $ls['warnings'], true) && in_array('rotate_failed', $ls['warnings'], true) && !in_array('rotate_never', $ls['warnings'], true));
+file_put_contents($lsc, '<?php return array("secret" => "x", "log_dir" => "' . $lsd . '", "log_min_free_mb" => 1000000000);');
+$ls = gp_log_storage($now);
+t_ok('log storage: free space under the floor is reported', in_array('disk_low', $ls['warnings'], true) && $ls['free'] !== null);
+t_ok('gp_bytes is readable and Latin', gp_bytes(512) === '512 B' && gp_bytes(1536) === '1.5 KB' && gp_bytes(3 * 1073741824) === '3.0 GB');
+putenv('GV_CONFIG');
+@unlink($lsc);
+foreach ((array)glob($lsd . '/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+@rmdir($lsd);
+
+// --------------------------------------------------------------------------
 t_section('Settings management: form parsing, analyzer keys, file editor, backups');
 
 $bk_before = array_map('basename', (array)glob(gp_backup_dir() . '/*'));

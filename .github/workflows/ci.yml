@@ -76,6 +76,8 @@ jobs:
         run: php -d display_errors=1 -d error_reporting=-1 scripts/panel-selftest.php
       - name: redis self-test (round trips, fail-fast, breaker, auth, prefix, handshake)
         run: php -d display_errors=1 -d error_reporting=-1 scripts/redis-selftest.php
+      - name: log rotation self-test (compression, retention, size cap, settings from config)
+        run: bash scripts/logrotate-selftest.sh
       - name: the suites left the working tree clean (nothing tracked or logged into the repo)
         run: |
           git status --porcelain

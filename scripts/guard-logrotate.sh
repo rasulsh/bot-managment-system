@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # Daily rotation for the Bot Guard JSONL logs.
-# Gzips every finished day and drops archives older than the retention window.
+# Gzips every finished day, drops archives older than the retention window and,
+# when a size cap is set, the oldest archives until the logs fit under it.
 # Cron example (03:10 every day):
 #   10 3 * * * /full/path/bot-guard/scripts/guard-logrotate.sh >/dev/null 2>&1
 #
-# GV_LOG_DIR overrides the directory (use it when log_dir in guard/config.php
-# is not the default <repo>/logs).
+# Settings come from the guard's effective config (guard/config.php plus the
+# panel overlay), read through scripts/config-dump.php:
+#   log_dir             where the logs are
+#   log_retention_days  archives older than this are deleted (default 60)
+#   log_max_mb          total size cap for logs/ in MiB, 0 = no cap (default 0)
+# Environment overrides: GV_LOG_DIR, GV_RETENTION_DAYS, GV_MAX_MB. GV_PHP names
+# the PHP binary (cron has a minimal PATH). Without PHP the defaults apply.
+#
+# Every run writes logs/.last-rotate (one JSON line) for the panel dashboard.
 #
 # What this script is careful about:
 #   * It never compresses a file that was written to in the last hour. The
@@ -20,8 +28,22 @@
 #     status is non-zero so cron can report it.
 set -uo pipefail
 
-LOG_DIR="${GV_LOG_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/logs}"
-RETENTION_DAYS=60
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PHP_BIN="${GV_PHP:-php}"
+
+# One effective setting, or nothing when PHP or the key is unavailable.
+cfg_get() {
+	"$PHP_BIN" "$REPO/scripts/config-dump.php" --get "$1" 2>/dev/null
+}
+# A whole number at least $2, else the default $3.
+int_or() {
+	case "$1" in ''|*[!0-9]*) echo "$3" ;; *) if [ "$1" -ge "$2" ]; then echo "$1"; else echo "$3"; fi ;; esac
+}
+
+LOG_DIR="${GV_LOG_DIR:-$(cfg_get log_dir)}"
+[ -n "$LOG_DIR" ] || LOG_DIR="$REPO/logs"
+RETENTION_DAYS="$(int_or "${GV_RETENTION_DAYS:-$(cfg_get log_retention_days)}" 1 60)"
+MAX_MB="$(int_or "${GV_MAX_MB:-$(cfg_get log_max_mb)}" 0 0)"
 MIN_IDLE_MINUTES=60
 
 if [ ! -d "$LOG_DIR" ]; then
@@ -67,6 +89,29 @@ find "$LOG_DIR" -maxdepth 1 -name 'guard-errors-*.log.gz' -type f -mtime "+$RETE
 
 deleted=$(find "$LOG_DIR" -maxdepth 1 -name '*.jsonl.gz' -type f -mtime "+$RETENTION_DAYS" -print -delete | wc -l | tr -d ' ')
 
-echo "Bot Guard log rotation: compressed $gzipped file(s), deleted $deleted archive(s) older than $RETENTION_DAYS days, skipped $skipped non-regular entr(ies), $failed failure(s) in $LOG_DIR"
+# Size cap: delete the oldest daily archives until every guard-* file together
+# fits under log_max_mb. Uncompressed files (today, or a day not yet idle for an
+# hour) are never deleted; if they alone are over the cap, that is reported.
+capped=0
+over=0
+total_bytes() {
+	find "$LOG_DIR" -maxdepth 1 -type f -name 'guard-*' -printf '%s\n' 2>/dev/null | awk '{s+=$1} END {print s+0}'
+}
+if [ "$MAX_MB" -gt 0 ]; then
+	limit=$((MAX_MB * 1048576))
+	while [ "$(total_bytes)" -gt "$limit" ]; do
+		oldest="$(find "$LOG_DIR" -maxdepth 1 -type f \( -name 'guard-*.jsonl.gz' -o -name 'guard-errors-*.log.gz' \) -printf '%T@ %p\n' | sort -n | head -1 | cut -d' ' -f2-)"
+		if [ -z "$oldest" ]; then over=1; break; fi
+		if rm -f -- "$oldest"; then capped=$((capped + 1)); else failed=$((failed + 1)); break; fi
+	done
+fi
+
+bytes="$(total_bytes)"
+printf '{"ts":%s,"compressed":%s,"deleted":%s,"capped":%s,"over_cap":%s,"failures":%s,"retention_days":%s,"max_mb":%s,"bytes":%s}\n' \
+	"$(date +%s)" "$gzipped" "$deleted" "$capped" "$over" "$failed" "$RETENTION_DAYS" "$MAX_MB" "$bytes" \
+	> "$LOG_DIR/.last-rotate.tmp" && mv -f -- "$LOG_DIR/.last-rotate.tmp" "$LOG_DIR/.last-rotate" || failed=$((failed + 1))
+
+echo "Bot Guard log rotation: compressed $gzipped file(s), deleted $deleted archive(s) older than $RETENTION_DAYS days, $capped more for the ${MAX_MB} MiB cap, skipped $skipped non-regular entr(ies), $failed failure(s) in $LOG_DIR ($bytes bytes now)"
+[ "$over" -eq 0 ] || echo "WARNING: the uncompressed log files alone exceed log_max_mb (${MAX_MB} MiB); lower traffic logging (log_skip_paths) or raise the cap."
 [ "$failed" -eq 0 ] || exit 1
 exit 0

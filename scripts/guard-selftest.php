@@ -399,6 +399,43 @@ t_ok('empty UA plus no Accept-Language plus few headers reaches the block score'
 	$r[0] === 70 && $r[1] === array('UA_EMPTY', 'NO_AL', 'FEW_HDR'));
 
 // --------------------------------------------------------------------------
+t_section('PHP 8.4+ compatibility');
+// A typed parameter with a null default ("array $x = null") is deprecated from
+// PHP 8.4 and prints a notice on every request. Only the newest CI job would
+// see it; this scan catches it on any PHP.
+$cmp_bad = array();
+foreach (array_merge(glob(__DIR__ . '/../guard/*.php'), glob(__DIR__ . '/../panel/*.php'), glob(__DIR__ . '/../panel/views/*.php'), glob(__DIR__ . '/*.php'), array(__DIR__ . '/../prepend.php')) as $cmp_f) {
+	if (preg_match_all('/function\s+\w+\s*\([^)]*?(?<![?\w])(?:array|string|int|float|bool|callable|iterable|object|[A-Z]\w*)\s+\$\w+\s*=\s*null/i', file_get_contents($cmp_f), $m)) {
+		$cmp_bad[] = basename($cmp_f);
+	}
+}
+t_ok('no implicitly nullable typed parameter' . ($cmp_bad ? ' (' . implode(', ', $cmp_bad) . ')' : ''), !$cmp_bad);
+
+t_section('Log storage settings');
+t_ok('log storage defaults: no skipped path, 60 days, no cap, 200 MiB floor',
+	gv_cfg_defaults(array())['log_skip_paths'] === array() && gv_cfg_defaults(array())['log_retention_days'] === 60
+	&& gv_cfg_defaults(array())['log_max_mb'] === 0 && gv_cfg_defaults(array())['log_min_free_mb'] === 200);
+t_ok('a hand-edited invalid value falls back to the default',
+	gv_cfg_defaults(array('log_retention_days' => 0, 'log_max_mb' => -5, 'log_min_free_mb' => 'lots'))['log_retention_days'] === 60
+	&& gv_cfg_defaults(array('log_max_mb' => -5))['log_max_mb'] === 0 && gv_cfg_defaults(array('log_min_free_mb' => 'lots'))['log_min_free_mb'] === 200);
+t_ok('the overlay accepts the log settings and refuses a skip of the whole site',
+	gv_overlay_validate('log_skip_paths', array('/gv-admin/'))[0] === true && gv_overlay_validate('log_skip_paths', array('/'))[0] === false
+	&& gv_overlay_validate('log_retention_days', 0)[0] === false && gv_overlay_validate('log_retention_days', 365)[0] === true
+	&& gv_overlay_validate('log_max_mb', 0)[0] === true && gv_overlay_validate('log_min_free_mb', -1)[0] === false);
+t_ok('gv_path_has_prefix refuses dot segments and encoded slashes',
+	gv_path_has_prefix('/gv-admin/index.php', array('/gv-admin/')) && !gv_path_has_prefix('/gv-admin/../x', array('/gv-admin/'))
+	&& !gv_path_has_prefix('/gv-admin%2f..%2fx', array('/gv-admin')) && !gv_path_has_prefix('/other', array('/gv-admin/')));
+$ls_dir = sys_get_temp_dir() . '/gv-ls-' . getmypid();
+@mkdir($ls_dir);
+gv_log_policy(array('skip' => true, 'min_free' => 0));
+gv_log(array('a' => 1), $ls_dir); gv_log_outcome(array('o' => 1), $ls_dir);
+t_ok('skip policy: gv_log and gv_log_outcome write nothing', glob($ls_dir . '/guard-*.jsonl') === array());
+gv_log_policy(array('skip' => false, 'min_free' => 0));
+gv_log(array('a' => 1), $ls_dir);
+t_ok('policy cleared: the line is written', count(glob($ls_dir . '/guard-*.jsonl')) === 1);
+foreach ((array)glob($ls_dir . '/{,.}*', GLOB_BRACE) as $ls_f) { if (is_file($ls_f)) { @unlink($ls_f); } }
+@rmdir($ls_dir);
+
 t_section('Exemptions and known bots');
 
 $ex = array('/internal-cron.php', '/rest/');

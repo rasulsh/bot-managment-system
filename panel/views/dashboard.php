@@ -55,6 +55,51 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 </div>
 <?php endif; ?>
 
+<?php if (!empty($storage) && is_array($storage)):
+	$sw = $storage['warnings']; ?>
+<div class="gp-card">
+	<div class="gp-card-title"><?= gp_e(gp_t('ls_title')) ?>
+		<span class="gp-badge <?= $sw ? 'gp-badge-warn' : 'gp-badge-on' ?>"><?= gp_e($sw ? gp_t('ls_attention') : gp_t('ls_ok')) ?></span>
+	</div>
+	<?php foreach ($sw as $w): ?>
+	<p class="gp-note gp-note-strong" style="margin-bottom:.5rem"><?= gp_e(gp_t('ls_w_' . $w)) ?></p>
+	<?php endforeach; ?>
+	<div class="gp-stat-row">
+		<span class="gp-stat-key"><?= gp_e(gp_t('ls_total')) ?></span>
+		<span class="gp-stat-val"><?= gp_e(gp_bytes($storage['total'])) ?>
+			<?php if ($storage['max_mb'] > 0): ?> / <?= gp_e(gp_bytes($storage['max_mb'] * 1048576)) ?><?php endif; ?></span>
+	</div>
+	<div class="gp-stat-row">
+		<span class="gp-stat-key"><?= gp_e(gp_t('ls_today')) ?></span>
+		<span class="gp-stat-val"><?= gp_e(gp_bytes($storage['today'])) ?></span>
+	</div>
+	<div class="gp-stat-row">
+		<span class="gp-stat-key"><?= gp_e(gp_t('ls_archives')) ?></span>
+		<span class="gp-stat-val"><?= gp_e(gp_num($storage['archives'])) ?>
+			<?php if ($storage['oldest'] !== ''): ?> · <?= gp_e(gp_t('ls_oldest')) ?> <?= gp_e(substr($storage['oldest'], 0, 4) . '-' . substr($storage['oldest'], 4, 2) . '-' . substr($storage['oldest'], 6, 2)) ?><?php endif; ?>
+			· <?= gp_e(sprintf(gp_t('ls_kept'), gp_num($storage['retention_days']))) ?></span>
+	</div>
+	<div class="gp-stat-row">
+		<span class="gp-stat-key"><?= gp_e(gp_t('ls_free')) ?></span>
+		<span class="gp-stat-val"><?= $storage['free'] === null ? gp_e(gp_t('unknown')) : gp_e(gp_bytes($storage['free'])) ?>
+			<?php if ($storage['disk']): ?> / <?= gp_e(gp_bytes($storage['disk'])) ?><?php endif; ?>
+			<?php if ($storage['min_free_mb'] > 0): ?> · <?= gp_e(sprintf(gp_t('ls_floor'), gp_bytes($storage['min_free_mb'] * 1048576))) ?><?php endif; ?></span>
+	</div>
+	<div class="gp-stat-row">
+		<span class="gp-stat-key"><?= gp_e(gp_t('ls_rotate')) ?></span>
+		<span class="gp-stat-val"><?= $storage['rotate'] === null ? gp_e(gp_t('never'))
+			: gp_e(gp_age((int)$storage['rotate']['ts'])) . ' ' . gp_e(gp_t('ago')) ?></span>
+	</div>
+	<?php if ($storage['skip_paths']): ?>
+	<div class="gp-stat-row">
+		<span class="gp-stat-key"><?= gp_e(gp_t('ls_skipped')) ?></span>
+		<span class="gp-mono"><?= gp_e(implode('  ', $storage['skip_paths'])) ?></span>
+	</div>
+	<?php endif; ?>
+	<p class="gp-help"><?= gp_e(gp_t('ls_help')) ?></p>
+</div>
+<?php endif; ?>
+
 <?php if (!empty($ip_open)): ?>
 <div class="gp-note"><?= gp_e(gp_t('dash_ip_open')) ?></div>
 <?php endif; ?>

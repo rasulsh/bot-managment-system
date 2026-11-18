@@ -4,6 +4,8 @@
 //   php scripts/config-dump.php
 //   php scripts/config-dump.php --config /full/path/to/config.php
 //   php scripts/config-dump.php --redis-credentials     (analyzer bridge only)
+//   php scripts/config-dump.php --get log_retention_days (one top-level scalar,
+//       printed bare, for shell scripts; secrets and redis are refused)
 //
 // The config is loaded through the guard's own gv_cfg_load()/gv_cfg_defaults(),
 // so the dump reflects the shipped defaults and the forced-monitor rule exactly
@@ -25,12 +27,16 @@ define('GV_BOOT', 1);
 $gv_argv   = isset($argv) && is_array($argv) ? $argv : array();
 $gv_config = '';
 $gv_creds  = false;
+$gv_get    = '';
 for ($i = 1; $i < count($gv_argv); $i++) {
 	if ($gv_argv[$i] === '--config' && isset($gv_argv[$i + 1])) {
 		$gv_config = (string)$gv_argv[$i + 1];
 		$i++;
 	} elseif (strncmp($gv_argv[$i], '--config=', 9) === 0) {
 		$gv_config = substr($gv_argv[$i], 9);
+	} elseif ($gv_argv[$i] === '--get' && isset($gv_argv[$i + 1])) {
+		$gv_get = (string)$gv_argv[$i + 1];
+		$i++;
 	} elseif ($gv_argv[$i] === '--redis-credentials') {
 		$gv_creds = true;
 	} elseif ($gv_argv[$i] === '--help' || $gv_argv[$i] === '-h') {
@@ -50,6 +56,18 @@ if ($gv_config !== '') {
 require __DIR__ . '/../guard/guard.php';
 
 $gv_cfg = gv_cfg_load();
+
+// --get KEY: one top-level scalar, bare, for guard-logrotate.sh. Exit 3 when the
+// key is unknown, secret or not a scalar, so the caller falls back to its default.
+if ($gv_get !== '') {
+	if (in_array($gv_get, array('secret', 'holdout_salt', 'redis'), true)
+		|| !array_key_exists($gv_get, $gv_cfg) || !is_scalar($gv_cfg[$gv_get])) {
+		exit(3);
+	}
+	$gv_v = $gv_cfg[$gv_get];
+	echo (is_bool($gv_v) ? ($gv_v ? 'true' : 'false') : (string)$gv_v) . "\n";
+	exit(0);
+}
 
 // Strip the secrets. unset() rather than masking: a masked value still leaks
 // its length, and nothing downstream has any use for any of these keys.
