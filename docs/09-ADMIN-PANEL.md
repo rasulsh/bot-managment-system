@@ -74,6 +74,9 @@ generates a session secret distinct from the guard's, and writes
    `HttpOnly` and `SameSite=Strict` always, with `Path` scoped to the panel
    directory.
 
+How to expose the panel on a URL (symlink, permissions, web server settings,
+troubleshooting): [13-PANEL-WEB-ACCESS.md](13-PANEL-WEB-ACCESS.md).
+
 `panel/.htaccess` denies everything except `index.php` and the CSS/font assets,
 and denies `panel.config.php` and `audit.jsonl` explicitly. If your server
 ignores `.htaccess`, put `panel/` outside the document root and alias only

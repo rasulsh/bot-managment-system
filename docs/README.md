@@ -283,6 +283,7 @@ Python (`analyzer/decision.py`); the parity test fails until they agree exactly
 - [`docs/10-UPGRADE-NOTES.md`](10-UPGRADE-NOTES.md) — what changed in each release.
 - [`docs/11-TESTING-PIPELINE.md`](11-TESTING-PIPELINE.md) — why nothing shows in the panel, and how to test the whole pipeline.
 - [12-CHALLENGE-TEST.md](12-CHALLENGE-TEST.md): show the real challenge page to yourself, and the end-to-end challenge test
+- [`docs/13-PANEL-WEB-ACCESS.md`](13-PANEL-WEB-ACCESS.md) — making the admin panel reachable in a browser: symlink, permissions, web server settings, troubleshooting.
 
 ## Requirements
 
