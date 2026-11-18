@@ -237,7 +237,9 @@ Then, per the tool's own post-install advice:
 1. **Add the panel's URL path to `exempt_paths`** in `guard/config.php`, so your
    own bot guard cannot challenge you out of your own admin panel.
 2. Make sure the `snapshot` and `worker` cron lines from Step 4 are present.
-3. Open `panel/index.php` in a browser and sign in.
+3. Expose the panel with the symlink from "Layout (supported)" above, open
+   `https://example.com/gv-admin/` and sign in. Step by step, with permissions and
+   troubleshooting: [13-PANEL-WEB-ACCESS.md](13-PANEL-WEB-ACCESS.md).
 
 Optionally lock the panel to your own IP addresses: edit `panel/panel.config.php`
 and set `ip_allowlist` to single IPv4/IPv6 addresses or CIDR ranges, for example

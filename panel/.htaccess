@@ -16,7 +16,9 @@
 	Deny from all
 </IfModule>
 
-<FilesMatch "^index\.php$">
+# The empty alternative is the directory request itself (/gv-admin/): without it
+# Apache 2.4 refuses the panel's own URL with 403 before DirectoryIndex runs.
+<FilesMatch "^(index\.php)?$">
 	<IfModule mod_authz_core.c>
 		Require all granted
 	</IfModule>

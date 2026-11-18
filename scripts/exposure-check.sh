@@ -101,15 +101,18 @@ if [ "$NO_PANEL" = "1" ]; then
 	echo "Panel: not installed (skipped; anything under /panel was already tested above)"
 else
 echo "Panel:"
-entry="$("${CURL[@]}" -o /dev/null -w '%{http_code} %{size_download}' "$BASE_URL$PANEL_PATH/index.php" 2>/dev/null)"
+# Both the directory URL (what an operator types) and index.php must load.
+for entry_path in "$PANEL_PATH/" "$PANEL_PATH/index.php"; do
+entry="$("${CURL[@]}" -o /dev/null -w '%{http_code} %{size_download}' "$BASE_URL$entry_path" 2>/dev/null)"
 case "$entry" in
-	200\ *|302\ *|303\ *) printf '%-34s | %s\n' "$PANEL_PATH/index.php" "${entry%% *} ok" ;;
+	200\ *|302\ *|303\ *) printf '%-34s | %s\n' "$entry_path" "${entry%% *} ok" ;;
 	"404 0")
 		# index.php deliberately answers a bare, empty 404 until `php panel/setpass.php`
 		# has been run: the PHP file executed, so the layout is right.
-		printf '%-34s | %s\n' "$PANEL_PATH/index.php" "404 (empty body: panel code runs, credentials not installed yet - run php panel/setpass.php)" ;;
-	*) printf '%-34s | %s\n' "$PANEL_PATH/index.php" "${entry%% *}  PANEL ENTRY POINT DOES NOT LOAD"; failures=$((failures + 1)) ;;
+		printf '%-34s | %s\n' "$entry_path" "404 (empty body: panel code runs, credentials not installed yet - run php panel/setpass.php)" ;;
+	*) printf '%-34s | %s\n' "$entry_path" "${entry%% *}  PANEL ENTRY POINT DOES NOT LOAD"; failures=$((failures + 1)) ;;
 esac
+done
 css="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$BASE_URL$PANEL_PATH/assets/app.css" 2>/dev/null)"
 if [ "$css" = "200" ]; then
 	printf '%-34s | %s\n' "$PANEL_PATH/assets/app.css" "200 ok"

@@ -2,6 +2,20 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Panel reachable at its directory URL
+
+**Behaviour that changed**
+
+* **`/gv-admin/` (the directory URL) now opens the panel on Apache.** `panel/.htaccess` granted
+  only `index.php`, so Apache 2.4 answered 403 for the directory itself and only
+  `/gv-admin/index.php` worked. Copy the new `panel/.htaccess` over the old one.
+* `scripts/exposure-check.sh` checks both `/gv-admin/` and `/gv-admin/index.php`.
+
+**New**
+
+* [13-PANEL-WEB-ACCESS.md](13-PANEL-WEB-ACCESS.md): exposing the panel with a symlink, permissions,
+  Apache/LiteSpeed settings, checks and troubleshooting.
+
 ## Admin panel: themes, IP allowlist, pipeline status
 
 **Behaviour that changed**
