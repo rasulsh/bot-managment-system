@@ -39,6 +39,7 @@ SENSITIVE=(
 	"/logs/.redis-down"
 	"/guard/config.php"
 	"/guard/config.local.json"
+	"/guard/config-backups/"
 	"/guard/guard.php"
 	"/guard/config.php.bak"
 	"/guard/config.php~"

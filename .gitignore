@@ -42,3 +42,6 @@ logs/.redis-down
 # Analyzer run statistics (next to the model).
 analyzer/.laststats-*
 analyzer/*.tmp
+
+# Panel backups of the overlay (every save keeps the previous version).
+guard/config-backups/

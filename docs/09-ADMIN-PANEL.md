@@ -119,24 +119,69 @@ Validation lives in `gv_overlay_validate()` in `guard/guard.php`, not in
 change nothing — so what the panel accepts on write has to be the same code the
 guard runs on read, permanently.
 
-**Whitelist:** `enforce.*` and `signals.*` (bool), `hard_block_score` (10–200),
-`ml_weight` / `clf_weight` (0.0–2.0), `limits.window` (30–3600),
-`limits.device` / `.ip_ua` / `.ip` / `.bot` / `.mint` / `.preview` / `.bot_unverified` (1–100000),
-`limits.device_hour` / `.device_day` (1–1000000), `holdout_pct` (0–5),
-`challenge.pow_bits` (0–22), `challenge.gate_post` (bool), `capture_outcomes` (bool), `exempt_paths` (≤50 entries, each ≤200 chars starting
-with `/`), `exempt_params` (≤20 params, ≤50 values each), `known_bots` and
-`preview_bots` (≤20 each, lowercase `[a-z0-9._-]`), `honeypot_path` (starts with `/`, ≤100 chars).
+**Whitelist:** `gv_overlay_whitelist()` in `guard/guard.php` is the complete list, with
+the type and range of every key (the **Config file** page prints it too). It covers
+enforcement, signals and weights, every rate limit, the challenge (`pow_bits`, `gate_post`,
+`bind_ip`, `token_ttl`, `nonce_ttl`), the challenge page text
+(`strings.*`), holdout and outcome capture, exemptions and the honeypot,
+`exempt_params_paths`, `cdn_ranges`, `known_bots`, `preview_bots`, `bot_suffixes`, and the
+analyzer's operational settings (`analyzer.*`).
 
 Editing `guard/config.php` by hand still works and is still authoritative for
 anything not in the overlay. To go back to the file, use **reset to file** in the
 settings view — it removes the key from the overlay rather than writing the old
 value back.
 
+## Where each setting lives
+
+| Category | Where | Keys |
+|---|---|---|
+| **A. Install and secrets** | `guard/config.php`, over SSH | `secret`, `holdout_salt`, `redis.*` (host, port, socket, username, password, db, prefix, timeout, breaker_ttl), `log_dir`, `cookie_name`, `challenge.test_key`, `challenge.trust_headers` (rollback switch that weakens the challenge); the panel login (`setpass.php`); analyzer paths and `php_bin` (`GV_ANALYZER_CONFIG`) |
+| **B. Operation** | Panel: **Settings** or **Config file** | everything on the whitelist above |
+
+Category A is what the guard needs before it can read anything else (Redis, the log
+directory), or a secret whose change breaks every token or reshuffles the holdout. The
+**Settings** page shows their state at the bottom (set / not set, endpoint), never a
+secret value.
+
+Precedence, guard: shipped defaults → `guard/config.php` → `guard/config.local.json`.
+Precedence, analyzer: `analyzer/config.py` defaults → `GV_ANALYZER_CONFIG` file → panel
+(`analyzer.*` keys, read through `scripts/config-dump.php`).
+
+When a change takes effect: the guard reads the overlay on every request (no cache; the
+file is JSON, so OPcache does not hold an old copy). The analyzer reads it at the start of
+every run. The settings form writes only the keys you changed; a value that comes from
+`guard/config.php` stays there.
+
+## The config file editor
+
+**Config file** in the menu edits `guard/config.local.json` as text, with JSON syntax
+highlighting and a live syntax check in the browser. The browser check is a convenience;
+the server decides. Nothing is written unless the whole file passes:
+
+- strict JSON, one object, no duplicate keys (a parser that reports line and column,
+  because `json_decode()` only says "Syntax error");
+- every key on the whitelist and every value accepted by `gv_overlay_validate()`;
+- the file has not changed since the editor opened it (another tab, the settings form).
+
+Every error is listed with its line and a sentence that says what is wrong; clicking it
+selects the line. On success the previous version is copied to `guard/config-backups/`
+(newest 20 kept; also on every settings save and reset), the new text is written to a
+temp file and renamed into place, and each changed key goes to the audit trail as
+`config_file`. A backup can be opened in the editor and saved like any other edit.
+
+The editor is a textarea over a highlighted `<pre>` (about 80 lines of inline JS, no
+library). CodeMirror or Monaco would add 150 KB+ of vendored code to a panel that has no
+build step and no CDN, for one small JSON file. Without JavaScript the page is a plain
+textarea and the server check still applies. It edits JSON only: `guard/config.php` stays
+read-only for the panel, because a web form that writes PHP is code execution for anyone
+who steals the session.
+
 ## What deliberately has no UI
 
 | setting | why |
 |---|---|
-| `secret`, `holdout_salt` | Not on the whitelist and there is no form for them. Rotating `secret` invalidates every issued token at once; changing `holdout_salt` silently reshuffles the control group and invalidates the comparison the holdout exists to provide. Both are `openssl rand` + an editor, once. |
+| `secret`, `holdout_salt`, `redis`, `log_dir`, `cookie_name`, `challenge.test_key`, `challenge.trust_headers` | Not on the whitelist and there is no form for them (category A above). Rotating `secret` invalidates every issued token at once; changing `holdout_salt` silently reshuffles the control group and invalidates the comparison the holdout exists to provide. Both are `openssl rand` + an editor, once. |
 | Panel username, password, session secret | `setpass.php` only. A panel that can rewrite its own credentials from a session is one XSS away from a permanent backdoor. |
 | Reputation weights (`analyzer/reputation.py`), `DECISION_SPAN`, model internals | Code, not configuration. Changing them changes what every historical score meant, and the honest way to do that is a diff, a replay and a deploy. |
 | Log deletion, audit deletion | Append-only by design. Rotation is `scripts/guard-logrotate.sh`. |

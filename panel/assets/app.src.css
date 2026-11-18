@@ -396,6 +396,42 @@
 .gp-dl dt { @apply text-subtle; }
 .gp-dl dd { @apply m-0 break-all font-mono text-ink; }
 
+/* --- settings ------------------------------------------------------ */
+.gp-toc { @apply flex flex-wrap gap-2 text-xs; }
+.gp-toc a { @apply rounded-md border border-line bg-surface px-2 py-1 text-muted no-underline hover:bg-sunken hover:text-ink; }
+.gp-link { @apply font-bold text-accent underline; }
+.gp-set-grid { @apply grid gap-x-4 gap-y-5 sm:grid-cols-2 lg:grid-cols-3; }
+.gp-set { @apply flex min-w-0 flex-col gap-1.5; }
+.gp-set-wide { @apply sm:col-span-2 lg:col-span-3; }
+.gp-set-label { @apply text-sm font-bold text-ink; }
+.gp-set-meta { @apply flex flex-wrap items-center gap-2 text-[11px] text-subtle; }
+.gp-set-invalid .gp-input, .gp-set-invalid .gp-textarea, .gp-set-invalid .gp-check { @apply border-bad-fg; }
+.gp-savebar { @apply sticky bottom-16 z-20 flex flex-wrap items-center gap-3 rounded-xl border border-line
+	bg-surface/95 p-3 shadow-sm backdrop-blur lg:bottom-3; }
+[id^="set-"] { scroll-margin-top: 5rem; }
+
+/* --- config file editor ---------------------------------------------
+ * A transparent textarea over a highlighted <pre> with the same metrics.
+ * Without JavaScript (.gp-editor-on missing) it is a plain textarea. */
+.gp-editor { @apply relative overflow-hidden rounded-lg border border-field bg-surface; }
+.gp-editor-hl, .gp-editor-input { @apply m-0 block w-full border-0 p-3 font-mono text-xs;
+	line-height: 1.6; tab-size: 4; white-space: pre; overflow: auto; min-height: 24rem; }
+.gp-editor-hl { @apply pointer-events-none absolute inset-0 hidden text-ink; }
+.gp-editor-input { @apply relative bg-transparent text-ink outline-none; resize: vertical; }
+.gp-editor:focus-within { @apply ring-2 ring-accent/30; }
+.gp-editor-on .gp-editor-hl { @apply block; }
+.gp-editor-on .gp-editor-input { color: transparent; caret-color: rgb(var(--gp-ink)); }
+.gp-editor-on .gp-editor-input::selection { color: transparent; background: rgb(var(--gp-accent) / 0.3); }
+.gp-j-key { color: rgb(var(--gp-info-fg)); }
+.gp-j-str { color: rgb(var(--gp-ok-fg)); }
+.gp-j-num { color: rgb(var(--gp-warn-fg)); }
+.gp-j-lit { color: rgb(var(--gp-bad-fg)); font-weight: 700; }
+.gp-j-pun { color: rgb(var(--gp-muted)); }
+.gp-editor-ok { color: rgb(var(--gp-ok-fg)); }
+.gp-errlist { @apply m-0 space-y-2 p-0 text-sm; list-style: none; }
+.gp-errlist li { @apply flex flex-wrap items-baseline gap-2; }
+.gp-errlist a { @apply font-bold text-bad-fg underline; }
+
 /* --- flash --------------------------------------------------------- */
 .gp-flash { @apply rounded-lg border px-4 py-3 text-sm; }
 .gp-flash-ok { @apply border-ok-line bg-ok-bg text-ok-fg; }

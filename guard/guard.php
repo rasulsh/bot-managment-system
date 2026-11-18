@@ -162,7 +162,58 @@ function gv_overlay_whitelist() {
 		'known_bots'         => array('bots'),
 		'preview_bots'       => array('bots'),
 		'honeypot_path'      => array('hppath'),
+		// Tokens and the challenge.
+		'token_ttl'          => array('int', 3600, 2592000),
+		'nonce_ttl'          => array('int', 30, 900),
+		'challenge.bind_ip'  => array('bool'),
+		// challenge.trust_headers is deliberately NOT here: it is a rollback
+		// switch that lets any client skip the challenge by omitting an Accept
+		// header, so it stays a deliberate edit of guard/config.php.
+		// Where exempt_params count, which proxies may name the client, and the
+		// reverse-DNS suffixes that verify each known bot (read by the analyzer).
+		'exempt_params_paths' => array('exactpaths'),
+		'cdn_ranges'         => array('cidrs4'),
+		'bot_suffixes'       => array('suffixes'),
+		// The visitor-facing challenge page. Rendered escaped by challenge.php.
+		'strings.lang'       => array('lang'),
+		'strings.dir'        => array('enum', array('ltr', 'rtl')),
+		'strings.title'      => array('text', 200),
+		'strings.sub'        => array('text', 300),
+		'strings.noscript'   => array('text', 300),
+		'strings.failed'     => array('text', 300),
+		'strings.retry'      => array('text', 60),
+		'strings.nocookie'   => array('text', 300),
+		// Analyzer operation. The guard never reads these; the analyzer picks
+		// them up through scripts/config-dump.php (analyzer/config.py load()).
+		'analyzer.window_days'      => array('int', 1, 60),
+		'analyzer.session_gap_s'    => array('int', 60, 86400),
+		'analyzer.rep_ttl'          => array('int', 3600, 7776000),
+		'analyzer.ml_ttl'           => array('int', 3600, 2592000),
+		'analyzer.botv_ttl'         => array('int', 3600, 2592000),
+		'analyzer.botbad_ttl'       => array('int', 300, 86400),
+		'analyzer.dns_canary'       => array('host'),
+		'analyzer.ml_min_train'     => array('int', 10, 1000000),
+		'analyzer.contamination'    => array('float', 0.001, 0.49),
+		'analyzer.clf_min_positive' => array('int', 1, 100000),
+		'analyzer.clf_target_precision' => array('float', 0.5, 1.0),
+		'analyzer.path_listing'     => array('regexes'),
+		'analyzer.path_detail'      => array('regexes'),
+		'analyzer.report_days'      => array('int', 1, 90),
+		'analyzer.report_top_n'     => array('int', 1, 200),
+		'analyzer.challenge_success_target' => array('float', 0.5, 1.0),
+		'analyzer.snapshot_days'    => array('int', 1, 14),
+		'analyzer.job_ttl'          => array('int', 3600, 604800),
+		'analyzer.worker_max_jobs'  => array('int', 1, 50),
 	);
+}
+
+// One line of operator text: a string without control characters, bounded.
+function gv_overlay_text_ok($value, $max) {
+	if (!is_string($value)) { return 'not_string'; }
+	if (strlen($value) > $max) { return 'too_long'; }
+	if (!preg_match('//u', $value)) { return 'not_utf8'; }
+	if (preg_match('/[\x00-\x1F\x7F]/', $value)) { return 'control_chars'; }
+	return '';
 }
 
 // Validate one overlay value. Returns array(ok, value_or_error_code).
@@ -248,6 +299,87 @@ function gv_overlay_validate($key, $value) {
 		if (substr($value, 0, 1) !== '/') { return array(false, 'must_start_slash'); }
 		if (strlen($value) < 4) { return array(false, 'too_broad'); }   // "/" would 404 the home page
 		return array(true, $value);
+	}
+	if ($type === 'exactpaths') {
+		// Exact paths, so "/" is allowed here (unlike exempt_paths prefixes).
+		if (!is_array($value) || gv_is_assoc($value)) { return array(false, 'not_list'); }
+		if (count($value) > 20) { return array(false, 'too_many'); }
+		foreach ($value as $entry) {
+			if (!is_string($entry) || $entry === '') { return array(false, 'not_string'); }
+			if (strlen($entry) > 200) { return array(false, 'too_long'); }
+			if (substr($entry, 0, 1) !== '/') { return array(false, 'must_start_slash'); }
+			if (preg_match('/[\s\x00-\x1F]/', $entry)) { return array(false, 'control_chars'); }
+		}
+		return array(true, array_values($value));
+	}
+	if ($type === 'cidrs4') {
+		if (!is_array($value) || gv_is_assoc($value)) { return array(false, 'not_list'); }
+		if (count($value) > 100) { return array(false, 'too_many'); }
+		foreach ($value as $entry) {
+			if (!is_string($entry) || !preg_match('/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/', $entry, $m)
+				|| ip2long($m[1]) === false || (int)$m[2] > 32) {
+				return array(false, 'bad_cidr');
+			}
+			// Trusting X-Forwarded-For from a /0../7 would let half the internet
+			// choose its own address.
+			if ((int)$m[2] < 8) { return array(false, 'too_broad'); }
+		}
+		return array(true, array_values($value));
+	}
+	if ($type === 'suffixes') {
+		if (!is_array($value) || !gv_is_assoc($value)) { return array(false, 'not_map'); }
+		if (count($value) > 30) { return array(false, 'too_many'); }
+		$out = array();
+		foreach ($value as $name => $list) {
+			if (!is_string($name) || !preg_match('/^[a-z0-9._-]{3,40}$/', $name)) { return array(false, 'bad_param_name'); }
+			if (!is_array($list) || gv_is_assoc($list) || !$list) { return array(false, 'not_list'); }
+			if (count($list) > 10) { return array(false, 'too_many'); }
+			foreach ($list as $suffix) {
+				// A suffix starts with a dot so "evilgooglebot.com" cannot match ".googlebot.com",
+				// and has at least one more dot so it is never a bare top-level domain.
+				if (!is_string($suffix) || !preg_match('/^\.[a-z0-9-]+(\.[a-z0-9-]+)+$/', $suffix)) {
+					return array(false, 'bad_suffix');
+				}
+			}
+			$out[$name] = array_values($list);
+		}
+		return array(true, $out);
+	}
+	if ($type === 'lang') {
+		if (!is_string($value) || !preg_match('/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$/', $value)) { return array(false, 'bad_lang'); }
+		return array(true, $value);
+	}
+	if ($type === 'enum') {
+		if (!is_string($value) || !in_array($value, $spec[1], true)) { return array(false, 'not_allowed'); }
+		return array(true, $value);
+	}
+	if ($type === 'text') {
+		$err = gv_overlay_text_ok($value, $spec[1]);
+		if ($err !== '') { return array(false, $err); }
+		if (trim($value) === '') { return array(false, 'empty'); }
+		return array(true, $value);
+	}
+	if ($type === 'host') {
+		if (!is_string($value) || strlen($value) > 253
+			|| !preg_match('/^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i', $value)) {
+			return array(false, 'bad_host');
+		}
+		return array(true, strtolower($value));
+	}
+	if ($type === 'regexes') {
+		// Python reads these (re module). Only checked here for size and for
+		// compiling as PCRE, which rejects the usual typos; the analyzer
+		// additionally drops any pattern its own engine refuses.
+		if (!is_array($value) || gv_is_assoc($value)) { return array(false, 'not_list'); }
+		if (count($value) > 20) { return array(false, 'too_many'); }
+		foreach ($value as $re) {
+			$err = gv_overlay_text_ok($re, 200);
+			if ($err !== '') { return array(false, $err); }
+			if ($re === '' || @preg_match('#' . str_replace('#', '\\#', $re) . '#', '') === false) {
+				return array(false, 'bad_regex');
+			}
+		}
+		return array(true, array_values($value));
 	}
 	return array(false, 'unknown_type');
 }

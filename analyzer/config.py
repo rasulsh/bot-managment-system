@@ -12,6 +12,7 @@ the analyzer decides which IPs are impersonators, the guard honours the verdict.
 import copy
 import json
 import os
+import re
 import sys
 
 from analyzer import bridge
@@ -253,4 +254,47 @@ def load(path=None):
     # After the merge, so a relocated model_path takes its candidate with it.
     cfg = _derive_candidate_paths(cfg, explicit)
     cfg['redis'] = resolve_redis(cfg, explicit_redis)
+    cfg = apply_panel(cfg)
     return validate(cfg)
+
+
+# Analyzer keys the admin panel may set (guard overlay analyzer.*). Paths,
+# php_bin and Redis stay file-only: they are installation, not operation.
+PANEL_KEYS = {
+    'window_days': int, 'session_gap_s': int, 'rep_ttl': int, 'ml_ttl': int,
+    'botv_ttl': int, 'botbad_ttl': int, 'dns_canary': str, 'ml_min_train': int,
+    'contamination': float, 'clf_min_positive': int, 'clf_target_precision': float,
+    'path_listing': list, 'path_detail': list, 'report_days': int, 'report_top_n': int,
+    'challenge_success_target': float, 'snapshot_days': int, 'job_ttl': int,
+    'worker_max_jobs': int,
+}
+
+
+def apply_panel(cfg, settings=None):
+    """Overlay the settings saved in the admin panel. Precedence:
+    defaults < GV_ANALYZER_CONFIG file < panel, the same order as the guard
+    (config.php < config.local.json). A value of the wrong type is skipped,
+    and a regex Python cannot compile is dropped with a warning."""
+    if settings is None:
+        settings = bridge.panel_analyzer_settings(php=cfg.get('php_bin') or 'php',
+                                                  config_path=cfg.get('guard_config_path') or None)
+    for key, value in (settings or {}).items():
+        kind = PANEL_KEYS.get(key)
+        if kind is None or isinstance(value, bool):
+            continue
+        if kind is float and isinstance(value, int):
+            value = float(value)
+        if not isinstance(value, kind):
+            continue
+        if key in ('path_listing', 'path_detail'):
+            good = []
+            for pattern in value:
+                try:
+                    re.compile(pattern)
+                    good.append(pattern)
+                except (re.error, TypeError):
+                    print('WARN: panel setting %s: pattern %r does not compile in Python; ignored'
+                          % (key, pattern), file=sys.stderr)
+            value = good
+        cfg[key] = value
+    return cfg
