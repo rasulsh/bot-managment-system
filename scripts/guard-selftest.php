@@ -399,6 +399,18 @@ t_ok('empty UA plus no Accept-Language plus few headers reaches the block score'
 	$r[0] === 70 && $r[1] === array('UA_EMPTY', 'NO_AL', 'FEW_HDR'));
 
 // --------------------------------------------------------------------------
+t_section('PHP 8.4+ compatibility');
+// A typed parameter with a null default ("array $x = null") is deprecated from
+// PHP 8.4 and prints a notice on every request. Only the newest CI job would
+// see it; this scan catches it on any PHP.
+$cmp_bad = array();
+foreach (array_merge(glob(__DIR__ . '/../guard/*.php'), glob(__DIR__ . '/../panel/*.php'), glob(__DIR__ . '/../panel/views/*.php'), glob(__DIR__ . '/*.php'), array(__DIR__ . '/../prepend.php')) as $cmp_f) {
+	if (preg_match_all('/function\s+\w+\s*\([^)]*?(?<![?\w])(?:array|string|int|float|bool|callable|iterable|object|[A-Z]\w*)\s+\$\w+\s*=\s*null/i', file_get_contents($cmp_f), $m)) {
+		$cmp_bad[] = basename($cmp_f);
+	}
+}
+t_ok('no implicitly nullable typed parameter' . ($cmp_bad ? ' (' . implode(', ', $cmp_bad) . ')' : ''), !$cmp_bad);
+
 t_section('Log storage settings');
 t_ok('log storage defaults: no skipped path, 60 days, no cap, 200 MiB floor',
 	gv_cfg_defaults(array())['log_skip_paths'] === array() && gv_cfg_defaults(array())['log_retention_days'] === 60

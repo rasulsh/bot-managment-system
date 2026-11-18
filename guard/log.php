@@ -17,9 +17,9 @@ function gv_cut($s, $max) {
 //   skip      the request path is in log_skip_paths: write nothing for it
 //   min_free  MiB that must stay free on the log disk (0 = no check)
 // Outside a request (tests, panel, CLI) the default writes everything.
-function gv_log_policy(array $set = null) {
+function gv_log_policy($set = null) {
 	static $policy = array('skip' => false, 'min_free' => 0);
-	if ($set !== null) { $policy = array_merge($policy, $set); }
+	if (is_array($set)) { $policy = array_merge($policy, $set); }
 	return $policy;
 }
 
