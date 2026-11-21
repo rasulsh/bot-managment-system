@@ -783,7 +783,7 @@ for ($i = 0; $i < count($run_lines); $i++) {
 	}
 }
 t_ok('every return path in gv_run arms outcome capture (' . $armed_returns . ' armed)',
-	$armed_returns === 7 && $bare_returns === 0);
+	$armed_returns === 8 && $bare_returns === 0);
 t_ok('no exit path arms outcome capture', $armed_exits === 0);
 
 // --------------------------------------------------------------------------
@@ -1525,6 +1525,119 @@ if ($redis_bin === '') {
 	}
 	if (is_file($pid)) { @unlink($pid); }
 }
+
+// --------------------------------------------------------------------------
+t_section('IP lists: compiled allow / block files');
+
+$IPL_TMP = sys_get_temp_dir() . '/gv-iplist-selftest-' . getmypid();
+@mkdir($IPL_TMP, 0775, true);
+register_shutdown_function(function () use ($IPL_TMP) {
+	foreach ((array)glob($IPL_TMP . '/*/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+	foreach ((array)glob($IPL_TMP . '/*', GLOB_ONLYDIR) as $d) { @rmdir($d); }
+	@rmdir($IPL_TMP);
+});
+function t_ipl_dir($name, array $files) {
+	global $IPL_TMP;
+	$d = $IPL_TMP . '/' . $name;
+	@mkdir($d, 0775, true);
+	foreach ($files as $fn => $bytes) { file_put_contents($d . '/' . $fn, $bytes); }
+	putenv('GV_LISTS_DIR=' . $d);
+	gv_geo_state(true);
+	return $d;
+}
+$MON = 0x8000;
+$a4 = array(array_merge(gf_cidr4('198.51.100.0/24'), array(2 | $MON)), array_merge(gf_cidr4('203.0.113.0/24'), array(1)), array(4294967295, 4294967295, 3));
+$a6 = array(array_merge(gf_cidr6('2001:db8::/32'), array(1)));
+$b4 = array(array_merge(gf_cidr4('0.0.0.0/32'), array(7)), array_merge(gf_cidr4('198.51.100.0/24'), array(9)));
+t_ipl_dir('ok', array('allow.bin' => gf_pack(3, $a4, $a6), 'block.bin' => gf_pack(3, $b4, array(), 1700000000, 'iplists-block')));
+$ic = function ($ip) { return gv_iplist_check($ip); };
+t_ok('iplist: an address inside an allow range is a hit; its index and mode come from the value',
+	$ic('203.0.113.77')['allow'] === array('idx' => 1, 'monitor' => false) && $ic('203.0.113.77')['block'] === null);
+t_ok('iplist: the monitor bit is read (bit 15), the index is the low 15 bits',
+	$ic('198.51.100.5')['allow'] === array('idx' => 2, 'monitor' => true) && $ic('198.51.100.5')['block'] === array('idx' => 9, 'monitor' => false));
+t_ok('iplist: first and last address of a range, a gap, below the first range, the very last IPv4 address',
+	$ic('203.0.113.0')['allow'] !== null && $ic('203.0.113.255')['allow'] !== null && $ic('203.0.114.0')['allow'] === null && $ic('203.0.112.255')['allow'] === null
+	&& $ic('255.255.255.255')['allow']['idx'] === 3 && $ic('0.0.0.0')['block']['idx'] === 7 && $ic('0.0.0.1')['block'] === null);
+t_ok('iplist: IPv6, IPv4-mapped IPv6 and a miss', $ic('2001:db8::1')['allow'] !== null && $ic('2001:db9::1')['allow'] === null
+	&& $ic('::ffff:203.0.113.5')['allow'] !== null && $ic('::ffff:203.0.114.5')['allow'] === null);
+t_ok('iplist: an empty or malformed address is no match, no exception', $ic('') === array('allow' => null, 'block' => null) && $ic('nope')['allow'] === null && $ic('1.2.3')['block'] === null);
+t_ok('iplist: the log reason carries IPL_ALLOW / IPL_BLOCK, SH_ for monitor, and the id from lists.json',
+	gv_iplist_reason('allow', array('idx' => 1, 'monitor' => false)) === 'IPL_ALLOW:list1' && gv_iplist_reason('block', array('idx' => 5, 'monitor' => true)) === 'SH_IPL_BLOCK:list5');
+t_ipl_dir('named', array('lists.json' => json_encode(array('v' => 1, 'lists' => array(array('id' => 'scrapers', 'idx' => 4), array('id' => 'bad id!', 'idx' => 5), array('idx' => 6))))));
+t_ok('iplist: the id is looked up in lists.json on a hit; a missing, odd or absent id falls back to list<idx>',
+	gv_iplist_id(4) === 'scrapers' && gv_iplist_id(5) === 'list5' && gv_iplist_id(6) === 'list6' && gv_iplist_id(99) === 'list99');
+$errlog = $GV_TMP_LOGS . '/guard-errors.log';
+@unlink($errlog);
+foreach ((array)glob($GV_TMP_LOGS . '/.err-*') as $mk) { @unlink($mk); }
+t_ipl_dir('none', array());
+t_ok('iplist: no file = no list: no match and NOTHING logged (that is the normal state)', $ic('203.0.113.5') === array('allow' => null, 'block' => null) && !is_file($errlog));
+$good_l = gf_pack(3, $a4, $a6);
+t_ipl_dir('magic', array('allow.bin' => 'XXXX' . substr($good_l, 4)));
+t_ok('iplist: wrong magic is no match', $ic('203.0.113.5')['allow'] === null);
+t_ipl_dir('trunc', array('allow.bin' => substr($good_l, 0, 128 + 11)));
+t_ok('iplist: a truncated file is no match, and logged once', $ic('203.0.113.5')['allow'] === null && is_file($errlog) && strpos(file_get_contents($errlog), 'geo_corrupt') !== false);
+t_ipl_dir('short', array('allow.bin' => 'GVRG'));
+t_ok('iplist: a file shorter than the header is no match', $ic('203.0.113.5')['allow'] === null);
+t_ipl_dir('kind', array('allow.bin' => gf_pack(2, array(array(1, 2, 5)), array())));
+t_ok('iplist: an ASN file used as an IP list is refused', $ic('0.0.0.1')['allow'] === null);
+t_ipl_dir('vsize', array('allow.bin' => substr($good_l, 0, 7) . "\x00" . substr($good_l, 8)));
+t_ok('iplist: a list file with the wrong value size is refused', $ic('203.0.113.5')['allow'] === null);
+t_ipl_dir('ok3', array('allow.bin' => $good_l));
+t_ok('iplist: a good file after a bad one works again (state reset)', $ic('203.0.113.5')['allow'] !== null);
+t_ipl_dir('onlyblock', array('block.bin' => gf_pack(3, $b4, array())));
+t_ok('iplist: only the block file present: allow is null, block works', $ic('198.51.100.9') === array('allow' => null, 'block' => array('idx' => 9, 'monitor' => false)));
+
+// The tail search (64 records or fewer in one read) against a brute-force scan, every table size from 1 to 200.
+mt_srand(5);
+$bad = 0;
+for ($n = 1; $n <= 200; $n += ($n < 70 ? 1 : 13)) {
+	$r4 = array(); $pos = 1000;
+	for ($i = 0; $i < $n; $i++) { $len = mt_rand(0, 20); $r4[] = array($pos, $pos + $len, $i + 1); $pos += $len + mt_rand(2, 30); }
+	t_ipl_dir('scan' . $n, array('allow.bin' => gf_pack(3, $r4, array())));
+	for ($q = 900; $q < $pos + 40; $q++) {
+		$want = null;
+		foreach ($r4 as $r) { if ($q >= $r[0] && $q <= $r[1]) { $want = $r[2]; break; } }
+		$got = $ic(long2ip($q))['allow'];
+		if (($got === null ? null : $got['idx']) !== $want) { $bad++; }
+		if ($q % 7 === 0) { gv_geo_state(true); }
+	}
+}
+t_ok('iplist: the binary search with its in-memory tail agrees with a linear scan on every address of tables of 1..200 ranges (' . $bad . ' mismatches)', $bad === 0);
+$big4 = array(); $pos = 16777216;
+for ($i = 0; $i < 5000; $i++) { $big4[] = array($pos, $pos + 99, ($i % 40) + 1); $pos += 150; }
+t_ipl_dir('big', array('allow.bin' => gf_pack(3, $big4, array())));
+$bad = 0;
+for ($i = 0; $i < 5000; $i += 7) {
+	$s = $big4[$i][0];
+	foreach (array($s => true, $s + 99 => true, $s + 100 => false, $s - 1 => false) as $a => $want) {
+		if ($i === 0 && $a === $s - 1) { continue; }
+		if (($ic(long2ip($a))['allow'] !== null) !== $want) { $bad++; }
+	}
+}
+t_ok('iplist: a 5000-range table, boundaries of every 7th range (' . $bad . ' wrong)', $bad === 0);
+
+// What gv_run does with a hit: spelled out in the source, checked here so the guarantees cannot drift.
+$gsrc = file_get_contents(__DIR__ . '/../guard/guard.php');
+$strip = function ($code) { return preg_replace('#^\s*//.*$#m', '', $code); };   // code only: the comments talk about Redis and the holdout
+$a1 = strpos($gsrc, '// 1b. Enforced IP block list');
+$a2 = strpos($gsrc, '// 2. Verify handshake intercept');
+$a3 = strpos($gsrc, '// 3a. IP lists');
+$a3b = strpos($gsrc, '// 3b. Access rules');
+$blk1 = ($a1 !== false && $a2 > $a1) ? $strip(substr($gsrc, $a1, $a2 - $a1)) : '';
+$blk = ($a3 !== false && $a3b > $a3) ? $strip(substr($gsrc, $a3, $a3b - $a3)) : '';
+t_ok('iplist: the enforced block check (1b) sits before the challenge handshake (2); the allow check (3a) after the exemptions and before the rules and every Redis call',
+	$a1 !== false && $a1 < $a2 && $a2 < strpos($gsrc, 'gv_is_exempt($f', $a2) && strpos($gsrc, 'gv_is_exempt($f', $a2) < $a3 && $a3b > $a3 && strpos($gsrc, '$conn = gv_redis_connect($cfg[\'redis\'], $log);', $a3) > $a3b
+	&& strpos($gsrc, 'gv_redis_connect', $a1) > $a2);
+t_ok('iplist: 1b and 3a make no Redis round trip and no network request', $blk1 !== '' && $blk !== '' && !preg_match('/gv_redis|gv_bump|gv_r_|gethostby|dns_|curl_|fsockopen/', $blk1 . $blk));
+t_ok('iplist: an enforced block sends 403 and exits before the handshake; an enforced allow returns before any Redis or rule code; monitor only adds a reason',
+	strpos($blk1, "gv_emit(\$f, \$st, '403'") !== false && strpos($blk1, 'gv_send_403();') !== false && strpos($blk1, 'exit;') !== false
+	&& strpos($blk, "gv_emit(\$f, \$st, 'allow_override'") !== false && strpos($blk, "['monitor']") !== false && strpos($blk1, "['monitor']") !== false);
+t_ok('iplist: the block check keeps the exemptions and lets an enforced allow list win', strpos($blk1, 'gv_is_exempt(') !== false && strpos($blk1, "\$ipl['allow'] === null || \$ipl['allow']['monitor']") !== false);
+t_ok('iplist: a block list is not applied while the secret is unconfigured (monitor-first), an allow list is', strpos($blk1, "\$cfg['secret'] !== 'CHANGE_ME'") !== false && strpos($blk, "\$cfg['secret'] !== 'CHANGE_ME'") !== false
+	&& strpos($blk, "\$ipl['allow'] !== null") !== false);
+t_ok('iplist: lists do not depend on enforce.block / the holdout', strpos($blk1 . $blk, "enforce'") === false && strpos($blk1 . $blk, 'holdout') === false && strpos($blk1 . $blk, 'gv_is_holdout') === false);
+putenv('GV_LISTS_DIR');
+gv_geo_state(true);
 
 // --------------------------------------------------------------------------
 echo "\n";

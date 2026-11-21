@@ -20,7 +20,7 @@ define('GP_JOB_TTL', 86400);
 
 function gp_job_types() {
 	return array('verify', 'nightly', 'train', 'train_clf', 'replay_full',
-		'promote_ml', 'promote_clf', 'snapshot', 'geo_compile');
+		'promote_ml', 'promote_clf', 'snapshot', 'geo_compile', 'iplist_compile');
 }
 
 // Validate a job's parameters. Returns array(ok, params_or_error).

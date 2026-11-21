@@ -81,6 +81,12 @@ branch winning:
    (e.g. payment callbacks, cron endpoints, webhooks), log `exempt`, arm outcome
    capture, and return — the host app runs untouched.
 
+   **3a. IP lists** (`lists/allow.bin`, `lists/block.bin`; see *IP allow / block lists* below). A binary
+   search on the client address, only when an enabled list of that type exists. An enforced allow-list
+   hit returns here (`allow_override`). The enforced **block** list is decided even earlier, at **1b**,
+   right after the facts and *before* the handshake of step 2 (an exempt path still bypasses it). Neither
+   touches Redis.
+
 4. **Redis connect.** One connection. If it fails, the guard enters degraded mode:
    all counters and verdict reads are skipped, and the request can only ever be
    allowed. A Redis outage is never a bypass in the dangerous direction — it can
@@ -226,6 +232,58 @@ rules.
   skip, operator deny, then the rule. Country and ASN rules are ordinary rules and follow all of it; in
   particular, with Redis down a known-bot UA is treated as verified for `skip_verified_bots` (reason
   `RULE_SKIP_DEGRADED`), so a country rule can never block Googlebot or Bingbot during an outage.
+
+### IP allow / block lists
+
+`guard/iplist.php` (lookup), `panel/iplists.php` (everything else), `analyzer/iplist.py` (compile for big lists). The
+operator keeps named lists in the panel (**IP lists**): a type (`allow` or `block`), a mode (`enforce` or `monitor`),
+an enabled flag and a text of IPv4 / IPv6 addresses and CIDRs, one per line.
+
+* **Storage.** `lists/lists.json` (metadata, written only by the panel, temp file + rename under a lock),
+  `lists/<id>.txt` (the source), and **one compiled file per type**, `lists/allow.bin` / `lists/block.bin`, built from
+  *every enabled list of that type*. They use the range format of `geo/*.bin` (kind 3): a 128-byte header and sorted,
+  non-overlapping ranges, IPv4 `start 4 | end 4 | value 2`, IPv6 `start 16 | end 16 | value 2`. The value is a
+  `uint16`: bit 15 = the list is in monitor mode, bits 0-14 = the list index (never reused). Where lists overlap
+  the **smaller value wins**, so an *enforced* list beats a *monitor* list on the same address, then the lower index.
+  The file is written to a temp name and renamed (atomic); the file it replaces stays as `<name>.prev`.
+* **Safety caps, enforced by the compile itself** (`panel/iplists.php` `gp_ipl_refusal()` and its mirror in `analyzer/iplist.py`; the form
+  uses the same function), so a file copied over SFTP or compiled by the worker cannot bypass them: `0.0.0.0/0` and `::/0` are **always**
+  dropped (an allow list with it would switch the whole guard off); an allow entry wider than /16 (IPv4) or /32 (IPv6) is dropped; a block entry
+  wider than /8 or /32 is dropped; a block entry covering private, loopback, link-local space or the server's own addresses is dropped. The
+  list's `force` flag (set only from the panel, audit-logged) keeps everything except `0/0`. Dropped entries and unparseable lines are counted
+  per list and reason in `lists/lists-status.json` (with samples), shown on the Compile and Entries tabs, and raised on the dashboard. The
+  server's own addresses are recorded by the panel in `lists/lists.json` (`own`) on every metadata write, because the worker has no request.
+* **Compile.** In the panel request for small sources (up to 512 KiB in total), through the worker job
+  `iplist_compile` for big ones (`analyzer/iplist.py`, the same algorithm: a test compiles the same lists with both
+  and compares the files byte for byte). A type with no enabled list that has entries gets its file **deleted**: the
+  request path opens a list file only while an enabled list of that type needs it, so "no lists" costs one failed
+  `fopen()` per type (about 1 us).
+* **Lookup.** `fopen` / `fseek` / `fread` binary search with unbuffered reads, and the last 64 records of the search
+  read in one `fread`. Nothing is loaded into memory. The address is the CDN-aware client address (an IPv4-mapped IPv6
+  address is looked up as IPv4). A missing, short, wrong-magic, wrong-kind or truncated file is "no match" plus one
+  rate-limited line in `guard-errors.log` (the panel raises a dashboard alert while a list is enabled).
+* **Precedence**, highest first:
+  1. Kill switch and `exempt_paths` / `exempt_params`: unchanged, they bypass lists too.
+  2. **Allow list** (enforce) = an operator allow override, decided at step 3a (after the exemptions), before any Redis connection: skips
+     rules, scoring, counters, the challenge, the known-bot pass. Row: `act=allow_override`, `ovr=allow`,
+     `IPL_ALLOW:<id>`. It also beats an operator *deny* override (an allow override beats a deny too).
+  3. **Block list** (enforce) = 403, decided at step **1b**, **before the challenge handshake** (a listed address cannot drive handshake
+     `POST`s: no nonce claim, no counters, no Redis round trip), and so before the known-bot pass (a listed address cannot get
+     through by claiming to be Googlebot, and a verified crawler address on the list is refused too), before the
+     link-preview pass, before the counters. The holdout does not apply and `enforce.block` does not gate it: the list's
+     own mode does, like a rule. Row: `act=403`, `IPL_BLOCK:<id>`. No Redis command at all.
+  4. Everything else as before (rules, bot pass, overrides, scoring, counters).
+  An address in both an allow and a block list is **allowed** (the block check at 1b is skipped while an *enforced* allow list holds the
+  address); the panel shows a warning listing the overlapping ranges. An enforced allow list is also checked before any **deny
+  override**: a deny for an address inside it has no effect (the panel warns when the deny is created).
+* **Monitor lists** never act: the request goes on as usual and the row carries `SH_IPL_ALLOW:<id>` / `SH_IPL_BLOCK:<id>`.
+  A monitor allow list does not skip anything. With the secret unconfigured (`CHANGE_ME`) a block list is not applied
+  (monitor-first, like every enforcement); an allow list only ever relaxes, so it is.
+* **Counters.** A list hit that returns at 3a bumps no counter (an allow-listed or blocked request makes **zero** Redis
+  commands). Nothing can be reset by it; the counters of that address simply stop growing while it is listed.
+  The allow list stays after the handshake (step 3a): an allow-listed address mints a token like any client.
+* **Log and snapshot.** One row per request as always. The analyzer snapshot counts list hits per list (`iplists`,
+  24 h / 7 d / last hit, keyed `allow:<id>` / `block:<id>`), shown on the IP lists page.
 
 ### Redis contract (request path)
 

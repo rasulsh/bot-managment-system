@@ -11,7 +11,7 @@
 // Redis (scripts/bench-gv-run.sh starts a throw-away one).
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
-$opt = getopt('', array('n::', 'rules::', 'values::', 'redis-port::', 'regex::', 'geo-rules::', 'geo-ranges::', 'geo-log::', 'geo-ua::', 'lookup::', 'match::'));
+$opt = getopt('', array('n::', 'rules::', 'values::', 'redis-port::', 'regex::', 'geo-rules::', 'geo-ranges::', 'geo-log::', 'geo-ua::', 'lookup::', 'match::', 'lists::', 'list-lookup::', 'list-types::'));
 $n      = isset($opt['n']) ? (int)$opt['n'] : 3000;
 $nrules = isset($opt['rules']) ? (int)$opt['rules'] : 0;
 $nvals  = isset($opt['values']) ? (int)$opt['values'] : 5;
@@ -26,6 +26,11 @@ $geoua  = isset($opt['geo-ua']);
 $geolog = isset($opt['geo-log']);
 $granges = isset($opt['geo-ranges']) ? (int)$opt['geo-ranges'] : 150000;
 $lookup_only = isset($opt['lookup']);
+// IP lists: --lists=N4,N6 writes an allow AND a block file of N4 IPv4 + N6 IPv6 ranges each (none of
+// them covers the benchmark client); --list-lookup times gv_iplist_check() alone.
+$lists_spec = isset($opt['lists']) ? array_map('intval', explode(',', (string)$opt['lists'] . ',0')) : null;
+$list_lookup = isset($opt['list-lookup']);
+$list_types = (isset($opt['list-types']) && $opt['list-types'] === 'block') ? array('block' => 9) : array('allow' => 7, 'block' => 9);   // --list-types=block: only a block file
 $match_only = isset($opt['match']);     // --match: gv_rules_match() alone, country already known (no lookup)
 $tmp    = sys_get_temp_dir() . '/gv-bench-' . getmypid();
 @mkdir($tmp . '/logs', 0775, true);
@@ -64,7 +69,24 @@ if ($ngeo > 0 || $geolog || $lookup_only) {
 	@mkdir($tmp . '/geo', 0775, true);
 	$g = gf_random(1, $granges, 20000);
 	file_put_contents($tmp . '/geo/country.bin', gf_pack(1, $g[0], $g[1]));
+	unset($g);
+	gc_collect_cycles();
 	putenv('GV_GEO_DIR=' . $tmp . '/geo');
+}
+if ($lists_spec !== null || $list_lookup) {
+	require_once __DIR__ . '/geo-fixture.php';
+	@mkdir($tmp . '/lists', 0775, true);
+	$n4 = $lists_spec ? $lists_spec[0] : 100000;
+	$n6 = $lists_spec ? $lists_spec[1] : 10000;
+	foreach ($list_types as $lt => $seed) {
+		$g = gf_random(3, $n4, $n6, $seed);
+		// keep the benchmark client (203.0.113.0/24) out of every range
+		$g[0] = array_values(array_filter($g[0], function ($r) { return $r[1] < 3405803776 || $r[0] > 3405804031; }));
+		file_put_contents($tmp . '/lists/' . $lt . '.bin', gf_pack(3, $g[0], $g[1]));
+		unset($g);
+	}
+	gc_collect_cycles();                    // the generator's arrays are tens of MB: do not time gv_run next to them
+	putenv('GV_LISTS_DIR=' . $tmp . '/lists');
 }
 if ($ngeo > 0) {
 	$rules = array();
@@ -91,8 +113,8 @@ if ($nrules > 0) {
 
 $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 $bench_cleanup = function () use ($tmp) {
-	foreach ((array)glob($tmp . '/{,logs/,geo/}{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
-	@rmdir($tmp . '/logs'); @rmdir($tmp . '/geo'); @rmdir($tmp);
+	foreach ((array)glob($tmp . '/{,logs/,geo/,lists/}{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+	@rmdir($tmp . '/logs'); @rmdir($tmp . '/geo'); @rmdir($tmp . '/lists'); @rmdir($tmp);
 };
 if ($match_only) {
 	// The rule loop alone: the rules the run would load, the client's country supplied
@@ -106,6 +128,26 @@ if ($match_only) {
 	sort($m);
 	printf("rule loop rules=%d%s  p50=%.1fus p99=%.1fus max=%.0fus  (php %s)\n", count($loaded), $geoua ? ' ua+country' : '',
 		$m[(int)(0.5 * count($m))], $m[(int)(0.99 * count($m))], end($m), PHP_VERSION);
+	$bench_cleanup();
+	exit;
+}
+if ($list_lookup) {
+	// The IP list lookup alone (both files, no match): a fresh request (reset state, open + search both
+	// files) and the search with the files already open. Addresses are random, IPv4 and IPv6 mixed 10:1.
+	mt_srand(13);
+	$rand_ip = function () { return mt_rand(0, 10) === 0 ? '2001:db8:' . dechex(mt_rand(0, 65535)) . '::' . dechex(mt_rand(1, 65535)) : long2ip(mt_rand(16777216, 4278190080)); };
+	$warm = array(); $cold = array();
+	gv_iplist_check('1.1.1.1');
+	for ($i = 0; $i < 20000; $i++) { $ip = $rand_ip(); $t = hrtime(true); gv_iplist_check($ip); $warm[] = (hrtime(true) - $t) / 1000; }
+	for ($i = 0; $i < 10000; $i++) { $ip = $rand_ip(); gv_geo_state(true); $t = hrtime(true); gv_iplist_check($ip); $cold[] = (hrtime(true) - $t) / 1000; }
+	// And the "no enabled list" cost: both files absent.
+	putenv('GV_LISTS_DIR=' . $tmp . '/nolists');
+	$none = array();
+	for ($i = 0; $i < 10000; $i++) { gv_geo_state(true); $t = hrtime(true); gv_iplist_check('203.0.113.9'); $none[] = (hrtime(true) - $t) / 1000; }
+	sort($warm); sort($cold); sort($none);
+	$p = function ($a, $q) { return $a[(int)($q * count($a))]; };
+	printf("iplist lookup %d+%d ranges per type, " . (count($list_types) === 1 ? 'block only' : 'allow+block') . "  fresh request (open+search) p50=%.1fus p99=%.1fus max=%.0fus | files open p50=%.1fus p99=%.1fus | no lists p50=%.1fus p99=%.1fus  (php %s)\n",
+		$n4, $n6, $p($cold, 0.5), $p($cold, 0.99), end($cold), $p($warm, 0.5), $p($warm, 0.99), $p($none, 0.5), $p($none, 0.99), PHP_VERSION);
 	$bench_cleanup();
 	exit;
 }
@@ -148,6 +190,6 @@ for ($i = 0; $i < $n + 300; $i++) {
 }
 sort($samples);
 $pct = function ($p) use ($samples) { return $samples[(int)min(count($samples) - 1, floor($p * count($samples)))]; };
-printf("rules=%d%s%s values=%d%s n=%d  p50=%.0fus  p99=%.0fus  max=%.0fus  (php %s)\n", $nrules, $ngeo ? ' geo' . ($geoua ? '+ua' : '') : '', $geolog ? ' geo.log' : '', $nvals, $regex ? ' regex' : '', count($samples),
+printf("rules=%d%s%s%s values=%d%s n=%d  p50=%.0fus  p99=%.0fus  max=%.0fus  (php %s)\n", $nrules, $ngeo ? ' geo' . ($geoua ? '+ua' : '') : '', $geolog ? ' geo.log' : '', $lists_spec ? ' iplists=' . $lists_spec[0] . '+' . $lists_spec[1] . (count($list_types) === 1 ? ' block-only' : ' allow+block') : '', $nvals, $regex ? ' regex' : '', count($samples),
 	$pct(0.5), $pct(0.99), end($samples), PHP_VERSION);
 $bench_cleanup();

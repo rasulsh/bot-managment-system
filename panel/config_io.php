@@ -21,6 +21,9 @@ if (!defined('GV_NO_AUTORUN')) { define('GV_NO_AUTORUN', 1); }
 require_once __DIR__ . '/../guard/guard.php';
 
 function gp_audit_path() {
+	// GV_AUDIT lets the test harness keep the trail out of the working tree, like GV_CONFIG.
+	$env = getenv('GV_AUDIT');
+	if (is_string($env) && $env !== '') { return $env; }
 	return __DIR__ . '/audit.jsonl';
 }
 

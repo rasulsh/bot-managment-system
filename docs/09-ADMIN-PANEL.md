@@ -246,6 +246,31 @@ who steals the session.
   it says so and resolves the logged addresses in the current database, or says it cannot evaluate when there is
   no database - it never shows a bare zero. The Logs page filters by country (`cc`) and ASN (`asn`) and the CSV
   export has both columns.
+- **IP lists** — named allow / block lists of addresses and CIDRs, kept as files and compiled into one range file per type
+  that the guard searches without Redis (see [02-ARCHITECTURE.md](02-ARCHITECTURE.md#ip-allow--block-lists)). The single-address
+  overrides on the Overrides page stay as they are. Tabs: **Lists** (table with type, mode, enabled, entry and address counts,
+  hits 24 h / 7 d and last hit from the snapshot; filters name / type / mode / status, each include or exclude, as chips; enable /
+  disable, switch monitor / enforce, edit, export, delete), **Editor** (name, type, mode, enabled, note; paste text or upload a
+  file; the size is checked against `upload_max_filesize` / `post_max_size` and a bigger file is to be copied to `lists/` over SFTP),
+  **Entries** (the entries of one list, filter by text and family, include or exclude, the first 200), **Lookup tester** (an
+  address -> which list holds it, the effective decision in the guard's order, and the matching source entry) and **Compile**
+  (the compiled files with build time and range counts, rollback to `.prev`, *Compile now*, *use the worker job*, the last compile
+  result and its errors). Accepted text: plain text, one IPv4 / IPv6 address or CIDR per line, `#` comments, blank lines, CRLF, an
+  optional CSV first column. **Saving checks every line**: invalid lines are listed by line number and *nothing is saved* until
+  the operator ticks "save the valid lines only"; a block entry wider than /8 (IPv4) or /32 (IPv6), and any entry that covers
+  private, loopback, link-local space, the server's own address or the operator's own address, is refused (listed with the
+  reason) unless "I know what I'm doing" is ticked; `0.0.0.0/0` and `::/0` are refused even then. The **compile applies the same caps**
+  to every file, also one copied over SFTP: allow entries wider than /16 (IPv4) or /32 (IPv6), block entries wider than /8 or /32 and block
+  entries covering private, loopback, link-local space or the server's own addresses are dropped unless the list is forced, `0/0` always;
+  the Compile tab and the Entries tab show what was dropped (per reason, with samples) and the lines that are not an address. Overlapping
+  ranges are merged and the addresses counted. Every change is
+  audited (`iplist`, before / after) and compiles at once (or queues the job).
+  Warnings on the page: an address in both an allow and a block list (the allow list wins; the overlapping ranges are listed),
+  an allow entry wider than /16 (/32 for IPv6), an allow entry in the carrier-grade NAT range `100.64.0.0/10` or inside a mobile
+  operator AS, a block entry that covers a verified crawler seen in the recent logs, and a list changed but not yet compiled.
+- **Overrides and Identity** — a deny override for an address (or a device seen on an address) inside an *enforced* IP allow list has no
+  effect, because the allow list is checked first: the page shows a warning with a link to the list, and so does the flash right after the deny
+  is created.
 - **Audit** — the append-only trail, searchable (filters: event, user, text; each include or exclude).
 
 ## Dashboard, job health and alerts
@@ -259,6 +284,9 @@ cheap Redis command), never from the snapshot, because the snapshot job is one o
    free disk below `log_min_free_mb`; logs over the cap; no snapshot or a stale one; analyzer and panel time zones differ;
    **PR 1:** `rules.json` invalid, `rules.cache.php` older than `rules.json` (the guard then reads the JSON on every request);
    **PR 2:** a GeoIP database missing or corrupt while a geo rule is enabled (critical), older than 45 days (warning);
+   **PR 5:** a compiled IP list file missing or corrupt while its list is enabled (critical), the last IP list compile failed or its
+   worker job failed (critical), entries dropped by the safety caps (warning; **critical** when an allow list lost an entry wider than /8),
+   lists changed more than 10 minutes ago and still not compiled (warning);
    `secret` or `holdout_salt` still the placeholder; Redis not on `maxmemory-policy noeviction` (read with `CONFIG GET`, unknown
    when forbidden); crontab entries missing (critical), disabled, pointing at another install, running too rarely, or
    `GV_PYTHON` missing or invalid (warnings).

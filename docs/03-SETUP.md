@@ -227,7 +227,7 @@ without `worker`, panel-triggered jobs sit queued forever.
 | Job (cron mode) | Interval | Required | If it does not run |
 |---|---|---|---|
 | `verify` | 10 min | yes | Real crawlers never leave the shared `limits.bot_unverified` budget; fake crawlers are not refuted. |
-| `worker` | 1 min | yes | Jobs started from the panel (compile GeoIP, train, promote, replay) wait in the queue for ever. |
+| `worker` | 1 min | yes | Jobs started from the panel (compile GeoIP or IP lists, train, promote, replay) wait in the queue for ever. Small IP lists compile inside the panel request and do not need it. |
 | `snapshot` | 15 min | yes | The dashboard numbers (24 h KPIs, top lists, charts) freeze; the dashboard keeps looking normal. |
 | `nightly` | 24 h | yes | Reputations and anomaly levels expire (14 d / 24 h) and stop being refreshed; scoring gets weaker. |
 | `guard-logrotate.sh` | 24 h | yes | Logs are never compressed or deleted: the disk fills, then the guard stops logging at the floor. |

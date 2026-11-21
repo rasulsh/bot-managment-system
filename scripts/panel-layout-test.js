@@ -19,7 +19,7 @@ const ROOT = BASE.replace(/\/$/, '') + '/' + (PANEL || '/panel').replace(/^\/|\/
 const ORIGIN = new URL(BASE).origin;
 const VIEWS = [{ name: 'desktop', width: 1600, height: 1000 }, { name: 'mobile', width: 390, height: 844 }];
 const PAGES = ['dashboard', 'logs', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'identity&id=203.0.113.5', 'overrides', 'rules', 'rules&new=1', 'rules&edit=ZZ',
-	'geo', 'geo&test=1&ip=203.0.113.7', 'replay', 'models', 'settings', 'config_file', 'jobs', 'jobs&job=verify', 'audit&event=config&event_op=not'];
+	'geo', 'geo&test=1&ip=203.0.113.7', 'iplists', 'iplists&new=1&type=block', 'iplists&test=1&ip=203.0.113.7', 'replay', 'models', 'settings', 'config_file', 'jobs', 'jobs&job=verify', 'audit&event=config&event_op=not'];
 let failed = 0;
 const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } else { failed++; console.log('FAIL  ' + name + (extra ? ' (' + extra + ')' : '')); } };
 
@@ -88,6 +88,11 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 			&& (await page.locator('[data-tabs=rule] .gp-tab-badge').count()) === 1);
 		await page.goto(ROOT + '?r=geo');
 		check(v.name + ' geoip: tabs', (await page.locator('[data-tabs=geo] > .gp-tablist > [role=tab]').count()) === 3);
+		await page.goto(ROOT + '?r=iplists');
+		check(v.name + ' ip lists: lists / editor / entries / tester / compile tabs', (await page.locator('[data-tabs=ipl] > .gp-tablist > [role=tab]').count()) === 5);
+		await page.goto(ROOT + '?r=iplists&new=1&type=block#ipl-editor');
+		check(v.name + ' ip lists: the editor tab opens from the URL hash and has tooltips', (await page.locator('[data-tabs=ipl] > .gp-tablist > [aria-selected=true]').getAttribute('data-tab')) === 'editor'
+			&& (await page.locator('[data-panel=editor] .gp-tip-btn').count()) >= 8);
 
 		// ---- tooltips
 		await page.goto(ROOT + '?r=rules&new=1');

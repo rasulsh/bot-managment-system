@@ -66,11 +66,30 @@ def rule_ids(row):
     return out
 
 
+LIST_PREFIXES = (('IPL_ALLOW:', 'allow'), ('SH_IPL_ALLOW:', 'allow'), ('IPL_BLOCK:', 'block'), ('SH_IPL_BLOCK:', 'block'))
+
+
+def list_ids(row):
+    """IP-list hits a decision row carries: 'allow:<id>' / 'block:<id>' (IPL_* and SH_IPL_* reasons). Pure."""
+    out = []
+    for reason in (row.get('rs') or []):
+        if not isinstance(reason, str):
+            continue
+        for prefix, kind in LIST_PREFIXES:
+            if reason.startswith(prefix) and 0 < len(reason) - len(prefix) <= 24:
+                out.append('%s:%s' % (kind, reason[len(prefix):]))
+    return out
+
+
 def count_rule_hits(rows, since=0.0):
-    """{id: [hits with ts >= since, last ts]} over decision rows. Pure."""
+    """{id: [hits with ts >= since, last ts]} over decision rows. Pure.
+
+    Access-rule ids are keyed as they are; IP-list hits are keyed 'ipl:<allow|block>:<id>'
+    (collect_rule_hits splits them out into the snapshot's 'iplists').
+    """
     out = {}
     for row in rows:
-        ids = rule_ids(row)
+        ids = rule_ids(row) + ['ipl:' + x for x in list_ids(row)]
         if not ids:
             continue
         try:
@@ -135,6 +154,17 @@ def collect_rule_hits(log_dir, now, cache_path=None, days=7):
     for slot in totals.values():
         slot['last'] = round(slot['last'], 3)
     return totals
+
+
+def split_list_hits(totals):
+    """(rule hits, list hits) out of collect_rule_hits' one table. List keys: 'allow:<id>' / 'block:<id>'. Pure."""
+    rules, lists = {}, {}
+    for key, slot in totals.items():
+        if key.startswith('ipl:'):
+            lists[key[4:]] = slot
+        else:
+            rules[key] = slot
+    return rules, lists
 
 
 ALLOW_ACTS = ('allow', 'allow_bot', 'allow_preview', 'allow_override', 'exempt')
@@ -494,9 +524,10 @@ def main(argv=None):
     if not all_rows:
         jobreport.warn('no log rows in the last %d day(s): the dashboard shows nothing (is the guard logging?)' % (days * 2 + 1))
     try:
-        payload['rules'] = collect_rule_hits(
+        hit_totals = collect_rule_hits(
             cfg['log_dir'], time.time(),
             os.path.join(os.path.dirname(os.path.abspath(__file__)), '.rule-hits.json'))
+        payload['rules'], payload['iplists'] = split_list_hits(hit_totals)
     except Exception as exc:                  # hit counts are a convenience, never fatal
         print('WARNING: rule hit counts skipped: %s' % exc, file=sys.stderr)
 

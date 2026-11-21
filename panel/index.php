@@ -24,6 +24,7 @@ require_once __DIR__ . '/ui.php';
 require_once __DIR__ . '/health.php';
 require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/rules.php';
+require_once __DIR__ . '/iplists.php';
 
 $GP_LANG = require __DIR__ . '/lang.php';
 
@@ -248,6 +249,7 @@ switch ($gp_route) {
 			'cron_lines' => gp_cron_setup_lines($hjobs, $hin['cron']),
 			'protection' => gp_protection_mode($hcfg, $hrules['rules']),
 			'rsum'     => gp_rules_summary($hrules['rules']),
+			'isum'     => gp_iplists_summary(gp_iplists_state()['lists']),
 		));
 
 	case 'logs':
@@ -275,6 +277,7 @@ switch ($gp_route) {
 			'identity' => $identity,
 			'verdicts' => $identity !== '' ? gp_identity_verdicts($identity) : array(),
 			'rows'     => $identity !== '' ? gp_identity_rows($identity, 60, $idfilter) : array(),
+			'shadow'   => $identity !== '' ? gp_iplists_deny_shadow(array($identity)) : array(),
 			'redis_up' => gp_redis_up(),
 		));
 
@@ -288,6 +291,7 @@ switch ($gp_route) {
 			'filter'   => $ofilter,
 			'items_all' => $oall = gp_overrides_list(),
 			'items'    => gp_overrides_filter($oall, $ofilter),
+			'shadow'   => gp_iplists_deny_shadow(array_values(array_map(function ($i) { return $i['identity']; }, array_filter($oall, function ($i) { return $i['kind'] === 'deny'; })))),
 			'redis_up' => gp_redis_up(),
 		));
 
@@ -375,6 +379,62 @@ switch ($gp_route) {
 				? gp_geo_test($gtest_in['ip'], $gtest_in['ua'], $gtest_in['path'], $gtest_in['verified'], $gstate['rules'], $gcfg, time()) : null,
 			'test_ran' => (($_GET['test'] ?? '') === '1'),
 			'jobs' => array_slice(array_values(array_filter(gp_job_list(30), function ($j) { return ($j['type'] ?? '') === 'geo_compile'; })), 0, 5),
+		));
+
+	case 'iplists':
+		if ($gp_post && isset($_POST['do']) && is_string($_POST['do'])) {
+			$do = $_POST['do'];
+			$r = array(false, 'err_generic', '');
+			if ($do === 'save') {
+				$sv = gp_iplists_save($_POST, isset($_FILES['file']) && is_array($_FILES['file']) ? $_FILES['file'] : null, $gp_user, $gp_ip);
+				if ($sv['ok']) { gp_flash('ok', gp_t($sv['msg']) . ($sv['detail'] !== '' ? ': ' . $sv['detail'] : '')); gp_redirect('iplists'); }
+				gp_flash($sv['msg'] === 'ipl_confirm' ? 'warn' : 'error', gp_t($sv['msg']) . ($sv['detail'] !== '' ? ': ' . $sv['detail'] : ''));
+				$ipl_save = $sv;
+			} else {
+				if ($do === 'delete') { $r = gp_iplists_delete(is_string($_POST['id'] ?? null) ? $_POST['id'] : '', $gp_user, $gp_ip); }
+				elseif ($do === 'set') { $r = gp_iplists_set($_POST, $gp_user, $gp_ip); }
+				elseif ($do === 'compile') {
+					$r = gp_iplists_compile_auto($gp_user, !empty($_POST['job']));
+					gp_ipl_audit($gp_user, $gp_ip, 'compile', null, array('ok' => $r[0], 'result' => $r[1], 'job' => !empty($_POST['job'])));
+				}
+				elseif ($do === 'rollback') { $r = gp_iplists_rollback(($_POST['type'] ?? '') === 'block' ? 'block' : 'allow', $gp_user, $gp_ip); }
+				gp_flash($r[0] ? 'ok' : 'error', gp_t($r[1]) . ($r[2] !== '' ? ': ' . $r[2] : ''));
+				gp_redirect('iplists');
+			}
+		}
+		if (($_GET['export'] ?? '') !== '' && is_string($_GET['export'])) {
+			$ex = gp_iplists_export($_GET['export']);
+			if ($ex[0] === null) { gp_flash('error', gp_t('ipl_not_found')); gp_redirect('iplists'); }
+			gp_hardening_headers();
+			header('Content-Type: text/plain; charset=utf-8');
+			header('Content-Disposition: attachment; filename="' . $ex[0]['id'] . '.txt"');
+			echo $ex[1];
+			exit;
+		}
+		// A body larger than post_max_size arrives with no POST data at all (so no CSRF token).
+		if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && empty($_POST) && empty($_FILES) && (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+			gp_flash('error', gp_t('ipl_up_toobig'));
+		}
+		$istate = gp_iplists_state();
+		$istatus = gp_iplists_status();
+		$ifilter = gp_filter_parse($_GET, gp_iplists_filter_spec());
+		$irows = gp_iplists_rows($istate['lists'], $istatus, gp_snapshot());
+		$iedit = null;
+		if (isset($ipl_save)) { $iedit = $ipl_save['draft']; }
+		elseif (isset($_GET['edit']) && is_string($_GET['edit'])) { $iedit = gp_ipl_find($istate['lists'], $_GET['edit']); if ($iedit) { $iedit['text'] = ''; } }
+		elseif (isset($_GET['new'])) { $iedit = array('id' => '', 'name' => '', 'type' => (($_GET['type'] ?? '') === 'allow' ? 'allow' : 'block'), 'mode' => 'monitor', 'enabled' => true, 'force' => false, 'note' => '', 'text' => ''); }
+		$eid = isset($_GET['list']) && is_string($_GET['list']) ? $_GET['list'] : '';
+		$efilter = gp_filter_parse($_GET, array('entry' => 'text', 'family' => 'choice'));
+		$itest_ip = is_string($_GET['ip'] ?? null) ? substr($_GET['ip'], 0, 45) : '';
+		gp_render('iplists', array(
+			'state' => $istate, 'status' => $istatus, 'all' => $irows, 'visible' => gp_iplists_filter_rows($irows, $ifilter), 'filter' => $ifilter,
+			'edit' => $iedit, 'save' => isset($ipl_save) ? $ipl_save : null,
+			'warnings' => gp_iplists_warnings($istate['lists'], gp_iplists_verified_ips()),
+			'pending' => gp_iplists_pending($istate, $istatus), 'health' => gp_iplists_health(),
+			'eid' => $eid, 'efilter' => $efilter, 'entries' => $eid !== '' ? gp_iplists_entries($eid, $efilter) : array(array(), 0, 0, 0),
+			'test_ip' => $itest_ip, 'test' => (($_GET['test'] ?? '') === '1') ? gp_iplists_test($itest_ip) : null, 'test_ran' => (($_GET['test'] ?? '') === '1'),
+			'limit' => gp_geo_upload_limit(), 'jobs' => array_slice(array_values(array_filter(gp_job_list(30), function ($j) { return ($j['type'] ?? '') === 'iplist_compile'; })), 0, 5),
+			'prev' => array('allow' => is_file(gv_iplist_file('allow') . '.prev'), 'block' => is_file(gv_iplist_file('block') . '.prev')),
 		));
 
 	case 'replay':
@@ -572,6 +632,11 @@ function gp_handle_override_post($user, $ip) {
 				'ip' => $ip, 'key' => $identity, 'old' => null,
 				'new' => array('ttl' => $ttl)));
 			gp_flash('ok', gp_t('ovr_added'));
+			// A deny under an ENFORCED allow list does nothing: the allow list is checked first.
+			if ($action === 'deny') {
+				$sh = gp_iplists_deny_shadow(array(gp_identity_canon($identity)));
+				if ($sh) { gp_flash('warn', str_replace('%s', (string)reset($sh), gp_t('ovr_deny_shadowed'))); }
+			}
 		} else {
 			gp_flash('error', gp_t('err_generic'));
 		}

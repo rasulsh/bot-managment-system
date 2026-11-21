@@ -120,6 +120,27 @@ Web-protected like `guard/`. `GV_GEO_DIR` (environment) points the guard and the
 Compile: panel -> GeoIP -> **Compile now** (job `geo_compile`) or `scripts/analyzer-cron.sh geo`. Environment knobs for the compile:
 `GV_GEO_MIN_RANGES` (default 1000, the smallest table that is accepted; for tests).
 
+## IP list files (`lists/`)
+
+Web-protected like `guard/` and `geo/` (`lists/.htaccess`; `scripts/exposure-check.sh` probes it). `GV_LISTS_DIR` (environment)
+points the guard, the panel and the analyzer at another directory (tests). No overlay key: everything the operator changes
+is a list on the IP lists page.
+
+| File | Written by | Meaning |
+|---|---|---|
+| `lists.json` | the panel | `own` (the server's own addresses the panel saw, 16 at most: block entries covering them are dropped by the compile) and the lists: `id` (log name, `[a-z0-9-]`, 24 at most), `idx` (the number in the compiled value, never reused), `name`, `type` (`allow` / `block`), `enabled`, `mode` (`enforce` / `monitor`), `force`, `note`, audit fields. 50 lists at most. |
+| `<id>.txt` | the panel (or SFTP) | The source of one list: one IPv4 / IPv6 address or CIDR per line. `#` starts a comment, blank lines, CRLF and a BOM are fine, a CSV reads its first column. The panel stores the accepted entries in canonical form. 16 MiB and 300 000 lines at most per list. |
+| `allow.bin`, `block.bin` | the panel (small) or `analyzer/iplist.py` (job `iplist_compile`) | Compiled range files (kind 3) from every enabled list of that type. Deleted when no enabled list of the type has entries. `.prev` = the file replaced (rollback). |
+| `lists-status.json` | the compiler | Last compile: time, who ran it (`php` / `python`), `ok`, errors, per type the build time / range counts / sha256 / list ids, per list the counts (`entries` kept, `v4` / `v6` ranges, `addresses` (IPv4), `invalid` lines with `invalid_samples`, `dropped` per reason `all` / `allow_wide` / `wide` / `protected`, `dropped_n`, `dropped_huge` (allow entries wider than /8) and `dropped_samples`, 10 samples at most each). |
+| `.pending-<token>.txt` | the panel | A text waiting for the operator's confirmation of invalid lines; removed on save or after a day. |
+| `.compile.lock`, `.meta.lock` | the panel / the compiler | Locks. |
+
+Safety caps applied by every compile (panel and worker): `0.0.0.0/0` / `::/0` always dropped; allow wider than /16 or /32 dropped; block wider
+than /8 or /32 dropped; block covering private / loopback / link-local space or `own` dropped. `force` keeps all but `0/0`.
+
+Log reasons: `IPL_ALLOW:<id>`, `IPL_BLOCK:<id>`, and `SH_IPL_ALLOW:<id>` / `SH_IPL_BLOCK:<id>` for a monitor list.
+Job type: `iplist_compile` (no parameters). Audit event: `iplist` (create, edit, toggle, delete, rollback, with before / after).
+
 ## Platform notes
 
 - **WordPress**: `auto_prepend_file` recommended. Typical exemptions:

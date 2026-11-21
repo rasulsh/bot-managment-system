@@ -13,6 +13,9 @@
 # GeoIP: a country.bin built by analyzer/geo.py maps 127.0.0.0/8 to US and 5.0.0.0/8 to IR; the
 # client address is 127.0.0.1 (US), or 5.x / 9.x through X-Forwarded-For (cdn_ranges trusts the
 # loopback proxy here) for an IR and an unplaced visitor.
+# IP lists: allow/block lists compiled by analyzer/iplist.py (the worker's compiler) into $WORK/lists; the whole
+# precedence chain (allow beats rules and the operator deny, block beats the known-bot pass, both = allow wins
+# with the panel warning, kill switch and exempt paths unchanged, no Redis work, broken files fail open).
 # Needs: php (8.0+), python3 (stdlib only), curl, redis-server. Touches nothing outside a temp dir
 # (the kill-switch case creates and removes guard.off in the project root).
 set -uo pipefail
@@ -46,7 +49,7 @@ R() { redis-cli -p "$RPORT" "$@" >/dev/null; }
 SALT=$("$PHP_BIN" -r 'define("GV_BOOT",1); define("GV_NO_AUTORUN",1); require $argv[1]."/guard/guard.php";
 	for ($i = 0; $i < 100000; $i++) { if (gv_is_holdout("127.0.0.1", "s$i", 5)) { echo "s$i"; break; } }' "$ROOT")
 
-mkdir -p "$WORK/logs" "$WORK/geo"
+mkdir -p "$WORK/logs" "$WORK/geo" "$WORK/lists"
 # Test fixture only: the ranges are written with the real compiler's file format.
 python3 -I - "$ROOT" "$WORK/geo/country.bin" <<'PY'
 import sys
@@ -96,11 +99,27 @@ write_rules() {
 		file_put_contents($argv[2], gv_rules_cache_source(gv_rules_read($argv[3])));' "$ROOT" "$WORK/rules.cache.php" "$RULES"
 }
 
+
+# ilist ID IDX TYPE MODE ENABLED CIDR...  -> one list (record + source; FORCE=true sets the list's force flag: the compile
+# drops loopback / private entries of a block list otherwise); lists_compile writes lists.json and runs the
+# worker's compiler (analyzer/iplist.py), exactly what the panel's job does for a big list.
+ILS=()
+ilist() {
+	local id=$1 idx=$2 type=$3 mode=$4 en=$5; shift 5
+	ILS+=("{\"id\":\"$id\",\"idx\":$idx,\"name\":\"$id\",\"type\":\"$type\",\"mode\":\"$mode\",\"enabled\":$en,\"force\":${FORCE:-false},\"note\":\"\",\"created_by\":\"\",\"created_at\":0,\"updated_at\":0}")
+	printf '%s\n' "$@" > "$WORK/lists/$id.txt"
+}
+lists_compile() {
+	printf '{"v":1,"next_idx":99,"lists":[%s]}' "$(IFS=,; echo "${ILS[*]:-}")" > "$WORK/lists/lists.json"
+	python3 -I "$ROOT/analyzer/iplist.py" --dir "$WORK/lists" >/dev/null 2>&1
+	ILS=()
+}
+
 redis-server --port "$RPORT" --save "" --appendonly no --dir "$WORK" >"$WORK/redis.log" 2>&1 &
 PIDS+=($!)
 sleep 0.3
 write_rules
-GV_GEO_DIR="$WORK/geo" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "127.0.0.1:$PORT" "$ROOT/scripts/dev-router.php" >"$WORK/php.log" 2>&1 &
+GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "127.0.0.1:$PORT" "$ROOT/scripts/dev-router.php" >"$WORK/php.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/t/404" 2>/dev/null && break; sleep 0.1; done
 
@@ -302,6 +321,171 @@ ok "J7 ...and reported as corrupt" "$(grep -q geo_corrupt "$WORK/logs/guard-erro
 mv "$WORK/geo/country.bin.keep" "$WORK/geo/country.bin"
 eq "J8 the database back: the rule acts again" "$(get "$UA" /j8)" 403
 
+echo "== L. IP lists: block, allow, monitor and the whole precedence chain (the rules, bots and Redis keys are the ones above)"
+R flushall
+cmds() { redis-cli -p "$RPORT" info stats | sed -n 's/^total_commands_processed:\([0-9]*\).*/\1/p' | tr -d '\r'; }
+write_rules
+x=$(cmds); idle=$(( $(cmds) - x ))          # what two back-to-back INFO calls count by themselves
+eq "L0 no list files: a request is served and the row has no list reason" "$(get "$UA" /l0)" 200
+has 'IPL_'; ok "L0b ...no IPL reason" "$([ $? -ne 0 ] && echo 1 || echo 0)"
+ilist scrapers 1 block enforce true 203.0.113.0/24 2001:db8::/32 '# comment' 198.51.100.7
+lists_compile
+eq "L1 an enforced block list refuses a listed address with 403 although enforce.block is off" "$(get "$UA" /l1 -H 'X-Forwarded-For: 203.0.113.9')" 403
+has '"IPL_BLOCK:scrapers"'; ok "L2 the row carries IPL_BLOCK:scrapers, act 403, sh 0" "$([ $? -eq 0 ] && has '"act":"403"' && has '"sh":0' && echo 1 || echo 0)"
+eq "L3 an address outside the list is served" "$(get "$UA" /l3 -H 'X-Forwarded-For: 203.0.114.9')" 200
+eq "L4 a single-address entry and an IPv6 range both match" "$(get "$UA" /l4 -H 'X-Forwarded-For: 198.51.100.7')$(get "$UA" /l4b -H 'X-Forwarded-For: 2001:db8::5')" 403403
+eq "L5 the neighbour of a single-address entry is served" "$(get "$UA" /l5 -H 'X-Forwarded-For: 198.51.100.8')" 200
+before=$(rows); get "$UA" /l6 -H 'X-Forwarded-For: 203.0.113.9' >/dev/null
+eq "L6 exactly one log row per refused request" "$(( $(rows) - before ))" 1
+a=$(cmds); get "$UA" /l7 -H 'X-Forwarded-For: 203.0.113.9' >/dev/null; b=$(cmds)
+eq "L7 a block-listed request costs ZERO Redis commands" "$(( b - a ))" "$idle"
+# no extra Redis round trip for a request the list does not touch: same commands as with no list at all
+a=$(cmds); get "$UA" /l8 -H 'X-Forwarded-For: 192.0.2.77' >/dev/null; b=$(cmds)
+ilist none 1 block enforce false 1.2.3.4; lists_compile
+c=$(cmds); get "$UA" /l8b -H 'X-Forwarded-For: 192.0.2.77' >/dev/null; d=$(cmds)
+eq "L8 an unlisted request costs the same Redis commands with an enabled list as with none" "$(( b - a ))" "$(( d - c ))"
+ls "$WORK/lists/block.bin" >/dev/null 2>&1; ok "L9 with no enabled list the compiled file is gone: the guard opens nothing" "$([ $? -ne 0 ] && echo 1 || echo 0)"
+ilist scrapers 1 block enforce true 203.0.113.0/24 2001:db8::/32 198.51.100.7
+lists_compile
+
+echo "-- L: block list vs the known-bot pass"
+R set "gv:botok:203.0.113.9" 1 EX 60
+eq "L10 a block list beats the known-bot pass: a VERIFIED Googlebot address on the list is refused" "$(get "$GBOT" /l10 -H 'X-Forwarded-For: 203.0.113.9')" 403
+R del "gv:botok:203.0.113.9"
+eq "L11 a Googlebot CLAIM from a listed address is refused too" "$(get "$GBOT" /l11 -H 'X-Forwarded-For: 203.0.113.10')" 403
+eq "L12 the same claim from an unlisted address still takes the bot pass" "$(get "$GBOT" /l12 -H 'X-Forwarded-For: 203.0.114.10')" 200
+has '"act":"allow_bot"'; ok "L13 ...as allow_bot" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+eq "L14 a link-preview fetcher from a listed address is refused (the preview pass is behind the list)" "$(get 'TelegramBot (like TwitterBot)' /l14 -H 'X-Forwarded-For: 203.0.113.11')" 403
+
+echo "-- L: monitor lists never act"
+ilist scrapers 1 block monitor true 203.0.113.0/24
+lists_compile
+eq "L15 a monitor block list serves the request" "$(get "$UA" /l15 -H 'X-Forwarded-For: 203.0.113.9')" 200
+has '"SH_IPL_BLOCK:scrapers"'; ok "L16 ...and logs SH_IPL_BLOCK:scrapers" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+ilist scrapers 1 block monitor true 203.0.113.0/24
+ilist hard 2 block enforce true 203.0.113.0/24
+lists_compile
+eq "L17 where a monitor and an enforced list overlap, the enforced list acts" "$(get "$UA" /l17 -H 'X-Forwarded-For: 203.0.113.9')" 403
+has '"IPL_BLOCK:hard"'; ok "L18 ...and the row names the enforced list" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+
+echo "-- L: allow list beats rules, scoring, challenge and the operator deny"
+ilist partners 1 allow enforce true 127.0.0.1 198.51.100.0/25
+lists_compile
+write_rules "$(rule r-evil Evil enforce block '["evilbot"]')" "$(rule r-chal Chal enforce challenge '["chalbot"]')"
+eq "L19 an allow list beats an enforced block rule" "$(get 'x evilbot' /l19)" 200
+has '"act":"allow_override"'; ok "L20 ...logged as allow_override with IPL_ALLOW:partners and no RULE reason" "$([ $? -eq 0 ] && has '"IPL_ALLOW:partners"' && ! has 'RULE:' && echo 1 || echo 0)"
+eq "L21 an allow list beats an enforced challenge rule (no challenge page, no token needed)" "$(get 'x chalbot' /l21)" 200
+R set "gv:deny:127.0.0.1" 1 EX 60
+eq "L22 an allow list beats an operator DENY override (an allow override beats a deny too)" "$(get 'x evilbot' /l22)" 200
+R del "gv:deny:127.0.0.1"
+a=$(cmds); get 'x evilbot' /l23 >/dev/null; b=$(cmds)
+eq "L23 an allow-listed request costs ZERO Redis commands" "$(( b - a ))" "$idle"
+eq "L24 an allow list beats the known-bot unverified budget and a fake-bot claim (no Redis verdict is read)" "$(get "$GBOT" /l24)" 200
+has '"act":"allow_override"'; ok "L25 ...as allow_override, not allow_bot" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+eq "L26 an address outside the allow list is judged as before (the rule blocks it)" "$(get 'x evilbot' /l26 -H 'X-Forwarded-For: 203.0.114.200')" 403
+eq "L27 an allow list holding an IPv4 range matches through the proxy header too" "$(get 'x evilbot' /l27 -H 'X-Forwarded-For: 198.51.100.100')" 200
+ilist partners 1 allow monitor true 127.0.0.1
+lists_compile
+eq "L28 a MONITOR allow list does not skip anything: the rule still blocks" "$(get 'x evilbot' /l28)" 403
+has '"SH_IPL_ALLOW:partners"'; ok "L29 ...and the row carries SH_IPL_ALLOW:partners next to the rule" "$([ $? -eq 0 ] && has '"RULE:r-evil"' && echo 1 || echo 0)"
+
+echo "-- L: an address in both lists: the allow list wins (and the panel warns)"
+ilist partners 1 allow enforce true 203.0.113.64/26
+ilist scrapers 2 block enforce true 203.0.113.0/24
+lists_compile
+eq "L30 in both lists: allowed" "$(get "$UA" /l30 -H 'X-Forwarded-For: 203.0.113.70')" 200
+has '"IPL_ALLOW:partners"'; ok "L31 ...as allow_override" "$([ $? -eq 0 ] && has '"allow_override"' && ! has 'IPL_BLOCK' && echo 1 || echo 0)"
+eq "L32 the rest of the block range is still refused" "$(get "$UA" /l32 -H 'X-Forwarded-For: 203.0.113.5')" 403
+warn=$(GV_LISTS_DIR="$WORK/lists" GV_GEO_DIR="$WORK/geo" "$PHP_BIN" -r 'define("GV_BOOT", 1); define("GV_NO_AUTORUN", 1); define("GP_BOOT", 1); $r = $argv[1];
+	require $r . "/guard/guard.php"; require $r . "/panel/config_io.php"; require $r . "/panel/jobs.php"; require $r . "/panel/iplists.php";
+	foreach (gp_iplists_warnings(gp_iplists_state()["lists"]) as $w) { echo $w[0], " ", $w[1], "\n"; }' "$ROOT")
+ok "L33 the panel's warning lists the conflicting range and both lists" "$(echo "$warn" | grep -q '^conflict 203.0.113.64 - 203.0.113.127 (partners / scrapers)' && echo 1 || echo 0)"
+
+echo "-- L: kill switch, exempt paths and the holdout"
+FORCE=true ilist hold 1 block enforce true 127.0.0.1
+lists_compile
+eq "L34 a held-out client (127.0.0.1 is in the holdout here) is still refused by a block list" "$(get "$UA" /l34)" 403
+eq "L35 an exempt path bypasses a block list" "$(get "$UA" /exempt-me)" 200
+touch "$ROOT/guard.off"
+eq "L36 the kill switch bypasses a block list" "$(get "$UA" /l36)" 200
+rm -f "$ROOT/guard.off"
+eq "L37 without the kill switch the list acts again" "$(get "$UA" /l37)" 403
+
+echo "-- L: an enforced block list is decided BEFORE the challenge handshake (no nonce claim, no counters, no Redis)"
+ilist none 1 block enforce false 1.2.3.4
+lists_compile
+write_rules "$(rule r-chal Chal enforce challenge '["chalbot"]')"
+XF='X-Forwarded-For: 203.0.113.9'
+hs() { curl -s -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: x chalbot' -H "$XF" -H "X-GV: $1" -H "X-GV-P: $2" "http://127.0.0.1:$PORT/"; }
+nonce() { body 'x chalbot' "$1" -H "$XF" | sed -n "s/.*var N = '\([^']*\)'.*/\1/p" | head -1; }
+N1=$(nonce /l60); C1=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$N1")
+N2=$(nonce /l61); C2=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$N2")
+N3=$(nonce /l62); C3=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$N3")
+ok "L60 three valid challenge nonces were issued to the not-yet-listed address" "$([ -n "$N1" ] && [ -n "$N2" ] && [ -n "$N3" ] && echo 1 || echo 0)"
+ilist scrapers 1 block enforce true 203.0.113.0/24
+lists_compile
+a=$(cmds); code=$(hs "$N1" "$C1"); b=$(cmds)
+eq "L61 a block-listed address POSTing a VALID handshake gets 403" "$code" 403
+eq "L62 ...with ZERO Redis commands (no nonce claim, no counters)" "$(( b - a ))" "$idle"
+has '"IPL_BLOCK:scrapers"'; ok "L63 ...logged once as act 403 with IPL_BLOCK" "$([ $? -eq 0 ] && has '"act":"403"' && echo 1 || echo 0)"
+ok "L64 ...and the nonce was NOT claimed: no nonce key exists in Redis" "$([ "$(redis-cli -p "$RPORT" --scan --pattern 'gv:nonce:*' | wc -l | tr -d ' ')" = 0 ] && echo 1 || echo 0)"
+ilist scrapers 1 block monitor true 203.0.113.0/24
+lists_compile
+eq "L65 a MONITOR block list leaves the handshake unchanged: the same valid POST gives 204" "$(hs "$N1" "$C1")" 204
+ilist scrapers 1 block enforce true 203.0.113.0/24
+ilist partners 2 allow enforce true 203.0.113.9
+lists_compile
+eq "L66 an enforced ALLOW list for the same address wins over the block list: the handshake goes through (204)" "$(hs "$N2" "$C2")" 204
+ilist scrapers 1 block enforce true 203.0.113.0/24
+ilist partners 2 allow monitor true 203.0.113.9
+lists_compile
+eq "L67 a MONITOR allow list does not protect it: the block list answers 403 before the handshake" "$(hs "$N3" "$C3")" 403
+eq "L68 an exempt path is not blocked: the handshake POST to it is not refused by the list" "$([ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: x chalbot' -H "$XF" "http://127.0.0.1:$PORT/exempt-me")" != 403 ] && echo ok)" ok
+write_rules
+
+echo "-- L: the compiler enforces the safety caps (an allow 0.0.0.0/0 copied over SFTP must not switch the guard off)"
+ilist everyone 1 allow enforce true 0.0.0.0/0 ::/0 64.0.0.0/12 2400::/31
+FORCE=true ilist everyone2 2 allow enforce true 0.0.0.0/0 ::/0
+lists_compile
+write_rules "$(rule r-evil Evil enforce block '["evilbot"]')"
+eq "L70 an allow list holding 0.0.0.0/0, ::/0 and a /12 (forced or not): everything is dropped, an enforced block rule still blocks" "$(get 'x evilbot' /l70)" 403
+ok "L71 ...no allow file was written at all" "$([ ! -e "$WORK/lists/allow.bin" ] && echo 1 || echo 0)"
+ok "L72 ...and lists-status.json records the dropped entries per list and reason (also the forced list's 0/0)" "$(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["lists"]; print(1 if d["everyone"]["dropped"]=={"all":2,"allow_wide":2,"wide":0,"protected":0} and d["everyone"]["dropped_huge"]==2 and d["everyone2"]["dropped"]["all"]==2 else 0)' "$WORK/lists/lists-status.json")"
+ilist blockall 1 block enforce true 0.0.0.0/0 10.0.0.0/8 127.0.0.1
+lists_compile
+eq "L73 a block list of 0.0.0.0/0, private and loopback entries drops them all: nobody is refused" "$(get "$UA" /l73)" 200
+ok "L74 ...no block file was written" "$([ ! -e "$WORK/lists/block.bin" ] && echo 1 || echo 0)"
+write_rules
+
+echo "-- L: broken files fail open, and the dashboard can see them"
+ilist scrapers 1 block enforce true 203.0.113.0/24
+lists_compile
+cp "$WORK/lists/block.bin" "$WORK/lists/block.bin.keep"
+printf 'GVRGgarbage' > "$WORK/lists/block.bin"
+eq "L38 a corrupt block file: the request is served, never a 500" "$(get "$UA" /l38 -H 'X-Forwarded-For: 203.0.113.9')" 200
+ok "L39 ...and reported in guard-errors.log" "$(grep -q geo_corrupt "$WORK/logs/guard-errors.log" 2>/dev/null && echo 1 || echo 0)"
+health() { GV_LISTS_DIR="$WORK/lists" GV_GEO_DIR="$WORK/geo" "$PHP_BIN" -r 'define("GV_BOOT", 1); define("GV_NO_AUTORUN", 1); define("GP_BOOT", 1); $r = $argv[1];
+	require $r . "/guard/guard.php"; require $r . "/panel/config_io.php"; require $r . "/panel/jobs.php"; require $r . "/panel/iplists.php"; require $r . "/panel/health.php";
+	foreach (gp_iplists_health(time(), array()) as $w) { echo $w[0], ":", $w[1], "\n"; }' "$ROOT"; }
+ok "L40 the panel raises file_corrupt for it" "$(health | grep -q '^file_corrupt:block' && echo 1 || echo 0)"
+rm -f "$WORK/lists/block.bin"
+eq "L41 a missing block file while the list is enabled: served (fail-open)" "$(get "$UA" /l41 -H 'X-Forwarded-For: 203.0.113.9')" 200
+ok "L42 ...and the panel raises file_missing" "$(health | grep -q '^file_missing:block' && echo 1 || echo 0)"
+mv "$WORK/lists/block.bin.keep" "$WORK/lists/block.bin"
+ok "L43 the file back: no alert" "$([ -z "$(health)" ] && echo 1 || echo 0)"
+eq "L44 ...and the list acts again" "$(get "$UA" /l44 -H 'X-Forwarded-For: 203.0.113.9')" 403
+ilist scrapers 1 block enforce true 203.0.113.0/24
+lists_compile
+printf '%s' '{"v":1,"time":1,"ok":false,"errors":["boom"],"types":{"allow":null,"block":{"built":1}},"lists":{}}' > "$WORK/lists/lists-status.json"
+ok "L45 a compile that reported an error raises compile_failed" "$(health | grep -q '^compile_failed:boom' && echo 1 || echo 0)"
+lists_compile
+
+# The lists below stay in place for section G: Redis goes down with a block list and an allow list active.
+ilist partners 1 allow enforce true 198.51.100.0/25
+ilist scrapers 2 block enforce true 203.0.113.0/24
+lists_compile
+write_rules
+
 echo "== G. Redis down: rules still apply (they need no Redis), the request never fails"
 write_rules "$(rule r-evil Evil enforce block '["evilbot"]')" "$(rule r-gbot GBot enforce block '["googlebot"]')" \
 	"$(SKIP=false PRI=50 rule r-gnoskip GNoSkip enforce block '["bingbot"]')"
@@ -314,6 +498,12 @@ eq "G4 Redis down: a known-bot UA keeps its pass and the skipping rule does not 
 has '"act":"allow_bot"'; ok "G5 ...as allow_bot, with the reason RULE_SKIP_DEGRADED" "$([ $? -eq 0 ] && has '"RULE_SKIP_DEGRADED"' && echo 1 || echo 0)"
 eq "G6 Redis down: a rule with skip_verified_bots off still blocks a known-bot UA" "$(get 'Mozilla/5.0 (compatible; bingbot/2.0)' /g6)" 403
 eq "G7 Redis down: a UA that is not a known bot is still blocked" "$(get 'x evilbot' /g7)" 403
+eq "G8 Redis down: a block-listed address is refused (the lists need no Redis)" "$(get "$UA" /g8 -H 'X-Forwarded-For: 203.0.113.9')" 403
+eq "G9 Redis down: an allow-listed address is let through, even with an enforced block rule" "$(get 'x evilbot' /g9 -H 'X-Forwarded-For: 198.51.100.9')" 200
+has '"IPL_ALLOW:partners"'; ok "G10 ...logged with IPL_ALLOW (RULE_SKIP_DEGRADED above is unaffected by the lists)" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+eq "G11 Redis down: a Googlebot UA from a listed block address is refused, not passed as a degraded known bot" "$(get "$GBOT" /g11 -H 'X-Forwarded-For: 203.0.113.9')" 403
+eq "G12 Redis down: the degraded known-bot pass still works from an unlisted address" "$(get "$GBOT" /g12)" 200
+has '"RULE_SKIP_DEGRADED"'; ok "G13 ...with RULE_SKIP_DEGRADED, as before" "$([ $? -eq 0 ] && echo 1 || echo 0)"
 
 echo "== K. Redis down and a country rule: a crawler is never blocked by country during an outage"
 write_rules "$(grule r-noir NotIR enforce block exclude '["IR"]')"

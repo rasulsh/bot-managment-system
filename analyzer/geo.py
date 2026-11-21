@@ -126,11 +126,11 @@ def _pack_value(kind, value):
         return value.encode('ascii')
     if kind == KIND_ASN:
         return struct.pack('>I', value)
-    return b''
+    return struct.pack('>H', value)        # IP list: bit 15 monitor, bits 0-14 list index
 
 
 def _value_size(kind):
-    return {KIND_COUNTRY: 2, KIND_ASN: 4}.get(kind, 0)
+    return {KIND_COUNTRY: 2, KIND_ASN: 4, KIND_IPLIST: 2}.get(kind, 0)
 
 
 def pack(kind, v4, v6, built, source, sha256_hex):
@@ -190,7 +190,7 @@ def lookup(data, ip):
                 return raw.decode('ascii')
             if h['kind'] == KIND_ASN:
                 return struct.unpack('>I', raw)[0]
-            return ''
+            return struct.unpack('>H', raw)[0]
     return None
 
 
@@ -206,7 +206,7 @@ def read_ranges(data):
             return raw.decode('ascii')
         if h['kind'] == KIND_ASN:
             return struct.unpack('>I', raw)[0]
-        return ''
+        return struct.unpack('>H', raw)[0]
     v4, v6 = [], []
     for i in range(h['v4']):
         at = h['o4'] + i * (8 + vs)

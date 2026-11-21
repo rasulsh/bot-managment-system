@@ -100,6 +100,43 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
 - The Rules impact preview reads the country from the log when the row has it; for rows from before
   `geo.log` was on it looks the logged address up in the *current* database, and says so.
 
+## IP lists
+
+- A list is only as good as its source: an address list from a threat feed goes stale, and addresses are reassigned
+  (cloud, mobile carriers, home connections). A block list that is not refreshed ends up blocking innocent visitors.
+- **Shared addresses.** Everyone behind a carrier-grade NAT or a mobile operator's gateway shares a few addresses. An
+  *allow* entry there lets all of them skip the guard; a *block* entry blocks all of them. The panel warns about an allow
+  entry in `100.64.0.0/10`, one wider than /16 (IPv4) or /32 (IPv6), and (with the ASN database) one inside a mobile
+  operator AS (MCI, Irancell, Rightel: a short fixed list, not complete).
+- An allow list is a hole by design: its addresses skip rules, scoring, rate limits and the challenge. Use it for
+  monitoring probes and partners, not for "good" countries or big ISPs.
+- A block list refuses a verified crawler address too (it is evaluated before the bot pass). The panel warns when a block
+  entry covers a verified crawler seen in the recent logs, but only from the logs it can scan.
+- The safety caps are enforced by the compile itself, so also for a file copied over SFTP and for the worker: `0.0.0.0/0` and `::/0`
+  are always dropped (even for a forced list); allow entries wider than /16 (IPv4) or /32 (IPv6), block entries wider than /8 or /32, and
+  block entries covering private, loopback, link-local space or the server's own addresses are dropped unless the list was saved with
+  "I know what I'm doing". Dropped entries and unparseable lines are counted and shown (never fatal) and the dashboard warns; it is
+  critical when an allow list lost an entry wider than /8. The "server's own addresses" are the ones the panel saw (`SERVER_ADDR`) and
+  stored in `lists/lists.json`: on an install where nothing was ever saved from the panel, only the private ranges are protected.
+- Changes apply when the compile finishes. Small lists compile in the save request; a big list (over 512 KiB of source)
+  needs the `worker` cron, and until the job runs the guard keeps using the previous compiled files (the dashboard
+  warns after 10 minutes).
+- Compile status and "the file is missing" can only be seen by the panel, not by the guard: with a deleted compiled file
+  the guard fails open and treats the list as empty (a critical dashboard alert says so).
+- An enforced block list is decided before the challenge handshake, so a listed address cannot drive handshake `POST`s; a block list
+  does not stop a request that never reaches PHP (static files served directly by the web server). The allow list is checked after
+  the handshake step, so an allow-listed address can still complete one (it is allowed anyway).
+- **An enforced allow list beats a deny override.** The allow list is checked before any Redis override, so a deny override for an
+  address (or for a device seen on an address) inside an *enforced* allow list has **no effect**. The panel says so when the deny is
+  created and keeps showing it on the Overrides and Identity pages, with a link to the list; remove the address from the list or switch the
+  list to monitor if the deny is meant to work. A monitor allow list does not shadow a deny.
+- IPv6: one list entry is a range, and a /64 or /48 entry blocks every host in it; the per-/64 grouping used by the rate
+  counters does not apply here. The number of addresses in the table is shown for IPv4 only (IPv6 counts ranges).
+- A block list that covers the **operator's own address** is refused at save time (and so are private, loopback and
+  link-local ranges and the server's own address) unless "I know what I'm doing" is ticked. The panel only knows the
+  address it sees: an operator behind a proxy the panel does not trust can still lock themselves out. The kill switch
+  (`guard.off`) is the way back in.
+
 ## Panel filters, tabs and tooltips
 
 - Filters scan the day's log from the end under the existing scan caps. An *exclude* filter ("is not", "does not

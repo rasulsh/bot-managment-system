@@ -3,6 +3,7 @@ if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 
 require_once __DIR__ . '/data.php';
 require_once __DIR__ . '/rules.php';
+require_once __DIR__ . '/iplists.php';
 
 // Job health and the dashboard's critical alerts.
 //
@@ -353,6 +354,7 @@ function gp_health_inputs($now = null) {
 		'secret_default' => (!isset($cfg['secret']) || $cfg['secret'] === 'CHANGE_ME'), 'salt_default' => (!isset($cfg['holdout_salt']) || $cfg['holdout_salt'] === 'CHANGE_ME_TOO'),
 		'noeviction' => gp_redis_noeviction(), 'cron' => gp_cron_check($now), 'tz_offset' => (int)date('Z', $now),
 		'geo_used' => gp_geo_status($now)['country'] !== null || gp_geo_status($now)['asn'] !== null,
+		'iplist_warn' => gp_iplists_health($now),
 	);
 }
 
@@ -392,6 +394,12 @@ function gp_health_alerts(array $in) {
 	foreach ((array)($in['geo_warn'] ?? array()) as $g) {
 		$crit = in_array($g, array('missing', 'corrupt'), true) && !empty($in['geo_rules']);
 		$add('geo_' . $g, $crit ? 'critical' : 'warning', 'geo_w_' . $g, '', 'geo');
+	}
+	foreach ((array)($in['iplist_warn'] ?? array()) as $w) {
+		// A list file that is missing or corrupt while its list is enabled, or a failed compile: the guard
+		// silently treats the list as empty (fail-open), so these are critical. A pending compile is a warning.
+		$add('iplist_' . $w[0] . ($w[0] === 'file_missing' || $w[0] === 'file_corrupt' ? '_' . $w[1] : ''), in_array($w[0], array('pending', 'dropped'), true) ? 'warning' : 'critical',
+			'al_iplist_' . $w[0], $w[1], 'iplists');
 	}
 	if (($in['rules_state'] ?? '') === 'invalid') { $add('rules_invalid', 'critical', 'al_rules_invalid', '', 'rules'); }
 	if (!empty($in['rules_enabled']) && !empty($in['rules_cache_stale'])) { $add('rules_cache_stale', 'warning', 'al_rules_cache_stale', '', 'rules'); }

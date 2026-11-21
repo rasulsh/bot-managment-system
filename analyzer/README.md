@@ -29,6 +29,7 @@ Without scikit-learn everything except the anomaly model works.
 | `redis_io.py` | verdict writes/reads; never raises on a Redis outage |
 | `run_verify.py` | fast entry point: bot claims → `gv:botok` / `gv:botbad` |
 | `run_nightly.py` | daily entry point: sessions → features → `gv:rep`, and `gv:ml` |
+| `iplist.py` | IP list compile: `lists/<id>.txt` + `lists/lists.json` → `lists/allow.bin`, `lists/block.bin` (standard library). Job `iplist_compile` |
 | `geo.py` | GeoIP compile: `geo/*.mmdb` / `geoip.dat` → `geo/country.bin`, `geo/asn.bin` (standard library; `maxminddb` optional for `.mmdb`). Job `geo_compile`, cron `analyzer-cron.sh geo` |
 
 ## Running
