@@ -469,18 +469,21 @@ function gp_log_query(array $filter, $cursor = 0, $limit = 50) {
 	return array($rows, $meta);
 }
 
-// The log filter fields: filter key => array(row key, type, case-insensitive, optional).
-// Types as in panel/filters.php. OPTIONAL fields (the row may lack them: country and
-// ASN when no lookup ran, the outcome status, the bot verdict, an override, a device
-// id, reasons) follow "unknown matches neither": a row without the value matches
-// neither "is" nor "is not"; the value (none) selects those rows explicitly.
+// The log filter fields: filter key => array(row key, type, case-insensitive, optional,
+// offers (none)). Types as in panel/filters.php.
+// OPTIONAL = absence means NOT KNOWN: country and ASN (no lookup ran / nothing found),
+// the outcome status (not captured), the bot verdict (no bot claim). A row without the
+// value matches neither "is" nor "is not" (like an unknown country in a rule).
+// reason, dev and ovr are NOT optional: no reasons, no device id (a token-less client)
+// and no override are known values, so "is not X" includes those rows. (none) works on
+// all seven.
 function gp_log_filter_spec() {
 	return array(
-		'act' => array('act', 'choice'), 'ovr' => array('ovr', 'choice', false, true), 'tok' => array('tok', 'choice'),
-		'reason' => array('rs', 'choice', false, true), 'sh' => array('sh', 'choice'), 'hold' => array('hold', 'choice'),
-		'cc' => array('cc', 'choice', true, true), 'asn' => array('asn', 'choice', false, true), 'status' => array('_status', 'choice', false, true),
-		'botv' => array('botv', 'choice', false, true),
-		'dev' => array('dev', 'ident', false, true), 'ip' => array('ip', 'ident'),
+		'act' => array('act', 'choice'), 'ovr' => array('ovr', 'choice', false, false, true), 'tok' => array('tok', 'choice'),
+		'reason' => array('rs', 'choice', false, false, true), 'sh' => array('sh', 'choice'), 'hold' => array('hold', 'choice'),
+		'cc' => array('cc', 'choice', true, true, true), 'asn' => array('asn', 'choice', false, true, true), 'status' => array('_status', 'choice', false, true, true),
+		'botv' => array('botv', 'choice', false, true, true),
+		'dev' => array('dev', 'ident', false, false, true), 'ip' => array('ip', 'ident'),
 		'path' => array('p', 'text'), 'ua' => array('ua', 'text'),
 	);
 }

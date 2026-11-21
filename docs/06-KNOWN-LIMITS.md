@@ -105,9 +105,10 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
 - Filters scan the day's log from the end under the existing scan caps. An *exclude* filter ("is not", "does not
   contain") matches more rows and so fills a page more slowly; when a cap is reached the "scan limit reached" notice
   says the list may be incomplete.
-- On optional fields (country, ASN, status, bot verdict, override, device, reasons) a row without the value matches
-  neither "is" nor "is not", as in the rule engine; use the value `(none)` to list those rows. So "country is not IR"
-  does not count rows that were never looked up, and the two counts ("is IR", "is not IR") do not add up to all rows.
+- On fields whose empty value means *unknown* (country, ASN, outcome status, bot verdict) a row without the value matches
+  neither "is" nor "is not", as in the rule engine; use `(none)` to list those rows. So "country is not IR" does not
+  count rows that were never looked up, and "is IR" + "is not IR" do not add up to all rows. Fields whose empty value is a
+  fact (reasons, device id, override) are plain include / exclude.
 - Values containing a comma cannot be used in a multi-value choice field (the comma separates values).
 - Tabs, tooltips and *Share link* are JavaScript enhancements. Without JavaScript the tabs stack, tooltips open on
   keyboard focus only, and the link is a plain link.

@@ -50,7 +50,7 @@ $flt_field = function ($key) use ($flt, $f) {
 	$d = $flt[$key];
 	$v = isset($f[$key]) ? $f[$key] : null;
 	$dl = array_values(array_filter($d[2], 'strlen'));
-	if (!empty(gp_log_filter_spec()[$key][3])) { $dl[] = GP_FILTER_NONE; }      // optional field: (none) is a value
+	if (!empty(gp_log_filter_spec()[$key][4])) { $dl[] = GP_FILTER_NONE; }      // (none) = empty value
 	ob_start(); ?>
 	<div class="gp-field">
 		<label class="gp-label" for="flt-<?= gp_e($key) ?>"><?= gp_e(gp_t($d[0])) ?><?= gp_tip('flt_' . ($key === 'tok' || $key === 'dev' ? $key : $key)) ?></label>

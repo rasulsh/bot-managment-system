@@ -296,10 +296,10 @@ function gp_rules_filter_match(array $rule, array $f, $now) {
 		if (isset($f[$k]) && !gp_filter_test('choice', $f[$k], $val)) { return false; }
 	}
 	// "country is IR" means: the rule has a country condition that lists IR. A rule with
-	// no country condition has no value: it matches neither "is IR" nor "is not IR"
-	// (like the engine's unknown country); "(none)" lists those rules.
-	if (isset($f['cc']) && !gp_filter_test('choice', $f['cc'], $country, true, true)) { return false; }
-	if (isset($f['asn']) && !gp_filter_test('choice', $f['asn'], $asn, false, true)) { return false; }
+	// no country condition is a KNOWN "no country condition" (not an unknown country), so
+	// "is not IR" includes it; "(none)" lists those rules, "is not (none)" the others.
+	if (isset($f['cc']) && !gp_filter_test('choice', $f['cc'], $country, true, false)) { return false; }
+	if (isset($f['asn']) && !gp_filter_test('choice', $f['asn'], $asn, false, false)) { return false; }
 	if (isset($f['ua']) && !gp_filter_test('text', $f['ua'], implode("\n", $ua))) { return false; }
 	if (isset($f['q'])) {
 		$hay = $rule['name'] . ' ' . $rule['note'] . ' ' . implode(' ', $ua) . ' ' . implode(' ', $country) . ' ' . implode(' ', $asn)

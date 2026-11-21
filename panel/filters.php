@@ -85,12 +85,17 @@ function gp_filter_in_cidr($ip, $cidr) {
 // Test one value (or a list of values, e.g. the reasons of a row) against a filter
 // value. $type: choice | ident | text. Include = any value matches; not = none does.
 //
-// $optional marks a field a row may lack (country, ASN, outcome status, device, ...).
-// Such a field follows the rule engine's "unknown matches neither": a row WITHOUT a
-// value matches neither "is" nor "is not". The explicit value (none) means "absent or
-// empty": "is (none)" lists those rows, "is not (none)" lists the rows that have a
-// value, and (none) can sit in a comma list next to real values. A field every row
-// always has ($optional false) keeps the plain include / exclude behaviour.
+// Two kinds of field, by what an empty value MEANS:
+//  * $optional = true: empty means NOT KNOWN (country and ASN when no lookup ran or
+//    nothing was found, the outcome status when it was not captured, the bot verdict
+//    when no bot was claimed). Like the rule engine's unknown country, a row WITHOUT a
+//    value matches neither "is" nor "is not".
+//  * $optional = false: empty is a KNOWN value (no reasons, no device id = a token-less
+//    client, no override, a rule with no country condition). It is simply not equal to
+//    any real value, so "is not X" includes it, as usual.
+// On both kinds the value (none) means "empty": "is (none)" lists those rows, "is not
+// (none)" lists the rows that have a value, and (none) can sit in a comma list next to
+// real values.
 function gp_filter_test($type, $f, $actual, $ci = false, $optional = false) {
 	$def = gp_filter_def($f);
 	if ($def === null) { return true; }
@@ -99,10 +104,15 @@ function gp_filter_test($type, $f, $actual, $ci = false, $optional = false) {
 	if ($optional) {
 		$actual = array_values(array_filter($actual, function ($a) { return $a !== ''; }));
 		if (!$actual) { return $want_none && empty($def['not']); }
+	} elseif (!$actual) {
+		$actual = array('');                       // known-empty: a value that equals nothing real
 	}
 	$hit = false;
 	foreach ($def['v'] as $want) {
-		if ($optional && $want === GP_FILTER_NONE) { continue; }
+		if ($want === GP_FILTER_NONE && $type !== 'text') {
+			if (!$optional) { foreach ($actual as $a) { if ($a === '') { $hit = true; break 2; } } }
+			continue;
+		}
 		foreach ($actual as $a) {
 			if ($type === 'text') { $m = ($want === '' || stripos($a, $want) !== false); }
 			elseif ($type === 'ident' && $a !== '' && strpbrk($want, '/') !== false) { $m = gp_filter_in_cidr($a, $want); }

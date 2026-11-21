@@ -318,7 +318,7 @@ $err_text = function ($field) use ($errors, $details) {
 		<div class="gp-filters gp-filters-3">
 			<?php foreach ($rflt as $fk => $fd): $fv = isset($filter[$fk]) ? $filter[$fk] : null; ?>
 			<div class="gp-field">
-				<label class="gp-label" for="rf-<?= gp_e($fk) ?>"><?= gp_e(gp_t($fd[0])) ?><?= gp_tip($fk === 'q' ? 'flt_q' : ($fk === 'action' || $fk === 'mode' ? 'rule_' . $fk : 'flt_' . $fk)) ?></label>
+				<label class="gp-label" for="rf-<?= gp_e($fk) ?>"><?= gp_e(gp_t($fd[0])) ?><?= gp_tip($fk === 'q' ? 'flt_q' : ($fk === 'action' || $fk === 'mode' ? 'rule_' . $fk : ($fk === 'cc' || $fk === 'asn' ? 'flt_rule_' . $fk : 'flt_' . $fk))) ?></label>
 				<div class="gp-fgroup">
 					<?= gp_filter_op_select($fk, $fv, $fd[1]) ?>
 					<input class="gp-input gp-ltr" type="text" id="rf-<?= gp_e($fk) ?>" name="<?= gp_e($fk) ?>" value="<?= gp_e(gp_filter_text($fv)) ?>"
