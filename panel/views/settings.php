@@ -22,6 +22,7 @@ $groups = array(
 	'network'  => array('set_group_network', '', array('cdn_ranges')),
 	'bots'     => array('set_group_bots', '', array('known_bots', 'preview_bots', 'bot_suffixes')),
 	'logs'     => array('set_group_logs', 'set_group_logs_sub', array('log_skip_paths', 'log_retention_days', 'log_max_mb', 'log_min_free_mb')),
+	'geo'      => array('set_group_geo', 'set_group_geo_sub', array('geo.log')),
 	'analyzer' => array('set_group_analyzer', 'set_group_analyzer_sub', array('analyzer.window_days', 'analyzer.session_gap_s',
 		'analyzer.rep_ttl', 'analyzer.ml_ttl', 'analyzer.botv_ttl', 'analyzer.botbad_ttl', 'analyzer.dns_canary',
 		'analyzer.ml_min_train', 'analyzer.contamination', 'analyzer.clf_min_positive', 'analyzer.clf_target_precision',

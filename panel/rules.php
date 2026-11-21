@@ -2,6 +2,7 @@
 if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 
 require_once __DIR__ . '/data.php';
+require_once __DIR__ . '/geo.php';
 
 // Access rules: reading, writing, form parsing, warnings, the test box and the impact preview.
 //
@@ -124,9 +125,20 @@ function gp_rule_blank() {
 		'id' => '', 'name' => '', 'enabled' => true, 'mode' => 'monitor', 'action' => 'challenge',
 		'priority' => 100, 'skip_verified_bots' => true,
 		'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array()),
-		'path' => null, 'expires_at' => 0, 'pow_bits' => 0, 'note' => '',
+		'path' => null, 'country' => null, 'asn' => null, 'expires_at' => 0, 'pow_bits' => 0, 'note' => '',
 		'created_by' => '', 'created_at' => 0, 'updated_at' => 0,
 	);
+}
+
+// Country codes or AS numbers typed into one box: separated by spaces, commas or
+// new lines. Codes are upper-cased; "AS13335" and "13335" both mean 13335.
+function gp_rules_geo_tokens($text, $asn) {
+	$out = array();
+	foreach (preg_split('/[\s,;]+/', (string)$text, -1, PREG_SPLIT_NO_EMPTY) as $t) {
+		$t = $asn ? preg_replace('/^AS/i', '', $t) : strtoupper($t);
+		if (!in_array($t, $out, true)) { $out[] = $t; }
+	}
+	return $out;
 }
 
 // Rule fields from the form. Types are coerced just far enough for the guard's
@@ -154,6 +166,11 @@ function gp_rule_from_post(array $p, ?array $existing = null) {
 			'values' => $vals,
 		);
 	}
+	foreach (array('country' => false, 'asn' => true) as $k => $is_asn) {
+		$vals = gp_rules_geo_tokens(isset($p[$k . '_values']) && is_string($p[$k . '_values']) ? $p[$k . '_values'] : '', $is_asn);
+		$rule[$k] = $vals ? array('op' => (isset($p[$k . '_op']) && $p[$k . '_op'] === 'exclude') ? 'exclude' : 'include',
+			'type' => $is_asn ? 'number' : 'code', 'values' => $vals) : null;
+	}
 	// Expiry: a date (end of that day, UTC) or never.
 	$d = isset($p['expires_date']) && is_string($p['expires_date']) ? trim($p['expires_date']) : '';
 	if ($d === '') { $rule['expires_at'] = 0; }
@@ -169,8 +186,28 @@ function gp_rules_browser_samples() { return gv_rules_browser_samples(); }
 
 // Non-blocking warnings for a rule about to be saved. Returns a list of
 // array(code, detail). Pure: the config is passed in.
-function gp_rule_warnings(array $rule, array $cfg) {
+function gp_rule_warnings(array $rule, array $cfg, $geo = null) {
 	$out = array();
+	$has_geo = (!empty($rule['country']) && is_array($rule['country'])) || (!empty($rule['asn']) && is_array($rule['asn']));
+	if ($has_geo) {
+		if (($rule['action'] === 'block' || $rule['action'] === 'challenge') && empty($rule['skip_verified_bots'])) {
+			$out[] = array('geo_bots', '');
+		}
+		$c = !empty($rule['country']) && is_array($rule['country']) ? $rule['country'] : null;
+		if ($c && $c['op'] === 'exclude' && in_array('IR', $c['values'], true) && $rule['action'] === 'block') {
+			$out[] = array('geo_exclude_ir', '');
+		}
+		if (is_array($geo)) {
+			$need = array();
+			if ($c && !($geo['country'] && $geo['country']['valid'])) { $need[] = 'country.bin'; }
+			if (!empty($rule['asn']) && !($geo['asn'] && $geo['asn']['valid'])) { $need[] = 'asn.bin'; }
+			if ($need) { $out[] = array('geo_nodb', implode(', ', $need)); }
+			elseif ($c && $geo['countries']) {
+				$missing = array_values(array_diff($c['values'], $geo['countries']));
+				if ($missing) { $out[] = array('geo_code_absent', implode(', ', array_slice($missing, 0, 8))); }
+			}
+		}
+	}
 	if (!empty($rule['ua']) && is_array($rule['ua'])) {
 		$cond = array_merge($rule, array('path' => null));
 		$hit = array();
@@ -206,8 +243,14 @@ function gp_rule_warnings(array $rule, array $cfg) {
 
 // The test box: which rules would match this client, and what happens.
 // Pure. $verified = the client is a known bot with a verified 'ok' verdict.
-function gp_rules_test(array $rules, $ua, $path, $verified, array $cfg, $now) {
+function gp_rules_test(array $rules, $ua, $path, $verified, array $cfg, $now, $ip = '') {
 	$f = array('ua' => (string)$ua, 'path' => (string)$path === '' ? '/' : (string)$path);
+	// With an address the country and ASN come from the compiled databases; without
+	// one they are unknown, and an unknown value never matches a geo condition.
+	$ip = gp_geo_clean_ip($ip);
+	$f['ip'] = $ip;
+	$f['cc'] = $ip === '' ? '' : gv_geo_country($ip, true);
+	$f['asn'] = $ip === '' ? 0 : gv_geo_asn($ip, true);
 	$bot = gv_match_bot($f['ua'], (array)$cfg['known_bots']);
 	$all = gv_rules_match_all($f, $rules, $now);
 	$winner = null;
@@ -217,7 +260,8 @@ function gp_rules_test(array $rules, $ua, $path, $verified, array $cfg, $now) {
 		$winner = $r;
 		break;
 	}
-	return array('bot' => $bot, 'matches' => $all, 'winner' => $winner, 'skipped' => $skipped);
+	return array('bot' => $bot, 'matches' => $all, 'winner' => $winner, 'skipped' => $skipped,
+		'ip' => $ip, 'cc' => $f['cc'], 'asn' => $f['asn']);
 }
 
 // A short human summary of one condition, for the table.
@@ -225,7 +269,8 @@ function gp_rule_cond_text($label, $cond) {
 	if (!is_array($cond)) { return ''; }
 	$vals = array();
 	foreach ($cond['values'] as $v) { $vals[] = '"' . (strlen($v) > 40 ? substr($v, 0, 40) . '...' : $v) . '"'; }
-	return $label . ' ' . ($cond['op'] === 'exclude' ? 'NOT ' : '') . $cond['type'] . ' ' . implode(' / ', array_slice($vals, 0, 4))
+	$type = ($cond['type'] === 'code' || $cond['type'] === 'number') ? 'is' : $cond['type'];
+	return $label . ' ' . ($cond['op'] === 'exclude' ? 'NOT ' : '') . $type . ' ' . implode(' / ', array_slice($vals, 0, 4))
 		. (count($vals) > 4 ? ' +' . (count($vals) - 4) : '');
 }
 
@@ -252,6 +297,8 @@ function gp_rules_filter_match(array $rule, array $f, $now) {
 	}
 	if (isset($f['q'])) {
 		$hay = $rule['name'] . ' ' . $rule['note'] . ' ' . (isset($rule['ua']['values']) ? implode(' ', $rule['ua']['values']) : '')
+			. ' ' . (isset($rule['country']['values']) ? implode(' ', $rule['country']['values']) : '')
+			. ' ' . (isset($rule['asn']['values']) ? implode(' ', $rule['asn']['values']) : '')
 			. ' ' . (isset($rule['path']['values']) ? implode(' ', $rule['path']['values']) : '');
 		$has = stripos($hay, $f['q']) !== false;
 		if (($f['q_op'] === 'not') ? $has : !$has) { return false; }
@@ -307,16 +354,39 @@ function gp_log_scan(array $dates, callable $each) {
 // log rows), so it is tested without files. Rows of a verified crawler are not
 // counted when the rule skips them.
 function gp_rules_impact_fold(array $rule, array $rows) {
-	$out = array('requests' => 0, 'ips' => 0, 'devices' => 0, 'tokened' => 0, 'paths' => array(), 'scanned' => 0);
+	$out = gp_rules_impact_new($rule);
 	$ips = array(); $devs = array(); $paths = array();
 	foreach ($rows as $row) { gp_rules_impact_row($rule, $row, $out, $ips, $devs, $paths); }
 	return gp_rules_impact_finish($out, $ips, $devs, $paths);
+}
+
+// The empty result. geo_*: for a rule with a country / ASN condition, how many rows
+// had the value in the log (logged), had it resolved from the CURRENT database by
+// the row's address (lookup), or could not be evaluated at all (none).
+function gp_rules_impact_new(array $rule) {
+	return array('requests' => 0, 'ips' => 0, 'devices' => 0, 'tokened' => 0, 'paths' => array(), 'scanned' => 0,
+		'geo' => (!empty($rule['country']) || !empty($rule['asn'])), 'geo_logged' => 0, 'geo_lookup' => 0, 'geo_none' => 0);
 }
 
 function gp_rules_impact_row(array $rule, array $row, array &$out, array &$ips, array &$devs, array &$paths) {
 	$out['scanned']++;
 	if (!empty($rule['skip_verified_bots']) && (string)($row['botv'] ?? '') === 'ok') { return; }
 	$f = array('ua' => (string)($row['ua'] ?? ''), 'path' => (string)($row['p'] ?? '/'));
+	if ($out['geo']) {
+		// The value logged with the row wins; a row from before geo logging was on is
+		// resolved from the current database by its address; with neither it is unknown.
+		$ip = (isset($row['ip']) && is_string($row['ip'])) ? gv_ip_canon($row['ip']) : '';
+		$src = 'logged';
+		foreach (array('cc' => array('country', GV_GEO_COUNTRY), 'asn' => array('asn', GV_GEO_ASN)) as $k => $need) {
+			if (empty($rule[$need[0]])) { continue; }
+			if (isset($row[$k]) && (is_string($row[$k]) || is_int($row[$k]))) { $f[$k] = $row[$k]; }
+			elseif ($ip !== '' && gv_geo_open($need[1], null, true) !== null) {
+				$f[$k] = ($k === 'cc') ? gv_geo_country($ip, true) : gv_geo_asn($ip, true);
+				if ($src === 'logged') { $src = 'lookup'; }
+			} else { $f[$k] = ($k === 'cc') ? '' : 0; $src = 'none'; }
+		}
+		$out['geo_' . $src]++;
+	}
 	if (!gv_rule_matches($rule, $f)) { return; }
 	$out['requests']++;
 	if (isset($row['ip']) && is_string($row['ip']) && $row['ip'] !== '') { $ips[$row['ip']] = true; }
@@ -337,7 +407,7 @@ function gp_rules_impact_finish(array $out, array $ips, array $devs, array $path
 }
 
 function gp_rules_impact(array $rule) {
-	$out = array('requests' => 0, 'ips' => 0, 'devices' => 0, 'tokened' => 0, 'paths' => array(), 'scanned' => 0);
+	$out = gp_rules_impact_new($rule);
 	$ips = array(); $devs = array(); $paths = array();
 	$meta = gp_log_scan(gp_log_dates(2), function ($row) use ($rule, &$out, &$ips, &$devs, &$paths) {
 		gp_rules_impact_row($rule, $row, $out, $ips, $devs, $paths);
@@ -382,7 +452,7 @@ function gp_rules_action($action, array $p, $actor, $client_ip, array $cfg) {
 		}
 		if ($action === 'preview') { $res['msg'] = 'rule_preview'; return $res; }
 		// Warnings are shown once; "Save anyway" (ack=1) goes through.
-		$res['warnings'] = gp_rule_warnings($deep[1], $cfg);
+		$res['warnings'] = gp_rule_warnings($deep[1], $cfg, gp_geo_status());
 		if ($to_enforce) { array_unshift($res['warnings'], array($res['impact']['danger'] ? 'enforce_danger' : 'enforce', '')); }
 		if ($res['warnings'] && empty($p['ack'])) { $res['msg'] = 'rule_warnings'; return $res; }
 		$r = gp_rules_update(function ($rules) use ($deep, $new) {

@@ -51,9 +51,36 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 \$c['redis']['port'] = $RPORT;
 \$c['log_dir'] = '$LOGS';
 \$c['holdout_pct'] = 0;
+\$c['geo'] = array('log' => true);
 \$c['limits'] = array_merge(\$c['limits'], array('window' => 60, 'device' => 100000, 'ip_ua' => 100000, 'ip' => 100000, 'mint' => 100000));
 return \$c;
 EOF
+
+# GeoIP: a geoip.dat fixture compiled by the real cron wrapper (scripts/analyzer-cron.sh geo) into
+# country.bin; with geo.log on, every row must carry the country (127.0.0.0/8 is US in the fixture).
+mkdir -p "$WORK/geo"
+python3 -I - "$WORK/geo/geoip.dat" <<'PY'
+import sys
+def varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+def field(num, payload):
+    return varint((num << 3) | 2) + varint(len(payload)) + payload
+def entry(tag, nets):
+    body = field(1, tag.encode())
+    for ip, prefix in nets:
+        body += field(2, field(1, bytes(ip)) + varint((2 << 3) | 0) + varint(prefix))
+    return field(1, body)
+open(sys.argv[1], 'wb').write(entry('us', [((127, 0, 0, 0), 8)]) + entry('IR', [((5, 0, 0, 0), 8)]) + entry('private', [((10, 0, 0, 0), 8)]))
+PY
+GV_GEO_DIR="$WORK/geo" GV_GEO_MIN_RANGES=1 GV_PYTHON=python3 bash "$ROOT/scripts/analyzer-cron.sh" geo >"$WORK/geo.out" 2>&1 \
+	&& echo "PASS  analyzer-cron.sh geo compiled geoip.dat into country.bin" || { echo "FAIL  analyzer-cron.sh geo"; cat "$WORK/geo.out" >&2; }
+export GV_GEO_DIR="$WORK/geo"
 
 redis-server --port "$RPORT" --save "" --appendonly no --daemonize no --dir "$WORK" >"$WORK/redis.log" 2>&1 &
 PIDS+=($!)
@@ -141,4 +168,13 @@ else
 	status=1
 fi
 rm -f "$ROOT/analyzer/.rule-hits.json"
+# GeoIP logging: every decision row of this run carries the country, and the readers above accepted them.
+rows_total=$(cat "$LOGS"/guard-*.jsonl | grep -vc '"o":1')
+rows_cc=$(cat "$LOGS"/guard-*.jsonl | grep -c '"cc":"US"')
+if [ "$rows_cc" -gt 20 ] && [ "$rows_cc" -le "$rows_total" ]; then
+	echo "PASS  geo.log: $rows_cc rows carry cc US (compiled by the cron wrapper, read by the guard)"
+else
+	echo "FAIL  geo.log: $rows_cc of $rows_total rows carry cc US"
+	status=1
+fi
 exit $status

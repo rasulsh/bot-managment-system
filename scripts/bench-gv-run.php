@@ -11,12 +11,22 @@
 // Redis (scripts/bench-gv-run.sh starts a throw-away one).
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
-$opt = getopt('', array('n::', 'rules::', 'values::', 'redis-port::', 'regex::'));
+$opt = getopt('', array('n::', 'rules::', 'values::', 'redis-port::', 'regex::', 'geo-rules::', 'geo-ranges::', 'geo-log::', 'geo-ua::', 'lookup::', 'match::'));
 $n      = isset($opt['n']) ? (int)$opt['n'] : 3000;
 $nrules = isset($opt['rules']) ? (int)$opt['rules'] : 0;
 $nvals  = isset($opt['values']) ? (int)$opt['values'] : 5;
 $port   = isset($opt['redis-port']) ? (int)$opt['redis-port'] : 6399;
 $regex  = isset($opt['regex']);
+// GeoIP: --geo-rules=N writes N country-only rules that never match the client (the
+// realistic case); --geo-ua makes them UA + country rules (the UA misses, so the geo
+// lookup never runs); --geo-log turns geo.log on (lookup on every request, no rules);
+// --geo-ranges sets the size of the generated country database (default 150000 IPv4).
+$ngeo   = isset($opt['geo-rules']) ? (int)$opt['geo-rules'] : 0;
+$geoua  = isset($opt['geo-ua']);
+$geolog = isset($opt['geo-log']);
+$granges = isset($opt['geo-ranges']) ? (int)$opt['geo-ranges'] : 150000;
+$lookup_only = isset($opt['lookup']);
+$match_only = isset($opt['match']);     // --match: gv_rules_match() alone, country already known (no lookup)
 $tmp    = sys_get_temp_dir() . '/gv-bench-' . getmypid();
 @mkdir($tmp . '/logs', 0775, true);
 
@@ -27,6 +37,7 @@ file_put_contents($tmp . '/config.php', "<?php\nif (!defined('GV_BOOT')) { exit;
 	. "\$c['holdout_pct'] = 0; \$c['capture_outcomes'] = false;\n"
 	. "\$c['redis']['port'] = $port; \$c['redis']['timeout'] = 0.5; \$c['log_dir'] = " . var_export($tmp . '/logs', true) . ";\n"
 	. "\$c['limits'] = array_merge(\$c['limits'], array('window' => 3600, 'device' => 1000000, 'ip_ua' => 1000000, 'ip' => 1000000, 'device_hour' => 1000000, 'device_day' => 1000000));\n"
+	. ($geolog ? "\$c['geo'] = array('log' => true);\n" : '')
 	. "return \$c;\n");
 putenv('GV_CONFIG=' . $tmp . '/config.php');
 
@@ -47,6 +58,27 @@ if ($nrules > 0) {
 	putenv('GV_RULES=' . $tmp . '/rules.json');
 }
 
+// The generated GeoIP database (guard/geo.php exists only from the GeoIP release on).
+if ($ngeo > 0 || $geolog || $lookup_only) {
+	require_once __DIR__ . '/geo-fixture.php';
+	@mkdir($tmp . '/geo', 0775, true);
+	$g = gf_random(1, $granges, 20000);
+	file_put_contents($tmp . '/geo/country.bin', gf_pack(1, $g[0], $g[1]));
+	putenv('GV_GEO_DIR=' . $tmp . '/geo');
+}
+if ($ngeo > 0) {
+	$rules = array();
+	for ($i = 0; $i < $ngeo; $i++) {
+		$rules[] = array('id' => 'g' . sprintf('%05d', $i), 'name' => 'geo ' . $i, 'enabled' => true, 'mode' => 'enforce',
+			'action' => 'block', 'priority' => 100 + $i, 'skip_verified_bots' => true,
+			'ua' => $geoua ? array('op' => 'include', 'type' => 'contains', 'values' => array('scraper-' . $i)) : null, 'path' => null,
+			'country' => array('op' => 'include', 'type' => 'code', 'values' => array('KP', 'CU', 'SY', 'ZW', 'XK')),
+			'asn' => null, 'expires_at' => 0, 'pow_bits' => 0, 'note' => '', 'created_by' => '', 'created_at' => 0, 'updated_at' => 0);
+	}
+	putenv('GV_RULES=' . $tmp . '/rules.json');
+	$nrules = $ngeo;
+}
+
 define('GV_BOOT', 1);
 require __DIR__ . '/../guard/guard.php';
 $cfg = gv_cfg_load();
@@ -58,6 +90,49 @@ if ($nrules > 0) {
 }
 
 $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+$bench_cleanup = function () use ($tmp) {
+	foreach ((array)glob($tmp . '/{,logs/,geo/}{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+	@rmdir($tmp . '/logs'); @rmdir($tmp . '/geo'); @rmdir($tmp);
+};
+if ($match_only) {
+	// The rule loop alone: the rules the run would load, the client's country supplied
+	// (so no file is opened), 20000 evaluations, none of them matching.
+	$loaded = gv_rules_load();
+	$f = array('ua' => $ua, 'path' => '/p/1', 'ip' => '203.0.113.5', 'cc' => 'IR', 'asn' => 12880);
+	$now = time();
+	for ($i = 0; $i < 500; $i++) { gv_rules_match($f, $loaded, $now); }
+	$m = array();
+	for ($i = 0; $i < 20000; $i++) { $t = hrtime(true); gv_rules_match($f, $loaded, $now); $m[] = (hrtime(true) - $t) / 1000; }
+	sort($m);
+	printf("rule loop rules=%d%s  p50=%.1fus p99=%.1fus max=%.0fus  (php %s)\n", count($loaded), $geoua ? ' ua+country' : '',
+		$m[(int)(0.5 * count($m))], $m[(int)(0.99 * count($m))], end($m), PHP_VERSION);
+	$bench_cleanup();
+	exit;
+}
+if ($lookup_only) {
+	// The GeoIP lookup alone: p50/p99 of gv_geo_country() over random addresses (the file
+	// already open, as for every request after the first lookup), and of a first lookup
+	// in a fresh request (fopen + header + size check + search).
+	mt_srand(11);
+	$warm = array(); $cold = array();
+	gv_geo_country('1.1.1.1');
+	for ($i = 0; $i < 20000; $i++) {
+		$ip = long2ip(mt_rand(16777216, 4278190080));
+		$t = hrtime(true); gv_geo_country($ip); $warm[] = (hrtime(true) - $t) / 1000;
+	}
+	for ($i = 0; $i < 5000; $i++) {
+		$ip = long2ip(mt_rand(16777216, 4278190080));
+		gv_geo_state(true);
+		$t = hrtime(true); gv_geo_country($ip); $cold[] = (hrtime(true) - $t) / 1000;
+	}
+	sort($warm); sort($cold);
+	printf("geo lookup ranges=%d  warm p50=%.1fus p99=%.1fus max=%.0fus | fresh request (open+lookup) p50=%.1fus p99=%.1fus max=%.0fus  (php %s)\n",
+		$granges, $warm[(int)(0.5 * count($warm))], $warm[(int)(0.99 * count($warm))], end($warm),
+		$cold[(int)(0.5 * count($cold))], $cold[(int)(0.99 * count($cold))], end($cold), PHP_VERSION);
+	$bench_cleanup();
+	exit;
+}
+
 $_COOKIE = array('_gv' => gv_tok_make($cfg['secret']));
 $samples = array();
 for ($i = 0; $i < $n + 300; $i++) {
@@ -65,6 +140,7 @@ for ($i = 0; $i < $n + 300; $i++) {
 		'QUERY_STRING' => '', 'HTTP_USER_AGENT' => $ua, 'HTTP_ACCEPT' => 'text/html', 'HTTP_ACCEPT_LANGUAGE' => 'en-US,en;q=0.9',
 		'HTTP_SEC_FETCH_MODE' => 'navigate', 'HTTP_HOST' => 'x', 'HTTP_ACCEPT_ENCODING' => 'gzip', 'HTTP_CONNECTION' => 'keep-alive',
 		'HTTP_COOKIE' => '_gv=' . $_COOKIE['_gv']);
+	if (function_exists('gv_geo_state')) { gv_geo_state(true); }     // a fresh request: nothing carried over
 	$t = hrtime(true);
 	gv_run(microtime(true));
 	$us = (hrtime(true) - $t) / 1000;
@@ -72,7 +148,6 @@ for ($i = 0; $i < $n + 300; $i++) {
 }
 sort($samples);
 $pct = function ($p) use ($samples) { return $samples[(int)min(count($samples) - 1, floor($p * count($samples)))]; };
-printf("rules=%d values=%d%s n=%d  p50=%.0fus  p99=%.0fus  max=%.0fus  (php %s)\n", $nrules, $nvals, $regex ? ' regex' : '', count($samples),
+printf("rules=%d%s%s values=%d%s n=%d  p50=%.0fus  p99=%.0fus  max=%.0fus  (php %s)\n", $nrules, $ngeo ? ' geo' . ($geoua ? '+ua' : '') : '', $geolog ? ' geo.log' : '', $nvals, $regex ? ' regex' : '', count($samples),
 	$pct(0.5), $pct(0.99), end($samples), PHP_VERSION);
-foreach ((array)glob($tmp . '/{,logs/}{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
-@rmdir($tmp . '/logs'); @rmdir($tmp);
+$bench_cleanup();

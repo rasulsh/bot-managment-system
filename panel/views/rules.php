@@ -39,6 +39,8 @@ $err_text = function ($field) use ($errors, $details) {
 <?php if ($form !== null): $is_new = ($form['id'] === '');
 	$ua = is_array($form['ua']) ? $form['ua'] : array('op' => 'include', 'type' => 'contains', 'values' => array());
 	$pa = is_array($form['path']) ? $form['path'] : array('op' => 'include', 'type' => 'prefix', 'values' => array());
+	$co = is_array($form['country'] ?? null) ? $form['country'] : array('op' => 'include', 'type' => 'code', 'values' => array());
+	$as = is_array($form['asn'] ?? null) ? $form['asn'] : array('op' => 'include', 'type' => 'number', 'values' => array());
 	$exp_date = ((int)$form['expires_at'] > 0) ? gmdate('Y-m-d', (int)$form['expires_at']) : '';
 	$sel = function ($a, $b) { return $a === $b ? ' selected' : ''; };
 ?>
@@ -142,6 +144,30 @@ $err_text = function ($field) use ($errors, $details) {
 		</div>
 	</fieldset>
 
+
+	<?php foreach (array('country' => array($co, 'rules_f_country', 'rules_h_country', 'IR, US', 'country_values'),
+		'asn' => array($as, 'rules_f_asn', 'rules_h_asn', '13335, 15169', 'asn_values')) as $gk => $gdef): ?>
+	<fieldset class="gp-section">
+		<legend class="gp-label"><?= gp_e(gp_t($gdef[1])) ?></legend>
+		<div class="gp-grid-2">
+			<label class="gp-field">
+				<span class="gp-label"><?= gp_e(gp_t('rules_f_op')) ?></span>
+				<select class="gp-input" name="<?= gp_e($gk) ?>_op">
+					<option value="include"<?= $sel($gdef[0]['op'], 'include') ?>><?= gp_e(gp_t('rules_op_include')) ?></option>
+					<option value="exclude"<?= $sel($gdef[0]['op'], 'exclude') ?>><?= gp_e(gp_t('rules_op_exclude')) ?></option>
+				</select>
+			</label>
+			<label class="gp-field">
+				<span class="gp-label"><?= gp_e(gp_t('rules_f_values')) ?></span>
+				<textarea class="gp-textarea gp-ltr" name="<?= gp_e($gdef[4]) ?>" rows="2" spellcheck="false" placeholder="<?= gp_e($gdef[3]) ?>"><?= gp_e(implode("\n", $gdef[0]['values'])) ?></textarea>
+				<span class="gp-help"><?= gp_e(gp_t($gdef[2])) ?></span>
+				<span class="gp-help"><strong><?= gp_e(gp_t('rules_h_geo_unknown')) ?></strong></span>
+				<?php if ($err_text($gk) !== ''): ?><span class="gp-error" role="alert"><?= gp_e($err_text($gk)) ?></span><?php endif; ?>
+			</label>
+		</div>
+	</fieldset>
+	<?php endforeach; ?>
+
 	<div class="gp-grid-2">
 		<label class="gp-field">
 			<span class="gp-label"><?= gp_e(gp_t('rules_f_expires')) ?></span>
@@ -177,6 +203,13 @@ $err_text = function ($field) use ($errors, $details) {
 		<div class="gp-help"><?= gp_e(gp_t('rules_impact_range')) ?>:
 			<?= $mt['oldest'] > 0 ? gp_e(gp_num_raw(date('Y-m-d H:i', (int)$mt['oldest'])) . ' - ' . gp_num_raw(date('Y-m-d H:i', (int)$mt['newest']))) : '—' ?>
 			(<?= gp_e(gp_num($im['scanned'])) ?> <?= gp_e(gp_t('rules_impact_rows')) ?>, <?= gp_e(gp_num($mt['files'])) ?> <?= gp_e(gp_t('rules_impact_files')) ?><?= $mt['capped'] ? ', ' . gp_e(gp_t('rules_impact_capped')) : '' ?>)</div>
+		<?php if (!empty($im['geo'])): $gl = (int)$im['geo_logged']; $gk2 = (int)$im['geo_lookup']; $gn = (int)$im['geo_none']; ?>
+		<div class="gp-help" role="status"><strong><?= gp_e(gp_t('rules_impact_geo')) ?>:</strong>
+			<?php if ($im['scanned'] > 0 && $gl === 0 && $gk2 === 0): ?><?= gp_e(gp_t('rules_impact_geo_blind')) ?>
+			<?php elseif ($gl === 0): ?><?= gp_e(gp_t('rules_impact_geo_nolog')) ?>
+			<?php else: ?><?= gp_e(gp_t('rules_impact_geo_mixed')) ?><?php endif; ?>
+			(<?= gp_e(gp_num($gl)) ?> <?= gp_e(gp_t('rules_impact_geo_logged')) ?>, <?= gp_e(gp_num($gk2)) ?> <?= gp_e(gp_t('rules_impact_geo_lookup')) ?>, <?= gp_e(gp_num($gn)) ?> <?= gp_e(gp_t('rules_impact_geo_none')) ?>)</div>
+		<?php endif; ?>
 		<dl class="gp-dl">
 			<dt><?= gp_e(gp_t('rules_impact_requests')) ?></dt><dd class="gp-mono"><?= gp_e(gp_num($im['requests'])) ?></dd>
 			<dt><?= gp_e(gp_t('rules_impact_ips')) ?></dt><dd class="gp-mono"><?= gp_e(gp_num($im['ips'])) ?></dd>
@@ -188,7 +221,7 @@ $err_text = function ($field) use ($errors, $details) {
 		<ul class="gp-mono gp-ltr">
 			<?php foreach ($im['paths'] as $ip_path => $ip_n): ?><li><?= gp_e($ip_path) ?> &times; <?= gp_e(gp_num($ip_n)) ?></li><?php endforeach; ?>
 		</ul>
-		<?php elseif ($im['requests'] === 0): ?><div class="gp-help"><?= gp_e(gp_t('rules_impact_none')) ?></div><?php endif; ?>
+		<?php elseif ($im['requests'] === 0 && !(!empty($im['geo']) && (int)$im['geo_logged'] === 0 && (int)$im['geo_lookup'] === 0)): ?><div class="gp-help"><?= gp_e(gp_t('rules_impact_none')) ?></div><?php endif; ?>
 		<div class="gp-help"><?= gp_e(gp_t('rules_impact_note')) ?></div>
 	</div>
 	<?php endif; ?>
@@ -215,12 +248,18 @@ $err_text = function ($field) use ($errors, $details) {
 			<span class="gp-label"><?= gp_e(gp_t('rules_test_path')) ?></span>
 			<input class="gp-input gp-ltr" type="text" name="test_path" value="<?= gp_e($test_in['path']) ?>" placeholder="/">
 		</label>
+		<label class="gp-field">
+			<span class="gp-label"><?= gp_e(gp_t('rules_test_ip')) ?></span>
+			<input class="gp-input gp-ltr" type="text" name="test_ip" value="<?= gp_e($test_in['ip']) ?>" placeholder="203.0.113.7">
+		</label>
 	</div>
 	<label class="gp-check"><input type="checkbox" name="test_verified" value="1"<?= $test_in['verified'] ? ' checked' : '' ?>>
 		<span><?= gp_e(gp_t('rules_test_verified')) ?></span></label>
 	<div class="gp-row-head"><button class="gp-btn gp-btn-primary" type="submit" name="test" value="1"><?= gp_e(gp_t('rules_test_run')) ?></button></div>
 	<?php if ($test !== null): ?>
 	<div class="gp-note<?= $test['winner'] ? ' gp-note-strong' : '' ?>" role="status">
+		<?php if ($test['ip'] !== ''): ?><div><?= gp_e(gp_t('rules_test_geo')) ?>: <code class="gp-mono"><?= gp_e($test['cc'] !== '' ? $test['cc'] : gp_t('geo_unknown')) ?></code>
+			/ <code class="gp-mono"><?= gp_e($test['asn'] > 0 ? 'AS' . $test['asn'] : gp_t('geo_unknown')) ?></code></div><?php endif; ?>
 		<?php if ($test['bot'] !== ''): ?><div><?= gp_e(gp_t('rules_test_bot')) ?>: <code class="gp-mono"><?= gp_e($test['bot']) ?></code></div><?php endif; ?>
 		<?php if ($test['winner']): $w = $test['winner']; ?>
 		<div><strong><?= gp_e(gp_t('rules_test_winner')) ?>:</strong> <?= gp_e($w['name']) ?> (<code class="gp-mono"><?= gp_e($w['id']) ?></code>)
@@ -318,7 +357,8 @@ $err_text = function ($field) use ($errors, $details) {
 				<?= $post('move', "\u{2193}", '<input type="hidden" name="dir" value="down">') ?>
 			</td>
 			<td><strong><?= gp_e($r['name']) ?></strong><br><code class="gp-mono"><?= gp_e($r['id']) ?></code></td>
-			<td class="gp-mono gp-ltr"><?= gp_e(gp_rule_cond_text('UA', $r['ua'])) ?><?= ($r['ua'] && $r['path']) ? '<br>' : '' ?><?= gp_e(gp_rule_cond_text('path', $r['path'])) ?></td>
+			<td class="gp-mono gp-ltr"><?= gp_e(gp_rule_cond_text('UA', $r['ua'])) ?><?= ($r['ua'] && $r['path']) ? '<br>' : '' ?><?= gp_e(gp_rule_cond_text('path', $r['path'])) ?>
+				<?php foreach (array('country' => 'country', 'asn' => 'ASN') as $gk => $gl): if (!empty($r[$gk])): ?><br><?= gp_e(gp_rule_cond_text($gl, $r[$gk])) ?><?php endif; endforeach; ?></td>
 			<td><span class="gp-badge <?= $r['action'] === 'block' ? 'gp-badge-bad' : ($r['action'] === 'challenge' ? 'gp-badge-warn' : 'gp-badge-info') ?>"><?= gp_e(gp_t('rules_act_' . $r['action'])) ?></span></td>
 			<td><span class="gp-badge <?= $r['mode'] === 'enforce' ? 'gp-badge-on' : 'gp-badge-off' ?>"><?= gp_e(gp_t('rules_mode_' . $r['mode'])) ?></span></td>
 			<td><span class="gp-badge <?= (!$r['enabled'] || $expired) ? 'gp-badge-off' : 'gp-badge-on' ?>"><?= gp_e(gp_t(!$r['enabled'] ? 'off' : ($expired ? 'rules_expired' : 'on'))) ?></span></td>

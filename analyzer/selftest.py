@@ -2315,5 +2315,344 @@ ok('a corrupt cache is ignored and rebuilt',
 ok('an empty log directory gives no hits', snapshot_rh.collect_rule_hits(tempfile.mkdtemp(prefix='gv-empty-'), rh_now, None) == {})
 shutil.rmtree(rh_dir, ignore_errors=True)
 
+# ---------------------------------------------------------------------------
+section('GeoIP compile: ranges, geoip.dat, .mmdb, atomic swap, sanity checks, PHP parity')
+import ipaddress as ip_geo
+import json as json_geo
+import struct as struct_geo
+import subprocess as sp_geo
+from analyzer import geo as geo_mod
+from analyzer import worker as worker_geo
+
+
+def g_net(cidr, value):
+    n = ip_geo.ip_network(cidr)
+    return (int(n.network_address), int(n.broadcast_address), value)
+
+
+# -- range arithmetic
+ok('normalize: nested ranges - the narrower one wins inside, the wider keeps both sides',
+   geo_mod.normalize([g_net('10.0.0.0/8', 'AA'), g_net('10.1.0.0/16', 'BB')]) ==
+   [(167772160, 167837695, 'AA'), (167837696, 167903231, 'BB'), (167903232, 184549375, 'AA')])
+ok('normalize: adjacent ranges with the same value merge, different values do not',
+   geo_mod.normalize([g_net('1.0.0.0/24', 'AA'), g_net('1.0.1.0/24', 'AA'), g_net('1.0.2.0/24', 'BB')]) ==
+   [(16777216, 16777727, 'AA'), (16777728, 16777983, 'BB')])
+ok('normalize: identical ranges with different values - the smaller value wins, deterministically',
+   geo_mod.normalize([g_net('2.0.0.0/8', 'US'), g_net('2.0.0.0/8', 'IR')]) == [g_net('2.0.0.0/8', 'IR')]
+   and geo_mod.normalize([g_net('2.0.0.0/8', 'IR'), g_net('2.0.0.0/8', 'US')]) == [g_net('2.0.0.0/8', 'IR')])
+ok('normalize: input order does not matter and the output is sorted and non-overlapping',
+   geo_mod.normalize([g_net('9.0.0.0/8', 'CC'), g_net('3.0.0.0/8', 'AA'), g_net('3.3.0.0/16', 'BB'), g_net('3.3.3.0/24', 'DD')]) ==
+   geo_mod.normalize([g_net('3.3.3.0/24', 'DD'), g_net('3.0.0.0/8', 'AA'), g_net('9.0.0.0/8', 'CC'), g_net('3.3.0.0/16', 'BB')])
+   and all(a[1] < b[0] for a, b in zip(geo_mod.normalize([g_net('9.0.0.0/8', 'CC'), g_net('3.0.0.0/8', 'AA'), g_net('3.3.3.0/24', 'DD')]),
+                                       geo_mod.normalize([g_net('9.0.0.0/8', 'CC'), g_net('3.0.0.0/8', 'AA'), g_net('3.3.3.0/24', 'DD')])[1:])))
+ok('normalize: three levels of nesting', [r[2] for r in geo_mod.normalize([g_net('3.0.0.0/8', 'AA'), g_net('3.3.0.0/16', 'BB'), g_net('3.3.3.0/24', 'DD')])] == ['AA', 'BB', 'DD', 'BB', 'AA'])
+ok('normalize: empty input, and IPv6 (128-bit) ranges',
+   geo_mod.normalize([]) == [] and geo_mod.normalize([g_net('2001:db8::/32', 'DE'), g_net('2001:db8:1::/48', 'FR')])[1][2] == 'FR'
+   and len(geo_mod.normalize([g_net('2001:db8::/32', 'DE'), g_net('2001:db8:1::/48', 'FR')])) == 3)
+ok('split_family: an IPv4-mapped IPv6 network becomes the IPv4 range it carries',
+   geo_mod.split_family([(ip_geo.ip_network('::ffff:1.2.3.0/120'), 'AA'), (ip_geo.ip_network('2001:db8::/32'), 'DE')]) ==
+   ([(16909056, 16909311, 'AA')], [g_net('2001:db8::/32', 'DE')]))
+
+# -- the compiled file
+gv4 = geo_mod.normalize([g_net('1.0.0.0/24', 'AA'), g_net('5.0.0.0/8', 'IR'), g_net('255.255.255.255/32', 'ZZ')])
+gv6 = geo_mod.normalize([g_net('2001:db8::/32', 'DE'), g_net('2a00::/12', 'IR')])
+gbin = geo_mod.pack(geo_mod.KIND_COUNTRY, gv4, gv6, 1700000000, 'x.dat', 'ab' * 32)
+gh = geo_mod.parse_header(gbin)
+ok('compiled file: header fields round-trip', gh and gh['kind'] == 1 and gh['vsize'] == 2 and gh['built'] == 1700000000 and gh['v4'] == 3 and gh['v6'] == 2
+   and gh['source'] == 'x.dat' and gh['sha'] == 'ab' * 32 and len(gbin) == 128 + 3 * 10 + 2 * 34)
+ok('compiled file: read_ranges returns what was written', geo_mod.read_ranges(gbin) == (gv4, gv6))
+ok('compiled file: lookup of first / last / inside / gap / mapped IPv6',
+   geo_mod.lookup(gbin, '1.0.0.0') == 'AA' and geo_mod.lookup(gbin, '1.0.0.255') == 'AA' and geo_mod.lookup(gbin, '5.9.9.9') == 'IR'
+   and geo_mod.lookup(gbin, '255.255.255.255') == 'ZZ' and geo_mod.lookup(gbin, '4.0.0.0') is None and geo_mod.lookup(gbin, '::ffff:5.1.1.1') == 'IR'
+   and geo_mod.lookup(gbin, '2001:db8::5') == 'DE' and geo_mod.lookup(gbin, '2a01::1') == 'IR' and geo_mod.lookup(gbin, '3000::') is None)
+gasn = geo_mod.pack(geo_mod.KIND_ASN, geo_mod.normalize([g_net('1.0.0.0/24', 13335), g_net('2.0.0.0/24', 4200000000)]), [], 1, 'a.mmdb', '')
+ok('compiled file: ASN values, including one above 2^31', geo_mod.lookup(gasn, '1.0.0.9') == 13335 and geo_mod.lookup(gasn, '2.0.0.1') == 4200000000 and geo_mod.lookup(gasn, '9.9.9.9') is None)
+ok('compiled file: truncated or foreign bytes are not a compiled file',
+   geo_mod.parse_header(gbin[:200]) is None and geo_mod.parse_header(b'x' * 200) is None and geo_mod.parse_header(b'') is None)
+
+# -- geoip.dat (protobuf)
+def pb_varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def pb_field(num, wire, payload):
+    key = pb_varint((num << 3) | wire)
+    if wire == 2:
+        return key + pb_varint(len(payload)) + payload
+    return key + payload
+
+
+def pb_cidr(cidr):
+    n = ip_geo.ip_network(cidr)
+    return pb_field(1, 2, n.network_address.packed) + pb_field(2, 0, pb_varint(n.prefixlen))
+
+
+def pb_entry(tag, cidrs, reverse=False, extra=b''):
+    body = pb_field(1, 2, tag.encode()) + b''.join(pb_field(2, 2, pb_cidr(c)) for c in cidrs)
+    if reverse:
+        body += pb_field(3, 0, pb_varint(1))
+    return pb_field(1, 2, body + extra)
+
+
+dat_bytes = (pb_entry('IR', ['5.0.0.0/8', '2a00::/12']) + pb_entry('us', ['5.1.0.0/16', '8.8.8.0/24']) + pb_entry('PRIVATE', ['10.0.0.0/8', '192.168.0.0/16'])
+             + pb_entry('cloudflare', ['1.1.1.0/24']) + pb_entry('de', ['2001:db8::/32']) + pb_entry('geolocation-cn', ['9.9.9.0/24'])
+             + pb_entry('fr', ['7.0.0.0/8'], reverse=True) + pb_entry('tr', ['6.0.0.0/8'], extra=pb_field(15, 5, b'\0\0\0\0')))
+geo_work = tempfile.mkdtemp(prefix='gv-geo-selftest-')
+dat_path = os.path.join(geo_work, 'fixture.dat')
+with open(dat_path, 'wb') as fh:
+    fh.write(dat_bytes)
+dat = geo_mod.read_dat(dat_path)
+ok('geoip.dat: 2-letter tags become country ranges (any case, upper-cased)', set(r[2] for r in dat['v4']) == {'IR', 'US', 'TR'} and [r[2] for r in dat['v6']] == ['IR', 'DE'])
+ok('geoip.dat: private, cloudflare, longer tags and reverse_match entries are listed as ignored',
+   dat['ignored'] == {'PRIVATE': 2, 'cloudflare': 1, 'geolocation-cn': 1, 'fr': 1})
+ok('geoip.dat: an unknown field with a fixed-width wire type is skipped', 'TR' in set(r[2] for r in dat['v4']))
+for label, blob in (('truncated', dat_bytes[:-3]), ('a bad prefix', pb_entry('ir', []) + pb_field(1, 2, pb_field(1, 2, b'ir') + pb_field(2, 2, pb_field(1, 2, b'\x05\0\0\0') + pb_field(2, 0, pb_varint(40)))))):
+    bad_path = os.path.join(geo_work, 'bad.dat')
+    with open(bad_path, 'wb') as fh:
+        fh.write(blob)
+    try:
+        geo_mod.read_dat(bad_path)
+        raised = False
+    except geo_mod.GeoError:
+        raised = True
+    ok('geoip.dat: %s is an error, not a crash' % label, raised)
+os.remove(os.path.join(geo_work, 'bad.dat'))
+ok('geoip.dat: nested CIDRs from different countries compile to a narrower-wins table', (lambda t: (geo_mod.lookup(t, '5.1.2.3') == 'US' and geo_mod.lookup(t, '5.2.0.0') == 'IR' and geo_mod.lookup(t, '5.0.255.255') == 'IR'))(
+    geo_mod.pack(1, geo_mod.normalize(dat['v4']), geo_mod.normalize(dat['v6']), 1, 'f.dat', '')))
+
+
+# -- a minimal MaxMind DB writer (IPv4 tree, 24-bit records), enough to feed the reader
+def mm_str(s):
+    b = s.encode()
+    return bytes([0x40 | len(b)]) + b
+
+
+def mm_uint(typ, n):
+    raw = n.to_bytes(max(1, (n.bit_length() + 7) // 8), 'big') if n else b''
+    return bytes([(typ << 5) | len(raw)]) + raw
+
+
+def mm_value(v):
+    if isinstance(v, dict):
+        return bytes([0xE0 | len(v)]) + b''.join(mm_str(k) + mm_value(x) for k, x in v.items())
+    if isinstance(v, str):
+        return mm_str(v)
+    return mm_uint(6, v)
+
+
+def mm_build(entries, dbtype):
+    """entries: [(cidr, record dict)] -> MMDB bytes (IPv4 only)."""
+    data = b''
+    offsets = {}
+    nodes = [[None, None]]
+    for cidr, rec in sorted(entries, key=lambda e: ip_geo.ip_network(e[0]).prefixlen):
+        key = json_geo.dumps(rec, sort_keys=True)
+        if key not in offsets:
+            offsets[key] = len(data)
+            data += mm_value(rec)
+        net = ip_geo.ip_network(cidr)
+        bits = format(int(net.network_address), '032b')[:net.prefixlen]
+        at = 0
+        for i, bit in enumerate(bits):
+            b = int(bit)
+            if i == len(bits) - 1:
+                nodes[at][b] = ('data', offsets[key])
+            else:
+                if not isinstance(nodes[at][b], int):
+                    old = nodes[at][b]               # a wider network already ends here: both halves keep its data
+                    nodes.append([old, old])
+                    nodes[at][b] = len(nodes) - 1
+                at = nodes[at][b]
+    count = len(nodes)
+
+    def rec_val(r):
+        if r is None:
+            return count
+        if isinstance(r, int):
+            return r
+        return count + 16 + r[1]
+    tree = b''.join(rec_val(n[0]).to_bytes(3, 'big') + rec_val(n[1]).to_bytes(3, 'big') for n in nodes)
+    meta = {'binary_format_major_version': 2, 'binary_format_minor_version': 0, 'database_type': dbtype, 'ip_version': 4,
+            'node_count': count, 'record_size': 24, 'build_epoch': 1700000000, 'description': {'en': 'fixture'}, 'languages': ['en']}
+    md = bytes([0xE0 | len(meta)])
+    for k, v in meta.items():
+        md += mm_str(k)
+        if k == 'build_epoch':
+            md += bytes([4, 2]) + (1700000000).to_bytes(4, 'big')          # uint64: extended type 9
+        elif k == 'languages':
+            md += bytes([1, 4]) + mm_str('en')                            # array: extended type 11
+        elif k == 'description':
+            md += mm_value({'en': 'fixture'})
+        elif isinstance(v, str):
+            md += mm_str(v)
+        elif k in ('ip_version', 'record_size', 'binary_format_major_version', 'binary_format_minor_version'):
+            md += mm_uint(5, v)                                            # uint16
+        else:
+            md += mm_uint(6, v)
+    return tree + b'\0' * 16 + data + b'\xab\xcd\xefMaxMind.com' + md
+
+
+try:
+    import maxminddb as mm_geo
+except ImportError:
+    mm_geo = None
+if mm_geo is None:
+    skip('.mmdb reader and compile', 'the optional maxminddb package is not installed')
+else:
+    mm_country = mm_build([('5.0.0.0/8', {'country': {'iso_code': 'IR'}}), ('5.1.0.0/16', {'country': {'iso_code': 'DE'}}), ('8.8.8.0/24', {'country': {'iso_code': 'us'}}),
+                           ('9.0.0.0/8', {'country': {'names': {'en': 'nowhere'}}})], 'GeoLite2-Country')
+    mm_asn = mm_build([('1.0.0.0/24', {'autonomous_system_number': 13335, 'org': 'Cloudflare'}),
+                       ('1.0.1.0/24', {'autonomous_system_number': 13335, 'org': 'Cloudflare'}),
+                       ('2.0.0.0/24', {'asn': 'AS15169', 'country_code': 'US'})], 'GeoLite2-ASN')
+    mm_path = os.path.join(geo_work, 'c.mmdb')
+    with open(mm_path, 'wb') as fh:
+        fh.write(mm_country)
+    r_cc = geo_mod.read_mmdb(mm_path)
+    ok('.mmdb: country ranges (upper-cased), a record without an ISO code is skipped, no ASN data', geo_mod.normalize(r_cc['country']['v4']) ==
+       geo_mod.normalize([g_net('5.0.0.0/8', 'IR'), g_net('5.1.0.0/16', 'DE'), g_net('8.8.8.0/24', 'US')]) and r_cc['asn']['v4'] == []
+       and geo_mod.normalize(r_cc['country']['v4'])[1] == g_net('5.1.0.0/16', 'DE'))
+    with open(mm_path, 'wb') as fh:
+        fh.write(mm_asn)
+    r_as = geo_mod.read_mmdb(mm_path)
+    ok('.mmdb: ASN as a number (GeoLite2 style) and as "AS15169" (IPinfo style); an IPinfo-style record also gives a country',
+       geo_mod.normalize(r_as['asn']['v4']) == [g_net('1.0.0.0/23', 13335), g_net('2.0.0.0/24', 15169)] and r_as['country']['v4'] == [g_net('2.0.0.0/24', 'US')])
+    os.remove(mm_path)
+    with open(mm_path, 'wb') as fh:
+        fh.write(b'this is not a database')
+    try:
+        geo_mod.read_mmdb(mm_path)
+        raised = False
+    except geo_mod.GeoError:
+        raised = True
+    ok('.mmdb: a file that is not a MaxMind DB is an error, not a crash', raised)
+    os.remove(mm_path)
+
+
+# -- compile: atomic swap, rollback copy, sanity checks
+def geo_dir(name):
+    d = os.path.join(geo_work, name)
+    os.makedirs(d)
+    return d
+
+
+def put(d, name, blob):
+    with open(os.path.join(d, name), 'wb') as fh:
+        fh.write(blob)
+
+
+d1 = geo_dir('c1')
+put(d1, 'geoip.dat', dat_bytes)
+st1 = geo_mod.compile_geo(d1, known={'country': [('5.1.2.3', 'US'), ('5.9.9.9', 'IR')], 'asn': []}, min_ranges=2, now=1800000000)
+cbin = open(os.path.join(d1, 'country.bin'), 'rb').read()
+ok('compile: geoip.dat -> country.bin; the file passes its own lookups and has the source name and sha',
+   st1['ok'] and st1['errors'] == [] and geo_mod.lookup(cbin, '5.1.2.3') == 'US' and geo_mod.lookup(cbin, '6.1.1.1') == 'TR'
+   and geo_mod.parse_header(cbin)['source'] == 'geoip.dat' and geo_mod.parse_header(cbin)['built'] == 1800000000
+   and geo_mod.parse_header(cbin)['sha'] == __import__('hashlib').sha256(dat_bytes).hexdigest())
+ok('compile: no ASN source means no asn.bin and no error', not os.path.exists(os.path.join(d1, 'asn.bin')) and st1['asn'] is None)
+ok('compile: geo-status.json records the sources, the ignored tags and the country list',
+   json_geo.load(open(os.path.join(d1, 'geo-status.json')))['ignored_tags']['PRIVATE'] == 2 and st1['countries'] == ['DE', 'IR', 'TR', 'US']
+   and st1['sources'][0]['used'] == ['country'])
+ok('compile: no temp file and no .prev after the first compile', [n for n in os.listdir(d1) if '.tmp' in n or n.endswith('.prev')] == [])
+st2 = geo_mod.compile_geo(d1, known={'country': [], 'asn': []}, min_ranges=2, now=1800000100)
+ok('compile: a second compile keeps the file it replaced as country.bin.prev (rollback copy), byte for byte',
+   open(os.path.join(d1, 'country.bin.prev'), 'rb').read() == cbin and geo_mod.parse_header(open(os.path.join(d1, 'country.bin'), 'rb').read())['built'] == 1800000100)
+ok('compile: still no temp files', [n for n in os.listdir(d1) if '.tmp' in n] == [])
+
+# sanity failures keep the live file
+live = open(os.path.join(d1, 'country.bin'), 'rb').read()
+put(d1, 'geoip.dat', pb_entry('us', ['8.8.8.0/24']) + pb_entry('de', ['2001:db8::/32']))
+os.utime(os.path.join(d1, 'geoip.dat'), None)
+st3 = geo_mod.compile_geo(d1, known={'country': [], 'asn': []}, min_ranges=1, now=1800000200)
+ok('sanity: a table with no range for IR does not replace the live file', not st3['ok'] and any('no range for IR' in e for e in st3['errors']) and open(os.path.join(d1, 'country.bin'), 'rb').read() == live)
+ok('sanity: a failed compile still describes the file that is live (status keeps the old country entry)', st3['country'] is not None and st3['country']['built'] == 1800000100)
+put(d1, 'geoip.dat', dat_bytes)
+st4 = geo_mod.compile_geo(d1, known={'country': [], 'asn': []}, min_ranges=100, now=1800000300)
+ok('sanity: fewer IPv4 ranges than the minimum does not replace the live file', not st4['ok'] and any('IPv4 ranges' in e for e in st4['errors']) and open(os.path.join(d1, 'country.bin'), 'rb').read() == live)
+st5 = geo_mod.compile_geo(d1, known={'country': [('5.1.2.3', 'IR')], 'asn': []}, min_ranges=1, now=1800000400)
+ok('sanity: a known address that resolves differently blocks the swap and says which', not st5['ok'] and any('5.1.2.3' in e and "'US'" in e for e in st5['errors']) and open(os.path.join(d1, 'country.bin'), 'rb').read() == live)
+known_file = os.path.join(d1, 'known.json')
+with open(known_file, 'w') as fh:
+    json_geo.dump({'country': {'5.9.9.9': 'IR', '6.0.0.1': 'TR'}, 'asn': {}}, fh)
+ok('sanity: geo/known.json supplies the known addresses (none are hard-coded)', geo_mod.load_known(known_file)['country'] == [('5.9.9.9', 'IR'), ('6.0.0.1', 'TR')]
+   and geo_mod.load_known(os.path.join(d1, 'missing.json')) == {'country': [], 'asn': []})
+ok('sanity: sanity() flags an empty table and a missing IR', geo_mod.sanity(1, [], [], [], 1) and geo_mod.sanity(1, [(1, 2, 'US')], [], [], 1) == ['no range for IR'] and geo_mod.sanity(2, [(1, 2, 5)], [], [], 1) == [])
+
+d2 = geo_dir('c2')
+st6 = geo_mod.compile_geo(d2, known={'country': [], 'asn': []})
+ok('compile: a directory with no source says so and writes nothing', not st6['ok'] and any('no .mmdb' in e for e in st6['errors']) and not os.path.exists(os.path.join(d2, 'country.bin')))
+st7 = geo_mod.compile_geo(os.path.join(geo_work, 'missing-dir'), known={'country': [], 'asn': []})
+ok('compile: a missing directory is a reported error, not an exception', not st7['ok'] and st7['errors'])
+d3 = geo_dir('c3')
+put(d3, 'broken.dat', dat_bytes[:-3])
+put(d3, 'good.dat', dat_bytes)
+os.utime(os.path.join(d3, 'broken.dat'), (1, 1))
+st8 = geo_mod.compile_geo(d3, known={'country': [], 'asn': []}, min_ranges=1)
+ok('compile: a broken source is reported and skipped; a good one still compiles', st8['ok'] and any('broken.dat' in e for e in st8['errors']) and os.path.exists(os.path.join(d3, 'country.bin')))
+ok('compile: main() exits non-zero when anything went wrong, zero when nothing did',
+   geo_mod.main(['--dir', d3, '--min-ranges', '1']) == 1 and geo_mod.main(['--dir', d1, '--min-ranges', '1']) == 0)
+
+if mm_geo is not None:
+    d4 = geo_dir('c4')
+    put(d4, 'GeoLite2-Country.mmdb', mm_country)
+    put(d4, 'GeoLite2-ASN.mmdb', mm_build([('1.0.0.0/24', {'autonomous_system_number': 13335}), ('1.0.1.0/24', {'autonomous_system_number': 13335}),
+                                           ('2.0.0.0/24', {'autonomous_system_number': 15169})], 'GeoLite2-ASN'))
+    st9 = geo_mod.compile_geo(d4, known={'country': [('5.1.1.1', 'DE'), ('5.200.0.0', 'IR')], 'asn': [('1.0.0.77', 13335), ('1.0.1.77', 13335)]}, min_ranges=1, now=1800000000)
+    ok('compile: a country .mmdb and an ASN .mmdb give country.bin and asn.bin; adjacent same-AS networks merge',
+       st9['ok'] and st9['errors'] == [] and st9['asn']['v4'] == 2 and geo_mod.lookup(open(os.path.join(d4, 'asn.bin'), 'rb').read(), '2.0.0.5') == 15169
+       and geo_mod.parse_header(open(os.path.join(d4, 'asn.bin'), 'rb').read())['kind'] == 2)
+    ok('compile: each kind comes from the file that holds it',
+       st9['country']['source'] == 'GeoLite2-Country.mmdb' and st9['asn']['source'] == 'GeoLite2-ASN.mmdb')
+    # Without the optional package the .mmdb files are reported and a geoip.dat still compiles.
+    saved = sys.modules.get('maxminddb')
+    sys.modules['maxminddb'] = None
+    try:
+        put(d4, 'geoip.dat', dat_bytes)
+        st10 = geo_mod.compile_geo(d4, known={'country': [], 'asn': []}, min_ranges=1)
+    finally:
+        sys.modules['maxminddb'] = saved
+    ok('compile: without the maxminddb package the .mmdb files are reported (with the install hint) and the geoip.dat still compiles',
+       any('pip install maxminddb' in e for e in st10['errors']) and st10['country']['source'] == 'geoip.dat')
+
+# -- worker, cron wrapper
+ok('worker: geo_compile is a known job type with a handler', 'geo_compile' in worker_geo.HANDLERS and worker_geo.validate({'id': 'a1', 'type': 'geo_compile', 'params': {}})[0])
+ok('worker: an unknown type is still refused', not worker_geo.validate({'id': 'a1', 'type': 'geo_compilex', 'params': {}})[0])
+cron_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts', 'analyzer-cron.sh')).read()
+ok('cron wrapper: a geo mode that runs analyzer/geo.py', re.search(r'geo\)\s+SCRIPT="analyzer/geo\.py"', cron_src) is not None)
+jobs_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'panel', 'jobs.php')).read()
+ok('the panel and the worker agree on the job type list', "'geo_compile'" in jobs_src)
+
+# -- PHP reads what Python writes
+php_geo = shutil.which('php')
+if not php_geo:
+    skip('PHP lookup parity', 'php not found')
+else:
+    ips = ['5.1.2.3', '5.0.0.0', '5.255.255.255', '4.255.255.255', '6.1.1.1', '8.8.8.8', '8.8.9.1', '2001:db8::1', '2a01::1', '2b00::1', '::ffff:5.1.2.3', '255.255.255.255', 'bad']
+    d5 = geo_dir('c5')
+    put(d5, 'geoip.dat', dat_bytes)
+    geo_mod.compile_geo(d5, known={'country': [], 'asn': []}, min_ranges=1)
+    code = ('define("GV_BOOT", 1); define("GV_NO_AUTORUN", 1); require $argv[1] . "/guard/guard.php"; '
+            'foreach (array_slice($argv, 2) as $ip) { echo gv_geo_country($ip, true), "\\n"; }')
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ)
+    env['GV_GEO_DIR'] = d5
+    out = sp_geo.run([php_geo, '-r', code, root] + ips, env=env, stdout=sp_geo.PIPE, stderr=sp_geo.PIPE, universal_newlines=True)
+    php_vals = out.stdout.split('\n')[:len(ips)]
+    data5 = open(os.path.join(d5, 'country.bin'), 'rb').read()
+
+    def py_val(ip):
+        try:
+            return geo_mod.lookup(data5, ip) or ''
+        except ValueError:
+            return ''
+    ok('PHP and Python resolve every probe address the same way (%d probes)' % len(ips), out.returncode == 0 and php_vals == [py_val(ip) for ip in ips])
+    ok('...and the answers are the expected ones, not just equal', php_vals[:5] == ['US', 'IR', 'IR', '', 'TR'] and php_vals[7] == 'DE')
+shutil.rmtree(geo_work, ignore_errors=True)
+
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)

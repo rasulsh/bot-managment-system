@@ -30,6 +30,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import config as config_mod
+from analyzer import geo as geo_mod
 from analyzer import promote as promote_mod
 from analyzer import redis_io
 from analyzer import replay as replay_mod
@@ -114,6 +115,11 @@ def job_snapshot(cfg, params):
     return snapshot_mod.main(_cfg_argv(cfg.get('_config_path')))
 
 
+def job_geo_compile(cfg, params):
+    # Reads the sources in geo/ and swaps country.bin / asn.bin atomically.
+    return geo_mod.main([])
+
+
 HANDLERS = {
     'verify': job_verify,
     'nightly': job_nightly,
@@ -123,6 +129,7 @@ HANDLERS = {
     'promote_ml': job_promote('ml'),
     'promote_clf': job_promote('clf'),
     'snapshot': job_snapshot,
+    'geo_compile': job_geo_compile,
 }
 
 

@@ -459,6 +459,8 @@ function gp_log_match(array $row, array $f) {
 	if (isset($f['hold']) && $f['hold'] !== '' && (int)($row['hold'] ?? 0) !== (int)$f['hold']) { return false; }
 	if (!empty($f['ovr']) && (string)($row['ovr'] ?? '') !== (string)$f['ovr']) { return false; }
 	if (!empty($f['tok']) && (string)($row['tok'] ?? '') !== (string)$f['tok']) { return false; }
+	if (!empty($f['cc']) && strtoupper((string)($row['cc'] ?? '')) !== strtoupper((string)$f['cc'])) { return false; }
+	if (!empty($f['asn']) && (int)($row['asn'] ?? 0) !== (int)$f['asn']) { return false; }
 	if (!empty($f['dev']) && (string)($row['dev'] ?? '') !== (string)$f['dev']) { return false; }
 	if (!empty($f['ip']) && (string)($row['ip'] ?? '') !== (string)$f['ip']) { return false; }
 	if (!empty($f['path'])) {

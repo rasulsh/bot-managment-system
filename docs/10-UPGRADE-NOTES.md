@@ -2,6 +2,69 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## GeoIP: country and ASN conditions for access rules
+
+**New**
+
+* Rules gain a **Country** and an **ASN** condition (include / exclude), next to the User-Agent and path
+  conditions. They work in `monitor` and `enforce` exactly like any rule and follow the same precedence
+  ([02-ARCHITECTURE.md](02-ARCHITECTURE.md#geoip-country--asn-conditions)).
+* `guard/geo.php` and the `geo/` directory (web-protected). Sources: MaxMind DB `.mmdb` (GeoLite2, DB-IP Lite,
+  IPinfo Lite) and V2Ray/Xray `geoip.dat` (2-letter country tags only; other tags are listed as ignored). They are
+  compiled **offline** by `analyzer/geo.py` into `geo/country.bin` / `geo/asn.bin`; the guard binary-searches those
+  files with `fopen` / `fseek` / `fread`. No PHP extension, no `.mmdb` parsing in PHP, no Redis, no DNS.
+* New panel page **GeoIP** (databases, upload, compile, rollback, lookup tester), a GeoIP group in Settings
+  (`geo.log`), country / ASN filters and CSV columns in Logs, an optional client IP in the Rules test box, and an
+  impact preview that works for country / ASN conditions. A database older than 45 days warns on the dashboard.
+* New worker job type `geo_compile` (panel **Compile now**) and cron mode `scripts/analyzer-cron.sh geo`.
+* New optional Python package `maxminddb` (in `analyzer/requirements.txt`; without it `.mmdb` files are reported
+  as unreadable and a `geoip.dat` still compiles).
+* Log rows gain `cc` / `asn` **only when a lookup ran** (a rule needed it, or `geo.log` is on). An unknown
+  country is logged as `""`. A row without the key was not looked up. Existing readers ignore unknown keys.
+* **An unknown country or ASN matches neither include nor exclude.** "Block everything except IR" never blocks
+  a visitor that could not be placed.
+
+**Compatibility.** `guard/rules.json` files and `guard/rules.cache.php` written by the previous release keep working
+unchanged (a rule without `country` / `asn` has none). Nothing reads `geo/` unless a rule needs it or `geo.log` is on.
+
+**Upgrade steps (existing install `/home/cloud/bot-guard`, monitor mode)**
+
+1. Deploy the files. `pip install -r analyzer/requirements.txt` in the analyzer's virtualenv (adds `maxminddb`).
+   Make sure `geo/` is writable by the web user if you want to upload from the panel; otherwise copy files with SFTP.
+   Run `bash scripts/exposure-check.sh` (it now probes `geo/` too).
+2. Put a database in `geo/` (panel **GeoIP** -> upload, or SFTP): a country `.mmdb` (and optionally an ASN
+   `.mmdb`), or a `geoip.dat`. Press **Compile now** (needs the `worker` cron) or run
+   `scripts/analyzer-cron.sh geo`. Check the active database, then try an address in the **Lookup tester**.
+   Optional: `geo/known.json` with a few addresses that must resolve a given way before a new table is swapped in.
+3. Add the monthly cron line from [03-SETUP.md](03-SETUP.md) (only if you use geo rules).
+4. Optional: Settings -> GeoIP -> **log country**, so Logs can filter by country and the impact preview reads real
+   data. Costs one small file search per request.
+5. Create the first country rule in `monitor` mode, read its hits and the impact preview, then `challenge`, and only
+   then `block`. Leave **Skip verified crawlers** ticked. Do not start with "not IR -> block".
+
+**Rollback.** Disable or delete the rule; or roll the database back (**Roll back** on the GeoIP page restores
+`*.bin.prev`); or delete `geo/country.bin` (country rules then simply never match). The kill switch bypasses all rules.
+
+**Cost** (`scripts/bench-gv-run.sh`, PHP 8.3 with OPcache, `gv_run` on an allowed request, 150 000 IPv4 + 20 000 IPv6
+ranges in the country file, median of 15 interleaved runs of 4000 requests, same machine, Redis `noeviction`; a fresh
+request each time, so the file is re-opened on every request):
+
+| | p50 | p99 |
+|---|---|---|
+| master, no rules | 205 us | 388 us |
+| this branch, no rules (nothing reads `geo/`) | 205 us | 431 us |
+| master, 200 UA rules x 5 values | 284 us | 527 us |
+| this branch, 200 UA rules x 5 values | 299 us | 623 us |
+| this branch, `geo.log` on (lookup on every request, no rules) | 226 us | 450 us |
+| this branch, 200 country rules (the lookup runs once) | 255 us | 488 us |
+| this branch, 200 UA + country rules (the UA misses, the lookup still runs) | 250 us | 493 us |
+
+200 country rules cost +50 us p50 over master with no rules; the lookup is about 20 us of that, so the 200-rule loop
+itself is about 30 us (budget 100 us). `--geo-rules=200 --match` measures the loop alone: 20.5 us p50 / 41 us p99, with
+the country already known. The lookup alone (`--lookup`): warm file 8-12 us p50, 36-52 us p99; a fresh request
+(open + header check + search) 11-17 us p50, 35-57 us p99 (target: p99 well under 200 us). With 200 UA-only rules the
+loop got about 15 us slower (two more `isset()` per rule); the p99 columns are noisy on a shared machine.
+
 ## Access rules (User-Agent / path)
 
 **New**

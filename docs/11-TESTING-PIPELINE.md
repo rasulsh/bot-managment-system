@@ -78,4 +78,14 @@ bash scripts/rules-e2e.sh             # HTTP: block/challenge/log/monitor + the 
 bash scripts/bench-gv-run.sh          # gv_run p50/p99 with 0 / 20 / 200 rules (run on both branches)
 ```
 
-`rules-e2e.sh` needs `php`, `curl`, `redis-server`; it creates and removes `guard.off` in the project root.
+GeoIP has its own sections in the same suites: `guard-selftest.php` (lookup edge cases on generated range files:
+first / last range, gaps, IPv4-mapped IPv6, corrupt / truncated / missing files, unknown-country semantics,
+validation, cache), `panel-selftest.php` (upload, rollback, staleness, warnings, tester, impact preview),
+`analyzer/selftest.py` (range merging, `geoip.dat`, a generated `.mmdb`, atomic swap, sanity failures, and a check
+that PHP and Python resolve the same addresses from the same file) and `rules-e2e.sh` (country rules over HTTP,
+precedence, an unplaced visitor, a broken database, and "country rule + Googlebot UA + Redis down"). The
+fixtures are generated in temp directories; nothing binary is committed.
+`bash scripts/bench-gv-run.sh` also prints the geo rows (`--geo-log`, `--geo-rules=200`, `--geo-rules=200 --geo-ua`,
+`--lookup`); `php scripts/bench-gv-run.php --geo-rules=200 --match` times the rule loop alone.
+
+`rules-e2e.sh` needs `php`, `python3`, `curl`, `redis-server`; it creates and removes `guard.off` in the project root.
