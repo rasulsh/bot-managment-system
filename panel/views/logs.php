@@ -212,6 +212,11 @@ $dash = '—';
 					href="index.php?r=identity&amp;id=<?= gp_u($identity) ?>">
 					<?= gp_e(gp_t('id_title')) ?></a>
 				<?php endif; ?>
+				<?php if (isset($row['ua'])): ?>
+				<a class="gp-btn gp-btn-ghost gp-btn-sm"
+					href="index.php?r=rules&amp;new=1&amp;qua=<?= gp_u($row['ua']) ?>">
+					<?= gp_e(gp_t('rules_quick_block')) ?></a>
+				<?php endif; ?>
 			</div>
 		</div>
 		<?php if ($reasons): ?>

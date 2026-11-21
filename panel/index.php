@@ -19,6 +19,7 @@ require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/data.php';
 require_once __DIR__ . '/jobs.php';
 require_once __DIR__ . '/replay.php';
+require_once __DIR__ . '/rules.php';
 
 $GP_LANG = require __DIR__ . '/lang.php';
 
@@ -266,6 +267,54 @@ switch ($gp_route) {
 		gp_render('overrides', array(
 			'items'    => gp_overrides_list(),
 			'redis_up' => gp_redis_up(),
+		));
+
+	case 'rules':
+		$rcfg = gv_cfg_load();
+		$draft = null;
+		$errors = array();
+		$details = array();
+		$warnings = array();
+		$impact = null;
+		if ($gp_post && isset($_POST['do']) && is_string($_POST['do'])) {
+			$res = gp_rules_action($_POST['do'], $_POST, $gp_user, $gp_ip, $rcfg);
+			if ($res['ok']) {
+				gp_flash('ok', gp_t($res['msg']));
+				gp_redirect('rules');
+			}
+			gp_flash(in_array($res['msg'], array('rule_warnings', 'rule_preview'), true) ? 'warn' : 'error', gp_t($res['msg']));
+			$draft = $res['draft'];
+			$errors = $res['errors'];
+			$details = $res['details'];
+			$warnings = $res['warnings'];
+			$impact = $res['impact'];
+		}
+		$rstate = gp_rules_state();
+		if ($draft === null && isset($_GET['edit']) && is_string($_GET['edit'])) {
+			foreach ($rstate['rules'] as $r) { if ($r['id'] === $_GET['edit']) { $draft = $r; } }
+		}
+		if ($draft === null && isset($_GET['new'])) {
+			// "Quick block" from a log row passes the UA: a monitor-mode rule pre-filled from it.
+			$draft = isset($_GET['qua']) && is_string($_GET['qua']) ? gp_rule_from_ua(substr($_GET['qua'], 0, 300)) : gp_rule_blank();
+		}
+		// Opening the form (new, edit, quick block) shows what the rule would have matched.
+		if ($impact === null && $draft !== null && !$gp_post) {
+			$pv = gv_rule_validate(array_merge($draft, array('id' => $draft['id'] === '' ? 'r-preview' : $draft['id'], 'name' => $draft['name'] === '' ? 'preview' : $draft['name'])), false);
+			if ($pv[0]) { $impact = gp_rules_impact($pv[1]); }
+		}
+		$rfilter = gp_rules_filter_from_request($_GET);
+		$rnow = time();
+		$rvisible = array();
+		foreach ($rstate['rules'] as $r) { if (gp_rules_filter_match($r, $rfilter, $rnow)) { $rvisible[] = $r; } }
+		$test_in = array('ua' => is_string($_GET['test_ua'] ?? null) ? substr($_GET['test_ua'], 0, 500) : '',
+			'path' => is_string($_GET['test_path'] ?? null) ? substr($_GET['test_path'], 0, 300) : '',
+			'verified' => !empty($_GET['test_verified']));
+		$rtest = (($_GET['test'] ?? '') === '1')
+			? gp_rules_test($rstate['rules'], $test_in['ua'], $test_in['path'], $test_in['verified'], $rcfg, $rnow) : null;
+		gp_render('rules', array(
+			'state' => $rstate, 'all' => $rstate['rules'], 'visible' => $rvisible, 'filter' => $rfilter,
+			'draft' => $draft, 'errors' => $errors, 'details' => $details, 'warnings' => $warnings, 'impact' => $impact,
+			'test' => $rtest, 'test_in' => $test_in, 'snapshot' => gp_snapshot(),
 		));
 
 	case 'replay':

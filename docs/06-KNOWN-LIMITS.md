@@ -66,6 +66,17 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
 - Until `challenge.gate_post` is on, a POST is never challenged. If the
   application renders a page for a POST, that is a way round the challenge.
 
+## Access rules
+
+- Rules match the User-Agent, which the client chooses. A UA rule stops lazy tooling, not a
+  client that sends a browser UA. Pair it with the challenge and the rate limits.
+- During a Redis outage a known-bot UA keeps its pass (as before) and `skip_verified_bots` rules skip it too (row reason `RULE_SKIP_DEGRADED`): a forged Googlebot UA is not caught by rules until Redis is back.
+- Exempt paths and the kill switch bypass rules, so a rule never reaches an exempt path.
+- Case-insensitivity is ASCII only; a UA is matched as bytes. Regex: no back-references.
+- The request path reads the generated `guard/rules.cache.php` (OPcache). Without OPcache, or when the cache is stale and `rules.json` is read instead, 200 rules cost about 1 ms per request; keep the list short and save rules from the panel.
+- Hit counts (Rules page) lag by up to one snapshot interval and need the `snapshot` cron job.
+- A "Quick block" of a UA longer than 120 chars becomes a prefix rule because the log keeps 120.
+
 ## Crawlers
 
 - Only crawlers in `known_bots` pass. Every other crawler, monitor and SEO tool

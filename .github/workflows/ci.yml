@@ -74,6 +74,8 @@ jobs:
         run: php -d display_errors=1 -d error_reporting=-1 scripts/guard-selftest.php
       - name: panel self-test
         run: php -d display_errors=1 -d error_reporting=-1 scripts/panel-selftest.php
+      - name: access rules end-to-end (block, challenge, log, monitor, precedence)
+        run: bash scripts/rules-e2e.sh
       - name: redis self-test (round trips, fail-fast, breaker, auth, prefix, handshake)
         run: php -d display_errors=1 -d error_reporting=-1 scripts/redis-selftest.php
       - name: log rotation self-test (compression, retention, size cap, settings from config)

@@ -49,6 +49,7 @@
 			'logs'      => array('nav_logs', '&#9776;'),
 			'identity'  => array('id_title', '&#9678;'),
 			'overrides' => array('nav_overrides', '&#9873;'),
+			'rules'     => array('nav_rules', '&#9888;'),
 			'replay'    => array('nav_replay', '&#8644;'),
 			'models'    => array('nav_models', '&#9707;'),
 			'settings'  => array('nav_settings', '&#9881;'),

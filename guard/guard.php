@@ -10,6 +10,7 @@ require_once __DIR__ . '/redis.php';
 require_once __DIR__ . '/log.php';
 require_once __DIR__ . '/challenge.php';
 require_once __DIR__ . '/outcome.php';
+require_once __DIR__ . '/rules.php';
 
 // --------------------------------------------------------------------------
 // Configuration
@@ -1328,6 +1329,25 @@ function gv_run($t0) {
 	$gate = gv_is_gate($f, !empty($cfg['challenge']['trust_headers']));
 	$st['gate'] = $gate ? 1 : 0;
 
+	// 3b. Access rules (guard/rules.json). A pure match on the request facts: no
+	// Redis, no DNS. It runs after the kill switch and the exemptions (both
+	// bypass rules) and before anything that can give a free pass. Where the
+	// result is applied is spelled out at each step below. With the secret
+	// unconfigured no rule is loaded, like every other enforcement.
+	$rule = null;
+	if ($cfg['secret'] !== 'CHANGE_ME') {
+		try {
+			$rules = gv_rules_load();
+			if ($rules) { $rule = gv_rules_match($f, $rules, time()); }
+		} catch (\Throwable $e) {
+			$rule = null;
+			gv_errlog('rules_exception', get_class($e) . ': ' . $e->getMessage());
+		}
+	}
+	// An enforced block/challenge rule takes the place of the bot and preview
+	// passes below (unless the client is a verified crawler and the rule says so).
+	$rule_acts = ($rule !== null && gv_rule_overrides_pass($rule));
+
 	// 4. Token. A pure HMAC check, so it can run before Redis is opened: the
 	// device id is needed to build the batched reads below. The result stays in
 	// locals and reaches $st at the point it always did (step 7), so the logged
@@ -1404,6 +1424,18 @@ function gv_run($t0) {
 	if ($bot !== '') {
 		$st['bot'] = $bot;
 		$verdict = gv_bot_verdict_from($rv('botbad'), $rv('botok'));
+		// A VERIFIED crawler skips a rule that asks for it (the default). A claim
+		// that is unverified, or refuted ('bad'), never does. With Redis down no
+		// verdict can be read, and a known bot keeps its pass during an outage, so
+		// the rule is skipped too and the row says so (RULE_SKIP_DEGRADED).
+		if ($rule !== null) {
+			$skip = gv_rule_bot_skip($rule, $verdict, gv_redis_alive($conn));
+			if ($skip !== '') {
+				if ($skip === 'degraded') { $st['rs'][] = 'RULE_SKIP_DEGRADED'; }
+				$rule = null;
+				$rule_acts = false;
+			}
+		}
 		if ($verdict === 'bad') {
 			// An impersonator must be judged, not trusted. Revoke the pass and
 			// fall through into normal scoring like any other client.
@@ -1425,7 +1457,8 @@ function gv_run($t0) {
 				// either - it is handled like any other client from here on.
 				$st['rs'][] = 'BOT_UNVERIFIED';
 				$bot = '';
-			} elseif (!$bot_over) {
+			} elseif (!$bot_over && !$rule_acts) {
+				if ($rule !== null) { $st['rs'][] = gv_rule_reason($rule); }
 				gv_finish($conn, $st);
 				gv_emit($f, $st, 'allow_bot', 0, $t0, $log);
 				gv_arm_outcome($cfg, $f, $log);
@@ -1442,12 +1475,13 @@ function gv_run($t0) {
 	// like any other client - changing IP does not buy a new budget.
 	// No Redis, no pass: without a counter the budget cannot be enforced. An
 	// operator deny on the address still wins.
-	if ($bot === '' && !$is_hp && $rv('deny_ip') !== '1' && gv_redis_alive($conn)) {
+	if ($bot === '' && !$is_hp && !$rule_acts && $rv('deny_ip') !== '1' && gv_redis_alive($conn)) {
 		$pv = gv_match_bot($f['ua'], $cfg['preview_bots']);
 		if ($pv !== '') {
 			$n = gv_bump($conn, gv_key('rp:' . $pv), $cfg['limits']['window']);
 			if ($n >= 1 && $n <= (int)$cfg['limits']['preview']) {
 				$st['bot'] = $pv;
+				if ($rule !== null) { $st['rs'][] = gv_rule_reason($rule); }
 				gv_finish($conn, $st);
 				gv_emit($f, $st, 'allow_preview', 0, $t0, $log);
 				gv_arm_outcome($cfg, $f, $log);
@@ -1503,6 +1537,8 @@ function gv_run($t0) {
 	$scored    = gv_score($f, $hp_hist);
 	$st['sc']  = $scored[0];
 	$st['rs']  = array_merge($scored[1], $st['rs']);
+	// The rule reason rides on every row of a request that matched a rule.
+	if ($rule !== null) { $st['rs'][] = gv_rule_reason($rule); }
 	if ($bot_fake) {
 		// Part of the static score on purpose: it counts whatever the signal
 		// toggles say, because a revoked bot claim is not a shadow signal.
@@ -1551,12 +1587,21 @@ function gv_run($t0) {
 	$intended  = gv_decide($st['esc'], $over, $gate, $st['tok'], $cfg['hard_block_score'],
 		$st['ovr']);
 
+	// 10b. What an enforced rule adds. Rule actions are operator actions: they
+	// do not depend on enforce.block / enforce.challenge (the rule's own mode
+	// does), and the holdout never suppresses them. The counters above ran as
+	// for any request, so a blocked client keeps counting up exactly like one
+	// under an operator deny.
+	$page = gv_gate_enforced($f, !empty($cfg['challenge']['gate_post']));
+	$ra   = ($rule !== null) ? gv_rule_act($rule, $st['tok'], $gate, $page) : array('', '');
+
 	// 11. Act. Every branch logs exactly one line.
-	if ($intended === 'allow') {
+	if ($intended === 'allow' && $ra[0] === '') {
 		gv_emit($f, $st, 'allow', 0, $t0, $log);
 		gv_arm_outcome($cfg, $f, $log);
 		return;                                   // zero bytes of output
 	}
+	if ($intended === 'allow') { $intended = $ra[0]; }
 
 	// Holdout: a small deterministic slice measured but never enforced against.
 	// It is the only source of outcome data this system has not already biased
@@ -1568,10 +1613,11 @@ function gv_run($t0) {
 	// holdout suppresses the classifier's own decisions (score block, challenge)
 	// but never a 429 (resource protection) or an operator deny (an action); a
 	// deny is passed through gv_served untouched by the holdout for that reason.
-	$page   = gv_gate_enforced($f, !empty($cfg['challenge']['gate_post']));
 	$served = gv_served($st['esc'], $over, $gate, $st['tok'], $cfg['hard_block_score'], $st['ovr'],
 		$cfg['enforce'], $st['hold'], $page);
 	if ($st['ovr'] === 'deny' && !empty($cfg['enforce']['block'])) { $served = '403'; }
+	if ($ra[1] === '403') { $served = '403'; }
+	elseif ($ra[1] === 'challenge' && $served === 'allow') { $served = 'challenge'; }
 
 	if ($served === 'allow') {
 		// Monitor mode or holdout: record what would have happened and allow.
@@ -1592,6 +1638,7 @@ function gv_run($t0) {
 	if ($intended === '403') { gv_send_403(); exit; }
 	if ($intended === '429') { gv_send_429(); exit; }
 	$bits  = max(0, min(24, (int)$cfg['challenge']['pow_bits']));
+	if ($ra[1] === 'challenge' && (int)$rule['pow_bits'] > 0) { $bits = (int)$rule['pow_bits']; }
 	$nonce = gv_nonce_make($cfg['secret'], $f['ua'], !empty($cfg['challenge']['bind_ip']) ? $f['ip'] : '', $bits);
 	gv_challenge_render($nonce, $cfg['strings'], $bits);
 	exit;
