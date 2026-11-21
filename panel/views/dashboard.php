@@ -35,6 +35,14 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 </div>
 <?php endif; ?>
 
+<?php if (!empty($geo_warn)): ?>
+<div class="gp-card gp-card-danger">
+	<span class="gp-badge gp-badge-warn"><?= gp_e(gp_t('geo_title')) ?></span>
+	<?php foreach ($geo_warn as $w): ?><p class="gp-help"><?= gp_e(gp_t('geo_w_' . $w)) ?></p><?php endforeach; ?>
+	<a class="gp-btn gp-btn-ghost gp-btn-sm" href="index.php?r=geo"><?= gp_e(gp_t('geo_open')) ?></a>
+</div>
+<?php endif; ?>
+
 <?php if (!empty($pipeline) && is_array($pipeline)):
 	$pv = (string)$pipeline['verdict']; ?>
 <div class="gp-card">

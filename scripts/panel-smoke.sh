@@ -83,11 +83,42 @@ check "delete removes the rule" "$(grep -q 'Smoke rule' <<<"$rp" && echo 0 || ec
 code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" -d 'do=starter' "$URL?r=rules")"
 check "a POST without the CSRF token changes nothing (no 303 redirect)" "$([ "$code" != 303 ] && echo 1 || echo 0)"
 
+# GeoIP page: upload a fake source, see it, tester, country rule form, delete it again.
+gp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=geo")"
+check "the GeoIP page renders with an upload form" "$(grep -q 'enctype="multipart/form-data"' <<<"$gp" && grep -q 'Lookup tester' <<<"$gp" && echo 1 || echo 0)"
+tok="$(printf '%s' "$gp" | csrf)"
+smoke_mmdb="$(mktemp)"; printf 'smoke\xab\xcd\xefMaxMind.com' > "$smoke_mmdb"
+code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" -F "csrf=$tok" -F 'do=upload' -F "source=@$smoke_mmdb;filename=smoke-test-upload.mmdb" "$URL?r=geo")"
+rm -f "$smoke_mmdb"
+check "uploading a source file answers 303" "$([ "$code" = 303 ] && echo 1 || echo 0)"
+gp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=geo")"
+check "the uploaded source is listed as not compiled yet" "$(grep -q 'gp-ltr">smoke-test-upload.mmdb</td>' <<<"$gp" && grep -q 'not compiled yet' <<<"$gp" && echo 1 || echo 0)"
+tp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'test=1' --data-urlencode 'ip=203.0.113.7' "$URL?r=geo")"
+check "the lookup tester answers for an address (unknown without a database)" "$(grep -q '203.0.113.7' <<<"$tp" && grep -q 'unknown' <<<"$tp" && echo 1 || echo 0)"
+tp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'test=1' --data-urlencode 'ip=not-an-ip' "$URL?r=geo")"
+check "the tester refuses something that is not an address" "$(grep -q 'not an IPv4 or IPv6 address' <<<"$tp" && echo 1 || echo 0)"
+tok="$(printf '%s' "$gp" | csrf)"
+curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=delete' -d 'name=smoke-test-upload.mmdb' "$URL?r=geo"
+gp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=geo")"
+check "deleting the source removes it from the list" "$(grep -q 'gp-ltr">smoke-test-upload.mmdb</td>' <<<"$gp" && echo 0 || echo 1)"
+rp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=rules")"
+tok="$(printf '%s' "$rp" | csrf)"
+code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=save' -d 'name=Smoke geo rule' -d 'enabled=1' -d 'mode=monitor' -d 'action=log' \
+	-d 'priority=901' -d 'country_op=include' --data-urlencode 'country_values=KP, CU' -d 'ack=1' "$URL?r=rules")"
+check "a country-only rule is saved (monitor)" "$([ "$code" = 303 ] && echo 1 || echo 0)"
+rp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=rules")"
+check "the country rule is listed with its codes" "$(grep -q 'Smoke geo rule' <<<"$rp" && grep -q 'KP' <<<"$rp" && echo 1 || echo 0)"
+rid="$(grep -o 'name="id" value="r[0-9a-f]\{6\}"' <<<"$rp" | head -1 | sed 's/.*value="//; s/"$//')"
+tok="$(printf '%s' "$rp" | csrf)"
+curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=delete' -d "id=$rid" "$URL?r=rules"
+rp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=rules")"
+check "the country rule is deleted again" "$(grep -q 'Smoke geo rule' <<<"$rp" && echo 0 || echo 1)"
+
 # Every page is English and left-to-right, with Latin digits only. The logs,
 # identity, settings and config file pages are checked for direction only: they
 # show request data or operator-written values (the challenge page text, which
 # ships in Persian) as they are, and those may contain any script.
-for r in dashboard logs identity overrides rules replay models settings config_file jobs audit; do
+for r in dashboard logs identity overrides rules geo replay models settings config_file jobs audit; do
 	page="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=$r")"
 	check "page $r is English and left-to-right" "$(grep -q '<html lang="en" dir="ltr">' <<<"$page" && echo 1 || echo 0)"
 	case "$r" in logs|identity|settings|config_file) continue ;; esac

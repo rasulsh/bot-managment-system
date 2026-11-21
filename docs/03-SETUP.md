@@ -210,7 +210,13 @@ GV_PYTHON=/home/youruser/bot-guard/.venv/bin/python
 10 3   * * * /home/youruser/bot-guard/scripts/guard-logrotate.sh         >/dev/null 2>&1
 # optional weekly report by email
 30 7   * * 1 /home/youruser/bot-guard/scripts/analyzer-cron.sh report | mail -s "Bot Guard weekly" you@example.com
+# only when you use country / ASN rules: recompile the GeoIP databases monthly (see docs/09-ADMIN-PANEL.md, GeoIP)
+23 3   1 * * /home/youruser/bot-guard/scripts/analyzer-cron.sh geo       >/dev/null 2>&1
 ```
+
+The `geo` line only recompiles what is already in `geo/`: download a fresh database yourself (GeoLite2,
+DB-IP Lite, IPinfo Lite, or a `geoip.dat`) into `geo/` first. Reading a `.mmdb` needs the `maxminddb` package
+(in `analyzer/requirements.txt`; the analyzer still runs without it and only reports the `.mmdb` file as unreadable).
 
 The `snapshot` and `worker` lines are the two most-forgotten and the two whose
 absence is hardest to diagnose: without `snapshot`, the panel dashboard is stale;

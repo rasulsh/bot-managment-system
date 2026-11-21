@@ -10,7 +10,10 @@
 # unverified and refuted bot, preview fetcher, holdout, expiry).
 # Every enforce toggle is OFF in this server on purpose: rule actions must not
 # depend on enforce.block / enforce.challenge.
-# Needs: php (8.0+), curl, redis-server. Touches nothing outside a temp dir
+# GeoIP: a country.bin built by analyzer/geo.py maps 127.0.0.0/8 to US and 5.0.0.0/8 to IR; the
+# client address is 127.0.0.1 (US), or 5.x / 9.x through X-Forwarded-For (cdn_ranges trusts the
+# loopback proxy here) for an IR and an unplaced visitor.
+# Needs: php (8.0+), python3 (stdlib only), curl, redis-server. Touches nothing outside a temp dir
 # (the kill-switch case creates and removes guard.off in the project root).
 set -uo pipefail
 
@@ -24,7 +27,7 @@ RULES="$WORK/rules.json"
 UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 GBOT='Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
 
-for need in "$PHP_BIN" curl redis-server redis-cli; do
+for need in "$PHP_BIN" python3 curl redis-server redis-cli; do
 	command -v "$need" >/dev/null 2>&1 || { echo "ERROR: '$need' is required." >&2; exit 2; }
 done
 
@@ -43,7 +46,19 @@ R() { redis-cli -p "$RPORT" "$@" >/dev/null; }
 SALT=$("$PHP_BIN" -r 'define("GV_BOOT",1); define("GV_NO_AUTORUN",1); require $argv[1]."/guard/guard.php";
 	for ($i = 0; $i < 100000; $i++) { if (gv_is_holdout("127.0.0.1", "s$i", 5)) { echo "s$i"; break; } }' "$ROOT")
 
-mkdir -p "$WORK/logs"
+mkdir -p "$WORK/logs" "$WORK/geo"
+# Test fixture only: the ranges are written with the real compiler's file format.
+python3 -I - "$ROOT" "$WORK/geo/country.bin" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from analyzer import geo
+def net(cidr, cc):
+    import ipaddress
+    n = ipaddress.ip_network(cidr)
+    return (int(n.network_address), int(n.broadcast_address), cc)
+v4 = geo.normalize([net('127.0.0.0/8', 'US'), net('5.0.0.0/8', 'IR')])
+open(sys.argv[2], 'wb').write(geo.pack(geo.KIND_COUNTRY, v4, [], 1700000000, 'e2e-fixture', ''))
+PY
 cat > "$WORK/config.php" <<CFG
 <?php
 if (!defined('GV_BOOT')) { http_response_code(404); exit; }
@@ -55,6 +70,8 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 \$c['holdout_pct'] = 5;
 \$c['holdout_salt'] = '$SALT';
 \$c['capture_outcomes'] = false;
+\$c['cdn_ranges'] = array('127.0.0.1/32');
+if (is_file('$WORK/geolog.on')) { \$c['geo'] = array('log' => true); }
 \$c['challenge'] = array('pow_bits' => 12, 'bind_ip' => true);
 \$c['limits'] = array_merge(\$c['limits'], array('window' => 60, 'device' => 100000, 'ip_ua' => 100000, 'ip' => 100000, 'mint' => 100000, 'bot' => 100000, 'preview' => 100000));
 return \$c;
@@ -64,6 +81,13 @@ CFG
 rule() {
 	printf '{"id":"%s","name":"%s","enabled":true,"mode":"%s","action":"%s","priority":%s,"skip_verified_bots":%s,"ua":{"op":"include","type":"contains","values":%s},"path":null,"expires_at":%s,"pow_bits":%s,"note":"","created_by":"","created_at":0,"updated_at":0}' \
 		"$1" "$2" "$3" "$4" "${PRI:-100}" "${SKIP:-true}" "$5" "${EXP:-0}" "${POW:-0}"
+}
+# grule ID NAME MODE ACTION OP CC_JSON [UA_JSON]  (a country rule, optionally with a UA condition)
+grule() {
+	local ua=null
+	[ -n "${7:-}" ] && ua="{\"op\":\"include\",\"type\":\"contains\",\"values\":$7}"
+	printf '{"id":"%s","name":"%s","enabled":true,"mode":"%s","action":"%s","priority":%s,"skip_verified_bots":%s,"ua":%s,"path":null,"country":{"op":"%s","type":"code","values":%s},"expires_at":0,"pow_bits":0,"note":"","created_by":"","created_at":0,"updated_at":0}' \
+		"$1" "$2" "$3" "$4" "${PRI:-100}" "${SKIP:-true}" "$ua" "$5" "$6"
 }
 # Writes rules.json AND the generated cache the way the panel does, so the fast path is the one under test.
 write_rules() {
@@ -76,7 +100,7 @@ redis-server --port "$RPORT" --save "" --appendonly no --dir "$WORK" >"$WORK/red
 PIDS+=($!)
 sleep 0.3
 write_rules
-GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "127.0.0.1:$PORT" "$ROOT/scripts/dev-router.php" >"$WORK/php.log" 2>&1 &
+GV_GEO_DIR="$WORK/geo" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "127.0.0.1:$PORT" "$ROOT/scripts/dev-router.php" >"$WORK/php.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/t/404" 2>/dev/null && break; sleep 0.1; done
 
@@ -192,6 +216,92 @@ eq "F1 a held-out client is still blocked by the rule" "$(get 'x evilbot' /f1)" 
 has '"hold":1'; ok "F2 ...and the row says it is in the holdout" "$([ $? -eq 0 ] && echo 1 || echo 0)"
 eq "F3 a held-out client is still challenged by the rule" "$(get 'x chalbot' /f3)" 503
 
+echo "== H. GeoIP: country rules (client 127.0.0.1 is US; XFF 5.x is IR; XFF 9.x is not in the table)"
+R flushall
+eq "H0 an IR address through the trusted proxy resolves (no rule yet: served)" "$(get "$UA" /h0 -H 'X-Forwarded-For: 5.1.2.3')" 200
+write_rules "$(grule r-us US enforce block include '["US"]')"
+eq "H1 include US -> a US client is blocked, although enforce.block is off" "$(get "$UA" /h1)" 403
+has '"RULE:r-us"'; ok "H2 the row carries RULE:r-us and the country" "$([ $? -eq 0 ] && has '"cc":"US"' && echo 1 || echo 0)"
+eq "H3 an IR client is not touched by include US" "$(get "$UA" /h3 -H 'X-Forwarded-For: 5.1.2.3')" 200
+has '"cc":"IR"'; ok "H4 ...and its row carries cc IR (the lookup ran because a rule needed it)" "$([ $? -eq 0 ] && ! has 'RULE:' && echo 1 || echo 0)"
+write_rules "$(grule r-noir NotIR enforce block exclude '["IR"]')"
+eq "H5 exclude IR -> a US client is blocked" "$(get "$UA" /h5)" 403
+eq "H6 exclude IR -> an IR client is served" "$(get "$UA" /h6 -H 'X-Forwarded-For: 5.1.2.3')" 200
+eq "H7 exclude IR -> a client with an UNKNOWN country is NOT blocked" "$(get "$UA" /h7 -H 'X-Forwarded-For: 9.9.9.9')" 200
+has '"cc":""'; ok "H8 ...its row says the lookup ran and found nothing (cc is empty)" "$([ $? -eq 0 ] && ! has 'RULE:' && echo 1 || echo 0)"
+write_rules "$(grule r-ir IR enforce block include '["IR"]')"
+eq "H9 include IR -> an unknown country is not blocked either" "$(get "$UA" /h9 -H 'X-Forwarded-For: 9.9.9.9')" 200
+eq "H10 include IR -> an IR client is blocked" "$(get "$UA" /h10 -H 'X-Forwarded-For: 5.1.2.3')" 403
+write_rules "$(grule r-mon US monitor block include '["US"]')"
+eq "H11 a monitor country rule never acts" "$(get "$UA" /h11)" 200
+has '"SH_RULE:r-mon"'; ok "H12 ...and is logged as SH_RULE" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+write_rules "$(grule r-combo Combo enforce block include '["US"]' '["scraperx"]')"
+eq "H13 UA + country: a matching UA from the country is blocked" "$(get 'x scraperx/1' /h13)" 403
+eq "H14 UA + country: the same UA from another country is served" "$(get 'x scraperx/1' /h14 -H 'X-Forwarded-For: 5.1.2.3')" 200
+eq "H15 UA + country: another UA from the country is served" "$(get "$UA" /h15)" 200
+write_rules "$(grule r-chal Chal enforce challenge include '["US"]')"
+J="$WORK/h.jar"
+eq "H16 a country challenge rule: no token -> challenge page" "$(get "$UA" /h16 -b "$J" -c "$J")" 503
+N=$(body "$UA" /h17 -b "$J" -c "$J" | sed -n "s/.*var N = '\([^']*\)'.*/\1/p" | head -1)
+C=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$N")
+eq "H17 solving it gives 204" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "User-Agent: $UA" -H "X-GV: $N" -H "X-GV-P: $C" -b "$J" -c "$J" "http://127.0.0.1:$PORT/")" 204
+eq "H18 with the token the request passes: no endless loop" "$(get "$UA" /h18 -b "$J" -c "$J")" 200
+eq "H19 and again" "$(get "$UA" /h19 -b "$J" -c "$J")" 200
+
+echo "== I. GeoIP precedence and the request path"
+write_rules "$(grule r-us US enforce block include '["US"]')"
+R set "gv:allow:127.0.0.1" 1 EX 60
+eq "I1 an operator allow override beats a country rule" "$(get "$UA" /i1)" 200
+R del "gv:allow:127.0.0.1"
+R set "gv:botok:127.0.0.1" 1 EX 60
+eq "I3 a VERIFIED crawler from a US address skips the country rule" "$(get "$GBOT" /i3)" 200
+has '"act":"allow_bot"'; ok "I4 ...and takes the normal bot pass" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+write_rules "$(SKIP=false grule r-us US enforce block include '["US"]')"
+eq "I5 skip_verified_bots=false: the verified crawler is blocked by country" "$(get "$GBOT" /i5)" 403
+write_rules "$(grule r-us US enforce block include '["US"]')"
+R del "gv:botok:127.0.0.1"
+eq "I6 an UNVERIFIED crawler claim from a US address is NOT skipped" "$(get "$GBOT" /i6)" 403
+R set "gv:botbad:127.0.0.1" 1 EX 60
+eq "I7 a REFUTED crawler claim is NOT skipped" "$(get "$GBOT" /i7)" 403
+R del "gv:botbad:127.0.0.1"
+eq "I8 an exempt path bypasses a country rule" "$(get "$UA" /exempt-me)" 200
+touch "$ROOT/guard.off"
+eq "I9 the kill switch bypasses a country rule" "$(get "$UA" /i9)" 200
+rm -f "$ROOT/guard.off"
+eq "I10 a held-out client (the holdout covers 127.0.0.1) is still blocked by a country rule" "$(get "$UA" /i10)" 403
+has '"hold":1'; ok "I11 ...and the row says it is in the holdout" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+before=$(rows); get "$UA" /i12 >/dev/null
+eq "I12 exactly one log row per request" "$(( $(rows) - before ))" 1
+
+# No extra Redis work: the same request costs the same number of Redis commands with 200 country rules.
+cmds() { redis-cli -p "$RPORT" info stats | sed -n 's/^total_commands_processed:\([0-9]*\).*/\1/p' | tr -d '\r'; }
+write_rules "$(grule r-never Never enforce block include '["KP"]')"
+a=$(cmds); get "$UA" /i13 >/dev/null; b=$(cmds)
+many=""; for i in $(seq 1 200); do many="$many$(PRI=$((100 + i)) grule "r-n$i" "N$i" enforce block include '["KP","CU","SY"]'),"; done
+write_rules ${many%,}
+c=$(cmds); get "$UA" /i14 >/dev/null; d=$(cmds)
+eq "I13 200 non-matching country rules add no Redis command (no extra round trip)" "$(( d - c ))" "$(( b - a ))"
+
+echo "== J. GeoIP logging and a broken database"
+write_rules
+get "$UA" /j1 >/dev/null
+has '"cc"'; ok "J1 no geo rule and geo.log off: the row has no cc (the file is never opened)" "$([ $? -ne 0 ] && echo 1 || echo 0)"
+touch "$WORK/geolog.on"
+get "$UA" /j2 >/dev/null
+has '"cc":"US"'; ok "J2 geo.log on: the row carries the country without any rule" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+get "$UA" /j3 -H 'X-Forwarded-For: 9.9.9.9' >/dev/null
+has '"cc":""'; ok "J3 geo.log on: an unplaced address is logged with an empty country" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+rm -f "$WORK/geolog.on"
+write_rules "$(grule r-noir NotIR enforce block exclude '["IR"]')"
+mv "$WORK/geo/country.bin" "$WORK/geo/country.bin.keep"
+eq "J4 database missing: a country rule never matches and the request is served" "$(get "$UA" /j4)" 200
+ok "J5 ...and the missing file is reported in guard-errors.log" "$(grep -q geo_missing "$WORK/logs/guard-errors.log" 2>/dev/null && echo 1 || echo 0)"
+printf 'GVRGgarbage' > "$WORK/geo/country.bin"
+eq "J6 database corrupt: served, never a 500" "$(get "$UA" /j6)" 200
+ok "J7 ...and reported as corrupt" "$(grep -q geo_corrupt "$WORK/logs/guard-errors.log" 2>/dev/null && echo 1 || echo 0)"
+mv "$WORK/geo/country.bin.keep" "$WORK/geo/country.bin"
+eq "J8 the database back: the rule acts again" "$(get "$UA" /j8)" 403
+
 echo "== G. Redis down: rules still apply (they need no Redis), the request never fails"
 write_rules "$(rule r-evil Evil enforce block '["evilbot"]')" "$(rule r-gbot GBot enforce block '["googlebot"]')" \
 	"$(SKIP=false PRI=50 rule r-gnoskip GNoSkip enforce block '["bingbot"]')"
@@ -204,6 +314,18 @@ eq "G4 Redis down: a known-bot UA keeps its pass and the skipping rule does not 
 has '"act":"allow_bot"'; ok "G5 ...as allow_bot, with the reason RULE_SKIP_DEGRADED" "$([ $? -eq 0 ] && has '"RULE_SKIP_DEGRADED"' && echo 1 || echo 0)"
 eq "G6 Redis down: a rule with skip_verified_bots off still blocks a known-bot UA" "$(get 'Mozilla/5.0 (compatible; bingbot/2.0)' /g6)" 403
 eq "G7 Redis down: a UA that is not a known bot is still blocked" "$(get 'x evilbot' /g7)" 403
+
+echo "== K. Redis down and a country rule: a crawler is never blocked by country during an outage"
+write_rules "$(grule r-noir NotIR enforce block exclude '["IR"]')"
+eq "K1 country rule 'not IR -> block', Googlebot UA from a US address, Redis down: the crawler is served" "$(get "$GBOT" /k1)" 200
+has '"act":"allow_bot"'; ok "K2 ...as allow_bot with RULE_SKIP_DEGRADED, and the country is logged" "$([ $? -eq 0 ] && has '"RULE_SKIP_DEGRADED"' && has '"cc":"US"' && echo 1 || echo 0)"
+eq "K3 the same rule, a browser UA from the US, Redis down: blocked (no Redis needed)" "$(get "$UA" /k3)" 403
+eq "K4 the same rule, an IR client, Redis down: served" "$(get "$UA" /k4 -H 'X-Forwarded-For: 5.1.2.3')" 200
+write_rules "$(SKIP=false grule r-noir NotIR enforce block exclude '["IR"]')"
+eq "K5 skip_verified_bots off: Redis down, the crawler UA is blocked by country (the operator asked for it)" "$(get "$GBOT" /k5)" 403
+write_rules "$(grule r-noir NotIR enforce block exclude '["IR"]')"
+eq "K6 Bingbot UA from a US address, Redis down: served" "$(get 'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)' /k6)" 200
+eq "K7 a fake crawler UA that is not in known_bots is still blocked" "$(get 'Mozilla/5.0 (compatible; Notabot/2.0)' /k7)" 403
 
 echo
 echo "PASS $PASS  FAIL $FAIL"

@@ -195,6 +195,38 @@ with Redis alive an unverified or refuted claim is never skipped. A rule with
 bot pass itself: during an outage a client that merely claims to be Googlebot is not caught by
 rules.
 
+### GeoIP (country / ASN conditions)
+
+`guard/geo.php` answers "which country / AS is this address?" for the rules and, optionally, for the log.
+
+* **Offline compile, online search.** Source databases (`geo/*.mmdb`, `geo/geoip.dat`) are never read by
+  PHP. The analyzer (`analyzer/geo.py`, worker job `geo_compile`, or `scripts/analyzer-cron.sh geo`) merges
+  them into `geo/country.bin` and `geo/asn.bin`: a 128-byte header (magic `GVRG`, version, kind, build time,
+  range counts, sha256 and name of the source) and sorted, non-overlapping ranges (IPv4 `start 4 | end 4 | value`,
+  IPv6 `start 16 | end 16 | value`; country value = 2 letters, ASN = uint32). The IP lists (a later release) use the
+  same file format and the same lookup. The file is written to a temp name and renamed (atomic); the file it
+  replaces stays as `<name>.prev` for rollback. A new table replaces the live one only if it passes the sanity
+  checks (minimum range count, a range for IR, the addresses of `geo/known.json` when that file exists).
+* **Lookup.** A binary search with `fopen` / `fseek` / `fread` on the compiled file: nothing is loaded into
+  memory, the OS page cache does the work, no extension, no DNS, no Redis. The address is the CDN-aware client
+  address the guard already resolved (`gv_ip_canon`: an IPv4-mapped IPv6 address is looked up as IPv4). A
+  missing, short, wrong-magic, wrong-version or truncated file, or an address in no range, gives "unknown":
+  country `''` / ASN `0`, and one rate-limited line in `guard-errors.log` for a broken file.
+* **When the file is opened.** Only when an enabled, unexpired rule with a country or ASN condition is
+  *reached* in the priority loop (the cheap conditions of a rule - path, then country / ASN, then the UA
+  pattern - are tested in that order), or when `geo.log` is on. A site with no geo rule and `geo.log` off never
+  opens it. The result is memoised for the request.
+* **Unknown never matches.** An unknown country (or ASN) matches neither an `include` nor an `exclude`
+  condition. "Block everything except IR" therefore never blocks a visitor that could not be placed.
+* **In the generated cache.** `guard/rules.cache.php` carries each country / ASN condition as a lookup set
+  (`'set' => array('IR' => true, ...)`), so a rule costs one `isset()` after the request's single search.
+* **Log.** `cc` (and `asn` when an ASN database is installed) are added to the row exactly when a lookup ran:
+  `cc` is `""` for "looked up, not placed", and a row without the key was not looked up.
+* **Precedence is unchanged** (see Access rules): kill switch and exempt paths, operator allow, verified-bot
+  skip, operator deny, then the rule. Country and ASN rules are ordinary rules and follow all of it; in
+  particular, with Redis down a known-bot UA is treated as verified for `skip_verified_bots` (reason
+  `RULE_SKIP_DEGRADED`), so a country rule can never block Googlebot or Bingbot during an outage.
+
 ### Redis contract (request path)
 
 At most two round trips per request: one pipeline of every `GET` the request can need

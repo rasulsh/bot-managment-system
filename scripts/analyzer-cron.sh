@@ -13,6 +13,7 @@
 #   scripts/analyzer-cron.sh report     period report, useful as a weekly mail
 #   scripts/analyzer-cron.sh snapshot   dashboard snapshot for the admin panel
 #   scripts/analyzer-cron.sh worker     drain the panel's job queue
+#   scripts/analyzer-cron.sh geo        compile geo/*.mmdb / geoip.dat into country.bin / asn.bin
 #
 # Each mode takes its own flock, so overlapping cron firings queue-and-skip
 # instead of writing partial verdicts on top of each other.
@@ -25,6 +26,7 @@
 #   30 7   * * 1 /full/path/bot-guard/scripts/analyzer-cron.sh report | mail -s "Bot Guard weekly" you@example.com
 #   */15 * * * * /full/path/bot-guard/scripts/analyzer-cron.sh snapshot  >/dev/null 2>&1
 #   *    * * * * /full/path/bot-guard/scripts/analyzer-cron.sh worker    >/dev/null 2>&1
+#   23 3   1 * * /full/path/bot-guard/scripts/analyzer-cron.sh geo       >/dev/null 2>&1   # only when GeoIP rules are used
 #
 # report writes to stdout on purpose so it can be piped or mailed. Pass
 # GV_REPORT_HTML=/path/to/file.html to also write the standalone HTML version.
@@ -41,6 +43,7 @@ case "$MODE" in
 	train-clf) SCRIPT="analyzer/run_nightly.py"; ARGS=(--train-clf --candidate) ;;
 	snapshot)  SCRIPT="analyzer/snapshot.py";    ARGS=() ;;
 	worker)    SCRIPT="analyzer/worker.py";      ARGS=() ;;
+	geo)       SCRIPT="analyzer/geo.py";         ARGS=() ;;
 	report)
 		SCRIPT="analyzer/report.py"
 		ARGS=()
@@ -49,7 +52,7 @@ case "$MODE" in
 		fi
 		;;
 	*)
-		echo "Usage: $(basename "$0") {verify|nightly|train|train-clf|report|snapshot|worker}"
+		echo "Usage: $(basename "$0") {verify|nightly|train|train-clf|report|snapshot|worker|geo}"
 		exit 1
 		;;
 esac

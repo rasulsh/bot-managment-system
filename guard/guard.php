@@ -10,6 +10,7 @@ require_once __DIR__ . '/redis.php';
 require_once __DIR__ . '/log.php';
 require_once __DIR__ . '/challenge.php';
 require_once __DIR__ . '/outcome.php';
+require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/rules.php';
 
 // --------------------------------------------------------------------------
@@ -119,8 +120,12 @@ function gv_cfg_defaults(array $cfg) {
 		$cur = isset($cfg[$k]) ? $cfg[$k] : $d[0];
 		$cfg[$k] = ((is_int($cur) || (is_string($cur) && ctype_digit($cur))) && (int)$cur >= $d[1]) ? (int)$cur : $d[0];
 	}
+	// GeoIP: 'log' writes the country (and ASN) of every request into the log row.
+	// Off by default: the lookup then only runs when a rule needs it.
+	if (!isset($cfg['geo']) || !is_array($cfg['geo'])) { $cfg['geo'] = array(); }
+	$cfg['geo'] = array_merge(array('log' => false), $cfg['geo']);
 	// 'false' and 'off' are non-empty strings: without this they read as ON.
-	foreach (array('enforce', 'signals') as $grp) {
+	foreach (array('enforce', 'signals', 'geo') as $grp) {
 		if (!isset($cfg[$grp]) || !is_array($cfg[$grp])) { continue; }
 		foreach ($cfg[$grp] as $k => $v) {
 			if (!is_bool($v)) { $cfg[$grp][$k] = (bool)filter_var($v, FILTER_VALIDATE_BOOLEAN); }
@@ -194,6 +199,8 @@ function gv_overlay_whitelist() {
 		'log_min_free_mb'    => array('int', 0, 1000000),
 		'cdn_ranges'         => array('cidrs4'),
 		'bot_suffixes'       => array('suffixes'),
+		// GeoIP: put the country / ASN of every request into its log row.
+		'geo.log'            => array('bool'),
 		// The visitor-facing challenge page. Rendered escaped by challenge.php.
 		'strings.lang'       => array('lang'),
 		'strings.dir'        => array('enum', array('ltr', 'rtl')),
@@ -843,7 +850,7 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 		$host = parse_url((string)$f['referer'], PHP_URL_HOST);
 		if (is_string($host)) { $ref = gv_cut($host, 100); }
 	}
-	return array(
+	$row = array(
 		'v'   => 5,
 		'rid' => isset($f['rid']) ? (string)$f['rid'] : '',
 		'ts'  => round(microtime(true), 3),
@@ -883,6 +890,11 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 		'sh'  => (int)$sh,
 		'ms'  => round((microtime(true) - $t0) * 1000, 2),
 	);
+	// GeoIP result, only on a request where a lookup ran: cc is '' for an unknown
+	// country, asn is 0 for an unknown AS. A row without the key was not looked up.
+	if (isset($f['cc'])) { $row['cc'] = (string)$f['cc']; }
+	if (isset($f['asn'])) { $row['asn'] = (int)$f['asn']; }
+	return $row;
 }
 
 // Emit the single log line for this request.
@@ -1344,6 +1356,16 @@ function gv_run($t0) {
 			gv_errlog('rules_exception', get_class($e) . ': ' . $e->getMessage());
 		}
 	}
+	// GeoIP logging (geo.log): the lookup runs for every request. Otherwise it
+	// ran only if a rule got far enough to need it. Either way the row carries
+	// cc / asn exactly when a lookup ran; the file is never opened for nothing.
+	if (!empty($cfg['geo']['log'])) {
+		gv_geo_country($f['ip'], true);
+		if (is_file(gv_geo_file(GV_GEO_ASN))) { gv_geo_asn($f['ip'], true); }
+	}
+	$gran = gv_geo_ran();
+	if ($gran['cc']) { $f['cc'] = gv_geo_country($f['ip']); }
+	if ($gran['asn']) { $f['asn'] = gv_geo_asn($f['ip']); }
 	// An enforced block/challenge rule takes the place of the bot and preview
 	// passes below (unless the client is a verified crawler and the rule says so).
 	$rule_acts = ($rule !== null && gv_rule_overrides_pass($rule));

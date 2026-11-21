@@ -230,6 +230,22 @@ who steals the session.
   acknowledgement. Regexes are refused on save if they hit the backtrack limit or take more than 1 ms
   for a single match on the stress and real-browser test strings (`regex_slow`). If `guard/rules.json` is
   invalid the page says so and refuses writes until it is fixed or the invalid part discarded.
+- **GeoIP** — the active databases (source file, build date, age, IPv4 / IPv6 range counts), the source files in
+  `geo/`, upload (checked against `upload_max_filesize` / `post_max_size`; a bigger file: copy it to `geo/` over
+  SFTP), **Compile now** (queues the `geo_compile` job; the worker cron runs it), the last compile result with
+  its errors and the **ignored geoip.dat tags**, one-click **rollback** to the previous compiled file, delete of
+  a source file, and a **lookup tester** (address -> country / ASN, and which rule would act on that client, with
+  optional UA, path and "verified crawler"). Everything is audited (`geo_upload`, `geo_delete`, `geo_rollback`,
+  the job). Warnings (also on the dashboard): a database older than 45 days, a rule that needs a database that is
+  not installed, a damaged compiled file. Rules gain **Country** and **ASN** conditions (include / exclude);
+  the form says that an unknown country never matches. Extra rule warnings: block / challenge by country
+  without `skip_verified_bots` (Googlebot and Bingbot crawl from US addresses), "not IR -> block" (blocks
+  Iranian visitors on a VPN or foreign proxy: try `challenge` or `monitor` first), a country code that is not in
+  the active database. The Rules **Test** box takes an optional client IP. The impact preview works for
+  country / ASN conditions: when the log rows carry no `cc` / `asn` yet (Settings -> GeoIP -> log country is off)
+  it says so and resolves the logged addresses in the current database, or says it cannot evaluate when there is
+  no database - it never shows a bare zero. The Logs page filters by country (`cc`) and ASN (`asn`) and the CSV
+  export has both columns.
 - **Audit** — the append-only trail, searchable.
 
 ## Testing

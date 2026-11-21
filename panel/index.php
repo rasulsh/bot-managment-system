@@ -19,6 +19,7 @@ require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/data.php';
 require_once __DIR__ . '/jobs.php';
 require_once __DIR__ . '/replay.php';
+require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/rules.php';
 
 $GP_LANG = require __DIR__ . '/lang.php';
@@ -231,6 +232,7 @@ switch ($gp_route) {
 			'pipeline' => gp_pipeline_status(),
 			'storage'  => gp_log_storage(),
 			'ip_open'  => empty($gp_cfg['ip_allowlist']),
+			'geo_warn' => gp_geo_dashboard_warnings(),
 		));
 
 	case 'logs':
@@ -308,13 +310,47 @@ switch ($gp_route) {
 		foreach ($rstate['rules'] as $r) { if (gp_rules_filter_match($r, $rfilter, $rnow)) { $rvisible[] = $r; } }
 		$test_in = array('ua' => is_string($_GET['test_ua'] ?? null) ? substr($_GET['test_ua'], 0, 500) : '',
 			'path' => is_string($_GET['test_path'] ?? null) ? substr($_GET['test_path'], 0, 300) : '',
-			'verified' => !empty($_GET['test_verified']));
+			'verified' => !empty($_GET['test_verified']),
+			'ip' => is_string($_GET['test_ip'] ?? null) ? substr($_GET['test_ip'], 0, 45) : '');
 		$rtest = (($_GET['test'] ?? '') === '1')
-			? gp_rules_test($rstate['rules'], $test_in['ua'], $test_in['path'], $test_in['verified'], $rcfg, $rnow) : null;
+			? gp_rules_test($rstate['rules'], $test_in['ua'], $test_in['path'], $test_in['verified'], $rcfg, $rnow, $test_in['ip']) : null;
 		gp_render('rules', array(
 			'state' => $rstate, 'all' => $rstate['rules'], 'visible' => $rvisible, 'filter' => $rfilter,
 			'draft' => $draft, 'errors' => $errors, 'details' => $details, 'warnings' => $warnings, 'impact' => $impact,
 			'test' => $rtest, 'test_in' => $test_in, 'snapshot' => gp_snapshot(),
+		));
+
+	case 'geo':
+		$gcfg = gv_cfg_load();
+		if ($gp_post && isset($_POST['do']) && is_string($_POST['do'])) {
+			$do = $_POST['do'];
+			$r = array(false, 'err_generic', '');
+			if ($do === 'upload') { $r = gp_geo_upload(isset($_FILES['source']) && is_array($_FILES['source']) ? $_FILES['source'] : array(), $gp_user, $gp_ip); }
+			elseif ($do === 'compile') { $r = gp_geo_compile($gp_user); }
+			elseif ($do === 'delete') { $r = gp_geo_delete_source(is_string($_POST['name'] ?? null) ? $_POST['name'] : '', $gp_user, $gp_ip); }
+			elseif ($do === 'rollback') { $r = gp_geo_rollback(($_POST['kind'] ?? '') === 'asn' ? 'asn' : 'country', $gp_user, $gp_ip); }
+			gp_flash($r[0] ? 'ok' : 'error', gp_t($r[1]) . ($r[2] !== '' ? ': ' . $r[2] : ''));
+			gp_redirect('geo');
+		}
+		// A body larger than post_max_size arrives with no POST data at all (so no CSRF
+		// token): tell the operator why instead of showing a bare "invalid token".
+		if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && empty($_POST) && empty($_FILES)
+			&& (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+			gp_flash('error', gp_t('geo_up_toobig'));
+		}
+		$gstate = gp_rules_state();
+		$gtest_in = array('ip' => is_string($_GET['ip'] ?? null) ? substr($_GET['ip'], 0, 45) : '',
+			'ua' => is_string($_GET['ua'] ?? null) ? substr($_GET['ua'], 0, 500) : '',
+			'path' => is_string($_GET['path'] ?? null) ? substr($_GET['path'], 0, 300) : '',
+			'verified' => !empty($_GET['verified']));
+		$gstatus = gp_geo_status();
+		gp_render('geo', array(
+			'status' => $gstatus, 'cfg' => $gcfg, 'geo_rules' => gp_geo_rules_need($gstate['rules']),
+			'test_in' => $gtest_in,
+			'test' => (($_GET['test'] ?? '') === '1')
+				? gp_geo_test($gtest_in['ip'], $gtest_in['ua'], $gtest_in['path'], $gtest_in['verified'], $gstate['rules'], $gcfg, time()) : null,
+			'test_ran' => (($_GET['test'] ?? '') === '1'),
+			'jobs' => array_slice(array_values(array_filter(gp_job_list(30), function ($j) { return ($j['type'] ?? '') === 'geo_compile'; })), 0, 5),
 		));
 
 	case 'replay':
@@ -435,14 +471,14 @@ exit;
 function gp_logs_filter_from_request() {
 	$get = $_GET;
 	$out = array();
-	foreach (array('date', 'act', 'ovr', 'tok', 'dev', 'ip', 'path', 'reason', 'status') as $key) {
+	foreach (array('date', 'act', 'ovr', 'tok', 'dev', 'ip', 'path', 'reason', 'status', 'cc') as $key) {
 		$value = isset($get[$key]) ? trim((string)$get[$key]) : '';
 		if ($value !== '') { $out[$key] = substr($value, 0, 200); }
 	}
 	foreach (array('sh', 'hold') as $key) {
 		if (isset($get[$key]) && $get[$key] !== '') { $out[$key] = (int)$get[$key]; }
 	}
-	foreach (array('sc_min', 'sc_max', 'esc_min', 'esc_max') as $key) {
+	foreach (array('sc_min', 'sc_max', 'esc_min', 'esc_max', 'asn') as $key) {
 		if (isset($get[$key]) && $get[$key] !== '') { $out[$key] = (int)$get[$key]; }
 	}
 	return $out;
@@ -465,7 +501,7 @@ function gp_logs_export_csv(array $rows) {
 	$out = fopen('php://output', 'w');
 	fwrite($out, "\xEF\xBB\xBF");     // BOM so spreadsheets read UTF-8
 	$cols = array('ts', 'rid', 'ip', 'dev', 'm', 'p', 'q', 'act', 'sh', 'hold', 'ovr',
-		'tok', 'sc', 'esc', 'rs', 'rep', 'ml', 'clf', 'botv', 'st', 'by', 'dur');
+		'tok', 'sc', 'esc', 'rs', 'rep', 'ml', 'clf', 'botv', 'cc', 'asn', 'st', 'by', 'dur');
 	fputcsv($out, $cols);
 	foreach ($rows as $row) {
 		$line = array();

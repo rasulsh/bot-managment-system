@@ -15,7 +15,7 @@ $reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR'
 <?php
 // Numbers here are Latin digits without grouping (gp_latin()), so a value can
 // be copied straight into a filter or a shell.
-$adv_keys = array('reason', 'dev', 'tok', 'sh', 'hold', 'sc_min', 'sc_max');
+$adv_keys = array('reason', 'dev', 'tok', 'sh', 'hold', 'sc_min', 'sc_max', 'cc', 'asn');
 $adv_open = false;
 foreach ($adv_keys as $k) { if (isset($f[$k]) && $f[$k] !== '') { $adv_open = true; } }
 $dash = '—';
@@ -115,6 +115,14 @@ $dash = '—';
 				</select>
 			</label>
 			<label class="gp-field">
+				<span class="gp-label"><?= gp_e(gp_t('geo_cc')) ?></span>
+				<input class="gp-input gp-ltr" type="text" name="cc" maxlength="2" value="<?= gp_e($f['cc'] ?? '') ?>" placeholder="IR">
+			</label>
+			<label class="gp-field">
+				<span class="gp-label"><?= gp_e(gp_t('geo_asn')) ?></span>
+				<input class="gp-input gp-ltr" type="number" name="asn" inputmode="numeric" value="<?= gp_e((string)($f['asn'] ?? '')) ?>">
+			</label>
+			<label class="gp-field">
 				<span class="gp-label"><?= gp_e(gp_t('logs_score_min')) ?></span>
 				<input class="gp-input gp-ltr" type="number" name="sc_min" inputmode="numeric"
 					value="<?= gp_e((string)($f['sc_min'] ?? '')) ?>">
@@ -192,7 +200,8 @@ $dash = '—';
 				<span class="gp-log-method"><?= gp_e($row['m'] ?? '') ?></span>
 				<span class="gp-log-path"><?= gp_e($row['p'] ?? '') ?></span>
 			</div>
-			<div class="gp-log-ip gp-ltr"><?= gp_e($row['ip'] ?? '') ?></div>
+			<div class="gp-log-ip gp-ltr"><?= gp_e($row['ip'] ?? '') ?>
+				<?php if ((string)($row['cc'] ?? '') !== ''): ?><span class="gp-badge gp-badge-off" title="<?= gp_e(gp_t('geo_cc')) ?>"><?= gp_e($row['cc']) ?></span><?php endif; ?></div>
 			<div class="gp-log-score gp-ltr"
 				title="<?= gp_e(gp_t('logs_sc')) ?> / <?= gp_e(gp_t('logs_esc')) ?>">
 				<?php if ($sc !== $esc): ?><span class="gp-log-base"><?= gp_e(gp_latin($sc)) ?> →</span><?php endif; ?>
@@ -255,6 +264,8 @@ $dash = '—';
 					'bot'  => array(gp_t('logs_bot'), 'str'),
 					'botv' => array(gp_t('id_botv'), 'str'),
 					'hp'   => array(gp_t('id_honeypot'), 'bool'),
+					'cc'   => array(gp_t('geo_cc'), 'str'),
+					'asn'  => array(gp_t('geo_asn'), 'int'),
 				)),
 				array('logs_sec_score', '', array(
 					'sc'  => array(gp_t('logs_sc'), 'int'),

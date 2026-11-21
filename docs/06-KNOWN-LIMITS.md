@@ -77,6 +77,29 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
 - Hit counts (Rules page) lag by up to one snapshot interval and need the `snapshot` cron job.
 - A "Quick block" of a UA longer than 120 chars becomes a prefix rule because the log keeps 120.
 
+## GeoIP
+
+- A country or ASN is a statistical guess from a database: wrong for VPN and proxy users, mobile carriers that
+  route through another country, corporate networks and anycast addresses. A country rule that **blocks**
+  also blocks every legitimate visitor that appears in that country. Start in `monitor`, then `challenge`.
+- "Not IR -> block" blocks Iranian visitors on a VPN or a foreign proxy, and anyone behind a foreign CDN that
+  does not pass the real address (set `cdn_ranges` so the real client address is used).
+- An address that is not in the database is **unknown** and matches no country or ASN condition, include or
+  exclude. This is deliberate (fail-open) and means a gap in the database is a gap in the rule.
+- Verified crawlers come from US addresses: a country rule without `skip_verified_bots` blocks them. While
+  Redis is down a known-bot UA is treated as verified, so a forged Googlebot UA from any country is not caught by
+  a country rule during an outage (same trade-off as the bot pass itself).
+- The databases are only as fresh as the last compile. The panel warns at 45 days; the compile is not
+  automatic unless the `geo` cron entry is installed (`scripts/analyzer-cron.sh geo`, monthly).
+- `geoip.dat` carries no ASN data, and only its 2-letter country tags are used (`private`, `cloudflare`,
+  `telegram`, ... are listed on the GeoIP page as ignored). Reading a `.mmdb` needs the optional Python package
+  `maxminddb` on the analyzer side; without it the file is reported and skipped.
+- Only the newest file that has data of a kind is compiled. An older one is listed as unused.
+- With `geo.log` on, every request pays one more small file search (about 0.01 ms warm, 0.05 ms p99); the
+  default is off.
+- The Rules impact preview reads the country from the log when the row has it; for rows from before
+  `geo.log` was on it looks the logged address up in the *current* database, and says so.
+
 ## Crawlers
 
 - Only crawlers in `known_bots` pass. Every other crawler, monitor and SEO tool

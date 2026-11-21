@@ -1590,6 +1590,238 @@ putenv('GV_RULES');
 if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
 if ($ar_audit_backup !== null) { file_put_contents(gp_audit_path(), $ar_audit_backup); }
 
+t_section('GeoIP page and country / ASN rules');
+require_once __DIR__ . '/../panel/geo.php';
+require_once __DIR__ . '/../panel/jobs.php';
+require_once __DIR__ . '/geo-fixture.php';
+$gx_tmp = sys_get_temp_dir() . '/gp-geo-selftest-' . getmypid();
+@mkdir($gx_tmp . '/geo', 0775, true);
+@mkdir($gx_tmp . '/logs', 0775, true);
+gv_redis_ctx(array('log_dir' => $gx_tmp . '/logs'));
+putenv('GV_GEO_DIR=' . $gx_tmp . '/geo');
+putenv('GV_RULES=' . $gx_tmp . '/rules.json');
+gv_geo_state(true);
+define('GP_TEST_UPLOADS', 1);
+$gx_audit_backup = is_file(gp_audit_path()) ? file_get_contents(gp_audit_path()) : null;
+if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
+$gx_g4 = array(array_merge(gf_cidr4('5.0.0.0/8'), array('IR')), array_merge(gf_cidr4('127.0.0.0/8'), array('US')));
+$gx_bin = function ($built, $kind = 1) use ($gx_g4) {
+	return $kind === 1 ? gf_pack(1, $gx_g4, array(), $built, 'fixture.dat')
+		: gf_pack(2, array(array(83886080, 100663295, 12880)), array(), $built, 'asn.mmdb');
+};
+$gx_now = 1900000000;
+
+// PHP limits and file names.
+t_ok('ini sizes: K, M, G, plain, unlimited', gp_ini_bytes('2M') === 2097152 && gp_ini_bytes('512K') === 524288 && gp_ini_bytes('1G') === 1073741824
+	&& gp_ini_bytes('8192') === 8192 && gp_ini_bytes('0') === 0 && gp_ini_bytes('') === 0 && gp_ini_bytes('-1') === 0);
+t_ok('the upload limit is the smaller of the two PHP limits', gp_geo_upload_limit() >= 0);
+t_ok('source names: .mmdb and .dat only, sanitised, no path, no compiled names',
+	gp_geo_clean_name('GeoLite2-Country.mmdb') === 'GeoLite2-Country.mmdb' && gp_geo_clean_name('geoip.dat') === 'geoip.dat'
+	&& gp_geo_clean_name('../../etc/x.mmdb') === 'x.mmdb' && gp_geo_clean_name('a b.mmdb') === 'a_b.mmdb'
+	&& gp_geo_clean_name('shell.php') === '' && gp_geo_clean_name('.htaccess') === '' && gp_geo_clean_name('country.bin') === ''
+	&& gp_geo_clean_name('country.bin.mmdb') === '' && gp_geo_clean_name('') === '' && gp_geo_clean_name(str_repeat('a', 70) . '.dat') === '');
+
+// Upload.
+$gx_up = function ($name, $content, $err = 0) use ($gx_tmp) {
+	$tmp = $gx_tmp . '/upload.tmp';
+	file_put_contents($tmp, $content);
+	return array('name' => $name, 'tmp_name' => $tmp, 'error' => $err, 'size' => strlen($content));
+};
+$gx_mmdb = str_repeat('x', 1000) . "\xAB\xCD\xEFMaxMind.com" . str_repeat('m', 50);
+t_ok('upload: a valid .mmdb is stored under its clean name and audited', (function () use ($gx_up, $gx_mmdb, $gx_tmp) {
+	$r = gp_geo_upload($gx_up('Geo Country.mmdb', $gx_mmdb), 'tester', '198.51.100.1');
+	$a = gp_audit_read(5);
+	return $r[0] && $r[1] === 'geo_up_done' && is_file($gx_tmp . '/geo/Geo_Country.mmdb') && $a && $a[0]['event'] === 'geo_upload' && $a[0]['key'] === 'Geo_Country.mmdb';
+})());
+t_ok('upload: no temp file is left in geo/', glob($gx_tmp . '/geo/*.part*') === array());
+t_ok('upload: a file without the MaxMind marker is refused', gp_geo_upload($gx_up('x.mmdb', 'just text'), 't', '1.1.1.1')[1] === 'geo_up_badfile' && !is_file($gx_tmp . '/geo/x.mmdb'));
+t_ok('upload: a geoip.dat is accepted', gp_geo_upload($gx_up('geoip.dat', "\x0a\x00"), 't', '1.1.1.1')[0] === true && is_file($gx_tmp . '/geo/geoip.dat'));
+t_ok('upload: a script or an unnamed file is refused', gp_geo_upload($gx_up('shell.php', '<?php'), 't', '1.1.1.1')[1] === 'geo_up_badname' && !is_file($gx_tmp . '/geo/shell.php'));
+t_ok('upload: too big for PHP, no file, and a failed upload each say so',
+	gp_geo_upload(array('name' => 'a.mmdb', 'tmp_name' => '', 'error' => UPLOAD_ERR_INI_SIZE), 't', '1.1.1.1')[1] === 'geo_up_toobig'
+	&& gp_geo_upload(array('error' => UPLOAD_ERR_NO_FILE), 't', '1.1.1.1')[1] === 'geo_up_nofile'
+	&& gp_geo_upload(array('name' => 'a.mmdb', 'tmp_name' => '', 'error' => UPLOAD_ERR_PARTIAL), 't', '1.1.1.1')[1] === 'geo_up_failed'
+	&& gp_geo_upload(array(), 't', '1.1.1.1')[1] === 'geo_up_nofile');
+t_ok('upload: the compile job type exists and takes no parameters', in_array('geo_compile', gp_job_types(), true) && gp_job_params('geo_compile', array())[0] === true);
+
+// Status, staleness, rollback.
+t_ok('status: nothing compiled yet', gp_geo_status($gx_now)['country'] === null && gp_geo_status($gx_now)['asn'] === null && gp_geo_status($gx_now)['stale'] === false);
+file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin($gx_now - 10 * 86400));
+$gx_st = gp_geo_status($gx_now);
+t_ok('status: a fresh country file shows its header', $gx_st['country']['valid'] && $gx_st['country']['age_days'] === 10 && $gx_st['country']['v4'] === 2 && $gx_st['country']['source'] === 'fixture.dat' && !$gx_st['stale']);
+file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin($gx_now - 46 * 86400));
+t_ok('status: older than 45 days is stale, exactly 45 is not', gp_geo_status($gx_now)['stale'] === true
+	&& (function () use ($gx_tmp, $gx_bin, $gx_now) { file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin($gx_now - 45 * 86400)); return gp_geo_status($gx_now)['stale'] === false; })());
+file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin($gx_now - 90 * 86400));
+file_put_contents($gx_tmp . '/geo/asn.bin', $gx_bin($gx_now - 5 * 86400, 2));
+t_ok('status: the oldest of the two files decides', gp_geo_status($gx_now)['stale'] === true && gp_geo_status($gx_now)['asn']['age_days'] === 5);
+t_ok('warnings: stale', gp_geo_warnings(gp_geo_status($gx_now), 0, gv_cfg_defaults(array())) === array('stale'));
+file_put_contents($gx_tmp . '/geo/country.bin', 'GARBAGE');
+t_ok('status: a damaged file is reported as corrupt, not as missing', gp_geo_status($gx_now)['country']['valid'] === false && in_array('corrupt', gp_geo_warnings(gp_geo_status($gx_now), 0, gv_cfg_defaults(array())), true));
+@unlink($gx_tmp . '/geo/country.bin'); @unlink($gx_tmp . '/geo/asn.bin');
+t_ok('warnings: a geo rule with no database at all', gp_geo_warnings(gp_geo_status($gx_now), 1, gv_cfg_defaults(array())) === array('missing'));
+t_ok('warnings: geo.log on with no country database', in_array('log_no_db', gp_geo_warnings(gp_geo_status($gx_now), 0, array('geo' => array('log' => true))), true));
+
+file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin($gx_now - 1 * 86400));
+file_put_contents($gx_tmp . '/geo/country.bin.prev', $gx_bin($gx_now - 40 * 86400));
+t_ok('rollback: the previous file becomes the live file (audited), the .prev stays', (function () use ($gx_tmp, $gx_now) {
+	$r = gp_geo_rollback('country', 'tester', '1.1.1.1');
+	$h = gv_geo_header_parse(file_get_contents($gx_tmp . '/geo/country.bin', false, null, 0, 128));
+	$a = gp_audit_read(1);
+	return $r[0] && $h['built'] === $gx_now - 40 * 86400 && is_file($gx_tmp . '/geo/country.bin.prev') && $a[0]['event'] === 'geo_rollback' && glob($gx_tmp . '/geo/*.rb*') === array();
+})());
+t_ok('rollback: nothing to roll back to / a damaged previous file', gp_geo_rollback('asn', 't', '1.1.1.1')[1] === 'geo_rb_none'
+	&& (function () use ($gx_tmp) { file_put_contents($gx_tmp . '/geo/asn.bin.prev', 'junk'); return gp_geo_rollback('asn', 't', '1.1.1.1')[1] === 'geo_rb_bad'; })());
+@unlink($gx_tmp . '/geo/asn.bin.prev');
+file_put_contents($gx_tmp . '/geo/geo-status.json', json_encode(array('v' => 1, 'time' => $gx_now - 100, 'ok' => false, 'errors' => array('country table not replaced: no range for IR'),
+	'sources' => array(array('name' => 'geoip.dat', 'size' => 2, 'mtime' => 5, 'provides' => array('country'), 'used' => array('country'))),
+	'ignored_tags' => array('private' => 3, 'cloudflare' => 9), 'countries' => array('IR', 'US'))));
+$gx_st = gp_geo_status($gx_now);
+t_ok('status: the last compile result, ignored tags and errors are read from geo-status.json', $gx_st['compile']['ok'] === false && $gx_st['ignored_tags']['private'] === 3
+	&& $gx_st['errors'][0] === 'country table not replaced: no range for IR' && $gx_st['countries'] === array('IR', 'US'));
+t_ok('status: a source on disk that the last compile has not seen is listed as new', (function () use ($gx_st) {
+	foreach ($gx_st['sources'] as $s) { if ($s['name'] === 'Geo_Country.mmdb' && !empty($s['new'])) { return true; } }
+	return false;
+})());
+file_put_contents($gx_tmp . '/geo/geo-status.json', '{not json');
+t_ok('status: a damaged geo-status.json is ignored', gp_geo_status($gx_now)['compile'] === null);
+@unlink($gx_tmp . '/geo/geo-status.json');
+
+// The form (no database installed yet).
+@unlink($gx_tmp . '/geo/country.bin'); @unlink($gx_tmp . '/geo/country.bin.prev'); @unlink($gx_tmp . '/geo/asn.bin');
+gv_geo_state(true);
+$gx_post = array('do' => 'save', 'id' => '', 'name' => 'Block IR', 'enabled' => '1', 'skip_verified_bots' => '1', 'mode' => 'monitor', 'action' => 'challenge',
+	'priority' => '100', 'ua_values' => '', 'path_values' => '', 'pow_bits' => '0', 'expires_date' => '', 'note' => '',
+	'country_op' => 'exclude', 'country_values' => "ir, tr\nIR", 'asn_op' => 'include', 'asn_values' => 'AS13335  15169,as15169');
+$gx_rule = gp_rule_from_post($gx_post);
+t_ok('form: country codes are upper-cased and de-duplicated, ASN numbers lose their AS prefix',
+	$gx_rule['country'] === array('op' => 'exclude', 'type' => 'code', 'values' => array('IR', 'TR'))
+	&& $gx_rule['asn'] === array('op' => 'include', 'type' => 'number', 'values' => array('13335', '15169')));
+$gx_empty = $gx_post; $gx_empty['country_values'] = '  '; $gx_empty['asn_values'] = '';
+t_ok('form: empty boxes mean no condition', gp_rule_from_post($gx_empty)['country'] === null && gp_rule_from_post($gx_empty)['asn'] === null);
+$gx_cfg = gv_cfg_defaults(array());
+$gx_save = $gx_post; $gx_save['asn_values'] = '';
+$gx_r = gp_rules_action('save', $gx_save, 'tester', '1.1.1.1', $gx_cfg);
+t_ok('a country-only rule is saved (no UA needed), warns about the missing database, and is not saved until acknowledged', $gx_r['ok'] === false && $gx_r['msg'] === 'rule_warnings'
+	&& in_array('geo_nodb', array_column($gx_r['warnings'], 0), true) && in_array('geo_exclude_ir', array_column($gx_r['warnings'], 0), true) === false);
+$gx_save['ack'] = '1';
+t_ok('...and saves with the acknowledgement', gp_rules_action('save', $gx_save, 'tester', '1.1.1.1', $gx_cfg)['ok'] === true);
+$gx_back = gv_rules_read(gv_rules_path());
+$gx_loaded = gv_rules_load();
+t_ok('the guard reads the country rule back, and the generated cache carries its set', count($gx_back) === 1 && $gx_back[0]['country']['values'] === array('IR', 'TR')
+	&& $gx_loaded[0]['country']['set'] === array('IR' => true, 'TR' => true));
+$gx_bad = $gx_post; $gx_bad['country_values'] = 'IRAN'; $gx_bad['asn_values'] = 'AS0';
+$gx_r = gp_rules_action('save', $gx_bad, 't', '1.1.1.1', $gx_cfg);
+t_ok('a bad country code and a bad AS number are reported on their own fields', $gx_r['errors']['country'] === 'bad_country' && $gx_r['errors']['asn'] === 'bad_asn');
+
+// Warnings.
+$gx_w = function (array $over, $geo = null) use ($gx_cfg, $gx_post) {
+	return array_column(gp_rule_warnings(array_merge(gp_rule_from_post($gx_post), $over), $gx_cfg, $geo), 0);
+};
+$gx_good_geo = array('country' => array('valid' => true), 'asn' => array('valid' => true), 'countries' => array('IR', 'US', 'DE', 'TR'));
+t_ok('warning: block / challenge by country without skipping verified crawlers',
+	in_array('geo_bots', $gx_w(array('skip_verified_bots' => false, 'action' => 'block')), true) && in_array('geo_bots', $gx_w(array('skip_verified_bots' => false, 'action' => 'challenge')), true)
+	&& !in_array('geo_bots', $gx_w(array('skip_verified_bots' => true, 'action' => 'block')), true) && !in_array('geo_bots', $gx_w(array('skip_verified_bots' => false, 'action' => 'log')), true));
+t_ok('warning: "not IR -> block" names the VPN problem; "not IR -> challenge" does not',
+	in_array('geo_exclude_ir', $gx_w(array('action' => 'block')), true) && !in_array('geo_exclude_ir', $gx_w(array('action' => 'challenge')), true)
+	&& !in_array('geo_exclude_ir', $gx_w(array('action' => 'block', 'country' => array('op' => 'include', 'type' => 'code', 'values' => array('IR')))), true)
+	&& !in_array('geo_exclude_ir', $gx_w(array('action' => 'block', 'country' => array('op' => 'exclude', 'type' => 'code', 'values' => array('DE')))), true));
+t_ok('warning: the rule needs a database that is not installed', in_array('geo_nodb', $gx_w(array(), array('country' => null, 'asn' => null, 'countries' => array())), true)
+	&& !in_array('geo_nodb', $gx_w(array('asn' => null), $gx_good_geo), true));
+t_ok('warning: a country code that is not in the active database', in_array('geo_code_absent', $gx_w(array('country' => array('op' => 'include', 'type' => 'code', 'values' => array('IR', 'QQ'))), $gx_good_geo), true)
+	&& !in_array('geo_code_absent', $gx_w(array(), $gx_good_geo), true));
+t_ok('no geo warning for a rule with no country / ASN condition', array_filter($gx_w(array('country' => null, 'asn' => null, 'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('curlx'))), $gx_good_geo),
+	function ($c) { return strpos($c, 'geo_') === 0; }) === array());
+
+// The test box and the tester.
+file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin($gx_now - 86400));
+file_put_contents($gx_tmp . '/geo/asn.bin', $gx_bin($gx_now - 86400, 2));
+gv_geo_state(true);
+$gx_rules = array(
+	array_merge(gp_rule_blank(), array('id' => 'r-ir', 'name' => 'IR', 'mode' => 'enforce', 'action' => 'block', 'ua' => null,
+		'country' => array('op' => 'include', 'type' => 'code', 'values' => array('IR')))),
+	array_merge(gp_rule_blank(), array('id' => 'r-as', 'name' => 'AS', 'priority' => 200, 'mode' => 'enforce', 'action' => 'challenge', 'ua' => null,
+		'asn' => array('op' => 'include', 'type' => 'number', 'values' => array('12880')))),
+);
+$gx_t = gp_geo_test('5.1.1.1', 'Mozilla/5.0', '/', false, $gx_rules, $gx_cfg, $gx_now);
+t_ok('tester: country, ASN and the winning rule for an address', $gx_t['cc'] === 'IR' && $gx_t['asn'] === 12880 && $gx_t['winner']['id'] === 'r-ir' && array_column($gx_t['matches'], 'id') === array('r-ir', 'r-as'));
+$gx_t = gp_geo_test('127.0.0.1', 'x', '/', false, $gx_rules, $gx_cfg, $gx_now);
+t_ok('tester: another country matches nothing', $gx_t['cc'] === 'US' && $gx_t['asn'] === 0 && $gx_t['winner'] === null);
+t_ok('tester: an address in no range is unknown and matches no geo rule', gp_geo_test('8.8.8.8', 'x', '/', false, $gx_rules, $gx_cfg, $gx_now)['cc'] === '' && gp_geo_test('8.8.8.8', 'x', '/', false, $gx_rules, $gx_cfg, $gx_now)['winner'] === null);
+t_ok('tester: IPv4-mapped IPv6 input; garbage and empty input', gp_geo_test('::ffff:5.1.1.1', 'x', '/', false, $gx_rules, $gx_cfg, $gx_now)['cc'] === 'IR'
+	&& gp_geo_test('nope', 'x', '/', false, $gx_rules, $gx_cfg, $gx_now) === null && gp_geo_test('', 'x', '/', false, $gx_rules, $gx_cfg, $gx_now) === null);
+t_ok('the rules test box takes an optional IP; without one the country is unknown', gp_rules_test($gx_rules, 'x', '/', false, $gx_cfg, $gx_now, '5.1.1.1')['winner']['id'] === 'r-ir'
+	&& gp_rules_test($gx_rules, 'x', '/', false, $gx_cfg, $gx_now)['winner'] === null);
+t_ok('the verified-bot skip applies to a country rule in the tester', (function () use ($gx_rules, $gx_cfg, $gx_now) {
+	$c = $gx_cfg; $c['known_bots'] = array('googlebot');
+	$t = gp_geo_test('5.1.1.1', 'Googlebot/2.1', '/', true, $gx_rules, $c, $gx_now);
+	return $t['winner'] === null && $t['skipped'] === array('r-ir', 'r-as');
+})());
+
+// Impact preview with country / ASN.
+$gx_irrule = $gx_rules[0];
+$gx_rows = array(
+	array('ip' => '5.1.1.1', 'ua' => 'a', 'p' => '/a', 'cc' => 'IR', 'dev' => 'd1', 'tok' => 'm'),
+	array('ip' => '5.2.2.2', 'ua' => 'a', 'p' => '/a', 'dev' => 'd2', 'tok' => 'v'),               // no cc in the log: resolved now
+	array('ip' => '127.0.0.1', 'ua' => 'a', 'p' => '/a'),                                             // resolved now: US
+	array('ip' => '127.0.0.2', 'ua' => 'a', 'p' => '/a', 'cc' => 'US'),
+);
+$gx_im = gp_rules_impact_fold($gx_irrule, $gx_rows);
+t_ok('impact: logged and resolved-now rows are both counted and told apart', $gx_im['requests'] === 2 && $gx_im['geo'] === true && $gx_im['geo_logged'] === 2 && $gx_im['geo_lookup'] === 2 && $gx_im['geo_none'] === 0 && $gx_im['tokened'] === 1);
+$gx_im = gp_rules_impact_fold($gx_irrule, array(array('ip' => '5.1.1.1', 'ua' => 'a', 'p' => '/a', 'cc' => 'IR'), array('ip' => '5.1.1.2', 'ua' => 'a', 'p' => '/a', 'cc' => 'IR')));
+t_ok('impact: a log with cc on every row needs no lookup', $gx_im['geo_logged'] === 2 && $gx_im['geo_lookup'] === 0 && $gx_im['requests'] === 2);
+putenv('GV_GEO_DIR=' . $gx_tmp . '/nodb');
+gv_geo_state(true);
+$gx_im = gp_rules_impact_fold($gx_irrule, array(array('ip' => '5.1.1.1', 'ua' => 'a', 'p' => '/a'), array('ip' => '5.1.1.2', 'ua' => 'a', 'p' => '/a')));
+t_ok('impact: no cc in the log and no database: the preview says it cannot evaluate (counts none), not "zero matches"', $gx_im['requests'] === 0 && $gx_im['geo_none'] === 2 && $gx_im['geo_logged'] === 0 && $gx_im['geo_lookup'] === 0 && $gx_im['scanned'] === 2);
+putenv('GV_GEO_DIR=' . $gx_tmp . '/geo');
+gv_geo_state(true);
+t_ok('impact: a rule with no geo condition carries no geo counters of note', gp_rules_impact_fold(gp_rule_blank() + array(), array())['geo'] === false);
+$gx_asn_im = gp_rules_impact_fold($gx_rules[1], array(array('ip' => '5.1.1.1', 'ua' => 'a', 'p' => '/', 'asn' => 12880), array('ip' => '8.8.8.8', 'ua' => 'a', 'p' => '/', 'asn' => 0), array('ip' => '5.9.9.9', 'ua' => 'a', 'p' => '/')));
+t_ok('impact: ASN rows, an unknown ASN (0) in the log never matches', $gx_asn_im['requests'] === 2 && $gx_asn_im['geo_logged'] === 2 && $gx_asn_im['geo_lookup'] === 1);
+t_ok('impact: the Rules page and the preview scan carry the geo counters through gp_rules_impact', (function () use ($gx_irrule) {
+	$i = gp_rules_impact($gx_irrule);
+	return array_key_exists('geo_none', $i) && array_key_exists('meta', $i);
+})());
+
+// Logs: filters and export.
+t_ok('log filter: cc (any case) and asn', gp_log_match(array('cc' => 'IR'), array('cc' => 'ir')) && !gp_log_match(array('cc' => 'US'), array('cc' => 'IR')) && !gp_log_match(array(), array('cc' => 'IR'))
+	&& gp_log_match(array('asn' => 12880), array('asn' => 12880)) && !gp_log_match(array('asn' => 1), array('asn' => 12880)) && gp_log_match(array(), array()));
+$gx_index = file_get_contents(__DIR__ . '/../panel/index.php');
+t_ok('the log filter reads cc and asn from the query string; the CSV export has cc and asn columns', strpos($gx_index, "'status', 'cc')") !== false && strpos($gx_index, "'esc_max', 'asn')") !== false
+	&& strpos($gx_index, "'botv', 'cc', 'asn', 'st'") !== false);
+
+// Dashboard, settings, strings, views.
+file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin(time() - 60 * 86400));
+t_ok('the dashboard warns when a database is older than 45 days', gp_geo_dashboard_warnings() === array('stale'));
+file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin(time() - 3 * 86400));
+t_ok('the dashboard is quiet about a fresh database', gp_geo_dashboard_warnings() === array());
+@unlink($gx_tmp . '/geo/country.bin'); @unlink($gx_tmp . '/geo/asn.bin'); @unlink($gx_tmp . '/rules.json'); @unlink(gv_rules_cache_path($gx_tmp . '/rules.json'));
+$gx_def = array();
+$gx_lang = require __DIR__ . '/../panel/lang.php';
+foreach (array('stale', 'missing', 'corrupt', 'no_country', 'log_no_db') as $c) { if (!isset($gx_lang['geo_w_' . $c])) { $gx_def[] = 'geo_w_' . $c; } }
+foreach (array('geo_up_toobig', 'geo_up_nofile', 'geo_up_badname', 'geo_up_badfile', 'geo_up_failed', 'geo_up_nowrite', 'geo_up_done', 'geo_compile_queued', 'geo_compile_failed',
+	'geo_rb_none', 'geo_rb_bad', 'geo_rb_done', 'rwarn_geo_bots', 'rwarn_geo_exclude_ir', 'rwarn_geo_nodb', 'rwarn_geo_code_absent', 'rerr_bad_country', 'rerr_bad_asn',
+	'lbl_geo_log', 'help_geo_log', 'set_group_geo', 'nav_geo', 'rules_impact_geo_blind', 'rules_impact_geo_nolog', 'rules_impact_geo_mixed') as $k) {
+	if (!isset($gx_lang[$k])) { $gx_def[] = $k; }
+}
+t_ok('every GeoIP translation key the page builds dynamically exists' . ($gx_def ? ' (missing: ' . implode(',', $gx_def) . ')' : ''), !$gx_def);
+$gx_view = file_get_contents(__DIR__ . '/../panel/views/geo.php');
+t_ok('the GeoIP page posts a CSRF token on every POST form and escapes everything', substr_count($gx_view, 'method="post"') === substr_count($gx_view, 'gp_csrf_token()')
+	&& preg_match('/<\?= \$[a-z_]+\s*\?>/', $gx_view) === 0 && strpos($gx_view, 'enctype="multipart/form-data"') !== false);
+t_ok('the GeoIP page loads nothing from outside (no http:// or https:// URL)', preg_match('#https?://#', $gx_view) === 0);
+t_ok('Settings has a GeoIP group with the geo.log switch, labelled', strpos(file_get_contents(__DIR__ . '/../panel/views/settings.php'), "'geo.log'") !== false);
+t_ok('the panel routes /geo and links it in the navigation', strpos($gx_index, "case 'geo':") !== false && strpos(file_get_contents(__DIR__ . '/../panel/views/layout.php'), "'geo'") !== false);
+
+foreach ((array)glob($gx_tmp . '/{geo,logs}/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+foreach (array('/geo', '/logs', '/nodb') as $d) { @rmdir($gx_tmp . $d); }
+foreach ((array)glob($gx_tmp . '/*') as $f) { if (is_file($f)) { @unlink($f); } }
+@rmdir($gx_tmp);
+putenv('GV_GEO_DIR'); putenv('GV_RULES');
+gv_geo_state(true);
+if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
+if ($gx_audit_backup !== null) { file_put_contents(gp_audit_path(), $gx_audit_backup); }
+
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');
 // The panel is English and left-to-right. No Persian or Arabic script (letters

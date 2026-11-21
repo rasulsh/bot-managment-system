@@ -12,9 +12,9 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 // file write. Anything unexpected (a bad file, a PCRE error) means "no match",
 // plus one rate-limited line in guard-errors.log. A rule can never cause a 500.
 //
-// A rule has up to two conditions (UA, path; GeoIP conditions come in a later
-// release). All non-null conditions are AND-ed; a rule without any condition
-// is invalid. First matching rule by priority wins.
+// A rule has up to four conditions: UA, path, country, ASN (the last two read
+// the compiled GeoIP files, see geo.php). All non-null conditions are AND-ed; a
+// rule without any condition is invalid. First matching rule by priority wins.
 
 define('GV_RULES_MAX', 200);
 define('GV_RULES_MAX_VALUES', 50);
@@ -85,6 +85,27 @@ function gv_rules_browser_samples() {
 		'Edge (Windows)' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
 		'Samsung Internet' => 'Mozilla/5.0 (Linux; Android 14; SAMSUNG SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/26.0 Chrome/122.0.0.0 Mobile Safari/537.36',
 	);
+}
+
+// Country condition: ISO 3166 alpha-2 codes, upper case. The panel normalises
+// what the operator types; this is the strict check on what is stored.
+function gv_rule_country_validate($cond, $deep) {
+	$r = gv_rule_cond_validate($cond, array('code'), $deep);
+	if (!$r[0]) { return $r; }
+	foreach ($r[1]['values'] as $i => $v) {
+		if (!preg_match('/^[A-Z]{2}$/', $v)) { return array(false, 'bad_country', 'value ' . ($i + 1)); }
+	}
+	return $r;
+}
+
+// ASN condition: AS numbers as decimal strings, 1 .. 4294967295 (no "AS" prefix).
+function gv_rule_asn_validate($cond, $deep) {
+	$r = gv_rule_cond_validate($cond, array('number'), $deep);
+	if (!$r[0]) { return $r; }
+	foreach ($r[1]['values'] as $i => $v) {
+		if (!preg_match('/^[1-9][0-9]{0,9}$/', $v) || (int)$v > 4294967295) { return array(false, 'bad_asn', 'value ' . ($i + 1)); }
+	}
+	return $r;
 }
 
 // A UA condition. $deep adds the checks that cost something (compiling and
@@ -181,10 +202,13 @@ function gv_rule_validate($rule, $deep = false) {
 	$out['priority'] = $pri;
 
 	$conds = 0;
-	foreach (array('ua', 'path') as $k) {
+	foreach (array('ua', 'path', 'country', 'asn') as $k) {
 		$c = array_key_exists($k, $rule) ? $rule[$k] : null;
 		if ($c === null) { $out[$k] = null; continue; }
-		$r = ($k === 'ua') ? gv_rule_ua_validate($c, $deep) : gv_rule_path_validate($c, $deep);
+		if ($k === 'ua') { $r = gv_rule_ua_validate($c, $deep); }
+		elseif ($k === 'path') { $r = gv_rule_path_validate($c, $deep); }
+		elseif ($k === 'country') { $r = gv_rule_country_validate($c, $deep); }
+		else { $r = gv_rule_asn_validate($c, $deep); }
 		if ($r[0]) {
 			$out[$k] = $r[1];
 			$conds++;
@@ -297,7 +321,7 @@ function gv_rules_read($path = null) {
 // guard/rules.json stays the source of truth. On every save the panel also
 // writes guard/rules.cache.php, generated ONLY by var_export() from the
 // validated list: enabled rules only, already sorted, each UA condition with its
-// compiled pattern and blank flag. It is a plain PHP array literal, so OPcache
+// compiled pattern and blank flag, each country / ASN condition with its lookup set. It is a plain PHP array literal, so OPcache
 // keeps it in shared memory and a request pays no file read, no JSON decode, no
 // validation and no pattern building. With no enabled rule it returns an empty
 // array and the guard does nothing more.
@@ -316,7 +340,12 @@ function gv_rules_cache_source(array $rules) {
 		if (empty($r['enabled'])) { continue; }
 		$slim = array('id' => $r['id'], 'enabled' => true, 'mode' => $r['mode'], 'action' => $r['action'],
 			'priority' => $r['priority'], 'skip_verified_bots' => $r['skip_verified_bots'],
-			'ua' => $r['ua'], 'path' => $r['path'], 'expires_at' => $r['expires_at'], 'pow_bits' => $r['pow_bits']);
+			'ua' => $r['ua'], 'path' => $r['path'], 'country' => $r['country'] ?? null, 'asn' => $r['asn'] ?? null,
+			'expires_at' => $r['expires_at'], 'pow_bits' => $r['pow_bits']);
+		// Country and ASN values become a lookup set: one isset() per request.
+		foreach (array('country', 'asn') as $g) {
+			if (is_array($slim[$g])) { $slim[$g]['set'] = gv_rule_geo_set($slim[$g]); }
+		}
 		if (is_array($slim['ua'])) {
 			$c = gv_rule_ua_compile($slim['ua']);
 			$slim['ua']['pat'] = $c[0];
@@ -402,6 +431,30 @@ function gv_rule_path_eval(array $cond, $path) {
 	return ($cond['op'] === 'include') ? $hit : !$hit;
 }
 
+// The values of a country / ASN condition as a lookup set (value => true). A
+// cached rule carries it; a rule read from rules.json builds it once per request.
+function gv_rule_geo_set(array $cond) {
+	if (isset($cond['set']) && is_array($cond['set'])) { return $cond['set']; }
+	$set = array();
+	foreach ($cond['values'] as $v) { $set[$v] = true; }
+	return $set;
+}
+
+// Whether a country ($kind 'cc') or ASN ('asn') condition holds. The fact comes
+// from $f when the caller supplies it (the panel, from a log row), otherwise from
+// the compiled GeoIP file by the client address (a lazy lookup: the file is only
+// opened when a rule actually gets this far). An UNKNOWN country or ASN returns
+// null for include AND exclude alike, which never matches: "block everyone except
+// IR" must not block a client we could not place.
+function gv_rule_geo_eval(array $cond, $kind, array $f) {
+	if (isset($f[$kind])) { $v = $f[$kind]; }
+	else { $ip = isset($f['ip']) ? $f['ip'] : ''; $v = ($kind === 'cc') ? gv_geo_country($ip) : gv_geo_asn($ip); }
+	if ($v === '' || $v === 0 || $v === null) { return null; }
+	$set = isset($cond['set']) ? $cond['set'] : gv_rule_geo_set($cond);
+	$hit = isset($set[$v]);
+	return ($cond['op'] === 'include') ? $hit : !$hit;
+}
+
 // Whether one rule matches these facts. Conditions are AND-ed; an unknown
 // result (null) counts as no match.
 function gv_rule_matches(array $rule, array $f) {
@@ -411,6 +464,8 @@ function gv_rule_matches(array $rule, array $f) {
 	if (isset($rule['path']) && is_array($rule['path'])) {
 		if (gv_rule_path_eval($rule['path'], isset($f['path']) ? $f['path'] : '') !== true) { return false; }
 	}
+	if (isset($rule['country']) && is_array($rule['country']) && gv_rule_geo_eval($rule['country'], 'cc', $f) !== true) { return false; }
+	if (isset($rule['asn']) && is_array($rule['asn']) && gv_rule_geo_eval($rule['asn'], 'asn', $f) !== true) { return false; }
 	return true;
 }
 
@@ -426,8 +481,13 @@ function gv_rules_match(array $f, array $rules, $now) {
 	foreach ($rules as $rule) {
 		if (empty($rule['enabled'])) { continue; }
 		if ($rule['expires_at'] !== 0 && (int)$rule['expires_at'] <= $now) { continue; }
-		if (isset($rule['ua']) && gv_rule_ua_eval($rule['ua'], $ua) !== true) { continue; }
+		// Cheapest first: a path prefix, then the country / ASN set (one isset() after the
+		// request's single file search), and the pattern match on the UA last. A rule that
+		// combines them skips its regex for every client from another country.
 		if (isset($rule['path']) && gv_rule_path_eval($rule['path'], isset($f['path']) ? $f['path'] : '') !== true) { continue; }
+		if (isset($rule['country']) && gv_rule_geo_eval($rule['country'], 'cc', $f) !== true) { continue; }
+		if (isset($rule['asn']) && gv_rule_geo_eval($rule['asn'], 'asn', $f) !== true) { continue; }
+		if (isset($rule['ua']) && gv_rule_ua_eval($rule['ua'], $ua) !== true) { continue; }
 		return $rule;
 	}
 	return null;

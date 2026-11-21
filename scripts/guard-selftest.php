@@ -1223,6 +1223,177 @@ t_ok('rule evaluation takes no Redis connection (no extra round trip)', $no_conn
 @unlink($rf);
 
 // --------------------------------------------------------------------------
+t_section('GeoIP lookup and country / ASN conditions');
+
+require_once __DIR__ . '/geo-fixture.php';
+$GEO_TMP = sys_get_temp_dir() . '/gv-geo-selftest-' . getmypid();
+@mkdir($GEO_TMP, 0775, true);
+register_shutdown_function(function () use ($GEO_TMP) {
+	foreach ((array)glob($GEO_TMP . '/*/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+	foreach ((array)glob($GEO_TMP . '/*', GLOB_ONLYDIR) as $d) { @rmdir($d); }
+	foreach ((array)glob($GEO_TMP . '/*') as $f) { if (is_file($f)) { @unlink($f); } }
+	@rmdir($GEO_TMP);
+});
+// A fresh directory with the given files; points the lookup at it and forgets what was open.
+function t_geo_dir($name, array $files) {
+	global $GEO_TMP;
+	$d = $GEO_TMP . '/' . $name;
+	@mkdir($d, 0775, true);
+	foreach ($files as $fn => $bytes) { file_put_contents($d . '/' . $fn, $bytes); }
+	putenv('GV_GEO_DIR=' . $d);
+	gv_geo_state(true);
+	return $d;
+}
+$g4 = array(gf_cidr4('1.0.0.0/24'), gf_cidr4('5.0.0.0/8'), gf_cidr4('10.0.0.0/8'), gf_cidr4('11.0.0.0/8'),
+	gf_cidr4('127.0.0.0/8'), array(4294967295, 4294967295, 'ZZ'));
+$g4[0][] = 'AA'; $g4[1][] = 'IR'; $g4[2][] = 'AB'; $g4[3][] = 'BB'; $g4[4][] = 'US';
+$a6 = gf_cidr6('2001:db8::/32'); $a6[] = 'DE';
+$b6 = gf_cidr6('2a00::/12'); $b6[] = 'IR';
+$digits = array('0000000000000000', '0000000000009999', 'TT');           // ASCII-digit keys: must compare as bytes
+$c6 = array(str_repeat("\xff", 16), str_repeat("\xff", 16), 'YY');
+$g6 = array($digits, $a6, $b6, $c6);
+usort($g6, function ($x, $y) { return strcmp($x[0], $y[0]); });
+t_geo_dir('ok', array('country.bin' => gf_pack(1, $g4, $g6)));
+$cc = function ($ip) { return gv_geo_country($ip, true); };
+t_ok('geo: an address inside a range resolves', $cc('5.1.2.3') === 'IR' && $cc('127.0.0.1') === 'US');
+t_ok('geo: the first and last address of a range', $cc('5.0.0.0') === 'IR' && $cc('5.255.255.255') === 'IR' && $cc('1.0.0.0') === 'AA' && $cc('1.0.0.255') === 'AA');
+t_ok('geo: adjacent ranges do not bleed into each other', $cc('10.255.255.255') === 'AB' && $cc('11.0.0.0') === 'BB');
+t_ok('geo: the very last IPv4 address (first and last record of the file)', $cc('255.255.255.255') === 'ZZ');
+t_ok('geo: a gap or an address below the first range is unknown', $cc('0.0.0.1') === '' && $cc('4.255.255.255') === '' && $cc('20.0.0.1') === '' && $cc('126.255.255.255') === '');
+t_ok('geo: IPv6 ranges', $cc('2001:db8::1') === 'DE' && $cc('2a01::1') === 'IR' && $cc('2b00::1') === '' && $cc('2001:db9::') === '');
+t_ok('geo: the last IPv6 address', $cc('ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff') === 'YY');
+t_ok('geo: IPv4-mapped IPv6 is the IPv4 address it carries', $cc('::ffff:127.0.0.1') === 'US' && $cc('::ffff:20.0.0.1') === '');
+t_ok('geo: keys made of ASCII digits compare as bytes, not as numbers', $cc(inet_ntop('0000000000005555')) === 'TT' && $cc(inet_ntop('0000000000009999')) === 'TT' && $cc(inet_ntop('0000000000009a00')) === '');
+t_ok('geo: not an address, empty, whitespace: unknown, no exception', $cc('not-an-ip') === '' && $cc('') === '' && $cc(' ') === '' && $cc('999.1.1.1') === '');
+t_ok('geo: the header is read back (counts, source name)', (function () {
+	$h = gv_geo_header_parse(file_get_contents(gv_geo_file(GV_GEO_COUNTRY), false, null, 0, 128));
+	return $h && $h['v4'] === 6 && $h['v6'] === 4 && $h['kind'] === 1 && $h['source'] === 'fixture.dat' && $h['built'] === 1700000000;
+})());
+t_ok('geo: the lookup is memoised for the request and marks that a lookup ran', gv_geo_ran()['cc'] === true && gv_geo_ran()['asn'] === false);
+
+// ASN file
+t_geo_dir('asn', array('asn.bin' => gf_pack(2, array(array(16777216, 33554431, 13335), array(84215040, 84215295, 4200000000)), array())));
+t_ok('geo: ASN lookup, incl. an AS number above 2^31', gv_geo_asn('1.2.3.4', true) === 13335 && gv_geo_asn('5.5.5.5', true) === 4200000000 && gv_geo_asn('9.9.9.9', true) === 0);
+
+// Broken files never throw and never match.
+$good = gf_pack(1, $g4, $g6);
+$errlog = $GV_TMP_LOGS . '/guard-errors.log';
+@unlink($errlog);
+foreach ((array)glob($GV_TMP_LOGS . '/.err-geo_*') as $mk) { @unlink($mk); }
+t_geo_dir('nofile', array());
+t_ok('geo: a missing file is unknown (and logged, rate-limited)', gv_geo_country('5.1.2.4') === '' && $cc('5.1.2.3') === '' && is_file($errlog) && strpos(file_get_contents($errlog), 'geo_missing') !== false);
+t_geo_dir('magic', array('country.bin' => 'XXXX' . substr($good, 4)));
+t_ok('geo: wrong magic is unknown', $cc('5.1.2.3') === '');
+t_geo_dir('ver', array('country.bin' => substr($good, 0, 4) . "\x00\x02" . substr($good, 6)));
+t_ok('geo: an unknown format version is unknown', $cc('5.1.2.3') === '');
+t_geo_dir('trunc', array('country.bin' => substr($good, 0, 128 + 25)));
+t_ok('geo: a truncated file is unknown', $cc('5.1.2.3') === '');
+t_geo_dir('short', array('country.bin' => 'GVRG'));
+t_ok('geo: a file shorter than the header is unknown', $cc('5.1.2.3') === '');
+t_geo_dir('empty', array('country.bin' => ''));
+t_ok('geo: an empty file is unknown', $cc('5.1.2.3') === '');
+t_geo_dir('kind', array('country.bin' => gf_pack(2, array(array(1, 2, 5)), array())));
+t_ok('geo: an ASN file used as the country file is refused', $cc('0.0.0.1') === '' && strpos(file_get_contents($errlog), 'geo_corrupt') !== false);
+t_geo_dir('junk', array('country.bin' => substr($good, 0, 128) . str_repeat("\xff", 60)));
+t_ok('geo: a header that promises more than the file holds is unknown', $cc('5.1.2.3') === '');
+t_geo_dir('ok2', array('country.bin' => $good));
+t_ok('geo: a good file after a bad one works again (state reset)', $cc('5.1.2.3') === 'IR');
+
+// Unknown never matches, include or exclude.
+$cr = function ($op, array $v) { return t_rule(array('ua' => null, 'country' => array('op' => $op, 'type' => 'code', 'values' => $v))); };
+$ar = function ($op, array $v) { return t_rule(array('ua' => null, 'asn' => array('op' => $op, 'type' => 'number', 'values' => $v))); };
+$m = function (array $r, array $f) { return gv_rule_matches($r, $f); };
+t_ok('country include: matches a listed country only', $m($cr('include', array('IR', 'TR')), array('cc' => 'TR')) && !$m($cr('include', array('IR')), array('cc' => 'US')));
+t_ok('country exclude: matches every placed country outside the list', $m($cr('exclude', array('IR')), array('cc' => 'US')) && !$m($cr('exclude', array('IR')), array('cc' => 'IR')));
+t_ok('UNKNOWN country: never matches include, never matches exclude',
+	!$m($cr('include', array('IR')), array('cc' => '')) && !$m($cr('exclude', array('IR')), array('cc' => '')));
+t_ok('asn include / exclude and UNKNOWN asn (0)',
+	$m($ar('include', array('13335')), array('asn' => 13335)) && !$m($ar('include', array('13335')), array('asn' => 15169))
+	&& $m($ar('exclude', array('13335')), array('asn' => 15169)) && !$m($ar('exclude', array('13335')), array('asn' => 0))
+	&& !$m($ar('include', array('13335')), array('asn' => 0)));
+t_geo_dir('lazy', array('country.bin' => $good));
+t_ok('the country comes from the file when the facts do not carry it', $m($cr('include', array('IR')), array('ip' => '5.1.2.3')) && !$m($cr('include', array('IR')), array('ip' => '127.0.0.1')));
+t_ok('facts with no address and no country: unknown, no match', !$m($cr('exclude', array('IR')), array()));
+t_geo_dir('none', array());
+t_ok('no database: a country rule never matches, include or exclude', !$m($cr('include', array('IR')), array('ip' => '5.1.2.3')) && !$m($cr('exclude', array('IR')), array('ip' => '5.1.2.3')));
+
+// Combined conditions, order, and the file is only opened when a rule gets that far.
+t_geo_dir('combo', array('country.bin' => $good));
+$combo = t_rule(array('id' => 'r-combo', 'ua' => t_cond('contains', array('scraper')), 'country' => array('op' => 'include', 'type' => 'code', 'values' => array('IR'))));
+t_ok('UA + country are AND-ed', $m($combo, array('ua' => 'a scraper', 'ip' => '5.1.2.3', 'path' => '/')) && !$m($combo, array('ua' => 'a scraper', 'ip' => '127.0.0.1', 'path' => '/'))
+	&& !$m($combo, array('ua' => 'nice', 'ip' => '5.1.2.3', 'path' => '/')));
+t_ok('UA + country + path + asn: all four must hold', $m(t_rule(array('path' => t_cond('prefix', array('/a')), 'country' => array('op' => 'include', 'type' => 'code', 'values' => array('IR')),
+	'asn' => array('op' => 'exclude', 'type' => 'number', 'values' => array('1')))), array('ua' => 'badbot', 'path' => '/a', 'cc' => 'IR', 'asn' => 7)));
+t_geo_dir('lazy2', array('country.bin' => $good));
+gv_rules_match(array('ua' => 'nothing', 'ip' => '5.1.2.3', 'path' => '/'), array(t_rule()), $now);
+t_ok('a UA-only rule list never opens the geo file', gv_geo_ran()['cc'] === false);
+gv_rules_match(array('ua' => 'x', 'ip' => '5.1.2.3', 'path' => '/'), array(t_rule(array('ua' => null, 'country' => array('op' => 'include', 'type' => 'code', 'values' => array('US'))))), $now);
+t_ok('a country rule that is reached looks the country up (once)', gv_geo_ran()['cc'] === true && gv_geo_ran()['asn'] === false);
+t_geo_dir('lazy3', array('country.bin' => $good));
+gv_rules_match(array('ua' => 'x', 'ip' => '5.1.2.3', 'path' => '/'), array(t_rule(array('enabled' => false, 'ua' => null, 'country' => array('op' => 'include', 'type' => 'code', 'values' => array('US')))),
+	t_rule(array('expires_at' => 1000, 'ua' => null, 'country' => array('op' => 'include', 'type' => 'code', 'values' => array('US'))))), $now);
+t_ok('a disabled or expired country rule does not trigger a lookup', gv_geo_ran()['cc'] === false);
+t_ok('first match by priority with geo rules', (function () use ($good, $now) {
+	t_geo_dir('prio', array('country.bin' => $good));
+	$a = t_rule(array('id' => 'r-a', 'priority' => 20, 'ua' => null, 'country' => array('op' => 'include', 'type' => 'code', 'values' => array('IR'))));
+	$b = t_rule(array('id' => 'r-b', 'priority' => 10, 'ua' => null, 'country' => array('op' => 'include', 'type' => 'code', 'values' => array('IR', 'US'))));
+	$w = gv_rules_match(array('ip' => '5.1.2.3'), array($b, $a), $now);
+	return $w && $w['id'] === 'r-b';
+})());
+
+// Validation.
+$v = function (array $over) { return gv_rule_validate(t_rule($over), true); };
+t_ok('validate: a country-only rule is valid and keeps its type', $v(array('ua' => null, 'country' => t_cond('code', array('IR', 'US'))))[0] === true);
+t_ok('validate: lower-case, 3-letter, numeric and empty country codes are refused',
+	!$v(array('country' => t_cond('code', array('ir'))))[0] && !$v(array('country' => t_cond('code', array('IRN'))))[0]
+	&& !$v(array('country' => t_cond('code', array('I1'))))[0] && !$v(array('country' => t_cond('code', array())))[0]);
+t_ok('validate: bad country reports the field and the value number', (function () use ($v) { $r = $v(array('country' => t_cond('code', array('IR', 'x')))); return !$r[0] && $r[1]['country'] === 'bad_country' && $r[2]['country'] === 'value 2'; })());
+t_ok('validate: ASN values are plain decimal numbers 1..4294967295',
+	$v(array('asn' => t_cond('number', array('13335', '4294967295'))))[0] && !$v(array('asn' => t_cond('number', array('0'))))[0]
+	&& !$v(array('asn' => t_cond('number', array('4294967296'))))[0] && !$v(array('asn' => t_cond('number', array('AS13335'))))[0]
+	&& !$v(array('asn' => t_cond('number', array('-5'))))[0] && !$v(array('asn' => t_cond('number', array('1e3'))))[0]);
+t_ok('validate: more than 50 country values is refused', !$v(array('country' => t_cond('code', array_map(function ($i) { return chr(65 + intdiv($i, 26)) . chr(65 + $i % 26); }, range(0, 50)))))[0]);
+t_ok('validate: a rule with no condition at all is still invalid', !$v(array('ua' => null))[0]);
+t_ok('validate: a rule saved before GeoIP (no country / asn keys) is valid and gets null for both', (function () {
+	$r = t_rule(); unset($r['country'], $r['asn']);
+	$x = gv_rule_validate($r, true);
+	return $x[0] && $x[1]['country'] === null && $x[1]['asn'] === null;
+})());
+
+// The generated cache.
+$gc = array(t_rule(array('id' => 'r-g1', 'priority' => 5, 'ua' => null, 'country' => t_cond('code', array('IR', 'TR'), 'exclude'), 'asn' => t_cond('number', array('13335', '15169')))));
+$gsrc = gv_rules_cache_source($gc);
+$gcache = $GEO_TMP . '/geo-rules.cache.php';
+file_put_contents($gcache, $gsrc);
+$gl = include $gcache;
+t_ok('cache: country and ASN conditions carry a lookup set', $gl[0]['country']['set'] === array('IR' => true, 'TR' => true) && $gl[0]['asn']['set'] === array(13335 => true, 15169 => true));
+$gids = array();
+foreach (token_get_all(substr($gsrc, strpos($gsrc, 'return array'))) as $tk) { if (is_array($tk) && $tk[0] === T_STRING) { $gids[] = strtolower($tk[1]); } }
+t_ok('cache: still a pure array literal with geo conditions', array_diff($gids, array('true', 'false', 'null')) === array());
+t_ok('cache: a cached geo rule matches like the JSON rule',
+	$m($gl[0], array('cc' => 'US', 'asn' => 13335)) === $m($gc[0], array('cc' => 'US', 'asn' => 13335))
+	&& $m($gl[0], array('cc' => 'US', 'asn' => 13335)) === true && $m($gl[0], array('cc' => 'IR', 'asn' => 13335)) === false
+	&& $m($gl[0], array('cc' => '', 'asn' => 13335)) === false && $m($gl[0], array('cc' => 'US', 'asn' => 0)) === false);
+t_ok('cache: a cache written by the previous release (no country / asn keys) still works', (function () use ($now) {
+	$old = t_rule(); unset($old['country'], $old['asn']);
+	return gv_rules_match(array('ua' => 'x badbot', 'path' => '/'), array($old), $now) !== null;
+})());
+
+// Log row, config and overlay.
+$row_f = t_facts();
+t_ok('log row: no cc / asn key when no lookup ran', !array_key_exists('cc', gv_log_row($row_f, gv_state_new(), 'allow', 0, microtime(true))) && !array_key_exists('asn', gv_log_row($row_f, gv_state_new(), 'allow', 0, microtime(true))));
+$row_geo = gv_log_row(array_merge($row_f, array('cc' => 'IR', 'asn' => 12880)), gv_state_new(), 'allow', 0, microtime(true));
+t_ok('log row: cc and asn when a lookup ran', $row_geo['cc'] === 'IR' && $row_geo['asn'] === 12880);
+$row_unk = gv_log_row(array_merge($row_f, array('cc' => '', 'asn' => 0)), gv_state_new(), 'allow', 0, microtime(true));
+t_ok('log row: an unknown country is logged as "" (looked up, not placed)', $row_unk['cc'] === '' && $row_unk['asn'] === 0);
+t_ok('config: geo.log defaults to off and is a whitelisted bool',
+	gv_cfg_defaults(array())['geo'] === array('log' => false) && gv_overlay_validate('geo.log', true)[0] === true && gv_overlay_validate('geo.log', 'yes')[0] === false);
+t_ok('config: "off" / "false" in a hand-edited geo block read as off', gv_cfg_defaults(array('geo' => array('log' => 'off')))['geo']['log'] === false && gv_cfg_defaults(array('geo' => array('log' => 'true')))['geo']['log'] === true);
+t_ok('config: a damaged geo value falls back to the default', gv_cfg_defaults(array('geo' => 'x'))['geo'] === array('log' => false));
+putenv('GV_GEO_DIR');
+gv_geo_state(true);
+
+// --------------------------------------------------------------------------
 t_section('Redis roundtrip (optional)');
 
 $redis_bin = trim((string)@shell_exec('command -v redis-server 2>/dev/null'));

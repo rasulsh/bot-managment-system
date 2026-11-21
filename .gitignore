@@ -48,6 +48,18 @@ analyzer/*.tmp
 # Panel backups of the overlay (every save keeps the previous version).
 guard/config-backups/
 
+# GeoIP: databases and their compiled files are downloaded or compiled per install.
+geo/*.bin
+geo/*.bin.prev
+geo/*.mmdb
+geo/*.dat
+geo/geo-status.json
+geo/known.json
+geo/*.tmp*
+geo/*.part*
+geo/*.rb*
+geo/*.lock
+
 # Access rules: written by the panel, local to each install.
 guard/rules.json
 guard/rules.json.tmp*
