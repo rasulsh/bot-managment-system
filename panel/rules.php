@@ -235,6 +235,7 @@ function gp_rule_warnings(array $rule, array $cfg, $geo = null) {
 		}
 		if ($over) { $out[] = array('exempt', implode(', ', array_unique($over))); }
 	}
+	if ($rule['action'] === 'captcha' && !gv_captcha_available()) { $out[] = array('captcha_gd', ''); }
 	if (!empty($rule['path']) && is_array($rule['path']) && $rule['path']['op'] === 'exclude' && $rule['mode'] === 'enforce' && $rule['action'] !== 'log') {
 		$out[] = array('wide', '');
 	}
@@ -368,12 +369,14 @@ function gp_rules_impact_fold(array $rule, array $rows) {
 // the row's address (lookup), or could not be evaluated at all (none).
 function gp_rules_impact_new(array $rule) {
 	return array('requests' => 0, 'ips' => 0, 'devices' => 0, 'tokened' => 0, 'paths' => array(), 'scanned' => 0,
-		'geo' => (!empty($rule['country']) || !empty($rule['asn'])), 'geo_logged' => 0, 'geo_lookup' => 0, 'geo_none' => 0);
+		'geo' => (!empty($rule['country']) || !empty($rule['asn'])), 'geo_logged' => 0, 'geo_lookup' => 0, 'geo_none' => 0,
+		'captcha' => (isset($rule['action']) && $rule['action'] === 'captcha'), 'captcha_would' => 0);
 }
 
 function gp_rules_impact_row(array $rule, array $row, array &$out, array &$ips, array &$devs, array &$paths) {
 	$out['scanned']++;
-	if (!empty($rule['skip_verified_bots']) && (string)($row['botv'] ?? '') === 'ok') { return; }
+	// A captcha rule never asks a verified crawler, whatever skip_verified_bots says.
+	if ((!empty($rule['skip_verified_bots']) || (isset($rule['action']) && $rule['action'] === 'captcha')) && (string)($row['botv'] ?? '') === 'ok') { return; }
 	$f = array('ua' => (string)($row['ua'] ?? ''), 'path' => (string)($row['p'] ?? '/'));
 	if ($out['geo']) {
 		// The value logged with the row wins; a row from before geo logging was on is
@@ -395,6 +398,11 @@ function gp_rules_impact_row(array $rule, array $row, array &$out, array &$ips, 
 	if (isset($row['ip']) && is_string($row['ip']) && $row['ip'] !== '') { $ips[$row['ip']] = true; }
 	if (isset($row['dev']) && is_string($row['dev']) && $row['dev'] !== '') { $devs[$row['dev']] = true; }
 	if ((string)($row['tok'] ?? '') === 'v') { $out['tokened']++; }
+	// How many of the matched requests would get a CAPTCHA: an HTML request (nav) that needed a token (gate; older rows
+	// without it count as gated), without a CAPTCHA-level token (tl), that was not exempt or let through by an allow
+	// override or list. The rest of the matched requests would keep their normal flow.
+	if (!empty($out['captcha']) && !empty($row['nav']) && (!isset($row['gate']) || !empty($row['gate'])) && (string)($row['tl'] ?? '') !== 'c'
+		&& !in_array((string)($row['act'] ?? ''), array('exempt', 'allow_override'), true)) { $out['captcha_would']++; }
 	$p = $f['path'];
 	if (isset($paths[$p]) || count($paths) < 2000) { $paths[$p] = (isset($paths[$p]) ? $paths[$p] : 0) + 1; }
 }

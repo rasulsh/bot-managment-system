@@ -126,4 +126,14 @@ files, Redis down) and `panel-smoke.sh` / `panel-layout-test.sh` (the page at de
 `php scripts/bench-gv-run.php --list-lookup` times the lookup alone, `--lists=100000,10000` the whole `gv_run` with an allow and a
 block file of 100k IPv4 + 10k IPv6 ranges each. The safety caps are tested in PHP and Python (0/0 in allow with and without force, a /12 in allow, private / loopback / link-local / server address / IPv6 equivalents in block, a mixed valid / invalid SFTP-style file, byte parity of the files and the status, `rules-e2e.sh` L70-L74), the block check before the handshake in `rules-e2e.sh` L60-L68, and the "deny under an allow list" warning in `panel-selftest.php`. All of it works in temp directories (`GV_LISTS_DIR`, `GV_AUDIT`).
 
+Image CAPTCHA: `guard-selftest.php` (the five levels, the answer alphabet, image generation at every level - PNG, size, characters, repeatability -,
+normalisation of Persian / Arabic digits, the nonce (answer commitment, binding, expiry, tampering, parser limits), token levels and old-token
+compatibility, the rule action matrix, the headless scoring function with every signal and weight, the log keys, config validation, the page, and the
+"GD missing" fallback via `GV_CAPTCHA_NO_GD`), `panel-selftest.php` (impact preview, the GD alert, the Settings tab, tooltips, the dashboard KPIs),
+`analyzer/selftest.py` (the KPIs), `rules-e2e.sh` sections M and K2 over HTTP (the answer is found by brute force with `scripts/captcha-solve.php`, the proof of
+work with `scripts/pow-solve.php`: the whole flow, wrong / right / Persian-digit answers, attempts, single use, the token level, every "never shown" case, the
+per-IP budget with no Redis work, escalation, CAPTCHA instead of the device 429, GD missing, Redis down) and `scripts/browser-test.js` (a real browser
+that looks headless is escalated and solves it; one that does not passes without it). `php scripts/bench-gv-run.php --cap-gen` times the page generation per
+level, `--cap-rules=20` / `--cap-match` the request path with captcha rules. CI installs GD (`extensions: gd`); the suites run the "GD missing" case with the knob on a PHP that has it.
+
 `rules-e2e.sh` needs `php`, `python3`, `curl`, `redis-server`; it creates and removes `guard.off` in the project root.

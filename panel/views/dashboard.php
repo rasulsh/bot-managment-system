@@ -148,6 +148,33 @@ $tiles = array('requests' => 'dash_k_requests', 'allowed' => 'dash_k_allowed', '
 	<?php endif; ?>
 </section>
 
+<?php /* ------------------------------------------------------------ 3b. CAPTCHA (only when there is something to show) */ ?>
+<?php
+$ccur = isset($kcur['captcha_shown']) ? $kcur : array();
+$cprev = $kprev;
+$ctiles = array('captcha_shown' => 'dash_c_shown', 'captcha_solved' => 'dash_c_solved', 'captcha_failed' => 'dash_c_failed', 'captcha_expired' => 'dash_c_expired',
+	'captcha_solve_rate' => 'dash_c_rate', 'captcha_median_s' => 'dash_c_median');
+$cany = $ccur && ((int)$ccur['captcha_shown'] + (int)($ccur['captcha_solved'] ?? 0) + (int)($ccur['captcha_failed'] ?? 0) + (int)($ccur['captcha_expired'] ?? 0)) > 0;
+?>
+<?php if ($cany): ?>
+<section aria-label="<?= gp_e(gp_t('dash_captcha')) ?>" id="dash-captcha">
+	<h2 class="gp-card-title"><?= gp_e(gp_t('dash_captcha')) ?> <span class="gp-card-sub"><?= gp_e(gp_t('dash_24h_sub')) ?></span></h2>
+	<div class="gp-grid-kpi">
+		<?php foreach ($ctiles as $k => $label): $cv = $ccur[$k] ?? null; $pv = $cprev[$k] ?? null;
+			$pct = ($k === 'captcha_solve_rate'); $sec = ($k === 'captcha_median_s');
+			$chg = ($pct || $sec) ? (($cv === null || $pv === null) ? '' : sprintf($pct ? '%+.1f pt' : '%+.1f s', $cv - $pv)) : gp_kpi_change($cv, $pv);
+			$bad = in_array($k, array('captcha_failed', 'captcha_expired'), true) && $chg !== '' && $chg[0] === '+'; ?>
+		<div class="gp-kpi" data-captcha-kpi="<?= gp_e($k) ?>">
+			<div class="gp-kpi-label"><?= gp_e(gp_t($label)) ?></div>
+			<div class="gp-kpi-value"><?= $cv === null ? '—' : ($pct ? gp_e(gp_num((float)$cv, 1)) . '%' : ($sec ? gp_e(gp_num((float)$cv, 1)) . ' s' : gp_e(gp_num((int)$cv)))) ?></div>
+			<div class="gp-kpi-hint <?= $bad ? 'gp-text-bad' : '' ?>"><?= $chg === '' ? '' : gp_e($chg) . ' ' . gp_e(gp_t('dash_vs_prev')) ?></div>
+		</div>
+		<?php endforeach; ?>
+	</div>
+	<p class="gp-help"><?= gp_e(gp_t('dash_c_hint')) ?></p>
+</section>
+<?php endif; ?>
+
 <?php /* ------------------------------------------------------------ 4. top lists, each links to the Logs filter */ ?>
 <?php
 $lists = array(

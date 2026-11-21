@@ -174,7 +174,9 @@ SERVED_ACTS = ('403', '429', 'challenge')
 def kpi_counts(rows):
     """The dashboard's headline numbers over one window of decision rows. Pure."""
     out = {'requests': 0, 'allowed': 0, 'blocked': 0, 'limited': 0, 'challenged': 0, 'token_issued': 0,
-           'rule_hits': 0, 'honeypot': 0, 'degraded': 0}
+           'rule_hits': 0, 'honeypot': 0, 'degraded': 0,
+           'captcha_shown': 0, 'captcha_solved': 0, 'captcha_failed': 0, 'captcha_expired': 0}
+    solve_times = []
     for row in rows:
         act = str(row.get('act') or '')
         shadow = int(row.get('sh') or 0) == 1
@@ -191,6 +193,29 @@ def kpi_counts(rows):
             out['honeypot'] += 1
         if int(row.get('rd') or 0) == 1:
             out['degraded'] += 1
+        # The image CAPTCHA (log key cap): show = a page served, ok = solved (ct = seconds it took), wrong / fail / inv =
+        # a failed attempt, exp = answered after the time limit.
+        cap = str(row.get('cap') or '')
+        if cap == 'show':
+            out['captcha_shown'] += 1
+        elif cap == 'ok':
+            out['captcha_solved'] += 1
+            try:
+                solve_times.append(float(row.get('ct')))
+            except (TypeError, ValueError):
+                pass
+        elif cap in ('wrong', 'fail', 'inv'):
+            out['captcha_failed'] += 1
+        elif cap == 'exp':
+            out['captcha_expired'] += 1
+    solve_times.sort()
+    if solve_times:
+        mid = len(solve_times) // 2
+        out['captcha_median_s'] = solve_times[mid] if len(solve_times) % 2 else (solve_times[mid - 1] + solve_times[mid]) / 2.0
+    else:
+        out['captcha_median_s'] = None
+    # Solve rate: solved / shown. A rate of 100 % with very short times looks like a solving service.
+    out['captcha_solve_rate'] = (100.0 * out['captcha_solved'] / out['captcha_shown']) if out['captcha_shown'] else None
     out['challenge_success'] = (100.0 * out['token_issued'] / out['challenged']) if out['challenged'] else None
     return out
 

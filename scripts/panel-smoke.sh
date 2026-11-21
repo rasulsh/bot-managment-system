@@ -83,6 +83,25 @@ check "delete removes the rule" "$(grep -q 'Smoke rule' <<<"$rp" && echo 0 || ec
 code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" -d 'do=starter' "$URL?r=rules")"
 check "a POST without the CSRF token changes nothing (no 303 redirect)" "$([ "$code" != 303 ] && echo 1 || echo 0)"
 
+# CAPTCHA: the Settings tab (GD status, preview), a setting saved and reset, the preview route, the rule action.
+st="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=settings")"
+check "Settings has a CAPTCHA tab with the level, the weights and a GD status line" "$(grep -q 'data-panel="captcha"' <<<"$st" && grep -q 'name="f\[captcha.level\]"' <<<"$st" && grep -q 'name="f\[captcha.w_webdriver\]"' <<<"$st" && grep -q 'id="cap-gd"' <<<"$st" && echo 1 || echo 0)"
+tok="$(printf '%s' "$st" | csrf)"
+code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'action=save' -d 'f[captcha.level]=3' "$URL?r=settings")"
+check "a CAPTCHA level is saved (303)" "$([ "$code" = 303 ] && echo 1 || echo 0)"
+st="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=settings")"
+check "...and shown" "$(grep -A6 'name="f\[captcha.level\]"' <<<"$st" | grep -q 'value="3"' && echo 1 || echo 0)"
+tok="$(printf '%s' "$st" | csrf)"
+code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'action=save' -d 'f[captcha.level]=9' "$URL?r=settings")"
+check "a CAPTCHA level out of range is refused, not clamped (no redirect)" "$([ "$code" != 303 ] && echo 1 || echo 0)"
+curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'action=reset' -d 'key=captcha.level' "$URL?r=settings"
+pv="$(curl -sk -c "$JAR" -b "$JAR" -D - -o /dev/null "$URL?r=captcha_preview&level=3&length=5")"
+check "the preview route answers a PNG (GD) or 204 (no GD), never an error" "$(grep -qiE '^HTTP/[0-9.]+ (200|204)' <<<"$pv" && { ! grep -qi '^HTTP/[0-9.]+ 200' <<<"$pv" || grep -qi 'content-type: image/png' <<<"$pv"; } && echo 1 || echo 0)"
+code="$(curl -sk -o /dev/null -w '%{http_code}' "$URL?r=captcha_preview")"
+check "the preview needs a login (no session: not an image)" "$([ "$code" != 200 ] && echo 1 || echo 0)"
+qp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'new=1' "$URL?r=rules")"
+check "the rule form offers the action Image CAPTCHA" "$(grep -q 'value="captcha"' <<<"$qp" && grep -q 'Image CAPTCHA' <<<"$qp" && echo 1 || echo 0)"
+
 # Dashboard (alerts, protection state, 24 h KPIs area, top lists) and the Jobs page (job health, crontab check).
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
 check "the dashboard shows the protection state and the details section" "$(grep -q 'Protection state' <<<"$dash" && grep -q 'gp-details' <<<"$dash" && echo 1 || echo 0)"

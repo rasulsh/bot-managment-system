@@ -12,7 +12,12 @@ define('GV_BOOT', 1);
 require __DIR__ . '/../guard/challenge.php';
 
 $nonce = isset($argv[1]) ? (string)$argv[1] : '';
+// A CAPTCHA nonce (six parts, guard/captcha.php) carries the same difficulty in its third part.
 $parsed = gv_nonce_parse($nonce);
+if ($parsed === false && substr_count($nonce, '.') === 5) {
+	$x = explode('.', $nonce);
+	$parsed = ctype_digit($x[2]) ? array($x[1], (int)$x[2]) : false;
+}
 if ($parsed === false) { fwrite(STDERR, "bad nonce\n"); exit(2); }
 for ($c = 0; $c < 100000000; $c++) {
 	if (gv_pow_ok($nonce, (string)$c, $parsed[1])) { echo $c . "\n"; exit(0); }

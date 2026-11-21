@@ -2872,6 +2872,100 @@ t_ok('the selftest left nothing in the repository: no lists/ files, no audit lin
 putenv('GV_LISTS_DIR'); putenv('GV_GEO_DIR'); putenv('GV_AUDIT');
 gv_geo_state(true);
 
+t_section('Image CAPTCHA: rule action, impact preview, Settings tab, dashboard KPIs and the GD alert');
+
+$cr_rule = array_merge(gp_rule_blank(), array('id' => 'cx', 'name' => 'c', 'mode' => 'enforce', 'action' => 'captcha', 'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('scraper'))));
+$cr_rows = array(
+	array('ua' => 'scraper/1', 'p' => '/a', 'ip' => '203.0.113.1', 'nav' => 1, 'gate' => 1, 'tok' => 'm', 'act' => 'challenge', 'dev' => ''),                 // would get a CAPTCHA
+	array('ua' => 'scraper/1', 'p' => '/b', 'ip' => '203.0.113.2', 'nav' => 1, 'gate' => 1, 'tok' => 'v', 'act' => 'allow', 'dev' => 'd1'),                  // PoW-level token: still asked
+	array('ua' => 'scraper/1', 'p' => '/c', 'ip' => '203.0.113.3', 'nav' => 1, 'gate' => 1, 'tok' => 'v', 'tl' => 'c', 'act' => 'allow', 'dev' => 'd2'),     // CAPTCHA-level token: not asked
+	array('ua' => 'scraper/1', 'p' => '/d', 'ip' => '203.0.113.4', 'nav' => 0, 'gate' => 1, 'tok' => 'm', 'act' => 'allow'),                                  // not HTML: keeps its flow
+	array('ua' => 'scraper/1', 'p' => '/e', 'ip' => '203.0.113.5', 'nav' => 1, 'gate' => 0, 'tok' => 'm', 'act' => 'allow'),                                  // not gated
+	array('ua' => 'scraper/1', 'p' => '/f', 'ip' => '203.0.113.6', 'nav' => 1, 'gate' => 1, 'tok' => 'm', 'act' => 'exempt'),                                 // exempt path
+	array('ua' => 'scraper/1', 'p' => '/g', 'ip' => '203.0.113.7', 'nav' => 1, 'gate' => 1, 'tok' => 'm', 'act' => 'allow_override'),                         // operator allow
+	array('ua' => 'scraper/1', 'p' => '/h', 'ip' => '203.0.113.8', 'nav' => 1, 'gate' => 1, 'tok' => 'm', 'botv' => 'ok', 'act' => 'allow_bot'),             // verified crawler
+	array('ua' => 'scraper/1', 'p' => '/i', 'ip' => '203.0.113.9', 'nav' => 1, 'tok' => 'm', 'act' => 'challenge'),                                           // an older row without gate: counts as gated
+	array('ua' => 'nice/1', 'p' => '/j', 'ip' => '203.0.113.10', 'nav' => 1, 'gate' => 1, 'tok' => 'm'),                                                      // does not match
+);
+$cr_im = gp_rules_impact_fold($cr_rule, $cr_rows);
+t_ok('impact: a captcha rule counts how many matched requests WOULD get a CAPTCHA (HTML, gated, no CAPTCHA-level token, not exempt, not allowed, not a verified crawler)',
+	$cr_im['captcha'] === true && $cr_im['requests'] === 8 && $cr_im['captcha_would'] === 3 && $cr_im['tokened'] === 2);
+t_ok('impact: a verified crawler is not counted for a captcha rule even with skip_verified_bots off (it is never asked)', gp_rules_impact_fold(array_merge($cr_rule, array('skip_verified_bots' => false)), $cr_rows)['requests'] === 8);
+t_ok('impact: other actions carry no captcha number', gp_rules_impact_fold(array_merge($cr_rule, array('action' => 'challenge')), $cr_rows)['captcha'] === false && gp_rules_impact_fold(array_merge($cr_rule, array('action' => 'challenge')), $cr_rows)['captcha_would'] === 0);
+t_ok('impact: an empty log is zero, not an error', gp_rules_impact_fold($cr_rule, array())['captcha_would'] === 0);
+$cr_view = function (array $im) {
+	$errs = array(); set_error_handler(function ($no, $str) use (&$errs) { $errs[] = $str; return true; });
+	$state = array('state' => 'ok', 'rules' => array(), 'dropped' => 0, 'path' => ''); $all = array(); $visible = array(); $filter = array(); $draft = gp_rule_blank(); $errors = array(); $details = array(); $warnings = array();
+	$impact = $im; $test = null; $test_in = array('ua' => '', 'path' => '', 'verified' => false, 'ip' => ''); $snapshot = null; $route = 'rules'; $user = 't';
+	ob_start(); require __DIR__ . '/../panel/views/rules.php'; $h = ob_get_clean(); restore_error_handler(); return array($h, $errs);
+};
+$cr_im['meta'] = array('files' => 1, 'capped' => false, 'from' => time() - 100, 'to' => time(), 'newest' => time(), 'oldest' => time() - 100);
+list($cr_h, $cr_e) = $cr_view($cr_im);
+t_ok('rules page: the impact preview shows the number of requests that would get a CAPTCHA and says what it counts; the action list has Image CAPTCHA', !$cr_e && strpos($cr_h, 'data-captcha-would="3"') !== false && strpos($cr_h, 'Would get a CAPTCHA') !== false && strpos($cr_h, 'value="captcha"') !== false && strpos($cr_h, 'Image CAPTCHA') !== false);
+putenv('GV_CAPTCHA_NO_GD=1');
+t_ok('rules form: a captcha rule on a PHP without GD is warned about; other actions are not', in_array(array('captcha_gd', ''), gp_rule_warnings($cr_rule, gv_cfg_defaults(array())), true) && !in_array(array('captcha_gd', ''), gp_rule_warnings(array_merge($cr_rule, array('action' => 'block')), gv_cfg_defaults(array())), true));
+putenv('GV_CAPTCHA_NO_GD');
+t_ok('rules form: with GD there is no captcha warning', gv_captcha_available() === false || !in_array(array('captcha_gd', ''), gp_rule_warnings($cr_rule, gv_cfg_defaults(array())), true));
+// the alert
+$ca_cfg = gv_cfg_defaults(array());
+$ca_live = array_merge($cr_rule, array('enabled' => true, 'expires_at' => 0));
+t_ok('alert input: a CAPTCHA is "needed" by an enforced captcha rule, an escalation score or the device budget; a monitor rule, a disabled rule, a block rule need none',
+	gp_captcha_needed($ca_cfg, array($ca_live)) === true && gp_captcha_needed($ca_cfg, array(array_merge($ca_live, array('mode' => 'monitor')))) === false && gp_captcha_needed($ca_cfg, array(array_merge($ca_live, array('enabled' => false)))) === false
+	&& gp_captcha_needed($ca_cfg, array(array_merge($ca_live, array('action' => 'block')))) === false && gp_captcha_needed($ca_cfg, array()) === false && gp_captcha_needed(array_merge($ca_cfg, array('captcha' => array_merge($ca_cfg['captcha'], array('escalate_score' => 60)))), array()) === true
+	&& gp_captcha_needed(array_merge($ca_cfg, array('captcha' => array_merge($ca_cfg['captcha'], array('device_budget' => true)))), array()) === true && gp_captcha_needed($ca_cfg, array(array_merge($ca_live, array('expires_at' => 5)))) === false);
+$ca_base = array('now' => time(), 'redis_up' => true, 'jobs' => array(), 'storage' => array('warnings' => array()), 'snapshot' => array('generated_at' => time(), 'tz' => array('offset' => 0)), 'tz_offset' => 0, 'queue' => array('stuck' => false), 'cron' => array('mode' => 'none', 'report' => null));
+$ca_ids = function (array $extra) use ($ca_base) { $o = array(); foreach (gp_health_alerts(array_merge($ca_base, $extra)) as $a_) { $o[$a_['id']] = $a_['level']; } return $o; };
+t_ok('alert: GD missing while a CAPTCHA is configured: a warning that opens Settings; GD present, or nothing configured: no alert',
+	($ca_ids(array('captcha_gd_needed' => true, 'captcha_gd' => false))['captcha_gd'] ?? '') === 'warning' && !isset($ca_ids(array('captcha_gd_needed' => true, 'captcha_gd' => true))['captcha_gd']) && !isset($ca_ids(array('captcha_gd_needed' => false, 'captcha_gd' => false))['captcha_gd'])
+	&& (function () use ($ca_base) { foreach (gp_health_alerts(array_merge($ca_base, array('captcha_gd_needed' => true, 'captcha_gd' => false))) as $a_) { if ($a_['id'] === 'captcha_gd') { return $a_['link'] === 'settings' && $a_['key'] === 'al_captcha_gd'; } } return false; })());
+// Settings
+$cs_keys = array_values(array_filter(array_keys(gv_overlay_whitelist()), function ($k) { return strncmp($k, 'captcha.', 8) === 0 || strncmp($k, 'strings.cap_', 12) === 0; }));
+$cs_src = file_get_contents(__DIR__ . '/../panel/views/settings.php');
+t_ok('settings: every captcha.* and strings.cap_* key is on the Settings page (' . count($cs_keys) . ' keys)', !array_filter($cs_keys, function ($k) use ($cs_src) { return strpos($cs_src, "'" . $k . "'") === false; }) && count($cs_keys) >= 33);
+$cs_render = function () {
+	$cfg = gp_effective_config(); $overlay = array(); $errors = array(); $pending = array(); $diff = array(); $route = 'settings';
+	$errs = array(); set_error_handler(function ($no, $str) use (&$errs) { $errs[] = $str; return true; });
+	ob_start(); require __DIR__ . '/../panel/views/settings.php'; $h = ob_get_clean(); restore_error_handler(); return array($h, $errs);
+};
+list($cs_h, $cs_e) = $cs_render();
+t_ok('settings: the CAPTCHA tab shows the GD status and the preview image with its button, and every field has a tooltip', !$cs_e && strpos($cs_h, 'data-panel="captcha"') !== false && (!gv_captcha_available() || (strpos($cs_h, 'id="cap-preview"') !== false && strpos($cs_h, 'id="cap-preview-btn"') !== false && strpos($cs_h, 'GD is installed') !== false))
+	&& substr_count($cs_h, 'class="gp-tip"') > 100);
+putenv('GV_CAPTCHA_NO_GD=1');
+list($cs_h2, $cs_e2) = $cs_render();
+putenv('GV_CAPTCHA_NO_GD');
+t_ok('settings: without GD the tab says "CAPTCHA unavailable (GD not installed)", every captcha action falls back, and there is no broken preview image', !$cs_e2 && strpos($cs_h2, 'CAPTCHA unavailable (GD not installed)') !== false && strpos($cs_h2, 'id="cap-preview"') === false);
+t_ok('settings: the preview is drawn by a logged-in-only route that validates its input and saves nothing', strpos(file_get_contents(__DIR__ . '/../panel/index.php'), "case 'captcha_preview':") !== false && strpos(file_get_contents(__DIR__ . '/../panel/index.php'), "ctype_digit(\$_GET['level'])") !== false
+	&& strpos(file_get_contents(__DIR__ . '/../panel/views/layout.php'), "captcha_preview") !== false);
+// the lang: every new setting has a label, a help text and a tooltip with the required parts
+$cl = require __DIR__ . '/../panel/lang.php'; $cl_bad = array();
+foreach ($cs_keys as $k) {
+	$kk = str_replace('.', '_', $k);
+	foreach (array('lbl_', 'help_', 'tip_set_') as $pre) { if (empty($cl[$pre . $kk])) { $cl_bad[] = $pre . $kk; } }
+	$t = isset($cl['tip_set_' . $kk]) ? $cl['tip_set_' . $kk] : '';
+	if (stripos($t, 'what it does') === false || stripos($t, 'safe value') === false || stripos($t, 'risk') === false) { $cl_bad[] = 'tip shape ' . $kk; }
+}
+t_ok('lang: every CAPTCHA setting has a label, a help text and a tooltip (what it does, a safe value, the risk)' . ($cl_bad ? ' (bad: ' . implode(',', array_slice($cl_bad, 0, 5)) . ')' : ''), !$cl_bad);
+t_ok('lang: each headless signal has its own weight setting with the signal named in its tooltip', isset($cl['tip_set_captcha_w_webdriver']) && stripos($cl['tip_set_captcha_w_webdriver'], 'webdriver') !== false && stripos($cl['tip_set_captcha_w_webgl_soft'], 'WebGL') !== false && stripos($cl['tip_set_captcha_w_too_fast'], 'fast') !== false);
+// the dashboard KPIs
+$ck_snap = array('generated_at' => time(), 'tz' => array('offset' => 0, 'name' => 'UTC'), 'traffic' => array('requests' => 10, 'devices' => 3, 'addresses' => 4, 'degraded' => 0), 'decisions' => array('allow' => 9),
+	'kpi' => array('cur' => array('requests' => 120, 'allowed' => 100, 'blocked' => 10, 'limited' => 2, 'challenged' => 8, 'challenge_success' => 91.5, 'rule_hits' => 7, 'honeypot' => 1, 'degraded' => 0,
+		'captcha_shown' => 40, 'captcha_solved' => 30, 'captcha_failed' => 12, 'captcha_expired' => 3, 'captcha_solve_rate' => 75.0, 'captcha_median_s' => 6.5),
+		'prev' => array('requests' => 100, 'allowed' => 90, 'blocked' => 5, 'limited' => 2, 'challenged' => 8, 'challenge_success' => 95.0, 'rule_hits' => 0, 'honeypot' => 1, 'degraded' => 0,
+		'captcha_shown' => 20, 'captcha_solved' => 18, 'captcha_failed' => 4, 'captcha_expired' => 1, 'captcha_solve_rate' => 90.0, 'captcha_median_s' => 8.0)),
+	'top' => array('rules' => array(), 'reasons' => array(), 'ips' => array(), 'devices' => array(), 'uas' => array(), 'paths' => array(), 'countries' => array()));
+list($ck_h, $ck_e) = $jh_render('dashboard', array('snapshot' => $ck_snap));
+t_ok('dashboard: the CAPTCHA KPIs (shown, solved, failed, expired, solve rate, median time) with the change against the previous 24 h; a rising failure count is marked',
+	!$ck_e && strpos($ck_h, 'id="dash-captcha"') !== false && substr_count($ck_h, 'data-captcha-kpi=') === 6 && strpos($ck_h, 'CAPTCHAs shown') !== false && strpos($ck_h, '+100 %') !== false && strpos($ck_h, '-15.0 pt') !== false
+	&& strpos($ck_h, '6.5 s') !== false && strpos($ck_h, '75.0%') !== false && strpos($ck_h, 'solving service') !== false && substr_count($ck_h, 'gp-kpi-label') === 9 + 6);
+$ck_none = $ck_snap; $ck_none['kpi']['cur'] = array_merge($ck_none['kpi']['cur'], array('captcha_shown' => 0, 'captcha_solved' => 0, 'captcha_failed' => 0, 'captcha_expired' => 0, 'captcha_solve_rate' => null, 'captcha_median_s' => null));
+list($ck_h2, $ck_e2) = $jh_render('dashboard', array('snapshot' => $ck_none));
+t_ok('dashboard: no CAPTCHA activity in the 24 h: no CAPTCHA section at all (no empty tiles, no 0 %)', !$ck_e2 && strpos($ck_h2, 'id="dash-captcha"') === false);
+$ck_only = $ck_snap; $ck_only['kpi']['cur']['captcha_solve_rate'] = null; $ck_only['kpi']['cur']['captcha_median_s'] = null; $ck_only['kpi']['cur']['captcha_solved'] = 0; $ck_only['kpi']['prev'] = array('requests' => 1);
+list($ck_h3, $ck_e3) = $jh_render('dashboard', array('snapshot' => $ck_only));
+t_ok('dashboard: a missing rate or median is a dash; a missing previous window shows no change', !$ck_e3 && strpos($ck_h3, 'data-captcha-kpi="captcha_median_s"') !== false && preg_match('/data-captcha-kpi="captcha_solve_rate".*?gp-kpi-value">—</s', $ck_h3) === 1);
+list($ck_h4, $ck_e4) = $jh_render('dashboard', array('snapshot' => $kpi_snap));
+t_ok('dashboard: an older snapshot without CAPTCHA keys renders exactly as before (9 tiles, no CAPTCHA section)', !$ck_e4 && strpos($ck_h4, 'id="dash-captcha"') === false && substr_count($ck_h4, 'gp-kpi-label') === 9);
+
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');
 // The panel is English and left-to-right. No Persian or Arabic script (letters

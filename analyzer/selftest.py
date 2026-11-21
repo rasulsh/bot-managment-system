@@ -3044,6 +3044,16 @@ ok('top lists: ips, devices, UAs and paths of the clients being acted on (403 / 
 ok('top lists: countries over all rows that carry one; empty when none does', tl_p4['countries'] == [['IR', 2], ['US', 1]] and snap_p4.top_lists([{'act': 'allow'}])['countries'] == [])
 ok('top lists are bounded (8 entries) and deterministic', len(snap_p4.top_lists([{'act': '403', 'ip': '10.0.0.%d' % i} for i in range(30)])['ips']) == 8
    and snap_p4.top_lists([{'act': '403', 'ip': 'b'}, {'act': '403', 'ip': 'a'}])['ips'] == [['a', 1], ['b', 1]])
+cap_rows = [{'act': 'challenge', 'cap': 'show'}, {'act': 'challenge', 'cap': 'show'}, {'act': 'challenge', 'cap': 'show'}, {'act': 'challenge', 'cap': 'show'},
+            {'act': 'token_issued', 'cap': 'ok', 'ct': 5}, {'act': 'token_issued', 'cap': 'ok', 'ct': 9}, {'act': 'token_issued', 'cap': 'ok', 'ct': 'x'}, {'act': 'token_issued', 'cap': 'ok'},
+            {'act': 'nonce_bad', 'cap': 'wrong'}, {'act': 'nonce_bad', 'cap': 'fail'}, {'act': 'nonce_bad', 'cap': 'inv'}, {'act': 'nonce_bad', 'cap': 'exp'}, {'act': 'allow'}]
+kcap = snap_p4.kpi_counts(cap_rows)
+ok('kpi: CAPTCHA pages shown, solved, failed (wrong / fail / inv) and expired are counted from the cap key', kcap['captcha_shown'] == 4 and kcap['captcha_solved'] == 4 and kcap['captcha_failed'] == 3 and kcap['captcha_expired'] == 1)
+ok('kpi: the CAPTCHA median solve time uses the rows that carry a number (5 s and 9 s -> 7 s); the solve rate is solved / shown', kcap['captcha_median_s'] == 7.0 and kcap['captcha_solve_rate'] == 100.0)
+ok('kpi: no CAPTCHA activity: counts 0, median and rate None (the panel shows a dash, not 0 %)', snap_p4.kpi_counts([{'act': 'allow'}])['captcha_shown'] == 0 and snap_p4.kpi_counts([{'act': 'allow'}])['captcha_median_s'] is None
+   and snap_p4.kpi_counts([{'act': 'allow'}])['captcha_solve_rate'] is None and snap_p4.kpi_counts([])['captcha_solved'] == 0)
+ok('kpi: an odd and an even number of solve times (median of 3 and of 4)', snap_p4.kpi_counts([{'cap': 'ok', 'ct': c} for c in (1, 2, 30)])['captcha_median_s'] == 2.0 and snap_p4.kpi_counts([{'cap': 'ok', 'ct': c} for c in (1, 2, 3, 30)])['captcha_median_s'] == 2.5)
+ok('kpi: a CAPTCHA-solved token_issued row still counts as a token (the challenge success rate)', logs_mod.token_was_issued({'act': 'token_issued', 'cap': 'ok'}) and kcap['token_issued'] == 4)
 tz_p4 = snap_p4.local_tz()
 ok('the analyzer reports its time zone offset (daily logs, logrotate and "today" follow it)', isinstance(tz_p4['offset'], int) and abs(tz_p4['offset']) <= 14 * 3600 and 'name' in tz_p4)
 ok('the worker records exit, warnings and the result of a job it ran', (lambda w: ('warnings' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read() and 'jobreport.parse' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read()))(0))

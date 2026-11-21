@@ -16,6 +16,9 @@
 # IP lists: allow/block lists compiled by analyzer/iplist.py (the worker's compiler) into $WORK/lists; the whole
 # precedence chain (allow beats rules and the operator deny, block beats the known-bot pass, both = allow wins
 # with the panel warning, kill switch and exempt paths unchanged, no Redis work, broken files fail open).
+# CAPTCHA: the image CAPTCHA (rule action `captcha`) end to end - the answer is found by brute force with
+# scripts/captcha-solve.php (the nonce carries only an HMAC of it) and the proof of work with scripts/pow-solve.php;
+# a second server (enforce.challenge, ratelimit, low device budget, escalation) and a third with GD "missing".
 # Needs: php (8.0+), python3 (stdlib only), curl, redis-server. Touches nothing outside a temp dir
 # (the kill-switch case creates and removes guard.off in the project root).
 set -uo pipefail
@@ -76,6 +79,7 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 \$c['cdn_ranges'] = array('127.0.0.1/32');
 if (is_file('$WORK/geolog.on')) { \$c['geo'] = array('log' => true); }
 \$c['challenge'] = array('pow_bits' => 12, 'bind_ip' => true);
+\$c['captcha'] = array('level' => 1, 'max_attempts' => 3, 'ip_budget' => 8, 'ip_window' => 600, 'escalate_score' => 60);
 \$c['limits'] = array_merge(\$c['limits'], array('window' => 60, 'device' => 100000, 'ip_ua' => 100000, 'ip' => 100000, 'mint' => 100000, 'bot' => 100000, 'preview' => 100000));
 return \$c;
 CFG
@@ -122,6 +126,24 @@ write_rules
 GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "127.0.0.1:$PORT" "$ROOT/scripts/dev-router.php" >"$WORK/php.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/t/404" 2>/dev/null && break; sleep 0.1; done
+# Second server: enforce.challenge and ratelimit ON, a low hourly device budget, CAPTCHA instead of the device 429.
+PORT2=$((PORT + 1)); PORT3=$((PORT + 2))
+cat > "$WORK/config2.php" <<CFG
+<?php
+if (!defined('GV_BOOT')) { http_response_code(404); exit; }
+\$c = require '$WORK/config.php';
+\$c['enforce'] = array('block' => false, 'challenge' => true, 'ratelimit' => true);
+\$c['limits']['device_hour'] = 3;
+\$c['holdout_pct'] = 0;                    // 127.0.0.1 is in the holdout of the first server: here the built-in rules are enforced
+\$c['captcha']['device_budget'] = true;
+return \$c;
+CFG
+GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config2.php" "$PHP_BIN" -S "127.0.0.1:$PORT2" "$ROOT/scripts/dev-router.php" >"$WORK/php2.log" 2>&1 &
+PIDS+=($!)
+# Third server: the same config as the first, but GD "missing" (GV_CAPTCHA_NO_GD): a captcha rule falls back to the PoW challenge.
+GV_CAPTCHA_NO_GD=1 GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "127.0.0.1:$PORT3" "$ROOT/scripts/dev-router.php" >"$WORK/php3.log" 2>&1 &
+PIDS+=($!)
+for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT2/t/404" 2>/dev/null && curl -s -o /dev/null "http://127.0.0.1:$PORT3/t/404" 2>/dev/null && break; sleep 0.1; done
 
 PASS=0; FAIL=0
 ok() { if [ "$2" = "1" ]; then PASS=$((PASS + 1)); echo "PASS  $1"; else FAIL=$((FAIL + 1)); echo "FAIL  $1"; fi; }
@@ -486,6 +508,150 @@ ilist scrapers 2 block enforce true 203.0.113.0/24
 lists_compile
 write_rules
 
+echo "== M. Image CAPTCHA (rule action captcha): the flow, the token level, the precedence"
+R flushall
+ilist none 1 block enforce false 1.2.3.4
+lists_compile
+write_rules "$(rule r-cap Cap enforce captcha '["capbot"]')"
+CJ="$WORK/m.jar"
+nonce_of() { sed -n "s/.*var N = '\([^']*\)'.*/\1/p" | head -1; }
+# a CAPTCHA page for UA / path / extra curl args -> the page; solve NONCE -> "answer counter"
+capget() { body "$1" "$2" "${@:3}"; }
+page=$(capget 'x capbot' /m1 -b "$CJ" -c "$CJ")
+N=$(printf '%s' "$page" | nonce_of)
+eq "M1 an enforced captcha rule: a token-less HTML GET gets the CAPTCHA page (503)" "$(get 'x capbot' /m1b -b "$WORK/m2.jar" -c "$WORK/m2.jar")" 503
+ok "M2 the page carries the image as a data URI, a text box, the nonce and NO answer" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && printf '%s' "$page" | grep -q 'id="gv-ca"' && [ -n "$N" ] && echo 1 || echo 0)"
+has '"cap":"show"'; ok "M3 the row: act challenge, cap show, RULE:r-cap, one row" "$([ $? -eq 0 ] && has '"act":"challenge"' && has '"RULE:r-cap"' && echo 1 || echo 0)"
+ok "M4 the nonce is a six-part CAPTCHA nonce, not the PoW one" "$([ "$(printf '%s' "$N" | tr -cd '.' | wc -c | tr -d ' ')" = 5 ] && echo 1 || echo 0)"
+ANS=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$N" 4 2>/dev/null)
+POWC=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$N")
+cpost() { # NONCE ANSWER POW JAR [extra curl args]
+	local n="$1" a="$2" c="$3" j="$4"; shift 4
+	curl -s -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: x capbot' -H "X-GV: $n" -H "X-GV-A: $a" -H "X-GV-P: $c" -b "$j" -c "$j" "$@" "http://127.0.0.1:$PORT/"
+}
+ok "M5 the solver found the 4-digit answer (the test's OCR)" "$([ -n "$ANS" ] && echo 1 || echo 0)"
+eq "M6 a WRONG answer: 422, the page stays" "$(cpost "$N" 0000x "$POWC" "$CJ")" 422
+has '"cap":"wrong"'; ok "M7 ...logged as cap wrong (act nonce_bad)" "$([ $? -eq 0 ] && has '"nonce_bad"' && echo 1 || echo 0)"
+eq "M8 a bad proof of work with the right answer: 403" "$(cpost "$N" "$ANS" 1 "$CJ")" 403
+eq "M9 the right answer: 204 and a token" "$(cpost "$N" "$ANS" "$POWC" "$CJ")" 204
+has '"cap":"ok"'; ok "M10 ...logged as token_issued, cap ok, a solve time and tl c" "$([ $? -eq 0 ] && has '"act":"token_issued"' && has '"ct":' && has '"tl":"c"' && echo 1 || echo 0)"
+ok "M11 the cookie is a CAPTCHA-level token (four parts, the third is c)" "$(awk '$6=="_gv"{print $7}' "$CJ" | awk -F. '{print (NF==4 && $3=="c") ? 1 : 0}' | head -1)"
+eq "M12 with the CAPTCHA-level token the request passes" "$(get 'x capbot' /m12 -b "$CJ")" 200
+has '"tl":"c"'; ok "M13 ...and the row says it carried a CAPTCHA-level token" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+eq "M14 the same nonce again is a replay: 403" "$(cpost "$N" "$ANS" "$POWC" "$WORK/m3.jar")" 403
+# attempts: three wrong answers burn the nonce, even a right one is refused afterwards
+page=$(capget 'x capbot' /m15 -b "$WORK/m4.jar" -c "$WORK/m4.jar"); N4=$(printf '%s' "$page" | nonce_of)
+ANS4=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$N4" 4 2>/dev/null); POW4=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$N4")
+eq "M15 wrong answer 1 and 2: 422" "$(cpost "$N4" 1111x "$POW4" "$WORK/m4.jar")$(cpost "$N4" 2222x "$POW4" "$WORK/m4.jar")" 422422
+eq "M16 wrong answer 3 (max_attempts 3): 403, the nonce is dead" "$(cpost "$N4" 3333x "$POW4" "$WORK/m4.jar")" 403
+has '"cap":"fail"'; ok "M17 ...logged as cap fail" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+eq "M18 after that even the RIGHT answer is refused" "$(cpost "$N4" "$ANS4" "$POW4" "$WORK/m4.jar")" 403
+# a Persian-digit answer is normalised and accepted
+page=$(capget 'x capbot' /m19 -b "$WORK/m5.jar" -c "$WORK/m5.jar"); N5=$(printf '%s' "$page" | nonce_of)
+ANS5=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$N5" 4 2>/dev/null); POW5=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$N5")
+FA=$("$PHP_BIN" -r '$m = array("0"=>"۰","1"=>"۱","2"=>"۲","3"=>"۳","4"=>"۴","5"=>"۵","6"=>"۶","7"=>"۷","8"=>"۸","9"=>"۹"); echo rawurlencode(strtr($argv[1], $m));' "$ANS5")
+eq "M20 the answer typed with Persian digits (percent-encoded in the header) is accepted" "$(cpost "$N5" "$FA" "$POW5" "$WORK/m5.jar")" 204
+# a PoW-level token does not satisfy a captcha rule
+page=$(body 'x powonly' /m21 -b "$WORK/m6.jar" -c "$WORK/m6.jar")
+write_rules "$(rule r-cap Cap enforce captcha '["capbot"]')" "$(rule r-pow Pow enforce challenge '["powonly"]')"
+page=$(capget 'x powonly' /m21 -b "$WORK/m6.jar" -c "$WORK/m6.jar"); NP=$(printf '%s' "$page" | nonce_of); CP=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NP")
+eq "M21 a proof-of-work handshake gives a PoW-level token" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: x powonly' -H "X-GV: $NP" -H "X-GV-P: $CP" -b "$WORK/m6.jar" -c "$WORK/m6.jar" "http://127.0.0.1:$PORT/")" 204
+eq "M22 that PoW-level token passes the PoW rule" "$(get 'x powonly' /m22 -b "$WORK/m6.jar")" 200
+eq "M23 ...but a captcha rule still asks for a CAPTCHA (only a CAPTCHA-level token satisfies it): old tokens count as PoW level" "$(get 'x capbot' /m23 -b "$WORK/m6.jar")" 503
+write_rules "$(rule r-cap Cap enforce captcha '["capbot"]')"
+eq "M24 a MONITOR captcha rule only logs (SH_RULE), the request is served" "$(write_rules "$(rule r-cap Cap monitor captcha '["capbot"]')"; get 'x capbot' /m24)" 200
+write_rules "$(rule r-cap Cap enforce captcha '["capbot"]')"
+
+echo "-- M: where a CAPTCHA is never shown"
+ilist partners 1 allow enforce true 127.0.0.1
+lists_compile
+eq "M30 an enforced ALLOW-LIST address: no CAPTCHA" "$(get 'x capbot' /m30)" 200
+ilist none 1 block enforce false 1.2.3.4
+lists_compile
+R set "gv:allow:127.0.0.1" 1 EX 60
+eq "M31 an operator ALLOW override: no CAPTCHA" "$(get 'x capbot' /m31)" 200
+R del "gv:allow:127.0.0.1"
+eq "M32 an EXEMPT path: no CAPTCHA" "$(get 'x capbot' /exempt-me)" 200
+eq "M33 a non-HTML request (Accept: application/json): no CAPTCHA, the normal flow" "$(curl -s -o /dev/null -w '%{http_code}' -H 'User-Agent: x capbot' -H 'Accept: application/json' "http://127.0.0.1:$PORT/m33")" 200
+eq "M34 an XMLHttpRequest: no CAPTCHA" "$(get 'x capbot' /m34 -H 'X-Requested-With: XMLHttpRequest')" 200
+write_rules "$(SKIP=false rule r-gcap GCap enforce captcha '["googlebot"]')"
+R set "gv:botok:127.0.0.1" 1 EX 60
+eq "M35 a VERIFIED crawler: never a CAPTCHA, even with skip_verified_bots off" "$(get "$GBOT" /m35)" 200
+has '"act":"allow_bot"'; ok "M36 ...it takes the normal bot pass" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+R del "gv:botok:127.0.0.1"
+eq "M37 an UNVERIFIED crawler claim: a CAPTCHA (it can prove itself)" "$(get "$GBOT" /m37)" 503
+write_rules "$(rule r-cap Cap enforce captcha '["capbot"]')"
+ilist scrapers 1 block enforce true 127.0.0.1
+FORCE=true ilist scrapers 1 block enforce true 127.0.0.1
+lists_compile
+eq "M38 a BLOCK-LISTED address gets 403, never a CAPTCHA" "$(get 'x capbot' /m38)" 403
+ilist none 1 block enforce false 1.2.3.4
+lists_compile
+eq "M39 a client with no rule match is not asked at all" "$(get "$UA" /m39)" 200
+
+echo "-- M: the per-IP CAPTCHA budget (8 pages / 600 s here) costs no Redis work once it is used up"
+R flushall
+for i in 1 2 3 4 5 6 7 8; do get 'x capbot' "/m4$i" >/dev/null; done
+eq "M40 the 8 pages inside the budget were served and counted" "$(redis-cli -p "$RPORT" get gv:cpi:127.0.0.1 | tr -d '\r')" 8
+n0=$(redis-cli -p "$RPORT" dbsize | tr -d '\r'); v0=$(redis-cli -p "$RPORT" get gv:cpi:127.0.0.1 | tr -d '\r')
+eq "M41 the 9th page: over the budget -> 429, not a CAPTCHA" "$(get 'x capbot' /m49)" 429
+has 'CAPT_BUDGET'; ok "M42 ...logged with CAPT_BUDGET" "$([ $? -eq 0 ] && has '"act":"429"' && echo 1 || echo 0)"
+ok "M43 ...and it wrote NOTHING for the CAPTCHA: the counter did not move and no key was created" "$([ "$(redis-cli -p "$RPORT" get gv:cpi:127.0.0.1 | tr -d '\r')" = "$v0" ] && [ "$(redis-cli -p "$RPORT" dbsize | tr -d '\r')" = "$n0" ] && echo 1 || echo 0)"
+ok "M44 ...no nonce claim, no attempt counter exists" "$([ "$(redis-cli -p "$RPORT" --scan --pattern 'gv:ca:*' | wc -l | tr -d ' ')" = 0 ] && [ "$(redis-cli -p "$RPORT" --scan --pattern 'gv:nonce:*' | wc -l | tr -d ' ')" = 0 ] && echo 1 || echo 0)"
+R flushall
+
+echo "-- M: headless signals, escalation and the device budget"
+# escalation in MONITOR mode (server 1, enforce.challenge off): logged, the token is still issued
+write_rules "$(rule r-pow Pow enforce challenge '["escbot"]')"
+page=$(body 'x escbot' /m50 -b "$WORK/e1.jar" -c "$WORK/e1.jar"); NE=$(printf '%s' "$page" | nonce_of); CE=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE")
+hpost() { # PORT NONCE POW SIGNALS JAR
+	curl -s -o /dev/null -w '%{http_code}' -D "$WORK/hdr.txt" -X POST -H 'User-Agent: x escbot' -H "X-GV: $2" -H "X-GV-P: $3" -H "X-GV-S: $4" -b "$5" -c "$5" "http://127.0.0.1:$1/"
+}
+eq "M50 a handshake with headless signals (score 105 >= escalate_score 60), enforce.challenge OFF: the token is issued (shadow)" "$(hpost "$PORT" "$NE" "$CE" 'w1.h1.t900' "$WORK/e1.jar")" 204
+has 'SH_CAPT_ESC'; ok "M51 ...logged with SH_CAPT_ESC and the score and letters only (hs, hf)" "$([ $? -eq 0 ] && has '"hs":105' && has '"hf":"whu"' && echo 1 || echo 0)"
+ok "M52 ...no raw fingerprint value is logged (only the letters)" "$(! has 'SwiftShader' && ! has 'llvmpipe' && ! has 'webdriver' && echo 1 || echo 0)"
+page=$(body 'x escbot' /m53 -b "$WORK/e2.jar" -c "$WORK/e2.jar"); NE=$(printf '%s' "$page" | nonce_of); CE=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE")
+eq "M53 a clean handshake (no signals, or neutral ones) is not escalated" "$(hpost "$PORT" "$NE" "$CE" 'w0.h0.l0.t900' "$WORK/e2.jar")" 204
+# server 2: enforce.challenge ON, ratelimit ON, device_hour 3, CAPTCHA instead of the device 429
+get2() { local ua="$1" path="$2"; shift 2; curl -s -o /dev/null -w '%{http_code}' -H "User-Agent: $ua" -H 'Accept: text/html' -H 'Accept-Language: en-US,en;q=0.9' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Site: none' "$@" "http://127.0.0.1:$PORT2$path"; }
+body2() { local ua="$1" path="$2"; shift 2; curl -s -H "User-Agent: $ua" -H 'Accept: text/html' -H 'Accept-Language: en-US,en;q=0.9' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Site: none' "$@" "http://127.0.0.1:$PORT2$path"; }
+write_rules
+page=$(body2 'x escbot' /m60 -b "$WORK/e3.jar" -c "$WORK/e3.jar"); NE=$(printf '%s' "$page" | nonce_of); CE=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE")
+eq "M60 server 2 (challenge enforced): the same signals escalate: 202, no token" "$(hpost "$PORT2" "$NE" "$CE" 'w1.h1.t900' "$WORK/e3.jar")" 202
+ok "M61 ...a signed flag cookie is set, and no token cookie" "$(grep -q '_gvc' "$WORK/hdr.txt" && ! grep -qi 'set-cookie: _gv=' "$WORK/hdr.txt" && echo 1 || echo 0)"
+has2() { tail -1 "$WORK"/logs/guard-*.jsonl | grep -q "$1"; }
+has2 '"cap":"esc"'; ok "M62 ...logged as a challenge with CAPT_ESC" "$([ $? -eq 0 ] && has2 'CAPT_ESC' && echo 1 || echo 0)"
+page=$(body2 'x escbot' /m63 -b "$WORK/e3.jar" -c "$WORK/e3.jar")
+ok "M63 the next page load is the CAPTCHA, not the PoW challenge" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
+NE3=$(printf '%s' "$page" | nonce_of); AE3=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$NE3" 4 2>/dev/null); PE3=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE3")
+eq "M64 solving it gives a CAPTCHA-level token" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: x escbot' -H "X-GV: $NE3" -H "X-GV-A: $AE3" -H "X-GV-P: $PE3" -b "$WORK/e3.jar" -c "$WORK/e3.jar" "http://127.0.0.1:$PORT2/")" 204
+eq "M65 with it the pages load" "$(get2 'x escbot' /m65 -b "$WORK/e3.jar")" 200
+# the device budget: a PoW-level token over device_hour (3) gets a CAPTCHA instead of a 429
+page=$(body2 'x devbot' /m70 -b "$WORK/d1.jar" -c "$WORK/d1.jar"); ND=$(printf '%s' "$page" | nonce_of); CD=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$ND")
+curl -s -o /dev/null -X POST -H 'User-Agent: x devbot' -H "X-GV: $ND" -H "X-GV-P: $CD" -b "$WORK/d1.jar" -c "$WORK/d1.jar" "http://127.0.0.1:$PORT2/"
+codes=""; for i in 1 2 3; do codes="$codes$(get2 'x devbot' "/m7$i" -b "$WORK/d1.jar")"; done
+eq "M71 three requests inside the hourly device budget" "$codes" 200200200
+page=$(body2 'x devbot' /m74 -b "$WORK/d1.jar")
+ok "M72 the 4th (over device_hour) is a CAPTCHA page, not a 429" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
+has2 'DEV_HOUR'; ok "M73 ...logged with DEV_HOUR as a challenge with cap show" "$([ $? -eq 0 ] && has2 '"cap":"show"' && echo 1 || echo 0)"
+ND4=$(printf '%s' "$page" | nonce_of); AD4=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$ND4" 4 2>/dev/null); PD4=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$ND4")
+eq "M74 solved: a CAPTCHA-level token" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: x devbot' -H "X-GV: $ND4" -H "X-GV-A: $AD4" -H "X-GV-P: $PD4" -b "$WORK/d1.jar" -c "$WORK/d1.jar" "http://127.0.0.1:$PORT2/")" 204
+eq "M75 a CAPTCHA-level token is waived from the hourly and daily device budgets" "$(get2 'x devbot' /m75 -b "$WORK/d1.jar")" 200
+# server 3: GD "missing"
+get3() { local ua="$1" path="$2"; shift 2; curl -s -H "User-Agent: $ua" -H 'Accept: text/html' -H 'Accept-Language: en-US,en;q=0.9' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Site: none' "$@" "http://127.0.0.1:$PORT3$path"; }
+write_rules "$(rule r-cap Cap enforce captcha '["capbot"]')"
+page=$(get3 'x capbot' /m80)
+ok "M80 GD missing: the captcha rule falls back to the proof-of-work challenge (no image)" "$(printf '%s' "$page" | grep -q "var N = '" && ! printf '%s' "$page" | grep -q 'data:image' && echo 1 || echo 0)"
+NG=$(printf '%s' "$page" | nonce_of)
+ok "M81 ...with a normal four-part nonce" "$([ "$(printf '%s' "$NG" | tr -cd '.' | wc -c | tr -d ' ')" = 3 ] && echo 1 || echo 0)"
+R flushall
+
+# The lists below stay in place for section G: Redis goes down with a block list and an allow list active.
+ilist partners 1 allow enforce true 198.51.100.0/25
+ilist scrapers 2 block enforce true 203.0.113.0/24
+lists_compile
+write_rules
+
 echo "== G. Redis down: rules still apply (they need no Redis), the request never fails"
 write_rules "$(rule r-evil Evil enforce block '["evilbot"]')" "$(rule r-gbot GBot enforce block '["googlebot"]')" \
 	"$(SKIP=false PRI=50 rule r-gnoskip GNoSkip enforce block '["bingbot"]')"
@@ -516,6 +682,18 @@ eq "K5 skip_verified_bots off: Redis down, the crawler UA is blocked by country 
 write_rules "$(grule r-noir NotIR enforce block exclude '["IR"]')"
 eq "K6 Bingbot UA from a US address, Redis down: served" "$(get 'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)' /k6)" 200
 eq "K7 a fake crawler UA that is not in known_bots is still blocked" "$(get 'Mozilla/5.0 (compatible; Notabot/2.0)' /k7)" 403
+
+echo "== K2. CAPTCHA with Redis down: the stateless checks still work (documented: attempts are not counted)"
+write_rules "$(rule r-cap Cap enforce captcha '["capbot"]')" "$(SKIP=false PRI=50 rule r-gcap GCap enforce captcha '["googlebot"]')"
+page=$(body 'x capbot' /k20 -b "$WORK/k2.jar" -c "$WORK/k2.jar"); NK=$(printf '%s' "$page" | nonce_of)
+ok "K20 Redis down: the CAPTCHA page is still served (no budget can be read)" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
+AK=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$NK" 4 2>/dev/null); PK=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NK")
+eq "K21 Redis down: wrong answers are 422 and never run out (no counter: the documented guessing window; the time limit and the PoW still bound it)" "$(cpost "$NK" 1111x "$PK" "$WORK/k2.jar")$(cpost "$NK" 2222x "$PK" "$WORK/k2.jar")$(cpost "$NK" 3333x "$PK" "$WORK/k2.jar")$(cpost "$NK" 4444x "$PK" "$WORK/k2.jar")" 422422422422
+eq "K22 Redis down: the right answer still gives a CAPTCHA-level token" "$(cpost "$NK" "$AK" "$PK" "$WORK/k2.jar")" 204
+eq "K23 Redis down: a bad proof of work is refused" "$(cpost "$NK" "$AK" 1 "$WORK/k2.jar")" 403
+eq "K24 Redis down: a known-bot UA keeps its pass; a captcha rule never asks a crawler (RULE_SKIP_DEGRADED)" "$(get "$GBOT" /k24)" 200
+has '"RULE_SKIP_DEGRADED"'; ok "K25 ...with the reason on the row" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+write_rules
 
 echo
 echo "PASS $PASS  FAIL $FAIL"

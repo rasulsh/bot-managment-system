@@ -120,6 +120,34 @@ Web-protected like `guard/`. `GV_GEO_DIR` (environment) points the guard and the
 Compile: panel -> GeoIP -> **Compile now** (job `geo_compile`) or `scripts/analyzer-cron.sh geo`. Environment knobs for the compile:
 `GV_GEO_MIN_RANGES` (default 1000, the smallest table that is accepted; for tests).
 
+## Image CAPTCHA (`captcha.*`, `strings.cap_*`)
+
+All keys are panel-tunable (Settings -> CAPTCHA, overlay keys). A level 1-5 preset sets the values below; every value can be overridden
+(`auto` / `0` = take it from the level). The panel validates every value and refuses an out-of-range one (never clamps).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `captcha.level` | 2 | Preset: 1 = 4 digits, low distortion, few lines, no overlap, 180 s; 2 = 5 digits, low, few, no, 150 s; 3 = 5 digits, medium, medium, slight, 120 s; 4 = 6 letters+digits, high, many, yes, 90 s; 5 = 7 letters+digits, high, many, yes, 60 s. |
+| `captcha.length` | 0 | 3-8 characters; 0 = the level's. |
+| `captcha.charset` | auto | `digits`, `alnum` (capitals and digits without look-alikes) or `auto`. Answers are case-insensitive; Persian / Arabic-Indic digits are accepted. |
+| `captcha.warp` / `noise` / `overlap` | auto | `low` / `medium` / `high`, `few` / `medium` / `many`, `no` / `slight` / `yes`, or `auto`. |
+| `captcha.time_limit` | 0 | 20-900 s; 0 = the level's. Part of the signed nonce. |
+| `captcha.max_attempts` | 3 | Answers one image accepts (counted in Redis). |
+| `captcha.ip_budget` / `ip_window` | 10 / 900 | CAPTCHA pages per address (IPv6 /64) per window (s). Over it: 429 and no Redis work. |
+| `captcha.require_pow` | true | The proof of work (`challenge.pow_bits`, or the rule's `pow_bits`) is still required with the CAPTCHA. |
+| `captcha.escalate_score` | 0 | 0 = off. A proof of work whose headless score reaches it gets a CAPTCHA instead of a token (only while `enforce.challenge` is on). |
+| `captcha.device_budget` | false | CAPTCHA instead of the hourly / daily device 429; a CAPTCHA-level token is waived from those two budgets. |
+| `captcha.w_webdriver` 40, `w_ua_headless` 40, `w_ua_mismatch` 25, `w_no_languages` 15, `w_no_chrome` 20, `w_no_plugins` 10, `w_webgl_soft` 15, `w_screen_zero` 20, `w_notification` 15, `w_too_fast` 20, `w_no_input` 20, `w_ua_spoof` 25 | | Weight (0-100) of each headless signal; 0 switches it off. |
+| `strings.cap_title`, `cap_sub`, `cap_label`, `cap_submit`, `cap_new`, `cap_wrong`, `cap_failed`, `cap_expired` | English / Persian defaults | The CAPTCHA page texts (escaped, any language, RTL follows `strings.dir`). |
+
+Rule action: `captcha` (rules cache like the others). Files: `guard/captcha-font.ttf` + `guard/captcha-font.LICENSE.txt` (DejaVu Sans Mono Bold, free
+Bitstream Vera / public-domain licence). Test knob: `GV_CAPTCHA_NO_GD=1` makes the guard behave as if GD were missing.
+
+Redis keys (prefixed): `cpi:<ip net>` pages per window, `ca:<nonce id>` attempts at a nonce, `nonce:<id>` the usual single-use claim.
+Log row keys (only when they apply): `cap` = `show | ok | wrong | fail | exp | inv | esc`, `ct` seconds a solved CAPTCHA took, `tl` = `c` for a request that
+carried a CAPTCHA-level token, `hs` the headless score, `hf` the letters of the signals that fired. Reasons: `CAPT_BUDGET`, `CAPT_ESC`, `SH_CAPT_ESC`.
+Token cookie: `device.issued.signature` (level p) or `device.issued.c.signature` (level c). Escalation flag cookie: `<cookie_name>c` (signed expiry).
+
 ## IP list files (`lists/`)
 
 Web-protected like `guard/` and `geo/` (`lists/.htaccess`; `scripts/exposure-check.sh` probes it). `GV_LISTS_DIR` (environment)

@@ -10,6 +10,9 @@
 //   * the challenge is passed on http:// and on https://,
 //   * a rejected handshake retries automatically at most twice and then shows
 //     the localized failure message with a working manual retry link,
+//   * the image CAPTCHA: a browser that looks headless (Playwright's own Chromium: webdriver, HeadlessChrome) is
+//     escalated to it, solving it (the answer is found with scripts/captcha-solve.php) gives a CAPTCHA-level
+//     token, a wrong answer is refused, and a browser that does not look headless passes without one,
 //   * median solve time at the default difficulty, and raw hash rate.
 // Exit code 1 on any failed check.
 const { spawn, execFileSync } = require('child_process');
@@ -38,9 +41,20 @@ $c['holdout_pct'] = 0;
 $c['capture_outcomes'] = false;
 $c['log_dir'] = '${tmp}/logs';
 return $c;`);
+  // A second server for the CAPTCHA scenarios only: escalation at headless score 80 would also escalate the default
+  // Playwright browsers of the other checks.
+  const cfgPath2 = path.join(tmp, 'config-captcha.php');
+  fs.writeFileSync(cfgPath2, `<?php if (!defined('GV_BOOT')) { exit; }
+$c = require '${cfgPath}';
+$c['captcha'] = array('level' => 1, 'escalate_score' => 80, 'max_attempts' => 3, 'ip_budget' => 1000);
+$c['log_dir'] = '${tmp}/logs2';
+return $c;`);
   const port = 18000 + Math.floor(Math.random() * 1000);
+  const port2 = port + 1000;
   const php = spawn('php', ['-S', '127.0.0.1:' + port, path.join(repo, 'scripts', 'dev-router.php')],
     { env: Object.assign({}, process.env, { GV_DEV_CONFIG: cfgPath }), stdio: 'ignore' });
+  const php2 = spawn('php', ['-S', '127.0.0.1:' + port2, path.join(repo, 'scripts', 'dev-router.php')],
+    { env: Object.assign({}, process.env, { GV_DEV_CONFIG: cfgPath2 }), stdio: 'ignore' });
   await new Promise(r => setTimeout(r, 800));
 
   // https reverse proxy with a throwaway certificate
@@ -117,6 +131,61 @@ return $c;`);
       await ctxc.close();
     }
 
+    // ---- The image CAPTCHA. Escalation needs the headless score to reach captcha.escalate_score (80 here).
+    const solver = path.join(repo, 'scripts', 'captcha-solve.php');
+    const answerFor = (html) => {
+      const m = html.match(/var N = '([0-9a-f.]+)'/);
+      return m ? execFileSync('php', [solver, m[1], '4'], { env: Object.assign({}, process.env, { GV_DEV_CONFIG: cfgPath2 }) }).toString().trim() : '';
+    };
+    {
+      const ctxh = await browser.newContext();            // the browser as Playwright launches it
+      const ph = await ctxh.newPage();
+      await ph.goto('http://127.0.0.1:' + port2 + '/?cap=1');
+      if (browserName === 'chromium') {
+        let esc = true;
+        try { await ph.waitForSelector('#gv-cform', { timeout: 20000 }); } catch (e) { esc = false; }
+        check('chromium (headless, webdriver true): escalated to the image CAPTCHA instead of a token', esc);
+        const html = await ph.content();
+        check('the CAPTCHA page shows an image and an empty text box', esc && (await ph.isVisible('img')) && (await ph.isVisible('#gv-ca')) && (await ph.inputValue('#gv-ca')) === '');
+        const ctoken = (await ctxh.cookies()).some(c => c.name === '_gv');
+        check('no token cookie while the CAPTCHA is open', esc && !ctoken);
+        // a wrong answer: the message shows and the page stays
+        await ph.fill('#gv-ca', '0000x');
+        await ph.click('#gv-cs');
+        let wrong = true;
+        try { await ph.waitForSelector('#gv-ce:not([hidden])', { timeout: 15000 }); } catch (e) { wrong = false; }
+        check('a wrong answer shows the message and keeps the form', wrong && (await ph.isVisible('#gv-ca')));
+        const ans = answerFor(html);
+        await ph.fill('#gv-ca', ans);
+        await ph.click('#gv-cs');
+        await ph.waitForFunction(() => document.body.textContent.indexOf('OK') !== -1, null, { timeout: 25000 });
+        const cs = (await ctxh.cookies()).filter(c => c.name === '_gv');
+        check('the right answer passes and the token is a CAPTCHA-level one (four parts, the third is c)', cs.length === 1 && cs[0].value.split('.').length === 4 && cs[0].value.split('.')[2] === 'c');
+      } else {
+        await ph.waitForFunction(() => document.body.textContent.indexOf('OK') !== -1, null, { timeout: 20000 });
+        check(browserName + ': webdriver alone (score 40, below the escalation score) passes without a CAPTCHA', true);
+      }
+      await ctxh.close();
+    }
+    {
+      // A browser that does not look headless: the automation flags are hidden. Passes the proof of work, no CAPTCHA.
+      const ctxr = await browser.newContext({ locale: 'en-US', userAgent: browserName === 'chromium'
+        ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36' : undefined });
+      await ctxr.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => false });
+        if (!window.chrome) { window.chrome = { runtime: {} }; }
+      });
+      const pr = await ctxr.newPage();
+      let sawCaptcha = false;
+      pr.on('response', async r => { if (r.request().method() === 'GET' && r.status() === 503) { try { if ((await r.text()).indexOf('gv-cform') !== -1) sawCaptcha = true; } catch (e) {} } });
+      await pr.goto('http://127.0.0.1:' + port2 + '/?cap=2');
+      await pr.waitForFunction(() => document.body.textContent.indexOf('OK') !== -1, null, { timeout: 20000 });
+      check(browserName + ' without the headless tells passes the challenge and is NOT asked for a CAPTCHA', !sawCaptcha);
+      const cr = (await ctxr.cookies()).filter(c => c.name === '_gv');
+      check('...and gets a proof-of-work-level token (three parts)', cr.length === 1 && cr[0].value.split('.').length === 3);
+      await ctxr.close();
+    }
+
     // Solve time at the default difficulty, and raw hashes per second.
     const times = [];
     let rate = 0;
@@ -162,6 +231,7 @@ return $c;`);
     await browser.close();
     proxy.close();
     php.kill();
+    php2.kill();
   }
   process.exit(failed ? 1 : 0);
 }
