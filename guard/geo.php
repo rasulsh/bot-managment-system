@@ -14,7 +14,7 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 //     0   4  magic "GVRG"
 //     4   2  format version (1)
 //     6   1  kind: 1 country, 2 asn, 3 ip list
-//     7   1  value size in bytes (country 2, asn 4, ip list 0)
+//     7   1  value size in bytes (country 2, asn 4, ip list 2)
 //     8   4  build time (unix)
 //     12  4  IPv4 range count
 //     16  4  IPv6 range count
@@ -24,7 +24,8 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 //   IPv4 section: count records of  start 4 | end 4 | value      (sorted, non-overlapping)
 //   IPv6 section: count records of  start 16 | end 16 | value
 //
-// Country value: two upper-case letters. ASN value: uint32. Anything wrong with
+// Country value: two upper-case letters. ASN value: uint32. IP list value: uint16,
+// bit 15 = the list is in monitor mode, bits 0-14 = the list index (see iplist.php). Anything wrong with
 // the file (missing, short, wrong magic or version, truncated) means "unknown":
 // no match, plus one rate-limited line in guard-errors.log. Never an exception.
 //
@@ -80,17 +81,18 @@ function gv_geo_open($kind, $path = null, $quiet = false) {
 	if (array_key_exists($path, $s['open'])) { return $s['open'][$path]; }
 	$s['open'][$path] = null;
 	try {
-		$fh = is_file($path) ? @fopen($path, 'rb') : false;
+		$fh = @fopen($path, 'rb');                // one failed open() is the whole cost of a missing file
 		if (!$fh) {
 			if (!$quiet) { gv_errlog('geo_missing', 'geo file missing or unreadable: ' . basename($path)); }
 			return null;
 		}
+		stream_set_read_buffer($fh, 0);       // every read is one exact pread: no 8 KiB chunk per probe
 		$h = gv_geo_header_parse(fread($fh, GV_GEO_HEADER));
 		$st = fstat($fh);
 		$vs = $h ? (int)$h['vsize'] : 0;
 		$o6 = $h ? GV_GEO_HEADER + $h['v4'] * (8 + $vs) : 0;
 		if (!$h || $h['kind'] !== $kind || !$st || $st['size'] < $o6 + $h['v6'] * (32 + $vs)
-			|| ($kind === GV_GEO_COUNTRY && $vs !== 2) || ($kind === GV_GEO_ASN && $vs !== 4)) {
+			|| ($kind === GV_GEO_COUNTRY && $vs !== 2) || ($kind === GV_GEO_ASN && $vs !== 4) || ($kind === GV_GEO_IPLIST && $vs !== 2)) {
 			fclose($fh);
 			gv_errlog('geo_corrupt', 'geo file is not a valid compiled range file: ' . basename($path));
 			return null;
@@ -112,11 +114,29 @@ function gv_geo_key($ip) {
 
 // Binary search one section. Compares with strcmp(): a byte-wise comparison.
 // (<=> would compare two digit-only binary strings as numbers.)
+//
+// Once 128 or fewer records are left they are read in ONE fread and searched in
+// memory: a 100k table then needs about 10 seek+read pairs instead of 17.
 function gv_geo_search($fh, $off, $count, $klen, $vsize, $key) {
 	$rec = 2 * $klen + $vsize;
 	$lo = 0;
 	$hi = $count - 1;
 	while ($lo <= $hi) {
+		if ($hi - $lo < 128) {
+			$n = $hi - $lo + 1;
+			$base = $lo;
+			if (fseek($fh, $off + $lo * $rec) !== 0) { return null; }
+			$d = fread($fh, $n * $rec);
+			if ($d === false || strlen($d) !== $n * $rec) { gv_errlog('geo_corrupt', 'geo file read failed'); return null; }
+			while ($lo <= $hi) {
+				$mid = ($lo + $hi) >> 1;
+				$at = ($mid - $base) * $rec;
+				if (strcmp($key, substr($d, $at, $klen)) < 0) { $hi = $mid - 1; }
+				elseif (strcmp($key, substr($d, $at + $klen, $klen)) > 0) { $lo = $mid + 1; }
+				else { return substr($d, $at + 2 * $klen, $vsize); }
+			}
+			return null;
+		}
 		$mid = ($lo + $hi) >> 1;
 		if (fseek($fh, $off + $mid * $rec) !== 0) { return null; }
 		$d = fread($fh, $rec);

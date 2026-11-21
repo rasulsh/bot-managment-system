@@ -2418,6 +2418,359 @@ if ($jh_prev_cfg !== false) { putenv('GV_CONFIG=' . $jh_prev_cfg); } else { pute
 if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
 if ($jh_audit_backup !== null) { file_put_contents(gp_audit_path(), $jh_audit_backup); }
 
+t_section('IP lists page: parser, compile, save flow, warnings, alerts');
+
+require_once __DIR__ . '/../panel/iplists.php';
+require_once __DIR__ . '/geo-fixture.php';
+$il_tmp = sys_get_temp_dir() . '/gp-iplist-selftest-' . getmypid();
+@mkdir($il_tmp . '/lists', 0775, true);
+@mkdir($il_tmp . '/geo', 0775, true);
+@mkdir($il_tmp . '/logs', 0775, true);
+register_shutdown_function(function () use ($il_tmp) {
+	foreach ((array)glob($il_tmp . '/{,*/}{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+	foreach ((array)glob($il_tmp . '/*', GLOB_ONLYDIR) as $d) { @rmdir($d); }
+	@rmdir($il_tmp);
+});
+putenv('GV_LISTS_DIR=' . $il_tmp . '/lists');
+putenv('GV_GEO_DIR=' . $il_tmp . '/geo');
+putenv('GV_AUDIT=' . $il_tmp . '/audit.jsonl');
+gv_redis_ctx(array('log_dir' => $il_tmp . '/logs'));
+gv_geo_state(true);
+if (!defined('GP_TEST_UPLOADS')) { define('GP_TEST_UPLOADS', 1); }
+$il_hex = function ($bin) { return inet_ntop($bin); };
+$pe = function ($t) { $e = gp_ipl_parse_entry($t); return $e === null ? null : gp_ipl_entry_text($e); };
+
+// ---- parser
+t_ok('parse: a bare address is a /32 or /128, a CIDR keeps its prefix', $pe('203.0.113.7') === '203.0.113.7' && $pe('203.0.113.0/24') === '203.0.113.0/24' && $pe('2001:db8::1') === '2001:db8::1' && $pe('2001:db8::/32') === '2001:db8::/32');
+t_ok('parse: host bits are masked (192.0.2.77/24 is 192.0.2.0/24)', $pe('192.0.2.77/24') === '192.0.2.0/24' && $pe('2001:db8:1:2::9/48') === '2001:db8:1::/48' && $pe('1.2.3.4/0') === '0.0.0.0/0');
+t_ok('parse: an IPv4-mapped IPv6 address is the IPv4 address it carries, a mapped CIDR counts from /96', $pe('::ffff:1.2.3.4') === '1.2.3.4' && $pe('::ffff:1.2.3.0/120') === '1.2.3.0/24' && $pe('::ffff:1.2.3.4/128') === '1.2.3.4');
+t_ok('parse: a mapped range wider than /96 is refused, as is everything that is not an address',
+	$pe('::ffff:1.2.3.0/64') === null && $pe('1.2.3') === null && $pe('300.1.1.1') === null && $pe('1.2.3.4/33') === null && $pe('2001:db8::/129') === null && $pe('1.2.3.4/') === null
+	&& $pe('1.2.3.4/a') === null && $pe('1.2.3.4/-1') === null && $pe('fe80::1%eth0') === null && $pe('') === null && $pe('1.2.3.4 5.6.7.8') === null && $pe('1.2.3.04') === null && $pe('example.com') === null);
+list($pt, $pb) = gp_ipl_parse_text("\xEF\xBB\xBFip,note\r\n# comment\r\n\r\n203.0.113.0/24  # trailing\r\n\"198.51.100.7\",x\r\n'192.0.2.1' , y\r\n2001:db8::/32\n\t10.9.9.9\t\njunk line\r5.5.5.5");
+t_ok('parse_text: BOM, CRLF, CR, comments, blank lines, a CSV first column and quotes; bad lines are reported with their number',
+	count($pt) === 6 && $pb === array(array(1, 'ip,note'), array(9, 'junk line'))
+	&& array_map('gp_ipl_entry_text', $pt) === array('203.0.113.0/24', '198.51.100.7', '192.0.2.1', '2001:db8::/32', '10.9.9.9', '5.5.5.5') && $pt[0]['line'] === 4 && $pt[1]['line'] === 5);
+t_ok('parse_text: an empty text has no entries and no errors', gp_ipl_parse_text('') === array(array(), array()) && gp_ipl_parse_text("# only\n\n") === array(array(), array()));
+
+// ---- ranges
+$rg = function ($t) { $e = gp_ipl_parse_entry($t); return array($e['s'], $e['e']); };
+$un = gp_ipl_union(array($rg('10.0.0.0/24'), $rg('10.0.1.0/24'), $rg('10.0.0.128/25'), $rg('10.0.3.0/24'), $rg('255.255.255.255'), $rg('255.255.255.0/24')));
+t_ok('union: overlapping, nested and ADJACENT ranges merge; a gap stays; the top of the space does not overflow',
+	count($un) === 3 && $il_hex($un[0][0]) === '10.0.0.0' && $il_hex($un[0][1]) === '10.0.1.255' && $il_hex($un[1][0]) === '10.0.3.0' && $il_hex($un[2][1]) === '255.255.255.255');
+t_ok('union: IPv6 and counting', count(gp_ipl_union(array($rg('2001:db8::/33'), $rg('2001:db8:8000::/33')))) === 1 && gp_ipl_count4(gp_ipl_union(array($rg('10.0.0.0/24'), $rg('10.0.0.0/25')))) === 256);
+t_ok('inc / dec carry across bytes and stop at the ends', gp_ipl_inc("\x00\xff\xff\xff") === "\x01\x00\x00\x00" && gp_ipl_inc("\xff\xff") === null && gp_ipl_dec("\x01\x00") === "\x00\xff" && gp_ipl_dec("\x00\x00") === null);
+$sw = gp_ipl_sweep(array(array($rg('10.0.0.0/8')[0], $rg('10.0.0.0/8')[1], 5), array($rg('10.1.0.0/16')[0], $rg('10.1.0.0/16')[1], 1), array($rg('10.2.0.0/16')[0], $rg('10.2.0.0/16')[1], 9),
+	array($rg('11.0.0.0/8')[0], $rg('11.0.0.0/8')[1], 5), array($rg('255.255.255.0/24')[0], $rg('255.255.255.255')[1], 32770)));
+$sw_t = array_map(function ($r) use ($il_hex) { return $il_hex($r[0]) . '-' . $il_hex($r[1]) . '=' . $r[2]; }, $sw);
+t_ok('sweep: the SMALLER value wins on an overlap whatever the widths, equal neighbours merge, the top of the space is kept',
+	$sw_t === array('10.0.0.0-10.0.255.255=5', '10.1.0.0-10.1.255.255=1', '10.2.0.0-10.255.255.255=5', '11.0.0.0-11.255.255.255=5', '255.255.255.0-255.255.255.255=32770') || $sw_t === array('10.0.0.0-10.0.255.255=5', '10.1.0.0-10.1.255.255=1', '10.2.0.0-11.255.255.255=5', '255.255.255.0-255.255.255.255=32770'));
+t_ok('sweep: an enforced list (value without bit 15) beats a monitor list on the same address', (function () use ($rg) {
+	$a = $rg('10.0.0.0/8'); $b = $rg('10.5.0.0/16');
+	$r = gp_ipl_sweep(array(array($a[0], $a[1], 0x8001), array($b[0], $b[1], 2)));
+	return count($r) === 3 && $r[1][2] === 2 && $r[0][2] === 0x8001 && $r[2][2] === 0x8001;
+})());
+t_ok('sweep: nothing in, nothing out; a single range is itself', gp_ipl_sweep(array()) === array() && count(gp_ipl_sweep(array(array($rg('1.1.1.1')[0], $rg('1.1.1.1')[1], 1)))) === 1);
+// The brute-force check: random overlapping ranges against a per-address scan.
+mt_srand(21);
+$bad = 0;
+$in = array();
+for ($i = 0; $i < 60; $i++) { $s = mt_rand(0, 200); $e = $s + mt_rand(0, 60); $in[] = array(pack('N', $s), pack('N', $e), mt_rand(1, 6) | (mt_rand(0, 1) ? 0x8000 : 0)); }
+$swp = gp_ipl_sweep($in);
+for ($a = 0; $a < 270; $a++) {
+	$want = null;
+	foreach ($in as $r) { if ($a >= unpack('N', $r[0])[1] && $a <= unpack('N', $r[1])[1]) { $want = $want === null ? $r[2] : min($want, $r[2]); } }
+	$got = null;
+	foreach ($swp as $r) { if ($a >= unpack('N', $r[0])[1] && $a <= unpack('N', $r[1])[1]) { $got = $r[2]; } }
+	if ($got !== $want) { $bad++; }
+}
+t_ok('sweep: 60 random overlapping ranges agree with a per-address minimum on 270 addresses (' . $bad . ' wrong)', $bad === 0);
+$prev_end = null; $okorder = true;
+foreach ($swp as $r) { if ($prev_end !== null && strcmp($r[0], $prev_end) <= 0) { $okorder = false; } $prev_end = $r[1]; }
+t_ok('sweep: the output is sorted and non-overlapping', $okorder);
+
+// ---- refusals and metadata
+$prot = gp_ipl_protected(array('198.51.100.200', '2001:db8:ffff::5', 'not-an-ip'));
+$rf = function ($t, $type) use ($prot) { return gp_ipl_refusal(gp_ipl_parse_entry($t), $type, $prot); };
+t_ok('refusal: a block entry wider than /8 (IPv4) or /32 (IPv6) is "wide", /8 and /32 are fine, an allow entry is never "wide"',
+	$rf('64.0.0.0/7', 'block') === 'wide' && $rf('64.0.0.0/8', 'block') === '' && $rf('2400::/31', 'block') === 'wide' && $rf('2400::/32', 'block') === '' && $rf('64.0.0.0/4', 'allow') === '' && $rf('0.0.0.0/0', 'block') === 'wide');
+t_ok('refusal: anything touching private, loopback, link-local space is "protected", for both types',
+	$rf('10.1.2.3', 'block') === 'protected' && $rf('192.168.0.0/16', 'allow') === 'protected' && $rf('127.0.0.1', 'block') === 'protected' && $rf('169.254.1.1', 'block') === 'protected' && $rf('172.20.0.0/14', 'block') === 'protected'
+	&& $rf('::1', 'block') === 'protected' && $rf('fc00:1::/32', 'block') === 'protected' && $rf('fc00::/8', 'allow') === 'protected' && $rf('fe80::/64', 'block') === 'protected' && $rf('0.0.0.0', 'block') === 'protected');
+t_ok('refusal: a /9 that CONTAINS a private block is protected too; public space is fine', $rf('0.0.0.0/9', 'block') === 'protected' && $rf('203.0.113.0/24', 'block') === '' && $rf('11.0.0.0/8', 'block') === '' && $rf('172.32.0.0/16', 'block') === '');
+t_ok('refusal: the server\'s and the operator\'s own addresses are protected, a bad extra is ignored', $rf('198.51.100.200', 'block') === 'protected' && $rf('198.51.100.0/24', 'block') === 'protected' && $rf('2001:db8:ffff::/48', 'block') === 'protected' && $rf('198.51.101.1', 'block') === '');
+$mv = function ($o) { return gp_ipl_validate_meta(array_merge(array('id' => 'a-list', 'idx' => 3, 'name' => 'A list', 'type' => 'block', 'mode' => 'monitor', 'enabled' => true, 'note' => ''), $o)); };
+t_ok('meta: a good record round-trips, every bad field is refused',
+	$mv(array())[0] && $mv(array('id' => 'A'))[0] === false && $mv(array('id' => '-a'))[0] === false && $mv(array('id' => str_repeat('a', 25)))[0] === false && $mv(array('name' => ''))[0] === false
+	&& $mv(array('name' => str_repeat('x', 81)))[0] === false && $mv(array('name' => "a\nb"))[0] === false && $mv(array('type' => 'x'))[0] === false && $mv(array('mode' => 'x'))[0] === false
+	&& $mv(array('idx' => 0))[0] === false && $mv(array('idx' => 32768))[0] === false && $mv(array('idx' => '3'))[0] === false && $mv(array('note' => str_repeat('n', 201)))[0] === false && gp_ipl_validate_meta('x')[0] === false);
+t_ok('slug: a name becomes a short log id', gp_ipl_slug('Scraper ASN ranges (2026)!') === 'scraper-asn-ranges-2026' && gp_ipl_slug('') === 'list' && gp_ipl_slug('!!!') === 'list' && strlen(gp_ipl_slug(str_repeat('abc ', 20))) <= 24);
+
+// ---- compile + the save flow
+$il_up = function ($content, $err = 0) use ($il_tmp) { $t = $il_tmp . '/up.tmp'; file_put_contents($t, $content); return array('name' => 'l.txt', 'tmp_name' => $t, 'error' => $err, 'size' => strlen($content)); };
+$sv = function (array $p, $file = null) { return gp_iplists_save(array_merge(array('name' => 'Scrapers', 'type' => 'block', 'mode' => 'enforce', 'enabled' => '1', 'note' => ''), $p), $file, 'tester', '198.18.77.7'); };
+t_ok('state: no file yet', gp_iplists_state()['state'] === 'missing' && gp_iplists_state()['lists'] === array() && gp_iplists_status() === null);
+$r1 = $sv(array('text' => "203.0.113.0/24\n198.51.100.0/25\n2001:db8::/48\n"));
+t_ok('save: a new block list is created, its source, record, compiled file and audit line exist',
+	$r1['ok'] && $r1['msg'] === 'ipl_created' && is_file($il_tmp . '/lists/scrapers.txt') && is_file($il_tmp . '/lists/block.bin') && !is_file($il_tmp . '/lists/allow.bin')
+	&& gp_iplists_state()['lists'][0]['id'] === 'scrapers' && gp_iplists_state()['lists'][0]['idx'] === 1 && file_get_contents($il_tmp . '/lists/scrapers.txt') === "203.0.113.0/24\n198.51.100.0/25\n2001:db8::/48\n"
+	&& strpos((string)@file_get_contents($il_tmp . '/audit.jsonl'), '"event":"iplist"') !== false);
+t_ok('save: the report says how many entries, ranges and addresses (and the compile result)', strpos($r1['detail'], '3 entries') !== false && strpos($r1['detail'], '384 IPv4 addresses') !== false);
+gv_geo_state(true);
+t_ok('compile: the guard finds the addresses in the file the panel wrote (v4, v6, mapped), with the list index', gv_iplist_check('203.0.113.9')['block'] === array('idx' => 1, 'monitor' => false)
+	&& gv_iplist_check('2001:db8::7')['block'] !== null && gv_iplist_check('::ffff:198.51.100.5')['block'] !== null && gv_iplist_check('198.51.100.200')['block'] === null && gv_iplist_check('203.0.113.9')['allow'] === null);
+$stt = gp_iplists_status();
+t_ok('compile: lists-status.json has the per-list counts and the type summary', $stt && $stt['ok'] === true && $stt['by'] === 'php' && $stt['lists']['scrapers']['entries'] === 3 && $stt['lists']['scrapers']['addresses'] === 384
+	&& $stt['lists']['scrapers']['v6'] === 1 && $stt['types']['block']['v4'] === 2 && $stt['types']['block']['lists'] === array('scrapers') && $stt['types']['allow'] === null);
+t_ok('compile: the header says kind 3, a 2-byte value and the build time', (function () use ($il_tmp, $stt) {
+	$h = gv_geo_header_parse(file_get_contents($il_tmp . '/lists/block.bin', false, null, 0, 128));
+	return $h && $h['kind'] === 3 && $h['vsize'] === 2 && $h['built'] === $stt['time'] && $h['v4'] === 2 && $h['v6'] === 1 && $h['source'] === 'iplists-block';
+})());
+// Invalid and refused lines: nothing is saved until the operator confirms.
+$before_meta = file_get_contents($il_tmp . '/lists/lists.json');
+$r2 = $sv(array('name' => 'Second', 'text' => "192.0.2.0/24\nbogus\n10.0.0.0/8\n64.0.0.0/4\n"));
+t_ok('save: invalid lines and refused entries are reported (by line number) and NOTHING is saved or written',
+	!$r2['ok'] && $r2['msg'] === 'ipl_confirm' && $r2['report']['invalid'] === array(array(2, 'bogus')) && count($r2['report']['refused']) === 2 && $r2['report']['refused'][0][0] === 3 && $r2['report']['refused'][0][2] === 'protected'
+	&& $r2['report']['refused'][1][2] === 'wide' && file_get_contents($il_tmp . '/lists/lists.json') === $before_meta && !is_file($il_tmp . '/lists/second.txt') && preg_match('/^[a-f0-9]{16}$/', $r2['pending']));
+t_ok('save: the text waits in a pending file that the next submit uses', is_file(gp_ipl_pending_path($r2['pending'])));
+$r3 = $sv(array('name' => 'Second', 'pending' => $r2['pending'], 'accept' => '1'));
+t_ok('save: after the operator accepts, the valid lines are saved and the pending file is gone', $r3['ok'] && file_get_contents($il_tmp . '/lists/second.txt') === "192.0.2.0/24\n" && !is_file(gp_ipl_pending_path($r2['pending']))
+	&& strpos($r3['detail'], '3 skipped') !== false);
+$r4 = $sv(array('name' => 'Wide', 'text' => "64.0.0.0/4\n10.0.0.0/8\n", 'force' => '1'));
+t_ok('save: "I know what I\'m doing" lets wide and private block entries through', $r4['ok'] && file_get_contents($il_tmp . '/lists/wide.txt') === "64.0.0.0/4\n10.0.0.0/8\n" && gp_ipl_find(gp_iplists_state()['lists'], 'wide')['force'] === true);
+gv_geo_state(true);
+$stt = gp_iplists_status();
+file_put_contents($il_tmp . '/lists/second.txt', "192.0.2.0/24\n32.0.0.0/4\n");           // a wide entry in an UNFORCED list (e.g. copied over SFTP)
+$cw = gp_iplists_compile();
+$stw = gp_iplists_status();
+file_put_contents($il_tmp . '/lists/second.txt', "192.0.2.0/24\n");
+gp_iplists_compile();
+gv_geo_state(true);
+t_ok('compile: a forced list keeps its wide entry; an unforced one drops it and counts it', $stt['lists']['wide']['entries'] === 2 && $stt['lists']['wide']['wide'] === 0 && gv_iplist_check('70.1.1.1')['block'] !== null
+	&& $cw['ok'] && $stw['lists']['second']['entries'] === 1 && $stw['lists']['second']['wide'] === 1);
+$ids = array_map(function ($l) { return $l['id'] . ':' . $l['idx']; }, gp_iplists_state()['lists']);
+t_ok('save: ids are slugs of the name, indexes count up and are never reused', $ids === array('scrapers:1', 'second:2', 'wide:3'));
+t_ok('save: the same name gets a distinct id', $sv(array('name' => 'Scrapers', 'text' => '203.0.114.0/24'))['ok'] && gp_ipl_find(gp_iplists_state()['lists'], 'scrapers-2')['idx'] === 4);
+t_ok('save: an uploaded file is read like pasted text (UTF-8 BOM, CRLF, CSV)', $sv(array('name' => 'Uploaded'), $il_up("\xEF\xBB\xBF203.0.115.0/24,x\r\n203.0.116.1\r\n"))['ok'] && file_get_contents($il_tmp . '/lists/uploaded.txt') === "203.0.115.0/24\n203.0.116.1\n");
+t_ok('save: a file over the PHP limit, a failed upload and a non-UTF-8 text are refused with their own message',
+	$sv(array('name' => 'X1'), array('error' => UPLOAD_ERR_INI_SIZE))['msg'] === 'ipl_up_toobig' && $sv(array('name' => 'X2'), array('error' => UPLOAD_ERR_PARTIAL))['msg'] === 'ipl_up_failed'
+	&& $sv(array('name' => 'X3', 'text' => "\xff\xfe1.2.3.4"))['msg'] === 'ipl_not_text' && !is_file($il_tmp . '/lists/x1.txt') && !is_file($il_tmp . '/lists/x3.txt'));
+$bad_name = $sv(array('name' => str_repeat('n', 81), 'text' => '1.2.3.4'));
+t_ok('save: a bad name is refused with the field named, nothing written', !$bad_name['ok'] && isset($bad_name['errors']['name']) && gp_ipl_find(gp_iplists_state()['lists'], 'nnnnnnnnnnnnnnnnnnnnnnnn') === null);
+$edit = gp_iplists_save(array('id' => 'second', 'name' => 'Second renamed', 'type' => 'allow', 'mode' => 'monitor', 'enabled' => '1', 'note' => 'n'), null, 'tester', '198.18.77.7');
+$sec = gp_ipl_find(gp_iplists_state()['lists'], 'second');
+t_ok('edit: without text the entries stay; the name, mode and note change; the TYPE and the id cannot', $edit['ok'] && $edit['msg'] === 'ipl_saved' && $sec['name'] === 'Second renamed' && $sec['type'] === 'block' && $sec['mode'] === 'monitor' && $sec['note'] === 'n'
+	&& $sec['id'] === 'second' && $sec['idx'] === 2 && file_get_contents($il_tmp . '/lists/second.txt') === "192.0.2.0/24\n");
+$edit2 = gp_iplists_save(array('id' => 'second', 'name' => 'Second renamed', 'mode' => 'monitor', 'enabled' => '1', 'text' => "192.0.2.128/25\n"), null, 'tester', '198.18.77.7');
+t_ok('edit: pasted text REPLACES the entries', $edit2['ok'] && file_get_contents($il_tmp . '/lists/second.txt') === "192.0.2.128/25\n");
+t_ok('edit: an unknown id is refused', gp_iplists_save(array('id' => 'nope', 'name' => 'x'), null, 'tester', '1.1.1.1')['msg'] === 'ipl_not_found');
+// Compile semantics across lists.
+$sv(array('name' => 'Partners', 'type' => 'allow', 'mode' => 'enforce', 'text' => "203.0.113.64/26\n"));
+gv_geo_state(true);
+$both = gv_iplist_check('203.0.113.70');
+t_ok('compile: an address in an allow AND a block list is found in BOTH files (the guard lets the allow list win)', $both['allow'] !== null && $both['block'] !== null && gv_iplist_check('203.0.113.5')['allow'] === null);
+gp_iplists_set(array('id' => 'partners', 'enabled' => '0'), 'tester', '1.1.1.1');
+gv_geo_state(true);
+t_ok('set: disabling the only allow list removes allow.bin: the guard has no allow lookup to do', !is_file($il_tmp . '/lists/allow.bin') && gv_iplist_check('203.0.113.70')['allow'] === null && gp_iplists_status()['types']['allow'] === null);
+gp_iplists_set(array('id' => 'partners', 'enabled' => '1', 'mode' => 'monitor'), 'tester', '1.1.1.1');
+gv_geo_state(true);
+t_ok('set: monitor mode sets bit 15 of the value; a monitor allow still shows as a hit with monitor=true', gv_iplist_check('203.0.113.70')['allow']['monitor'] === true && is_file($il_tmp . '/lists/allow.bin.prev') === false || is_file($il_tmp . '/lists/allow.bin'));
+gp_iplists_set(array('id' => 'partners', 'mode' => 'enforce'), 'tester', '1.1.1.1');
+t_ok('set: .prev keeps the previous compiled file, rollback puts it back', (function () use ($il_tmp) {
+	if (!is_file($il_tmp . '/lists/allow.bin.prev')) { return false; }
+	$h = gv_geo_header_parse(file_get_contents($il_tmp . '/lists/allow.bin.prev', false, null, 0, 128));
+	$r = gp_iplists_rollback('allow', 'tester', '1.1.1.1');
+	gv_geo_state(true);
+	return $h && $r[0] && gv_iplist_check('203.0.113.70')['allow']['monitor'] === true && gp_iplists_rollback('block', 't', '1')[0] === true && gp_iplists_rollback('allow', 't', '1')[0] === true;
+})());
+t_ok('rollback: with no .prev, or a .prev that is not a list file, it refuses', (function () use ($il_tmp) {
+	@unlink($il_tmp . '/lists/allow.bin.prev');
+	$a = gp_iplists_rollback('allow', 't', '1');
+	file_put_contents($il_tmp . '/lists/allow.bin.prev', 'junk');
+	$b = gp_iplists_rollback('allow', 't', '1');
+	@unlink($il_tmp . '/lists/allow.bin.prev');
+	return !$a[0] && !$b[0];
+})());
+file_put_contents($il_tmp . '/lists/partners.txt.bak', 'x'); @unlink($il_tmp . '/lists/partners.txt.bak');
+// A source that cannot be read keeps the old file and reports it.
+$keep = file_get_contents($il_tmp . '/lists/block.bin');
+rename($il_tmp . '/lists/second.txt', $il_tmp . '/lists/second.txt.gone');
+$cr = gp_iplists_compile();
+t_ok('compile: an enabled list whose source is missing: the error is reported, ok is false, the previous block file is kept', !$cr['ok'] && strpos(implode(' ', $cr['errors']), 'second') !== false && file_get_contents($il_tmp . '/lists/block.bin') === $keep && gp_iplists_status()['ok'] === false);
+rename($il_tmp . '/lists/second.txt.gone', $il_tmp . '/lists/second.txt');
+t_ok('compile: ... and compiles again once the source is back', gp_iplists_compile()['ok'] === true);
+// Export, entries, delete.
+$ex = gp_iplists_export('scrapers');
+t_ok('export: the source text comes back; an unknown list gives null', $ex[0]['id'] === 'scrapers' && $ex[1] === "203.0.113.0/24\n198.51.100.0/25\n2001:db8::/48\n" && gp_iplists_export('nope')[0] === null);
+$en = gp_iplists_entries('scrapers', array());
+t_ok('entries: every entry with its line, family and the totals', $en[1] === 3 && $en[2] === 3 && $en[0][0] === array('line' => 1, 'text' => '203.0.113.0/24', 'v' => 4) && $en[0][2]['v'] === 6);
+$en2 = gp_iplists_entries('scrapers', gp_filter_parse(array('entry' => '203.0', 'entry_op' => 'not'), array('entry' => 'text')));
+t_ok('entries: the text filter "does not contain" and the family filter "is" / "is not"', $en2[1] === 2 && array_column($en2[0], 'text') === array('198.51.100.0/25', '2001:db8::/48')
+	&& gp_iplists_entries('scrapers', gp_filter_parse(array('family' => 'v6'), array('family' => 'choice')))[1] === 1 && gp_iplists_entries('scrapers', gp_filter_parse(array('family' => 'v6', 'family_op' => 'not'), array('family' => 'choice')))[1] === 2);
+t_ok('entries: an unknown list is empty', gp_iplists_entries('nope', array()) === array(array(), 0, 0, 0));
+// The tester.
+gv_geo_state(true);
+$tt = gp_iplists_test('203.0.113.70');
+t_ok('tester: live hits per type, the effective decision (allow beats block) and the matching source entry', $tt && $tt['ip'] === '203.0.113.70' && $tt['live']['allow']['id'] === 'partners' && $tt['live']['block']['id'] === 'scrapers' && $tt['effective'] === 'allow'
+	&& count($tt['matches']) === 2 && $tt['matches'][0]['entry'] === '203.0.113.0/24');
+t_ok('tester: a block-only address, a clean address, a monitor-only address, and a non-address',
+	gp_iplists_test('198.51.100.5')['effective'] === 'block' && gp_iplists_test('8.8.8.8')['effective'] === '' && gp_iplists_test('8.8.8.8')['matches'] === array() && gp_iplists_test('192.0.2.200')['effective'] === 'monitor' && gp_iplists_test('nonsense') === null && gp_iplists_test('') === null);
+t_ok('tester: IPv6 and IPv4-mapped input', gp_iplists_test('2001:db8::9')['effective'] === 'block' && gp_iplists_test('::ffff:198.51.100.5')['effective'] === 'block');
+
+// ---- warnings
+$warn_lists = gp_iplists_state()['lists'];
+$wc = array_column(gp_iplists_warnings($warn_lists), 0);
+t_ok('warnings: an address in both an allow and a block list is reported with its lists', in_array('conflict', $wc, true) && (function () use ($warn_lists) { foreach (gp_iplists_warnings($warn_lists) as $w) { if ($w[0] === 'conflict') { return strpos($w[1], '203.0.113.64 - 203.0.113.127') !== false && strpos($w[1], 'partners / scrapers') !== false; } } return false; })());
+$sv(array('name' => 'Big allow', 'type' => 'allow', 'mode' => 'enforce', 'text' => "20.0.0.0/8\n100.64.5.0/24\n2a00::/16\n"));
+$ww = gp_iplists_warnings(gp_iplists_state()['lists']);
+$wm = array(); foreach ($ww as $w) { $wm[$w[0]] = $w[1]; }
+t_ok('warnings: an allow entry wider than /16 (or an IPv6 /16), and one in the shared CGNAT range', isset($wm['allow_wide']) && strpos($wm['allow_wide'], '20.0.0.0/8') !== false && strpos($wm['allow_wide'], '2a00::/16') !== false && isset($wm['allow_shared']) && strpos($wm['allow_shared'], '100.64.5.0/24') !== false);
+file_put_contents($il_tmp . '/geo/asn.bin', gf_pack(2, array(array(ip2long('100.64.5.0'), ip2long('100.64.5.255'), 44244)), array()));
+gv_geo_state(true);
+$wm2 = array(); foreach (gp_iplists_warnings(gp_iplists_state()['lists']) as $w) { $wm2[$w[0]] = $w[1]; }
+t_ok('warnings: an allow entry inside a mobile operator AS (needs the ASN file) names the operator', isset($wm2['allow_mobile']) && strpos($wm2['allow_mobile'], 'AS44244 Irancell') !== false);
+$wm3 = array(); foreach (gp_iplists_warnings(gp_iplists_state()['lists'], array('203.0.113.9', '8.8.8.8', '2001:db8::5', 'junk')) as $w) { $wm3[$w[0]] = $w[1]; }
+t_ok('warnings: a block entry covering a verified crawler address from the logs (v4 and v6)', isset($wm3['block_crawler']) && strpos($wm3['block_crawler'], '203.0.113.9 (scrapers)') !== false && strpos($wm3['block_crawler'], '2001:db8::5') !== false && strpos($wm3['block_crawler'], '8.8.8.8') === false);
+t_ok('warnings: disabled lists are ignored, a huge total is reported instead of analysed', gp_iplists_warnings(array_map(function ($l) { $l['enabled'] = false; return $l; }, $warn_lists)) === array() && gp_iplists_warnings($warn_lists, array(), 10)[0][0] === 'too_big');
+// Verified crawler addresses out of the logs.
+$il_logs = $il_tmp . '/logs';
+$il_day = date('Ymd');
+file_put_contents($il_logs . '/guard-' . $il_day . '.jsonl', json_encode(array('ts' => time(), 'ip' => '203.0.113.50', 'bot' => 'Googlebot', 'botv' => 'ok', 'act' => 'allow_bot')) . "\n"
+	. json_encode(array('ts' => time(), 'ip' => '203.0.113.51', 'bot' => 'Googlebot', 'botv' => 'bad', 'act' => '403')) . "\n" . json_encode(array('ts' => time(), 'ip' => '198.18.0.1', 'act' => 'allow')) . "\n");
+putenv('GV_LOG_DIR=' . $il_logs);
+$il_cfgf = $il_tmp . '/config.php';
+file_put_contents($il_cfgf, "<?php\nif (!defined('GV_BOOT')) { exit; }\n\$c = require " . var_export(__DIR__ . '/config.dev.php', true) . ";\n\$c['log_dir'] = " . var_export($il_logs, true) . ";\nreturn \$c;\n");
+putenv('GV_CONFIG=' . $il_cfgf);
+t_ok('verified crawler ips: only botv=ok rows count', gp_iplists_verified_ips() === array('203.0.113.50'));
+putenv('GV_CONFIG'); putenv('GV_LOG_DIR');
+
+// ---- health / dashboard alerts
+$hl = function ($jobs = array(), $now = null) { return gp_iplists_health($now, $jobs); };
+t_ok('health: compiled and fine: no alert', $hl() === array() || array_column($hl(), 0) === array());
+$bak = file_get_contents($il_tmp . '/lists/block.bin');
+unlink($il_tmp . '/lists/block.bin');
+t_ok('health: a missing compiled file while its list is enabled: file_missing for that type', in_array(array('file_missing', 'block'), $hl(), true));
+file_put_contents($il_tmp . '/lists/block.bin', 'GVRGxxxx' . str_repeat("\0", 200));
+t_ok('health: a corrupt compiled file: file_corrupt', in_array(array('file_corrupt', 'block'), $hl(), true));
+file_put_contents($il_tmp . '/lists/block.bin', $bak);
+t_ok('health: restored: quiet again', !array_filter($hl(), function ($w) { return in_array($w[0], array('file_missing', 'file_corrupt'), true); }));
+$st_bak = file_get_contents($il_tmp . '/lists/lists-status.json');
+$sj = json_decode($st_bak, true); $sj['ok'] = false; $sj['errors'] = array('boom: cannot read'); file_put_contents($il_tmp . '/lists/lists-status.json', json_encode($sj));
+t_ok('health: the last compile reported errors: compile_failed with the first error', in_array(array('compile_failed', 'boom: cannot read'), $hl(), true));
+file_put_contents($il_tmp . '/lists/lists-status.json', $st_bak);
+t_ok('health: a FAILED compile job newer than the last compile: compile_failed; an older failure and other job types do not count',
+	in_array(array('compile_failed', 'job j9'), $hl(array(array('id' => 'j9', 'type' => 'iplist_compile', 'status' => 'failed', 'requested_at' => time() + 5))), true)
+	&& !array_filter($hl(array(array('id' => 'j9', 'type' => 'iplist_compile', 'status' => 'failed', 'requested_at' => 5))), function ($w) { return $w[0] === 'compile_failed'; })
+	&& !array_filter($hl(array(array('id' => 'j9', 'type' => 'geo_compile', 'status' => 'failed', 'requested_at' => time() + 5))), function ($w) { return $w[0] === 'compile_failed'; })
+	&& !array_filter($hl(array(array('id' => 'j10', 'type' => 'iplist_compile', 'status' => 'done', 'requested_at' => time() + 9), array('id' => 'j9', 'type' => 'iplist_compile', 'status' => 'failed', 'requested_at' => time() + 5))), function ($w) { return $w[0] === 'compile_failed'; }));
+touch($il_tmp . '/lists/lists.json', time() + 5000);
+t_ok('health: lists changed long ago and never compiled (pending): a warning only after 10 minutes', in_array(array('pending', ''), $hl(array(), time() + 5700), true) && !in_array(array('pending', ''), $hl(array(), time() + 5100), true));
+touch($il_tmp . '/lists/lists.json');
+$ha = gp_health_alerts(array_merge(array('now' => time(), 'redis_up' => true, 'jobs' => array(), 'storage' => array('warnings' => array()), 'snapshot' => array('generated_at' => time(), 'tz' => array('offset' => 0)), 'tz_offset' => 0,
+	'queue' => array('stuck' => false), 'cron' => array('mode' => 'none', 'report' => null)),
+	array('iplist_warn' => array(array('file_missing', 'block'), array('file_corrupt', 'allow'), array('compile_failed', 'job j1'), array('pending', '')))));
+$hm = array(); foreach ($ha as $a) { $hm[$a['id']] = $a; }
+t_ok('alerts: file_missing / file_corrupt / compile_failed are CRITICAL and link to the IP lists page, pending is a warning',
+	$hm['iplist_file_missing_block']['level'] === 'critical' && $hm['iplist_file_corrupt_allow']['level'] === 'critical' && $hm['iplist_compile_failed']['level'] === 'critical' && $hm['iplist_pending']['level'] === 'warning'
+	&& $hm['iplist_file_missing_block']['link'] === 'iplists' && $hm['iplist_file_missing_block']['key'] === 'al_iplist_file_missing');
+t_ok('alerts: nothing wrong, nothing raised', !array_filter(gp_health_alerts(array('now' => time(), 'redis_up' => true, 'jobs' => array(), 'storage' => array('warnings' => array()), 'snapshot' => array('generated_at' => time(), 'tz' => array('offset' => 0)), 'tz_offset' => 0,
+	'queue' => array('stuck' => false), 'cron' => array('mode' => 'none', 'report' => null), 'iplist_warn' => array())), function ($a) { return strpos($a['id'], 'iplist') === 0; }));
+list($h_dal, $e_dal) = $jh_render('dashboard', array(), array('alerts' => $ha, 'isum' => array('total' => 2, 'enabled' => 2, 'by' => array('block/enforce' => 1, 'allow/monitor' => 1))));
+t_ok('dashboard: the IP list alerts render with their text, the compiled file / job in the detail, a link to the IP lists page, and the protection card counts enabled lists',
+	!$e_dal && strpos($h_dal, 'data-alert="iplist_file_missing_block"') !== false && strpos($h_dal, 'data-alert="iplist_compile_failed"') !== false && strpos($h_dal, 'compiled IP list file is missing') !== false
+	&& strpos($h_dal, 'job j1') !== false && strpos($h_dal, 'index.php?r=iplists') !== false && strpos($h_dal, 'Enabled IP lists') !== false && strpos($h_dal, 'Block') !== false);
+t_ok('summary: enabled lists by type / mode for the dashboard', gp_iplists_summary(array(array('enabled' => true, 'type' => 'block', 'mode' => 'enforce'), array('enabled' => true, 'type' => 'block', 'mode' => 'enforce'), array('enabled' => false, 'type' => 'allow', 'mode' => 'monitor'), array('enabled' => true, 'type' => 'allow', 'mode' => 'monitor')))
+	=== array('total' => 4, 'enabled' => 3, 'by' => array('block/enforce' => 2, 'allow/monitor' => 1)));
+
+// ---- filters (include / exclude) on the lists table
+$fr = gp_iplists_rows(gp_iplists_state()['lists'], gp_iplists_status(), array('iplists' => array('block:scrapers' => array('h24' => 5, 'd7' => 9, 'last' => 123))));
+$fl = function (array $get) use ($fr) { return array_column(gp_iplists_filter_rows($fr, gp_filter_parse($get, gp_iplists_filter_spec())), 'id'); };
+t_ok('rows: carry the compile counts and the snapshot hits of their own type:id', $fr[0]['hit'] === array('h24' => 5, 'd7' => 9, 'last' => 123) && $fr[0]['stat']['entries'] === 3 && $fr[1]['hit'] === array());
+t_ok('filter: type is / is not', $fl(array('type' => 'allow')) === array('partners', 'big-allow') && count($fl(array('type' => 'allow', 'type_op' => 'not'))) === count($fr) - 2 && count($fl(array('type' => 'allow,block'))) === count($fr));
+t_ok('filter: mode is / is not, status is / is not, several values OR inside the field, fields AND together',
+	$fl(array('mode' => 'monitor')) === array('second') && !in_array('second', $fl(array('mode' => 'monitor', 'mode_op' => 'not')), true) && count($fl(array('status' => 'enabled'))) === count($fr) && $fl(array('status' => 'disabled')) === array()
+	&& $fl(array('type' => 'block', 'mode' => 'monitor')) === array('second') && $fl(array('type' => 'allow', 'mode' => 'monitor')) === array());
+t_ok('filter: the name filter contains / does not contain, on the name and the id, case-insensitively', $fl(array('name' => 'SCRAP')) === array('scrapers', 'scrapers-2') && in_array('partners', $fl(array('name' => 'scrap', 'name_op' => 'not')), true) && !in_array('scrapers', $fl(array('name' => 'scrap', 'name_op' => 'not')), true));
+
+// ---- delete
+$del = gp_iplists_delete('wide', 'tester', '1.1.1.1');
+t_ok('delete: the record and the source are gone, the compiled file no longer holds its ranges, the audit has before / null',
+	$del[0] && gp_ipl_find(gp_iplists_state()['lists'], 'wide') === null && !is_file($il_tmp . '/lists/wide.txt') && (gv_geo_state(true) || true) && gv_iplist_check('70.1.1.1')['block'] === null
+	&& strpos((string)file_get_contents($il_tmp . '/audit.jsonl'), '"key":"wide"') !== false && !gp_iplists_delete('wide', 't', '1')[0]);
+foreach (array('scrapers', 'scrapers-2', 'second', 'uploaded', 'partners', 'big-allow') as $d) { gp_iplists_delete($d, 'tester', '1.1.1.1'); }
+t_ok('delete: with every list gone no compiled file is left, so the guard opens nothing', !is_file($il_tmp . '/lists/block.bin') && !is_file($il_tmp . '/lists/allow.bin') && gp_iplists_state()['lists'] === array());
+// An invalid metadata file blocks every write.
+file_put_contents($il_tmp . '/lists/lists.json', '{not json');
+t_ok('state: an unreadable lists.json is "invalid" and every write refuses until it is repaired', gp_iplists_state()['state'] === 'invalid' && $sv(array('name' => 'Z', 'text' => '1.2.3.4'))['msg'] === 'ipl_file_invalid' && gp_iplists_set(array('id' => 'a', 'enabled' => '1'), 't', '1')[0] === false);
+@unlink($il_tmp . '/lists/lists.json');
+// Big lists go through the worker.
+$sv(array('name' => 'Huge', 'text' => '203.0.113.0/24'));
+file_put_contents($il_tmp . '/lists/huge.txt', str_repeat("203.0.113.0/24\n", 50000));
+t_ok('compile mode: sources up to 512 KiB compile in the request, a bigger total (or "use the worker job") goes to the worker',
+	gp_iplists_compile_mode(gp_iplists_state()['lists']) === 'job' && gp_ipl_enabled_bytes(gp_iplists_state()['lists']) > GP_IPL_INLINE_BYTES
+	&& gp_iplists_compile_mode(array()) === 'inline' && gp_iplists_compile_mode(array(), true) === 'job');
+t_ok('compile_auto: the iplist_compile job type is on the closed list and takes no parameters', in_array('iplist_compile', gp_job_types(), true) && gp_job_params('iplist_compile', array())[0] === true);
+gp_iplists_delete('huge', 'tester', '1.1.1.1');
+
+// ---- the page renders, escaped, with tabs, tooltips and filters
+$il_render = function (array $extra) {
+	$errs = array();
+	set_error_handler(function ($no, $str) use (&$errs) { $errs[] = $str; return true; });
+	$state = gp_iplists_state(); $status = gp_iplists_status();
+	$rows = gp_iplists_rows($state['lists'], $status, null);
+	$vars = array_merge(array('state' => $state, 'status' => $status, 'all' => $rows, 'visible' => $rows, 'filter' => array(), 'edit' => null, 'save' => null, 'warnings' => array(), 'pending' => false, 'health' => array(),
+		'eid' => '', 'efilter' => array(), 'entries' => array(array(), 0, 0, 0), 'test_ip' => '', 'test' => null, 'test_ran' => false, 'limit' => 2097152, 'jobs' => array(), 'prev' => array('allow' => false, 'block' => false),
+		'snapshot' => null, 'route' => 'iplists', 'user' => 'tester'), $extra);
+	extract($vars, EXTR_SKIP);
+	ob_start();
+	require __DIR__ . '/../panel/views/iplists.php';
+	$html = ob_get_clean();
+	restore_error_handler();
+	return array($html, $errs);
+};
+list($h0, $e0) = $il_render(array());
+t_ok('page, no lists: renders without a PHP warning, five tabs, an empty-state text', !$e0 && substr_count($h0, 'role="tab"') === 5 && strpos($h0, 'No list yet') !== false && strpos($h0, 'role="tabpanel"') !== false);
+$sv(array('name' => 'Evil <script>alert(1)</script>', 'note' => '"><img src=x>', 'text' => "203.0.113.0/24\nbogus<b>\n"));
+$sv(array('name' => 'Evil <script>alert(1)</script>', 'note' => '"><img src=x>', 'text' => "203.0.113.0/24\n", 'accept' => '1'));
+$gp_post_bak = $_POST;
+list($h1, $e1) = $il_render(array('filter' => gp_filter_parse(array('type' => 'block', 'type_op' => 'not', 'name' => 'ev'), gp_iplists_filter_spec())));
+t_ok('page, with lists: names and notes are escaped, nothing breaks out', !$e1 && strpos($h1, '<script>alert') === false && strpos($h1, '<img src=x>') === false && strpos($h1, 'Evil &lt;script&gt;') !== false);
+t_ok('page: the lists table sits in a gp-table-wrap and shows enabled / mode / counts', strpos($h1, 'gp-table-wrap') !== false && strpos($h1, 'gp-badge-bad') !== false);
+t_ok('page: active filters are chips and "is not" is visibly marked', strpos($h1, 'gp-chip-not') !== false && strpos($h1, 'flt_is_not') === false);
+list($h2, $e2) = $il_render(array('edit' => array('id' => '', 'name' => 'N', 'type' => 'block', 'mode' => 'monitor', 'enabled' => true, 'force' => false, 'note' => '', 'text' => ''),
+	'save' => array('ok' => false, 'msg' => 'ipl_confirm', 'detail' => '', 'errors' => array('name' => 'bad_name'), 'pending' => 'abcdef0123456789', 'draft' => null,
+		'report' => array('invalid' => array(array(2, 'bogus<b>')), 'invalid_n' => 1, 'refused' => array(array(3, '10.0.0.0/8', 'protected')), 'refused_n' => 1))));
+t_ok('page, editor after a refused save: the confirmation table with line numbers and reasons, the accept box, the pending token, the name error, and the Editor tab opens with an error badge',
+	!$e2 && strpos($h2, 'bogus&lt;b&gt;') !== false && strpos($h2, 'name="accept"') !== false && strpos($h2, 'name="pending" value="abcdef0123456789"') !== false && strpos($h2, 'data-open="editor"') !== false && strpos($h2, 'gp-tab-badge') !== false && strpos($h2, 'name="csrf"') !== false);
+t_ok('page, editor: every field has a tooltip, the file input and the paste box, the force box', substr_count($h2, 'class="gp-tip"') >= 8 && strpos($h2, 'type="file" name="file"') !== false && strpos($h2, 'name="text"') !== false && strpos($h2, 'name="force"') !== false);
+$ent = gp_iplists_entries(gp_iplists_state()['lists'][0]['id'], array());
+list($h3, $e3) = $il_render(array('eid' => gp_iplists_state()['lists'][0]['id'], 'entries' => $ent, 'test_ip' => '203.0.113.5', 'test_ran' => true, 'test' => gp_iplists_test('203.0.113.5'),
+	'warnings' => array(array('conflict', '1.2.3.4 (a / b)')), 'health' => array(array('file_missing', 'block')), 'pending' => true));
+t_ok('page, entries / tester / warnings / alerts: render without a warning and show the entry, the matching list and the notes', !$e3 && strpos($h3, '203.0.113.0/24') !== false && strpos($h3, 'ipl_eff_') === false && strpos($h3, 'both an allow and a block list') !== false && strpos($h3, 'compiled IP list file is missing') !== false);
+list($h4, $e4) = $il_render(array('test_ran' => true, 'test' => null, 'test_ip' => 'zzz'));
+t_ok('page, tester with a bad address says so', !$e4 && strpos($h4, 'not a valid') !== false || strpos($h4, 'geo_bad_ip') === false);
+foreach (gp_iplists_state()['lists'] as $l) { gp_iplists_delete($l['id'], 'tester', '1.1.1.1'); }
+$_POST = $gp_post_bak;
+
+// ---- wiring: route, nav, lang, tips
+$idx_src = file_get_contents(__DIR__ . '/../panel/index.php');
+t_ok('wiring: the route, the nav entry and the dashboard hooks exist', strpos($idx_src, "case 'iplists':") !== false && strpos(file_get_contents(__DIR__ . '/../panel/views/layout.php'), "'iplists'") !== false
+	&& strpos($idx_src, "gp_iplists_summary") !== false && strpos(file_get_contents(__DIR__ . '/../panel/health.php'), 'gp_iplists_health') !== false);
+$il_lang = require __DIR__ . '/../panel/lang.php';
+$il_tip_miss = array(); $il_tip_short = array();
+foreach (array('ipl_name', 'ipl_type', 'ipl_mode', 'ipl_enabled', 'ipl_note', 'ipl_text', 'ipl_file', 'ipl_force', 'ipl_accept', 'ipl_filter_name', 'ipl_compile', 'ipl_compile_job', 'ipl_ip', 'ipl_f_entry', 'ipl_f_family', 'ipl_f_list') as $k) {
+	$t = isset($il_lang['tip_' . $k]) ? $il_lang['tip_' . $k] : '';
+	if ($t === '') { $il_tip_miss[] = $k; continue; }
+	if (strlen($t) < 50 || stripos($t, 'safe value') === false || stripos($t, 'risk') === false || stripos($t, 'what it does') === false) { $il_tip_short[] = $k; }
+}
+t_ok('every IP list field and filter has a tooltip with what it does, a safe value and the risk' . ($il_tip_miss ? ' (missing: ' . implode(',', $il_tip_miss) . ')' : '') . ($il_tip_short ? ' (incomplete: ' . implode(',', $il_tip_short) . ')' : ''), !$il_tip_miss && !$il_tip_short);
+preg_match_all("/gp_tip\\('([a-z_]+)'\\)/", file_get_contents(__DIR__ . '/../panel/views/iplists.php'), $il_mm);
+t_ok('every literal gp_tip() key in the IP lists view has a text', !array_filter($il_mm[1], function ($k) use ($il_lang) { return !isset($il_lang['tip_' . $k]); }));
+t_ok('the IP lists view loads nothing from outside', preg_match('#https?://#', file_get_contents(__DIR__ . '/../panel/views/iplists.php') . file_get_contents(__DIR__ . '/../panel/iplists.php')) === 0);
+t_ok('the selftest left nothing in the repository: no lists/ files, no audit line for it', glob(__DIR__ . '/../lists/*.{txt,bin,json}', GLOB_BRACE) === array());
+putenv('GV_LISTS_DIR'); putenv('GV_GEO_DIR'); putenv('GV_AUDIT');
+gv_geo_state(true);
+
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');
 // The panel is English and left-to-right. No Persian or Arabic script (letters

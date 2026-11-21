@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import config as config_mod
 from analyzer import geo as geo_mod
+from analyzer import iplist as iplist_mod
 from analyzer import jobreport
 from analyzer import promote as promote_mod
 from analyzer import redis_io
@@ -121,6 +122,11 @@ def job_geo_compile(cfg, params):
     return geo_mod.main([])
 
 
+def job_iplist_compile(cfg, params):
+    # Builds lists/allow.bin and lists/block.bin from the enabled IP lists (panel/iplists.php).
+    return iplist_mod.main([])
+
+
 HANDLERS = {
     'verify': job_verify,
     'nightly': job_nightly,
@@ -131,6 +137,7 @@ HANDLERS = {
     'promote_clf': job_promote('clf'),
     'snapshot': job_snapshot,
     'geo_compile': job_geo_compile,
+    'iplist_compile': job_iplist_compile,
 }
 
 

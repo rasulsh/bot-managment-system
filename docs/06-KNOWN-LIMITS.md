@@ -100,6 +100,35 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
 - The Rules impact preview reads the country from the log when the row has it; for rows from before
   `geo.log` was on it looks the logged address up in the *current* database, and says so.
 
+## IP lists
+
+- A list is only as good as its source: an address list from a threat feed goes stale, and addresses are reassigned
+  (cloud, mobile carriers, home connections). A block list that is not refreshed ends up blocking innocent visitors.
+- **Shared addresses.** Everyone behind a carrier-grade NAT or a mobile operator's gateway shares a few addresses. An
+  *allow* entry there lets all of them skip the guard; a *block* entry blocks all of them. The panel warns about an allow
+  entry in `100.64.0.0/10`, one wider than /16 (IPv4) or /32 (IPv6), and (with the ASN database) one inside a mobile
+  operator AS (MCI, Irancell, Rightel: a short fixed list, not complete).
+- An allow list is a hole by design: its addresses skip rules, scoring, rate limits and the challenge. Use it for
+  monitoring probes and partners, not for "good" countries or big ISPs.
+- A block list refuses a verified crawler address too (it is evaluated before the bot pass). The panel warns when a block
+  entry covers a verified crawler seen in the recent logs, but only from the logs it can scan.
+- The list entries are checked when saved in the panel. A file copied over SFTP into `lists/` is **not** re-validated:
+  lines that do not parse are skipped silently by the compile, and the width limit (/8, /32) is applied to block lists
+  unless the list was saved with "I know what I'm doing". Use the panel for anything that matters.
+- Changes apply when the compile finishes. Small lists compile in the save request; a big list (over 512 KiB of source)
+  needs the `worker` cron, and until the job runs the guard keeps using the previous compiled files (the dashboard
+  warns after 10 minutes).
+- Compile status and "the file is missing" can only be seen by the panel, not by the guard: with a deleted compiled file
+  the guard fails open and treats the list as empty (a critical dashboard alert says so).
+- The handshake `POST` of the challenge page is not subject to the lists (it runs before them), and a block list does not
+  stop a request that never reaches PHP (static files served directly by the web server).
+- IPv6: one list entry is a range, and a /64 or /48 entry blocks every host in it; the per-/64 grouping used by the rate
+  counters does not apply here. The number of addresses in the table is shown for IPv4 only (IPv6 counts ranges).
+- A block list that covers the **operator's own address** is refused at save time (and so are private, loopback and
+  link-local ranges and the server's own address) unless "I know what I'm doing" is ticked. The panel only knows the
+  address it sees: an operator behind a proxy the panel does not trust can still lock themselves out. The kill switch
+  (`guard.off`) is the way back in.
+
 ## Panel filters, tabs and tooltips
 
 - Filters scan the day's log from the end under the existing scan caps. An *exclude* filter ("is not", "does not

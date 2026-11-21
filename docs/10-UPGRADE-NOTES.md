@@ -2,6 +2,78 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## IP allow / block lists (files)
+
+**New**
+
+* New panel page **IP lists**: named **allow** and **block** lists of IPv4 / IPv6 addresses and CIDRs, each with a mode (`enforce` /
+  `monitor`), an enabled flag and a note; paste text or upload a file. They complement the single-address overrides (Redis), which stay
+  as they are. See [09-ADMIN-PANEL.md](09-ADMIN-PANEL.md#what-the-panel-does) and
+  [02-ARCHITECTURE.md](02-ARCHITECTURE.md#ip-allow--block-lists).
+* New `guard/iplist.php`, the `lists/` directory (web-protected, probed by `scripts/exposure-check.sh`), `panel/iplists.php`,
+  `analyzer/iplist.py` and the worker job `iplist_compile`. The compiled files (`lists/allow.bin`, `lists/block.bin`) use the range
+  format of the GeoIP files (kind 3) and the same binary-search lookup; the search got a faster tail (the last 128 records in one read)
+  and unbuffered reads, which also speeds up the GeoIP lookup. **No Redis command, no DNS, no file write in the request path**; the lists
+  are opened only while an enabled list of that type has entries.
+* **Precedence:** kill switch and exempt paths (unchanged) -> **allow list** (like an operator allow override: skips rules, scoring,
+  counters, challenge; decided before any Redis connection) -> **block list** (403, before the known-bot pass, no holdout, not gated by
+  `enforce.block`; the list's own mode decides) -> everything else as before. An address in both lists is allowed, and the panel warns.
+* New log reasons `IPL_ALLOW:<id>` / `IPL_BLOCK:<id>` (`SH_IPL_*` in monitor); the snapshot gains `iplists` (hits per list, 24 h / 7 d / last).
+  A list hit that returns early writes the usual single log row (`allow_override` / `403`).
+* Saving checks every line: invalid lines are reported by line number and nothing is saved until the operator accepts the valid ones;
+  a block entry wider than /8 (IPv4) or /32 (IPv6), and any entry covering private, loopback, link-local space, the server's own address
+  or the operator's own address, is refused unless "I know what I'm doing" is ticked.
+* New dashboard alerts: a compiled list file missing or corrupt while its list is enabled (critical), a failed compile or compile job
+  (critical), lists changed and not compiled for more than 10 minutes (warning). The dashboard's protection card counts enabled lists.
+* The IP lists page has tabs (Lists / Editor / Entries / Lookup tester / Compile), a tooltip on every field and include / exclude
+  filters on its tables. New env knobs for tests: `GV_LISTS_DIR`, `GV_AUDIT`.
+
+**Compatibility.** Nothing changes until a list exists: with no `lists/*.bin` the guard makes two failed `open()` calls per request
+(about 1-4 us) and goes on. Existing overrides, rules, GeoIP and the logs are untouched. `scripts/geo-fixture.php` (test tooling) now
+packs kind 3 with 2-byte values.
+
+**Upgrade steps (existing install `/home/cloud/bot-guard`, monitor mode)**
+
+1. Deploy the files. Make sure `lists/` is writable by the web user (the panel creates it if the project directory allows) and keep
+   `lists/.htaccess`; run `bash scripts/exposure-check.sh` (it probes `lists/` too). No new Python package, no new cron entry: small
+   lists compile inside the panel request; for a list of more than 512 KiB the existing `worker` cron runs `iplist_compile`.
+2. Create the first list as **block**, mode **monitor**, from a short list you trust (for example the addresses of a scraper you already
+   saw in the logs). Read the `SH_IPL_BLOCK:<id>` rows in Logs (reason filter), try addresses in the **Lookup tester**, and read the
+   page warnings (conflicts with allow lists, verified crawlers, wide entries).
+3. Only then switch the list to **enforce** (one click on the Lists tab). Keep allow lists short and specific: they skip everything.
+4. Watch the dashboard for the list alerts for a day.
+
+**Rollback.** Disable or delete the list (the guard stops using it as soon as the compile finishes, a second or two); **Roll back** on the
+Compile tab restores `*.bin.prev`; or delete `lists/block.bin` / `lists/allow.bin` (the lists are then simply not applied, and the
+dashboard says so). The kill switch (`guard.off`) bypasses all lists.
+
+**Cost** (`bash scripts/bench-gv-run.sh`; PHP 8.3 with OPcache, `gv_run` on an allowed request that no list matches, Redis `noeviction`,
+a fresh request each time so the files are re-opened on every request, median of 15 runs of 6000 requests in rotating order, same machine):
+
+| | p50 | p99 |
+|---|---|---|
+| master (no `iplist.php`) | 265 us | 489 us |
+| this branch, no list (two failed `open()` calls) | 277 us | 508 us |
+| this branch, a **block** file of 100 000 IPv4 + 10 000 IPv6 ranges | 269 us | 594 us |
+| this branch, an **allow and a block** file of 100 000 + 10 000 ranges each (worst case, both searched) | 310 us | 567 us |
+
+The list lookup alone (`php scripts/bench-gv-run.php --list-lookup [--list-types=block]`, random IPv4 / IPv6 addresses, a fresh request each
+time: reset, open, header check, search; median of 9 runs of 10 000 lookups):
+
+| | lookup p50 | lookup p99 | files already open p50 / p99 |
+|---|---|---|---|
+| no list file at all | 6 us | 18 us | - |
+| a block file, 100 000 + 10 000 ranges | **15 us** | 39 us | 8 / 27 us |
+| an allow and a block file, 100 000 + 10 000 each | **21 us** | 61 us | 17 / 47 us |
+
+Budget: at most 50 us p50 for the lookup with 100k IPv4 + 10k IPv6 entries: met (15 us for one file, 21 us with two). The whole-`gv_run` rows
+sit within the run-to-run noise of this shared machine (+/- 15 us p50, much more at p99); the lookup rows are the reliable ones. The
+benchmark process used to keep the generated test table (tens of MB) alive next to the timed loop, which inflated every number
+by 30-100 us; it is freed now (this also applies to the GeoIP rows of the previous release). A request that a list **hits** costs less than
+one it does not: it returns at step 3a, before any Redis connection (0 Redis commands, checked in `rules-e2e.sh`).
+
+**Known and not changed:** see [06-KNOWN-LIMITS.md](06-KNOWN-LIMITS.md#ip-lists).
+
 ## Dashboard redesign and background job health
 
 **New**

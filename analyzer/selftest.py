@@ -2655,6 +2655,185 @@ else:
 shutil.rmtree(geo_work, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
+section('IP lists compile: parser, merge by value, kind-3 file, atomic swap, PHP parity, snapshot hit counts')
+import random as rnd_il
+import subprocess as sp_il
+from analyzer import iplist as il_mod
+from analyzer import snapshot as snap_il
+
+IL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+il_work = tempfile.mkdtemp(prefix='gv-iplist-selftest-')
+
+pe = il_mod.parse_entry
+ok('parse_entry: addresses, CIDRs and masked host bits', pe('203.0.113.7') == (4, 3405803783, 3405803783, 32) and pe('203.0.113.0/24')[3] == 24
+   and pe('192.0.2.77/24') == pe('192.0.2.0/24') and pe('2001:db8::/32')[0] == 6 and pe('1.2.3.4/0')[1:3] == (0, 4294967295))
+ok('parse_entry: an IPv4-mapped IPv6 address is the IPv4 address it carries (counted from /96)',
+   pe('::ffff:1.2.3.4') == pe('1.2.3.4') and pe('::ffff:1.2.3.0/120') == pe('1.2.3.0/24') and pe('::ffff:1.2.3.0/64') is None)
+ok('parse_entry: everything that is not an address is refused',
+   all(pe(t) is None for t in ('', '1.2.3', '300.1.1.1', '1.2.3.4/33', '2001:db8::/129', '1.2.3.4/', '1.2.3.4/a', 'fe80::1%eth0', '1.2.3.4 5.6.7.8', 'example.com', '1.2.3.4/-1')))
+il_entries, il_bad = il_mod.parse_text('﻿ip,note\r\n# c\r\n\r\n203.0.113.0/24  # t\r\n"198.51.100.7",x\r\n\'192.0.2.1\' , y\r\n2001:db8::/32\n\t10.9.9.9\t\njunk line\r5.5.5.5')
+ok('parse_text: BOM, CRLF, CR, comments, blank lines, CSV first column, quotes; bad lines with their number',
+   len(il_entries) == 6 and il_bad == [(1, 'ip,note'), (9, 'junk line')])
+ok('union: overlapping, nested and adjacent ranges merge',
+   il_mod.union([(0, 9), (10, 19), (5, 6), (30, 40), (31, 32)]) == [(0, 19), (30, 40)] and il_mod.union([]) == [])
+ok('sweep: the SMALLER value wins on an overlap whatever the widths; equal neighbours merge',
+   il_mod.sweep([(0, 100, 5), (10, 20, 1), (15, 30, 9), (101, 110, 5), (200, 200, 0x8001)]) == [(0, 9, 5), (10, 20, 1), (21, 110, 5), (200, 200, 0x8001)])
+ok('sweep: an enforced value (no bit 15) beats a monitor value on the same address',
+   il_mod.sweep([(0, 99, 0x8001), (40, 49, 2)]) == [(0, 39, 0x8001), (40, 49, 2), (50, 99, 0x8001)])
+rnd_il.seed(21)
+il_bad_n = 0
+il_in = []
+for _ in range(80):
+    a = rnd_il.randint(0, 200)
+    il_in.append((a, a + rnd_il.randint(0, 60), rnd_il.randint(1, 6) | (0x8000 if rnd_il.random() < .5 else 0)))
+il_sw = il_mod.sweep(il_in)
+for a in range(0, 270):
+    want = min([v for s_, e_, v in il_in if s_ <= a <= e_] or [None]) if any(s_ <= a <= e_ for s_, e_, v in il_in) else None
+    got = [v for s_, e_, v in il_sw if s_ <= a <= e_]
+    if (got[0] if got else None) != want:
+        il_bad_n += 1
+ok('sweep: 80 random overlapping ranges agree with a per-address minimum (%d wrong)' % il_bad_n, il_bad_n == 0
+   and all(a[1] < b[0] for a, b in zip(il_sw, il_sw[1:])))
+il_top = il_mod.sweep([(4294967290, 4294967295, 3)])
+ok('sweep: the top of the address space does not overflow', il_top == [(4294967290, 4294967295, 3)])
+
+il_bin = geo_mod.pack(geo_mod.KIND_IPLIST, [(1000, 1999, 7), (3000, 3000, 0x8002)], [(5, 9, 1)], 1700000000, 'iplists-block', 'cd' * 32)
+il_h = geo_mod.parse_header(il_bin)
+ok('kind-3 file: 2-byte values, counts, header; read_ranges and lookup give the value back',
+   il_h['kind'] == 3 and il_h['vsize'] == 2 and il_h['v4'] == 2 and il_h['v6'] == 1 and geo_mod.read_ranges(il_bin) == ([(1000, 1999, 7), (3000, 3000, 0x8002)], [(5, 9, 1)])
+   and geo_mod.lookup(il_bin, '0.0.3.232') == 7 and geo_mod.lookup(il_bin, '0.0.11.184') == 0x8002 and geo_mod.lookup(il_bin, '0.0.7.208') is None)
+
+def il_dir(name, lists, sources):
+    d = os.path.join(il_work, name)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, 'lists.json'), 'w') as handle:
+        json_geo.dump({'v': 1, 'next_idx': 99, 'lists': lists}, handle)
+    for key, text in sources.items():
+        with open(os.path.join(d, key + '.txt'), 'w') as handle:
+            handle.write(text)
+    return d
+
+def il_list(i, kind, mode='enforce', enabled=True, force=False, id_=None):
+    return {'id': id_ or 'l%d' % i, 'idx': i, 'name': 'L%d' % i, 'type': kind, 'mode': mode, 'enabled': enabled, 'force': force}
+
+d1 = il_dir('c1', [il_list(1, 'block'), il_list(2, 'block', 'monitor'), il_list(3, 'allow'), il_list(4, 'block', enabled=False)],
+            {'l1': '203.0.113.0/24\n198.51.100.0/25\n2001:db8::/48\njunk\n', 'l2': '203.0.113.0/25\n192.0.2.0/24\n', 'l3': '203.0.113.64/26\n', 'l4': '8.8.8.0/24\n'})
+st1 = il_mod.compile_lists(d1, now=1800000000)
+blk = open(os.path.join(d1, 'block.bin'), 'rb').read()
+alw = open(os.path.join(d1, 'allow.bin'), 'rb').read()
+ok('compile: one file per type from the ENABLED lists; the disabled list is not in it', st1['ok'] and geo_mod.lookup(blk, '8.8.8.5') is None and geo_mod.lookup(alw, '203.0.113.70') == 3
+   and st1['types']['block']['lists'] == ['l1', 'l2'] and st1['types']['allow']['lists'] == ['l3'])
+ok('compile: the enforced list wins over the monitor list on an overlap (value 1, not 0x8002), the monitor-only part keeps bit 15',
+   geo_mod.lookup(blk, '203.0.113.9') == 1 and geo_mod.lookup(blk, '192.0.2.9') == 0x8002 and geo_mod.lookup(blk, '2001:db8::1') == 1)
+ok('compile: per-list counts (entries, ranges, addresses, skipped invalid lines)', st1['lists']['l1'] == {'entries': 3, 'v4': 2, 'v6': 1, 'addresses': 384, 'invalid': 1, 'wide': 0}
+   and st1['lists']['l3']['addresses'] == 64 and 'l4' not in st1['lists'])
+ok('compile: lists-status.json is written, atomically, with the time and no leftovers', json_geo.load(open(os.path.join(d1, 'lists-status.json')))['time'] == 1800000000
+   and not [n for n in os.listdir(d1) if '.tmp' in n])
+ok('compile: the header names the type and carries the build time and a sha256 of the sources', geo_mod.parse_header(blk)['built'] == 1800000000 and geo_mod.parse_header(blk)['source'] == 'iplists-block'
+   and len(geo_mod.parse_header(blk)['sha']) == 64 and geo_mod.parse_header(blk)['sha'] != '0' * 64)
+sha_before = geo_mod.parse_header(blk)['sha']
+with open(os.path.join(d1, 'l1.txt'), 'a') as handle:
+    handle.write('8.8.4.0/24\n')
+il_mod.compile_lists(d1, now=1800000100)
+blk2 = open(os.path.join(d1, 'block.bin'), 'rb').read()
+ok('compile: a changed source gives a new file and a new sha; the previous file stays as block.bin.prev',
+   geo_mod.parse_header(blk2)['sha'] != sha_before and geo_mod.lookup(blk2, '8.8.4.9') == 1 and open(os.path.join(d1, 'block.bin.prev'), 'rb').read() == blk)
+# wide entries, force, nothing to compile, a missing source
+d2 = il_dir('c2', [il_list(1, 'block'), il_list(2, 'block', force=True), il_list(3, 'allow')], {'l1': '64.0.0.0/4\n11.0.0.0/8\n2400::/31\n', 'l2': '96.0.0.0/3\n', 'l3': '64.0.0.0/4\n'})
+st2 = il_mod.compile_lists(d2, now=1)
+ok('compile: a block entry wider than /8 (IPv4) or /32 (IPv6) is dropped and counted unless the list is forced; an allow list is never limited',
+   st2['lists']['l1'] == {'entries': 1, 'v4': 1, 'v6': 0, 'addresses': 16777216, 'invalid': 0, 'wide': 2} and st2['lists']['l2']['wide'] == 0 and st2['lists']['l3']['wide'] == 0
+   and geo_mod.lookup(open(os.path.join(d2, 'block.bin'), 'rb').read(), '100.1.1.1') == 2 and geo_mod.lookup(open(os.path.join(d2, 'block.bin'), 'rb').read(), '70.1.1.1') is None)
+d3 = il_dir('c3', [il_list(1, 'block'), il_list(2, 'allow', enabled=False)], {'l1': '203.0.113.0/24\n', 'l2': '1.2.3.4\n'})
+il_mod.compile_lists(d3, now=1)
+ok('compile: no enabled allow list: no allow.bin at all (the guard opens nothing)', os.path.exists(os.path.join(d3, 'block.bin')) and not os.path.exists(os.path.join(d3, 'allow.bin')))
+with open(os.path.join(d3, 'l1.txt'), 'w') as handle:
+    handle.write('# only a comment\n')
+st3 = il_mod.compile_lists(d3, now=2)
+ok('compile: a list left with no entries removes its type file', st3['ok'] and not os.path.exists(os.path.join(d3, 'block.bin')) and st3['types']['block'] is None)
+il_mod.compile_lists(il_dir('c3b', [il_list(1, 'block')], {'l1': '203.0.113.0/24\n'}), now=1)
+d4 = os.path.join(il_work, 'c3b')
+keep4 = open(os.path.join(d4, 'block.bin'), 'rb').read()
+os.unlink(os.path.join(d4, 'l1.txt'))
+st4 = il_mod.compile_lists(d4, now=5)
+ok('compile: an enabled list whose source is missing is an error, the previous file is kept untouched', not st4['ok'] and any('l1' in e for e in st4['errors']) and open(os.path.join(d4, 'block.bin'), 'rb').read() == keep4)
+d5 = os.path.join(il_work, 'c5')
+os.makedirs(d5)
+ok('compile: no lists.json at all: nothing to do, no files, ok', il_mod.compile_lists(d5, now=1)['ok'] and not os.path.exists(os.path.join(d5, 'block.bin')))
+with open(os.path.join(d5, 'lists.json'), 'w') as handle:
+    handle.write('{not json')
+ok('compile: a broken lists.json is "no lists", not an exception', il_mod.compile_lists(d5, now=1)['ok'])
+with open(os.path.join(d5, 'lists.json'), 'w') as handle:
+    json_geo.dump({'lists': [{'id': '../x', 'idx': 1, 'type': 'block', 'enabled': True}, {'id': 'ok', 'idx': 0, 'type': 'block'}, {'id': 'ok2', 'idx': 40000, 'type': 'block'}, {'id': 'a', 'idx': 1, 'type': 'bogus'}, 'x']}, handle)
+ok('compile: records with a bad id, index or type are ignored (the id is never used as a path unvalidated)', il_mod.read_meta(d5) == [{'id': '../x', 'idx': 1, 'type': 'block', 'enabled': True}] and il_mod.compile_lists(d5, now=1)['ok'] is not None)
+ok('main(): exit 0 on success, 1 on an error or a missing directory',
+   il_mod.main(['--dir', d1]) == 0 and il_mod.main(['--dir', d4]) == 1 and il_mod.main(['--dir', os.path.join(il_work, 'nope')]) == 1)
+ok('worker: iplist_compile is a known job type with a handler; panel and worker agree on the list',
+   'iplist_compile' in worker_geo.HANDLERS and worker_geo.validate({'id': 'a1', 'type': 'iplist_compile', 'params': {}})[0]
+   and "'iplist_compile'" in open(os.path.join(IL_ROOT, 'panel', 'jobs.php')).read())
+
+# -- PHP and Python build the same bytes, and the guard reads what Python wrote
+php_il = shutil.which('php')
+if not php_il:
+    skip('IP list PHP parity', 'php not found')
+else:
+    rnd_il.seed(3)
+
+    def r4():
+        a = rnd_il.getrandbits(32)
+        return '%d.%d.%d.%d/%d' % (a >> 24, (a >> 16) & 255, (a >> 8) & 255, a & 255, rnd_il.choice([8, 12, 16, 20, 24, 28, 32]))
+
+    def r6():
+        return '%s/%d' % (ip_geo.IPv6Address(rnd_il.getrandbits(128)), rnd_il.choice([32, 48, 64, 128]))
+    lists_p = [il_list(1, 'allow'), il_list(2, 'block'), il_list(3, 'block', 'monitor'), il_list(4, 'allow', 'monitor'), il_list(5, 'block', force=True)]
+    sources_p = {}
+    for item in lists_p:
+        lines = [r4() for _ in range(1500)] + [r6() for _ in range(150)] + ['::ffff:1.2.3.0/120', '# c', 'junk', '10.1.0.0/9', '0.0.0.0/0', '203.0.113.0/24', '203.0.113.64/26']
+        sources_p[item['id']] = '\r\n'.join(lines) + '\r\n'
+    dp1 = il_dir('p1', lists_p, sources_p)
+    dp2 = il_dir('p2', lists_p, sources_p)
+    stp = il_mod.compile_lists(dp1, now=1700000000)
+    code = ('define("GV_BOOT", 1); define("GV_NO_AUTORUN", 1); define("GP_BOOT", 1); $r = $argv[1];'
+            'require $r . "/guard/guard.php"; require $r . "/panel/config_io.php"; require $r . "/panel/jobs.php"; require $r . "/panel/iplists.php";'
+            '$s = gp_iplists_compile(1700000000); echo json_encode($s["ok"]);')
+    env_p = dict(os.environ)
+    env_p['GV_LISTS_DIR'] = dp2
+    out_p = sp_il.run([php_il, '-r', code, IL_ROOT], env=env_p, stdout=sp_il.PIPE, stderr=sp_il.PIPE, universal_newlines=True)
+    same = all(open(os.path.join(dp1, n), 'rb').read() == open(os.path.join(dp2, n), 'rb').read() for n in ('allow.bin', 'block.bin'))
+    ok('PHP (panel) and Python (worker) compile the SAME bytes from the same lists (allow and block, v4 + v6, monitor + enforce, wide, mapped, CRLF)', out_p.stdout.strip() == 'true' and same and stp['ok'])
+    st_php = json_geo.load(open(os.path.join(dp2, 'lists-status.json')))
+    ok('...and the same per-list counts and type summaries', st_php['lists'] == stp['lists'] and st_php['types']['block']['v4'] == stp['types']['block']['v4'] and st_php['types']['allow']['sha'] == stp['types']['allow']['sha'])
+    probes = ['203.0.113.70', '203.0.113.5', '1.2.3.77', '10.1.2.3', '8.8.8.8', '2001:db8::1', '::ffff:203.0.113.5', '255.255.255.255', '0.0.0.0', 'bad']
+    code2 = ('define("GV_BOOT", 1); define("GV_NO_AUTORUN", 1); require $argv[1] . "/guard/guard.php";'
+             'foreach (array_slice($argv, 2) as $ip) { $c = gv_iplist_check($ip); echo json_encode(array(isset($c["allow"]["idx"]) ? $c["allow"]["idx"] . ($c["allow"]["monitor"] ? "m" : "") : "-", isset($c["block"]["idx"]) ? $c["block"]["idx"] . ($c["block"]["monitor"] ? "m" : "") : "-")), "\n"; }')
+    env_p['GV_LISTS_DIR'] = dp1
+    out2 = sp_il.run([php_il, '-r', code2, IL_ROOT] + probes, env=env_p, stdout=sp_il.PIPE, stderr=sp_il.PIPE, universal_newlines=True)
+    php_res = [json_geo.loads(x) for x in out2.stdout.strip().split('\n')]
+
+    def py_res(ip):
+        out = []
+        for kind in ('allow', 'block'):
+            try:
+                v = geo_mod.lookup(open(os.path.join(dp1, kind + '.bin'), 'rb').read(), ip)
+            except (ValueError, geo_mod.GeoError):
+                v = None
+            out.append('-' if v is None else '%d%s' % (v & 0x7FFF, 'm' if v & 0x8000 else ''))
+        return out
+    ok('the PHP guard and the Python reader agree on every probe address of the Python-written files (%d probes)' % len(probes), out2.returncode == 0 and php_res == [py_res(ip) for ip in probes])
+    ok('...and the probes really hit (not an all-miss agreement)', php_res[0] != ['-', '-'] and sum(1 for r in php_res if r != ['-', '-']) >= 4)
+shutil.rmtree(il_work, ignore_errors=True)
+
+# -- snapshot: hits of the lists
+ok('snapshot: list_ids reads IPL_ALLOW / IPL_BLOCK and their SH_ forms, nothing else',
+   snap_il.list_ids({'rs': ['IPL_BLOCK:scrapers', 'SH_IPL_ALLOW:partners', 'RULE:r1', 'IPL_BLOCK:', 'XIPL_BLOCK:z', 5, 'IPL_ALLOW:' + 'a' * 25]}) == ['block:scrapers', 'allow:partners']
+   and snap_il.list_ids({}) == [] and snap_il.list_ids({'rs': None}) == [])
+il_hits = snap_il.count_rule_hits([{'ts': 100.0, 'rs': ['IPL_BLOCK:x', 'RULE:a']}, {'ts': 200.0, 'rs': ['SH_IPL_BLOCK:x']}, {'ts': 300.0, 'rs': ['IPL_ALLOW:y']}])
+ok('snapshot: list hits are counted next to rule hits under an "ipl:" key, per type and id', il_hits['ipl:block:x'] == [2, 200.0] and il_hits['ipl:allow:y'] == [1, 300.0] and il_hits['a'] == [1, 100.0])
+ok('snapshot: split_list_hits separates them for the panel (iplists keyed type:id)',
+   snap_il.split_list_hits(il_hits) == ({'a': [1, 100.0]}, {'block:x': [2, 200.0], 'allow:y': [1, 300.0]}))
+ok('snapshot: a rule id that looks like a list key cannot collide (rule ids never start with "ipl:")', snap_il.split_list_hits({'r1': [1, 1.0]}) == ({'r1': [1, 1.0]}, {}))
+
+# ---------------------------------------------------------------------------
 section('Crontab check (scripts/cron-check.sh): parser, states, schedules, GV_PYTHON, CageFS, CRLF')
 import importlib.util as ilu_cc
 import json as json_cc

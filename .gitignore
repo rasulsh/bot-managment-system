@@ -83,3 +83,15 @@ logs/jobs.log
 logs/jobs-errors.log
 logs/jobs-*.log.gz
 logs/jobs-errors-*.log.gz
+
+# IP lists: written by the panel, local to each install.
+lists/*.txt
+lists/*.bin
+lists/*.bin.prev
+lists/lists.json
+lists/lists-status.json
+lists/*.tmp*
+lists/*.rb*
+lists/.pending-*
+lists/.*.lock
+lists/.compile.lock

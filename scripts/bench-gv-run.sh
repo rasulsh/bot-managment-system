@@ -19,6 +19,11 @@ if [ -f "$ROOT/guard/geo.php" ]; then
 	# lookup runs once. --geo-ua: 200 UA+country rules whose UA misses, so no lookup at all.
 	ARGSETS+=("--geo-log" "--geo-rules=200" "--geo-rules=200 --geo-ua" "--lookup")
 fi
+if [ -f "$ROOT/guard/iplist.php" ]; then
+	# IP lists: a block file, then an allow AND a block file, of 100k IPv4 + 10k IPv6 ranges each: the whole gv_run
+	# and the lookup alone.
+	ARGSETS+=("--lists=100000,10000 --list-types=block" "--lists=100000,10000" "--list-lookup --list-types=block" "--list-lookup")
+fi
 for args in "${ARGSETS[@]}"; do
 	for _ in $(seq 1 "$RUNS"); do
 		# shellcheck disable=SC2086

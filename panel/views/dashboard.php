@@ -8,6 +8,7 @@
 // Heavy numbers come from analyzer/snapshot.json; anything that decides an alert does not,
 // because the snapshot job is one of the things that can die.
 $s = is_array($snapshot) ? $snapshot : array();
+$isum = isset($isum) ? $isum : array('total' => 0, 'enabled' => 0, 'by' => array());   // enabled IP lists (index.php passes it)
 $traffic = isset($s['traffic']) && is_array($s['traffic']) ? $s['traffic'] : array();
 $decisions = isset($s['decisions']) && is_array($s['decisions']) ? $s['decisions'] : array();
 $funnel = isset($s['funnel']) && is_array($s['funnel']) ? $s['funnel'] : array();
@@ -91,6 +92,12 @@ $queue = isset($queue) && is_array($queue) ? $queue : array('length' => 0, 'olde
 			<span class="gp-stat-val"><a href="index.php?r=rules"><?= gp_num($rsum['enabled']) ?> / <?= gp_num($rsum['total']) ?></a></span></div>
 		<?php foreach ($rsum['by'] as $k => $n): list($rm, $ra) = explode('/', $k); ?>
 		<div class="gp-stat-row"><span class="gp-stat-key gp-mono"><?= gp_e(gp_t('rules_mode_' . $rm)) ?> · <?= gp_e(gp_t('rules_act_' . $ra)) ?></span>
+			<span class="gp-stat-val"><?= gp_num($n) ?></span></div>
+		<?php endforeach; ?>
+		<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('dash_iplists')) ?></span>
+			<span class="gp-stat-val"><a href="index.php?r=iplists"><?= gp_num($isum['enabled']) ?> / <?= gp_num($isum['total']) ?></a></span></div>
+		<?php foreach ($isum['by'] as $k => $n): list($it, $im) = explode('/', $k); ?>
+		<div class="gp-stat-row"><span class="gp-stat-key gp-mono"><?= gp_e(gp_t('ipl_type_' . $it)) ?> · <?= gp_e(gp_t('rules_mode_' . $im)) ?></span>
 			<span class="gp-stat-val"><?= gp_num($n) ?></span></div>
 		<?php endforeach; ?>
 	</div>

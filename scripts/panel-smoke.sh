@@ -125,11 +125,43 @@ curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=de
 rp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=rules")"
 check "the country rule is deleted again" "$(grep -q 'Smoke geo rule' <<<"$rp" && echo 0 || echo 1)"
 
+# IP lists: a refused save needs confirmation (nothing saved), then create, list, tester, entries, export, toggle, delete.
+ip="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=iplists")"
+check "the IP lists page renders with its five tabs and the precedence note" "$([ "$(grep -o 'role="tab"' <<<"$ip" | wc -l | tr -d ' ')" = 5 ] && grep -q 'Order of decisions' <<<"$ip" && echo 1 || echo 0)"
+tok="$(printf '%s' "$ip" | csrf)"
+resp="$(curl -sk -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=save' -d 'name=Smoke list' -d 'type=block' -d 'mode=monitor' -d 'enabled=1' \
+	--data-urlencode $'text=203.0.113.0/24\nbogus line\n10.0.0.0/8\n' "$URL?r=iplists")"
+check "invalid and refused lines are listed with their line numbers and nothing is saved" "$(grep -q 'bogus line' <<<"$resp" && grep -q 'name="accept"' <<<"$resp" && grep -q 'name="pending"' <<<"$resp" && echo 1 || echo 0)"
+ip="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=iplists")"
+check "...the list does not exist yet" "$(grep -q 'smoke-list' <<<"$ip" && echo 0 || echo 1)"
+pending="$(grep -o 'name="pending" value="[a-f0-9]*"' <<<"$resp" | head -1 | sed 's/.*value="//; s/"$//')"
+tok="$(printf '%s' "$resp" | csrf)"
+code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=save' -d 'name=Smoke list' -d 'type=block' -d 'mode=monitor' -d 'enabled=1' -d 'accept=1' -d "pending=$pending" "$URL?r=iplists")"
+check "accepting the valid lines saves the list (303)" "$([ "$code" = 303 ] && echo 1 || echo 0)"
+ip="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=iplists")"
+check "the list is shown with its id" "$(grep -q 'Smoke list' <<<"$ip" && grep -q 'smoke-list' <<<"$ip" && echo 1 || echo 0)"
+tp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'test=1' --data-urlencode 'ip=203.0.113.9' "$URL?r=iplists")"
+check "the lookup tester finds the address in the list (monitor)" "$(grep -q 'smoke-list' <<<"$tp" && grep -q '203.0.113.0/24' <<<"$tp" && echo 1 || echo 0)"
+ep="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'list=smoke-list' --data-urlencode 'entry=203.0' "$URL?r=iplists")"
+check "the entries tab lists the entry and takes the include / exclude filter" "$(grep -q '203.0.113.0/24' <<<"$ep" && echo 1 || echo 0)"
+exp="$(curl -sk -c "$JAR" -b "$JAR" -D - "$URL?r=iplists&export=smoke-list")"
+check "export returns the source as a text attachment" "$(grep -qi 'content-disposition: attachment' <<<"$exp" && grep -q '203.0.113.0/24' <<<"$exp" && echo 1 || echo 0)"
+tok="$(printf '%s' "$ip" | csrf)"
+curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=set' -d 'id=smoke-list' -d 'enabled=0' "$URL?r=iplists"
+ip="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=iplists")"
+check "toggle disables the list" "$(grep -q '>Enable<' <<<"$ip" && echo 1 || echo 0)"
+tok="$(printf '%s' "$ip" | csrf)"
+code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" -d 'do=delete' -d 'id=smoke-list' "$URL?r=iplists")"
+check "a POST without the CSRF token deletes nothing" "$([ "$code" != 303 ] && echo 1 || echo 0)"
+curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=delete' -d 'id=smoke-list' "$URL?r=iplists"
+ip="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=iplists")"
+check "delete removes the list" "$(grep -q 'Smoke list' <<<"$ip" && echo 0 || echo 1)"
+
 # Every page is English and left-to-right, with Latin digits only. The logs,
 # identity, settings and config file pages are checked for direction only: they
 # show request data or operator-written values (the challenge page text, which
 # ships in Persian) as they are, and those may contain any script.
-for r in dashboard logs identity overrides rules geo replay models settings config_file jobs audit; do
+for r in dashboard logs identity overrides rules geo iplists replay models settings config_file jobs audit; do
 	page="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=$r")"
 	check "page $r has the viewport meta tag" "$(grep -q 'name="viewport"' <<<"$page" && echo 1 || echo 0)"
 	check "page $r is English and left-to-right" "$(grep -q '<html lang="en" dir="ltr">' <<<"$page" && echo 1 || echo 0)"

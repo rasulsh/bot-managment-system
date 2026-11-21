@@ -6,12 +6,12 @@
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
 // $v4: list of array(start_int, end_int, value), $v6: list of array(start_bin16, end_bin16, value).
-// Both must already be sorted and non-overlapping. value: 2-letter string (kind 1) or int (kind 2).
+// Both must already be sorted and non-overlapping. value: 2-letter string (kind 1) or int (kind 2, kind 3).
 function gf_pack($kind, array $v4, array $v6, $built = 1700000000, $source = 'fixture.dat') {
-	$vs = $kind === 1 ? 2 : ($kind === 2 ? 4 : 0);
+	$vs = $kind === 2 ? 4 : 2;          // country 2, asn 4, ip list 2 (uint16: bit 15 monitor, bits 0-14 index)
 	$out = 'GVRG' . pack('nCCNNNN', 1, $kind, $vs, $built, count($v4), count($v6), 0)
 		. str_repeat("\0", 32) . str_pad(substr($source, 0, 72), 72, "\0");
-	$val = function ($v) use ($kind) { return $kind === 1 ? $v : ($kind === 2 ? pack('N', $v) : ''); };
+	$val = function ($v) use ($kind) { return $kind === 1 ? $v : ($kind === 2 ? pack('N', $v) : pack('n', $v)); };
 	foreach ($v4 as $r) { $out .= pack('NN', $r[0], $r[1]) . $val($r[2]); }
 	foreach ($v6 as $r) { $out .= $r[0] . $r[1] . $val($r[2]); }
 	return $out;
@@ -47,7 +47,7 @@ function gf_cidr6($cidr) {
 function gf_random($kind, $n4, $n6, $seed = 7) {
 	mt_srand($seed);
 	$ccs = array('US', 'DE', 'FR', 'GB', 'IR', 'CN', 'RU', 'BR', 'IN', 'JP', 'NL', 'TR', 'AE', 'CA', 'AU');
-	$val = function () use ($kind, $ccs) { return $kind === 1 ? $ccs[mt_rand(0, count($ccs) - 1)] : mt_rand(1, 400000); };
+	$val = function () use ($kind, $ccs) { return $kind === 1 ? $ccs[mt_rand(0, count($ccs) - 1)] : ($kind === 3 ? mt_rand(1, 40) : mt_rand(1, 400000)); };
 	$v4 = array(); $pos = 16777216; $step = (int)((4294967296 - 33554432) / max(1, $n4));
 	for ($i = 0; $i < $n4; $i++) {
 		$len = mt_rand(1, max(1, $step - 2));

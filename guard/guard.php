@@ -11,6 +11,7 @@ require_once __DIR__ . '/log.php';
 require_once __DIR__ . '/challenge.php';
 require_once __DIR__ . '/outcome.php';
 require_once __DIR__ . '/geo.php';
+require_once __DIR__ . '/iplist.php';
 require_once __DIR__ . '/rules.php';
 
 // --------------------------------------------------------------------------
@@ -1358,6 +1359,37 @@ function gv_run($t0) {
 	// on, so replay can re-decide from the log alone.
 	$gate = gv_is_gate($f, !empty($cfg['challenge']['trust_headers']));
 	$st['gate'] = $gate ? 1 : 0;
+
+	// 3a. IP lists (lists/allow.bin, lists/block.bin). A binary search on the
+	// compiled files, only when an enabled list of that type exists. No Redis.
+	//   allow list, enforce: same effect as an operator allow override, decided
+	//     here: no rules, scoring, counters or challenge, and not even a Redis
+	//     connection. It beats a block list and every rule.
+	//   block list, enforce: 403 now. Evaluated BEFORE the known-bot pass, so a
+	//     listed address cannot get through by claiming to be Googlebot, and before
+	//     the counters (a blocked address costs no Redis work). The holdout and
+	//     enforce.block do not apply: the list's own mode decides, like a rule.
+	//   monitor list: only SH_IPL_*:<id> in rs, the request goes on as usual.
+	// With the secret unconfigured a block list is not applied (like every other
+	// enforcement); an allow list only ever relaxes, so it is.
+	$ipl = gv_iplist_check($f['ip']);
+	if ($ipl['allow'] !== null) {
+		$st['rs'][] = gv_iplist_reason('allow', $ipl['allow']);
+		if (!$ipl['allow']['monitor']) {
+			$st['ovr'] = 'allow';
+			gv_emit($f, $st, 'allow_override', 0, $t0, $log);
+			gv_arm_outcome($cfg, $f, $log);
+			return;                                   // zero bytes of output
+		}
+	}
+	if ($ipl['block'] !== null && $cfg['secret'] !== 'CHANGE_ME') {
+		$st['rs'][] = gv_iplist_reason('block', $ipl['block']);
+		if (!$ipl['block']['monitor']) {
+			gv_emit($f, $st, '403', 0, $t0, $log);
+			gv_send_403();
+			exit;
+		}
+	}
 
 	// 3b. Access rules (guard/rules.json). A pure match on the request facts: no
 	// Redis, no DNS. It runs after the kill switch and the exemptions (both
