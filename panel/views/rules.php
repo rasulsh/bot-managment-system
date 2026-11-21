@@ -307,8 +307,8 @@ $err_text = function ($field) use ($errors, $details) {
 
 	<?php
 	$rflt = array('action' => array('rules_flt_action', 'is', array('block', 'challenge', 'log')), 'mode' => array('rules_flt_mode', 'is', array('enforce', 'monitor')),
-		'state' => array('rules_flt_state', 'is', array('active', 'disabled', 'expired')), 'cc' => array('geo_cc', 'is', array()),
-		'asn' => array('geo_asn', 'is', array()), 'ua' => array('logs_ua', 'has', array()), 'q' => array('rules_flt_q', 'has', array()));
+		'state' => array('rules_flt_state', 'is', array('active', 'disabled', 'expired')), 'cc' => array('geo_cc', 'is', array(GP_FILTER_NONE)),
+		'asn' => array('geo_asn', 'is', array(GP_FILTER_NONE)), 'ua' => array('logs_ua', 'has', array()), 'q' => array('rules_flt_q', 'has', array()));
 	$rchips = gp_filter_chips($filter, array_map(function ($d) { return gp_t($d[0]); }, $rflt),
 		array_map(function ($d) { return $d[1] === 'has' ? 'text' : 'choice'; }, $rflt),
 		function ($q) { return 'index.php?' . http_build_query(array_merge(array('r' => 'rules'), $q)); });

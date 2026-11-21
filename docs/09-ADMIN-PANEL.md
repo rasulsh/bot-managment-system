@@ -269,8 +269,18 @@ who steals the session.
   keeps the field names and adds `<key>_op=not` (absent = include), so older links keep working, and paging, the
   CSV export and *Share link* keep the operators. Active filters show as removable chips above the table, an
   exclude one marked "is not" / "does not contain". An exclude filter can scan more lines before it finds rows; the
-  existing "scan limit reached" notice appears when a cap is hit. Rows that never carried a value (no `cc`, no
-  outcome status) read as empty, so "country is not IR" also lists them.
+  existing "scan limit reached" notice appears when a cap is hit.
+* **Missing values follow the rule engine: unknown matches neither.** Some fields can be absent from a row: country
+  and ASN (only written when a lookup ran; ASN 0 = none found), the outcome status (needs `capture_outcomes`), the bot
+  verdict (`botv`), an operator override (`ovr`), the device id (a client with no token), the reasons list. On these
+  *optional* fields a row **without** the value matches **neither "is" nor "is not"**: "country is not IR" lists only rows
+  whose country is known and is not IR, so counts are never inflated by rows that were never looked up. The value
+  **`(none)`** (offered in the datalist and explained in the tooltip) means "absent or empty": **is (none)** lists those
+  rows, **is not (none)** lists the rows that have a value, and `(none)` can be mixed into the comma list
+  (`cc=IR,(none)` = Iran or unknown; "is not IR,(none)" = a known country other than Iran). The Rules table
+  follows the same rule for country and ASN: a rule with no country condition matches neither "country is IR" nor
+  "is not IR"; `(none)` lists those rules. Fields every row always has (action, address, path, User-Agent, token, shadow,
+  holdout) keep plain include / exclude. `(none)` survives paging, the CSV export link and *Share link*.
 
 ## Testing
 

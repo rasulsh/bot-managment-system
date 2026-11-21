@@ -14,6 +14,9 @@ if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 // Everything here is pure: the parser reads an array, the matcher reads a value,
 // nothing touches a file or the request.
 
+// The token that means "this field is absent or empty on the row". Only meaningful on
+// optional fields (see gp_filter_test).
+define('GP_FILTER_NONE', '(none)');
 define('GP_FILTER_MAX_VALUES', 8);
 define('GP_FILTER_MAX_LEN', 200);
 
@@ -36,7 +39,8 @@ function gp_filter_parse(array $get, array $spec) {
 				$p = trim($p);
 				if ($p === '') { continue; }
 				$p = substr($p, 0, GP_FILTER_MAX_LEN);
-				if ($ci) { $p = strtoupper($p); }
+				if (strtolower($p) === GP_FILTER_NONE) { $p = GP_FILTER_NONE; }
+				elseif ($ci) { $p = strtoupper($p); }
 				if (!in_array($p, $vals, true)) { $vals[] = $p; }
 				if (count($vals) >= GP_FILTER_MAX_VALUES) { break; }
 			}
@@ -80,12 +84,25 @@ function gp_filter_in_cidr($ip, $cidr) {
 
 // Test one value (or a list of values, e.g. the reasons of a row) against a filter
 // value. $type: choice | ident | text. Include = any value matches; not = none does.
-function gp_filter_test($type, $f, $actual, $ci = false) {
+//
+// $optional marks a field a row may lack (country, ASN, outcome status, device, ...).
+// Such a field follows the rule engine's "unknown matches neither": a row WITHOUT a
+// value matches neither "is" nor "is not". The explicit value (none) means "absent or
+// empty": "is (none)" lists those rows, "is not (none)" lists the rows that have a
+// value, and (none) can sit in a comma list next to real values. A field every row
+// always has ($optional false) keeps the plain include / exclude behaviour.
+function gp_filter_test($type, $f, $actual, $ci = false, $optional = false) {
 	$def = gp_filter_def($f);
 	if ($def === null) { return true; }
 	$actual = is_array($actual) ? array_map('strval', array_values($actual)) : array((string)$actual);
+	$want_none = in_array(GP_FILTER_NONE, $def['v'], true);
+	if ($optional) {
+		$actual = array_values(array_filter($actual, function ($a) { return $a !== ''; }));
+		if (!$actual) { return $want_none && empty($def['not']); }
+	}
 	$hit = false;
 	foreach ($def['v'] as $want) {
+		if ($optional && $want === GP_FILTER_NONE) { continue; }
 		foreach ($actual as $a) {
 			if ($type === 'text') { $m = ($want === '' || stripos($a, $want) !== false); }
 			elseif ($type === 'ident' && $a !== '' && strpbrk($want, '/') !== false) { $m = gp_filter_in_cidr($a, $want); }

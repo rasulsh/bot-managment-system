@@ -17,6 +17,11 @@ What changed in each release and what to do about it. Newest first.
 * `panel/assets/app.css` is rebuilt (`npx tailwindcss@3 -c panel/assets/tailwind.config.js -i panel/assets/app.src.css -o panel/assets/app.css --minify`).
 * New test: `scripts/panel-layout-test.sh` (browser, 1600 px / 390 px), also run by `panel-smoke.sh` and in CI.
 
+**Missing values.** On optional fields (country, ASN, status, bot verdict, override, device, reasons) a row without the value
+matches neither "is" nor "is not" (like an unknown country in a rule); the value `(none)` selects those rows
+(`is (none)`, `is not (none)`, or mixed into a list). A saved link with "is not" on such a field now lists fewer rows than
+before (rows that never had the value are no longer included).
+
 **Compatibility.** Every existing link keeps working (a bare `act=403` is "is 403"). `gp_log_match()` still accepts the old
 scalar filters. `gp_audit_read()` still accepts a search string.
 
