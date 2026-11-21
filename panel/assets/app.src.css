@@ -538,3 +538,13 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
  * instead of widening the page. */
 .gp-row, .gp-row-meta, .gp-row-head { @apply min-w-0; }
 .gp-row code, .gp-row .gp-mono { overflow-wrap: anywhere; max-width: 100%; }
+
+/* --- dashboard: alerts, KPI grid, details ------------------------------ */
+.gp-alert-list { @apply m-0 flex flex-col gap-2 p-0; list-style: none; }
+.gp-alert { @apply flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-sm; }
+.gp-alert-critical { @apply border-bad-line bg-bad-bg; }
+.gp-alert-warning { @apply border-warn-line bg-warn-bg; }
+.gp-alert-text { @apply min-w-0 flex-1 break-words; }
+.gp-grid-kpi { @apply grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-9; }
+.gp-pre { @apply overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-sunken p-3 text-xs; }
+.gp-details > summary { @apply text-base; }

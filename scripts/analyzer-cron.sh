@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # the JS_* variables are read by scripts/lib-jobstatus.sh
 # Bot Guard analyzer cron wrapper.
 #
 #   scripts/analyzer-cron.sh verify     fast reverse-DNS loop
@@ -61,24 +62,51 @@ esac
 # training modes and the worker (which runs the same code in-process) must never
 # run side by side. Read-mostly modes keep a lock of their own.
 case "$MODE" in
-	nightly|train|train-clf|worker) LOCK="$ROOT/analyzer/.write.lock" ;;
-	*)                              LOCK="$ROOT/analyzer/.$MODE.lock" ;;
+	nightly|train|train-clf|worker) LOCK="${GV_LOCK_DIR:-$ROOT/analyzer}/.write.lock" ;;
+	*)                              LOCK="${GV_LOCK_DIR:-$ROOT/analyzer}/.$MODE.lock" ;;
 esac
 
-if ! command -v flock >/dev/null 2>&1; then
-	echo "flock not available: running $MODE without a lock"
-	exec "$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
+# Job status (scripts/lib-jobstatus.sh): every run records its start, end, exit code, duration, the last
+# error lines and whether it was skipped by the lock, in analyzer/.jobstatus-<mode>.json and logs/jobs.log;
+# a failure also leaves its captured stderr in logs/jobs-errors.log. A trap records a crash or a signal.
+# report keeps its stdout untouched (it is piped to mail); everything else is replayed unchanged.
+JS_ROOT="$ROOT"
+# shellcheck source=lib-jobstatus.sh
+. "$ROOT/scripts/lib-jobstatus.sh"
+js_begin "$MODE"
+[ "$MODE" = report ] && JS_PASS_STDOUT=1
+
+# Preflight: a Python that cannot import the packages used to make every job "succeed" while storing
+# nothing. Now it is a recorded failure with the fix in the message.
+if ! js_preflight "$PYTHON" "$MODE"; then
+	exit 3
 fi
 
-# -E 99 makes "could not take the lock" distinguishable from the job's own
-# exit status, so an overlapping firing is a clean skip rather than an error.
-set +e
-flock -n -E 99 "$LOCK" "$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
-status=$?
-set -e
+run_job() {
+	if ! command -v flock >/dev/null 2>&1; then
+		echo "flock not available: running $MODE without a lock"
+		"$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
+		return $?
+	fi
+	# -E 99 makes "could not take the lock" distinguishable from the job's own
+	# exit status, so an overlapping firing is a clean skip rather than an error.
+	flock -n -E 99 "$LOCK" "$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
+}
+
+js_exec run_job
+status="$JS_EXIT"
 
 if [ "$status" -eq 99 ]; then
 	echo "Another $MODE run is already in progress; skipping this firing."
+	js_skipped
+	JS_EXIT=0
 	exit 0
+fi
+
+# The crontab check (scripts/cron-check.sh) is refreshed into analyzer/.cron-check.json for a panel that
+# cannot run it itself. At most every 10 minutes, best effort, never part of the job's result.
+CC="${GV_JOBSTATUS_DIR:-$ROOT/analyzer}/.cron-check.json"
+if [ ! -f "$CC" ] || [ -n "$(find "$CC" -mmin +10 2>/dev/null)" ]; then
+	( "$ROOT/scripts/cron-check.sh" --json > "$CC.tmp$$" 2>/dev/null && mv -f "$CC.tmp$$" "$CC" ) >/dev/null 2>&1 || rm -f "$CC.tmp$$"
 fi
 exit "$status"

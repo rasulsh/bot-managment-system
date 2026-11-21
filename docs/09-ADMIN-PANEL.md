@@ -248,6 +248,42 @@ who steals the session.
   export has both columns.
 - **Audit** — the append-only trail, searchable (filters: event, user, text; each include or exclude).
 
+## Dashboard, job health and alerts
+
+The dashboard is ordered by importance. Anything that decides an alert is read **live** (a file stat or a small read, one
+cheap Redis command), never from the snapshot, because the snapshot job is one of the things that can die.
+
+1. **Needs attention** (only when something is wrong; critical red, warning amber, each with an Open link): web exposure;
+   Redis down; rows logged in degraded mode in the last 15 minutes; new `guard-errors.log` lines; a background job failing,
+   late, or "did nothing useful", or a required job that never ran; panel jobs stuck in the queue (older than 5 minutes);
+   free disk below `log_min_free_mb`; logs over the cap; no snapshot or a stale one; analyzer and panel time zones differ;
+   **PR 1:** `rules.json` invalid, `rules.cache.php` older than `rules.json` (the guard then reads the JSON on every request);
+   **PR 2:** a GeoIP database missing or corrupt while a geo rule is enabled (critical), older than 45 days (warning);
+   `secret` or `holdout_salt` still the placeholder; Redis not on `maxmemory-policy noeviction` (read with `CONFIG GET`, unknown
+   when forbidden); crontab entries missing (critical), disabled, pointing at another install, running too rarely, or
+   `GV_PYTHON` missing or invalid (warnings).
+2. **Protection state:** the kill switch (prominent), each enforce toggle, enabled rules by mode and action, and a global summary:
+   *monitor only* (also when `secret` is the placeholder, which forces it), *partly enforcing*, *enforcing*.
+3. **Last 24 hours:** requests, allowed, blocked (403), rate-limited (429), challenged, challenge success rate, rule hits,
+   honeypot hits and degraded rows, each against the 24 hours before (from the snapshot).
+4. **Top lists** (each entry opens the Logs page with the matching filter): rules by hits, reasons, addresses, devices and
+   User-Agents being acted on, countries (needs *log country*), paths hit by blocked clients.
+5. **Details** (collapsible): the job table, data pipeline, log storage, system status, signals, models, coverage and charts.
+
+A **Cron setup** card shows when a required job has never run or the crontab check found a problem: the exact lines to add for
+what is missing, built from this install's real directory and starting with the `GV_PYTHON=` line, and the command to open the
+editor (`crontab -e`).
+
+**Jobs page.** The crontab check runs `scripts/cron-check.sh` through `proc_open` (argv array, stderr to `/dev/null`, 3 s read limit,
+SIGTERM then SIGKILL after 1 s for a child that hangs); the result is cached in `analyzer/.cron-check-live.json` for 5 minutes, so the dashboard
+and the Jobs page never start a process per view, and **Check again** (CSRF, audit-logged, once per 30 s for everyone) refreshes it. If the live check cannot run,
+the copy the cron wrapper writes is shown. A table per job (state, last success, last failure, next expected run, first line of the last error; the
+expected interval is editable in Settings -> Analyzer), the crontab check, the queue (length and age of the oldest job) and the
+jobs started from the panel (they now record exit code, duration, warnings and the result of a training run). A job's detail
+shows the captured error text (secrets redacted, shown escaped), the last runs from `logs/jobs.log`, and **Mark this error as
+seen** (audit-logged: it silences the alert for that failure; a newer failure raises it again). `proc_open` is used in exactly
+one place, with an argv array, to run `scripts/cron-check.sh`.
+
 ## Layout, tabs, tooltips and filters
 
 * **Width.** The content is up to 1680 px wide (fluid below that); card grids use 1 column on a phone, 2 from

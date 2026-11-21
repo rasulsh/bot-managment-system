@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from analyzer import classifier as clf_mod
 from analyzer import config as config_mod
 from analyzer import features as features_mod
+from analyzer import jobreport
 from analyzer import labels as labels_mod
 from analyzer import logs as logs_mod
 from analyzer import model as model_mod
@@ -271,8 +272,29 @@ def main(argv=None):
             print(warning, file=sys.stderr)
             print(warning)
 
+    # What a "successful" run that did nothing useful must say out loud (status: warning).
     if client is None:
         print('Redis unavailable: verdicts were computed but not stored.')
+        jobreport.warn('Redis unavailable: verdicts were computed but not stored')
+    if not rows:
+        jobreport.warn('no input rows: the log directory has no decision rows in the last %s day(s)' % cfg['window_days'])
+    if not model_mod.SKLEARN_AVAILABLE:
+        jobreport.warn('scikit-learn is not installed for this Python: no model or classifier (check GV_PYTHON)')
+    elif bundle is None:
+        jobreport.warn('model missing: no usable anomaly model at %s (run train, then promote)' % os.path.basename(cfg['model_path']))
+    if want_train and model_mod.SKLEARN_AVAILABLE and not trained:
+        jobreport.warn('model training produced no candidate: %s' % train_note)
+    if want_clf_train and clf_mod.SKLEARN_AVAILABLE and clf_note.startswith(('skipped', 'failed')):
+        jobreport.warn('classifier training produced no candidate: %s' % clf_note)
+    if args.train or args.train_clf or want_train or want_clf_train:
+        metrics = clf_bundle.get('metrics') if clf_bundle is not None and isinstance(clf_bundle.get('metrics'), dict) else None
+        jobreport.result({
+            'candidate_mode': bool(args.candidate),
+            'ml_trained': bool(trained), 'ml_samples': train_n, 'ml_note': train_note,
+            'clf_note': clf_note,
+            'clf_metrics': {k: v for k, v in (metrics or {}).items() if isinstance(v, (int, float, str))},
+            'rows': len(rows), 'devices_scored': sum(1 for e in devices.values() if e['is_device'] and not e.get('holdout')),
+        })
     if bundle is None and model_mod.SKLEARN_AVAILABLE:
         print('No usable model on disk: skipping ML verdicts. Run with --train.')
     if clf_bundle is None and clf_mod.SKLEARN_AVAILABLE:

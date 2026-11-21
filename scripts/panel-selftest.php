@@ -880,8 +880,16 @@ foreach ($files as $file) {
 	}
 }
 t_ok('panel/ contains PHP files to scan (' . count($files) . ')', count($files) > 0);
+// The ONE allowed exception: health.php runs scripts/cron-check.sh with proc_open and an ARGV ARRAY (no shell, a fixed
+// binary, no operator input, 3 s timeout). It must be exactly that call and no other.
+$allowed_po = array_values(array_filter($hits, function ($h) { return $h === 'health.php:proc_open'; }));
+$hits = array_values(array_diff($hits, array('health.php:proc_open')));
 t_ok('no shell-execution function appears under panel/'
 	. ($hits ? ' - found: ' . implode(', ', array_slice($hits, 0, 5)) : ''), !$hits);
+$hsrc = file_get_contents(__DIR__ . '/../panel/health.php');
+t_ok('the one proc_open (panel/health.php) takes an argv array of fixed binary + fixed script + --json, no string command, no shell, no operator input',
+	count($allowed_po) === 1 && substr_count($hsrc, '@proc_open(') === 1 && preg_match('/proc_open\(array\(\$bash, \$script, \x27--json\x27\)/', $hsrc) === 1
+	&& strpos($hsrc, "'/bin/bash'") !== false && strpos($hsrc, '$_GET') === false && strpos($hsrc, '$_POST') === false && strpos($hsrc, '$_REQUEST') === false);
 t_ok('no backtick operator appears under panel/', !$backticks);
 
 $evals = array();
@@ -2085,6 +2093,330 @@ t_ok('tables stay inside their card: every <table> in the views sits in a gp-tab
 	}
 	return true;
 })());
+
+t_section('Job health, crontab check reader and dashboard alerts');
+require_once __DIR__ . '/../panel/health.php';
+$jh_tmp = sys_get_temp_dir() . '/gp-health-' . getmypid();
+@mkdir($jh_tmp . '/status', 0775, true);
+@mkdir($jh_tmp . '/logs', 0775, true);
+gv_redis_ctx(array('log_dir' => $jh_tmp . '/logs'));
+putenv('GV_JOBSTATUS_DIR=' . $jh_tmp . '/status');
+putenv('GP_JOBS_SEEN=' . $jh_tmp . '/seen.json');
+$jh_audit_backup = is_file(gp_audit_path()) ? file_get_contents(gp_audit_path()) : null;
+if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
+$jh_cfg_file = $jh_tmp . '/config.php';
+file_put_contents($jh_cfg_file, "<?php\nif (!defined('GV_BOOT')) { exit; }\n\$c = require " . var_export(realpath(__DIR__ . '/../scripts/config.dev.php'), true) . ";\n\$c['log_dir'] = " . var_export($jh_tmp . '/logs', true) . ";\nreturn \$c;\n");
+$jh_prev_cfg = getenv('GV_CONFIG');
+putenv('GV_CONFIG=' . $jh_cfg_file);
+$jh_now = time();
+$jh_def = gp_job_defs()['verify'];
+$st = function (array $over = array()) use ($jh_now) {
+	return array_merge(array('v' => 1, 'mode' => 'verify', 'status' => 'ok', 'last_start' => $jh_now - 100, 'last_end' => $jh_now - 95, 'last_success' => $jh_now - 95, 'last_failure' => 0,
+		'last_exit' => 0, 'duration' => 5, 'skipped' => 0, 'runs' => 4, 'failures' => 0, 'last_error' => '', 'warnings' => array(), 'result_json' => ''), $over);
+};
+$h1 = function ($status, $marker = 0, $interval = 600, $seen = 0) use ($jh_def, $jh_now) { return gp_job_health_one('verify', $jh_def, $status, $marker, $interval, $jh_now, $seen); };
+
+// The four states, and the edges between them.
+t_ok('state never: no status file and no heartbeat', $h1(null)['state'] === 'never' && $h1(null)['source'] === 'none');
+t_ok('state ok: a recent success', $h1($st())['state'] === 'ok' && $h1($st())['next_expected'] === $jh_now - 95 + 600);
+t_ok('state late: no success for MORE than twice the interval; exactly twice is still ok', $h1($st(array('last_success' => $jh_now - 1201)))['state'] === 'late'
+	&& $h1($st(array('last_success' => $jh_now - 1200)))['state'] === 'ok' && $h1($st(array('last_success' => $jh_now - 1201)))['overdue'] === 1);
+t_ok('state failing: the last run failed (a failure newer than the last success)', $h1($st(array('status' => 'failed', 'last_exit' => 1, 'last_failure' => $jh_now - 10, 'last_success' => $jh_now - 400, 'last_error' => "Traceback\nValueError: boom")))['state'] === 'failing'
+	&& $h1($st(array('status' => 'failed', 'last_exit' => 1, 'last_failure' => $jh_now - 10, 'last_error' => "Traceback\nValueError: boom")))['first_line'] === 'Traceback');
+t_ok('failing wins over late (a job that keeps failing is failing, not merely late)', $h1($st(array('status' => 'failed', 'last_exit' => 1, 'last_failure' => $jh_now - 10, 'last_success' => $jh_now - 99999)))['state'] === 'failing');
+t_ok('a later success clears failing; a later firing skipped by the lock does not', $h1($st(array('last_failure' => $jh_now - 500, 'last_success' => $jh_now - 95)))['state'] === 'ok'
+	&& $h1($st(array('status' => 'skipped', 'last_failure' => $jh_now - 10, 'last_success' => $jh_now - 400)))['state'] === 'failing');
+t_ok('state warning: ran fine but said it did nothing useful; late still beats warning', $h1($st(array('status' => 'warning', 'warnings' => array('no input rows'))))['state'] === 'warning'
+	&& $h1($st(array('status' => 'warning', 'last_success' => $jh_now - 99999)))['state'] === 'late');
+t_ok('only skips so far (never a success) is "never", not failing', $h1($st(array('status' => 'skipped', 'last_success' => 0, 'last_failure' => 0, 'skipped' => 3)))['state'] === 'never');
+t_ok('the old heartbeat marker still gives a last success (upgrade period) and goes late like any other', $h1(null, $jh_now - 100)['state'] === 'ok' && $h1(null, $jh_now - 100)['source'] === 'marker' && $h1(null, $jh_now - 5000)['state'] === 'late');
+t_ok('clock skew: timestamps in the future are clamped, the job is not called late or failing, and the skew is flagged', (function () use ($h1, $st, $jh_now) {
+	$h = $h1($st(array('last_success' => $jh_now + 7200, 'last_end' => $jh_now + 7200, 'last_start' => $jh_now + 7190)));
+	return $h['state'] === 'ok' && $h['skew'] === true && $h['last_success'] === $jh_now && $h['overdue'] === 0;
+})());
+t_ok('a small clock difference (under 5 minutes) is not skew', $h1($st(array('last_success' => $jh_now + 100)))['skew'] === false);
+t_ok('a corrupt status file reads as never, flagged corrupt, never an exception', $h1(false)['state'] === 'never' && $h1(false)['corrupt'] === true);
+t_ok('the result and the warnings of a run are decoded', $h1($st(array('result_json' => '{"ml_samples":321}', 'warnings' => array('a', 'b'))))['result'] === array('ml_samples' => 321) && $h1($st(array('warnings' => array('a', 'b'))))['warnings'] === array('a', 'b'));
+t_ok('seen: an error marked seen is quiet until a NEWER failure', $h1($st(array('status' => 'failed', 'last_exit' => 1, 'last_failure' => $jh_now - 10, 'last_success' => 0)), 0, 600, $jh_now - 10)['seen'] === true
+	&& $h1($st(array('status' => 'failed', 'last_exit' => 1, 'last_failure' => $jh_now - 5, 'last_success' => 0)), 0, 600, $jh_now - 10)['seen'] === false);
+
+// Reading the files, and the intervals.
+t_ok('status files: missing = null, garbage = false, valid = array', gp_job_status_read('verify') === null && (function () use ($jh_tmp) {
+	file_put_contents($jh_tmp . '/status/.jobstatus-verify.json', '{not json'); $a = gp_job_status_read('verify') === false;
+	file_put_contents($jh_tmp . '/status/.jobstatus-verify.json', '[]'); $b = gp_job_status_read('verify') === false;
+	file_put_contents($jh_tmp . '/status/.jobstatus-verify.json', json_encode(array('v' => 1, 'mode' => 'verify', 'status' => 'ok'))); return $a && $b && is_array(gp_job_status_read('verify'));
+})());
+@unlink($jh_tmp . '/status/.jobstatus-verify.json');
+t_ok('intervals: the documented crontab by default, editable in Settings > Analyzer, never below one minute', gp_job_intervals() === array('verify' => 600, 'worker' => 60, 'snapshot' => 900, 'nightly' => 86400, 'logrotate' => 86400,
+	'train' => 604800, 'train-clf' => 604800, 'geo' => 2592000, 'report' => 604800)
+	&& gp_job_intervals(array('analyzer' => array_merge(gp_analyzer_defaults(), array('interval_verify' => 30, 'interval_geo' => 0))))['verify'] === 1800
+	&& gp_job_intervals(array('analyzer' => array_merge(gp_analyzer_defaults(), array('interval_geo' => 0))))['geo'] === 60);
+t_ok('every interval is a whitelisted Settings key with a bound', (function () {
+	foreach (array('verify', 'worker', 'snapshot', 'nightly', 'logrotate', 'train', 'train_clf', 'geo', 'report') as $j) {
+		$spec = gv_overlay_whitelist()['analyzer.interval_' . $j];
+		if (!gv_overlay_validate('analyzer.interval_' . $j, $spec[1])[0] || gv_overlay_validate('analyzer.interval_' . $j, $spec[1] - 1)[0] || !gv_overlay_validate('analyzer.interval_' . $j, $spec[2])[0] || gv_overlay_validate('analyzer.interval_' . $j, $spec[2] + 1)[0]) { return false; }
+	}
+	return true;
+})());
+file_put_contents($jh_tmp . '/status/.jobstatus-snapshot.json', json_encode($st(array('mode' => 'snapshot', 'last_success' => $jh_now - 5000, 'last_end' => $jh_now - 5000))));
+file_put_contents($jh_tmp . '/status/.jobstatus-nightly.json', json_encode($st(array('mode' => 'nightly', 'status' => 'failed', 'last_exit' => 1, 'last_failure' => $jh_now - 60, 'last_success' => $jh_now - 90000, 'last_error' => 'boom'))));
+file_put_contents($jh_tmp . '/status/.lastrun-worker', (string)($jh_now - 30));
+$jall = gp_job_health($jh_now, $jh_tmp . '/status', gp_job_intervals(), array());
+t_ok('gp_job_health reads every job: snapshot late, nightly failing, worker from its old marker, the rest never', $jall['snapshot']['state'] === 'late' && $jall['nightly']['state'] === 'failing' && $jall['worker']['state'] === 'ok'
+	&& $jall['verify']['state'] === 'never' && $jall['logrotate']['state'] === 'never' && count($jall) === 9);
+
+// Marking an error as seen.
+t_ok('mark seen: writes the file, is audited, silences THIS failure only', (function () use ($jh_tmp, $jh_now) {
+	$r = gp_jobs_mark_seen('nightly', 'tester', '198.51.100.1');
+	$a = gp_audit_read(3);
+	$seen = gp_jobs_seen();
+	return $r[0] && $seen['nightly'] === $jh_now - 60 && $a && $a[0]['event'] === 'job_error_seen' && $a[0]['key'] === 'nightly' && gp_job_health($jh_now, $jh_tmp . '/status', gp_job_intervals())['nightly']['seen'] === true;
+})());
+t_ok('a NEWER failure after it was marked raises the alert again', (function () use ($jh_tmp, $jh_now, $st) {
+	file_put_contents($jh_tmp . '/status/.jobstatus-nightly.json', json_encode($st(array('mode' => 'nightly', 'status' => 'failed', 'last_exit' => 1, 'last_failure' => $jh_now - 5, 'last_success' => $jh_now - 90000, 'last_error' => 'boom 2'))));
+	$h = gp_job_health($jh_now, $jh_tmp . '/status', gp_job_intervals())['nightly'];
+	return $h['state'] === 'failing' && $h['seen'] === false;
+})());
+t_ok('mark seen refuses an unknown job and a job with no failure', gp_jobs_mark_seen('../../etc', 't', '1.1.1.1')[0] === false && gp_jobs_mark_seen('verify', 't', '1.1.1.1')[0] === false);
+t_ok('the seen file is not world-writable and leaves no temp file', (fileperms($jh_tmp . '/seen.json') & 0002) === 0 && glob($jh_tmp . '/seen.json.tmp*') === array());
+
+// The alerts: a healthy input has none; every case raises exactly its alert.
+$ok_jobs = array();
+foreach (gp_job_defs() as $jn => $jd) { $ok_jobs[$jn] = gp_job_health_one($jn, $jd, array_merge($st(), array('mode' => $jn)), 0, 600, $jh_now); }
+$cron_ok = array('mode' => 'live', 'age' => 0, 'report' => array('jobs' => array(array('job' => 'verify', 'state' => 'ok', 'severity' => 'ok', 'required' => true)), 'gv_python' => array('set' => true, 'ok' => true, 'value' => '/x')));
+$healthy = array('now' => $jh_now, 'exposed' => array(), 'redis_up' => true, 'degraded' => array(100, 0), 'guard_errors' => array(), 'jobs' => $ok_jobs, 'queue' => array('stuck' => false, 'length' => 0, 'oldest_age' => null),
+	'storage' => array('warnings' => array()), 'snapshot' => array('generated_at' => $jh_now - 60, 'tz' => array('offset' => 0)), 'geo_warn' => array(), 'geo_rules' => 0, 'rules_state' => 'ok', 'rules_enabled' => 0, 'rules_cache_stale' => false,
+	'secret_default' => false, 'salt_default' => false, 'noeviction' => true, 'cron' => $cron_ok, 'tz_offset' => 0);
+$al = function (array $over) use ($healthy) { return gp_health_alerts(array_merge($healthy, $over)); };
+$al_ids = function (array $over) use ($al) { return array_column($al($over), 'id'); };
+$al_level = function (array $over, $id) use ($al) { foreach ($al($over) as $a) { if ($a['id'] === $id) { return $a['level']; } } return null; };
+t_ok('alerts: everything healthy = no alert at all', $al(array()) === array());
+t_ok('alert: web exposure (critical)', $al_ids(array('exposed' => array('/x/logs'))) === array('exposed') && $al_level(array('exposed' => array('/x/logs')), 'exposed') === 'critical');
+t_ok('alert: Redis down (critical)', $al_level(array('redis_up' => false), 'redis_down') === 'critical');
+t_ok('alert: degraded rows in the last 15 min (warning, critical when half or more)', $al_level(array('degraded' => array(100, 10)), 'degraded') === 'warning' && $al_level(array('degraded' => array(100, 60)), 'degraded') === 'critical' && $al_ids(array('degraded' => array(0, 0))) === array());
+t_ok('alert: new guard errors', $al_ids(array('guard_errors' => array('redis_connect' => 3, 'geo_missing' => 1))) === array('guard_errors') && strpos($al(array('guard_errors' => array('redis_connect' => 3)))[0]['detail'], 'redis_connect') !== false);
+$jf = $ok_jobs; $jf['nightly'] = gp_job_health_one('nightly', gp_job_defs()['nightly'], array_merge($st(), array('mode' => 'nightly', 'status' => 'failed', 'last_exit' => 1, 'last_failure' => $jh_now - 5, 'last_success' => $jh_now - 99999, 'last_error' => 'boom')), 0, 86400, $jh_now);
+$jl = $ok_jobs; $jl['snapshot'] = gp_job_health_one('snapshot', gp_job_defs()['snapshot'], array_merge($st(), array('mode' => 'snapshot', 'last_success' => $jh_now - 9999)), 0, 900, $jh_now);
+$jw = $ok_jobs; $jw['verify'] = gp_job_health_one('verify', gp_job_defs()['verify'], array_merge($st(), array('status' => 'warning', 'warnings' => array('no rows'))), 0, 600, $jh_now);
+$jn_ = $ok_jobs; $jn_['worker'] = gp_job_health_one('worker', gp_job_defs()['worker'], null, 0, 60, $jh_now);
+$jt = $ok_jobs; $jt['train'] = gp_job_health_one('train', gp_job_defs()['train'], array_merge($st(), array('mode' => 'train', 'last_success' => $jh_now - 99999999)), 0, 604800, $jh_now);
+t_ok('alert: a failing required job (critical, with its first error line and a link to the Jobs page), a late one, a warning one, a never-run one', $al_level(array('jobs' => $jf), 'job_failing_nightly') === 'critical'
+	&& strpos($al(array('jobs' => $jf))[0]['detail'], 'boom') !== false && $al(array('jobs' => $jf))[0]['link'] === 'jobs&job=nightly'
+	&& $al_level(array('jobs' => $jl), 'job_late_snapshot') === 'critical' && $al_level(array('jobs' => $jw), 'job_warning_verify') === 'warning' && $al_level(array('jobs' => $jn_), 'job_never_worker') === 'warning');
+t_ok('alert: a late RECOMMENDED job is only a warning; a never-run recommended job raises nothing', $al_level(array('jobs' => $jt), 'job_late_train') === 'warning' && $al_ids(array('jobs' => array_merge($ok_jobs, array('geo' => gp_job_health_one('geo', gp_job_defs()['geo'], null, 0, 99, $jh_now))))) === array());
+$jfs = $jf; $jfs['nightly'] = gp_job_health_one('nightly', gp_job_defs()['nightly'], array_merge($st(), array('mode' => 'nightly', 'status' => 'failed', 'last_exit' => 1, 'last_failure' => $jh_now - 5, 'last_success' => $jh_now - 99999, 'last_error' => 'boom')), 0, 86400, $jh_now, $jh_now - 5);
+t_ok('alert: a failure marked as seen raises none, but a late job is not silenced by "seen"', $al_ids(array('jobs' => $jfs)) === array());
+t_ok('alert: a stuck job queue (critical, with age and length)', $al_level(array('queue' => array('stuck' => true, 'oldest_age' => 900, 'length' => 2)), 'queue_stuck') === 'critical' && strpos($al(array('queue' => array('stuck' => true, 'oldest_age' => 900, 'length' => 2)))[0]['detail'], '15 min') !== false);
+t_ok('alert: disk below the floor (critical) and over the size cap (warning)', $al_level(array('storage' => array('warnings' => array('disk_low'))), 'disk_low') === 'critical' && $al_level(array('storage' => array('warnings' => array('over_cap'))), 'over_cap') === 'warning');
+t_ok('alert: no snapshot, and a stale snapshot (judged against the snapshot interval, read live, not from the snapshot)', $al_ids(array('snapshot' => null)) === array('snapshot_missing')
+	&& $al_ids(array('snapshot' => array('generated_at' => $jh_now - 5000, 'tz' => array('offset' => 0)))) === array('snapshot_stale') && $al_ids(array('snapshot' => array('generated_at' => $jh_now - 1100, 'tz' => array('offset' => 0)))) === array());
+t_ok('alert: the analyzer and the panel disagree on the time zone', $al_ids(array('snapshot' => array('generated_at' => $jh_now - 60, 'tz' => array('offset' => 12600)), 'tz_offset' => 0)) === array('tz_mismatch') && $al_ids(array('snapshot' => array('generated_at' => $jh_now - 60, 'tz' => array('offset' => 12600)), 'tz_offset' => 12600)) === array());
+t_ok('alert (PR 2): GeoIP database missing or corrupt while a geo rule is enabled is critical; older than 45 days is a warning',
+	$al_level(array('geo_warn' => array('missing'), 'geo_rules' => 1), 'geo_missing') === 'critical' && $al_level(array('geo_warn' => array('corrupt'), 'geo_rules' => 2), 'geo_corrupt') === 'critical'
+	&& $al_level(array('geo_warn' => array('stale'), 'geo_rules' => 1), 'geo_stale') === 'warning' && $al_level(array('geo_warn' => array('corrupt'), 'geo_rules' => 0), 'geo_corrupt') === 'warning');
+t_ok('alert (PR 1): an invalid rules file is critical, a stale rules cache is a warning (only when a rule is enabled)', $al_level(array('rules_state' => 'invalid'), 'rules_invalid') === 'critical'
+	&& $al_level(array('rules_enabled' => 3, 'rules_cache_stale' => true), 'rules_cache_stale') === 'warning' && $al_ids(array('rules_enabled' => 0, 'rules_cache_stale' => true)) === array());
+t_ok('alert: secret and holdout_salt still at their placeholders (one alert, the secret first)', $al_ids(array('secret_default' => true, 'salt_default' => true)) === array('secret_default') && $al_ids(array('salt_default' => true)) === array('salt_default'));
+t_ok('alert: Redis not on noeviction; unknown (CONFIG not allowed) raises nothing', $al_ids(array('noeviction' => false)) === array('evictable') && $al_ids(array('noeviction' => null)) === array());
+t_ok('alert: crontab missing a required entry is critical; disabled / wrong path / wrong schedule are warnings; GV_PYTHON bad or unset is a warning; unreadable crontab is a warning', (function () use ($al, $al_level, $cron_ok) {
+	$mk = function ($jobs, $py = null) use ($cron_ok) { $c = $cron_ok; $c['report']['jobs'] = $jobs; if ($py) { $c['report']['gv_python'] = $py; } return array('cron' => $c); };
+	return $al_level($mk(array(array('job' => 'worker', 'state' => 'missing', 'severity' => 'critical', 'required' => true))), 'cron_missing') === 'critical'
+		&& $al_level($mk(array(array('job' => 'nightly', 'state' => 'disabled', 'severity' => 'warning', 'required' => true))), 'cron_wrong') === 'warning'
+		&& $al_level($mk(array(array('job' => 'verify', 'state' => 'wrong_schedule', 'severity' => 'warning', 'required' => true))), 'cron_wrong') === 'warning'
+		&& $al_level($mk(array(), array('set' => true, 'ok' => false, 'value' => '/nope')), 'gv_python_bad') === 'warning' && $al_level($mk(array(), array('set' => false, 'ok' => false, 'value' => '')), 'gv_python_missing') === 'warning'
+		&& $al_level(array('cron' => array('mode' => 'none', 'report' => null, 'age' => null)), 'cron_unknown') === 'warning'
+		&& $al($mk(array(array('job' => 'train', 'state' => 'missing', 'severity' => 'info', 'required' => false)))) === array();
+})());
+t_ok('alerts are ordered critical first', (function () use ($al) { $a = $al(array('secret_default' => true, 'redis_up' => false)); return $a[0]['level'] === 'critical' && $a[1]['level'] === 'warning'; })());
+t_ok('every alert key and detail text exists in lang.php', (function () use ($al, $jf, $jl, $jw, $jn_, $healthy, $tip_lang) {
+	$lang = require __DIR__ . '/../panel/lang.php';
+	$all = array_merge($al(array('exposed' => array('/x'), 'redis_down' => 1, 'redis_up' => false, 'degraded' => array(10, 9), 'guard_errors' => array('a' => 1), 'jobs' => $jf, 'queue' => array('stuck' => true, 'oldest_age' => 600, 'length' => 1),
+		'storage' => array('warnings' => array('disk_low', 'over_cap')), 'snapshot' => null, 'geo_warn' => array('stale', 'missing', 'corrupt', 'no_country', 'log_no_db'), 'geo_rules' => 1, 'rules_state' => 'invalid', 'rules_enabled' => 1, 'rules_cache_stale' => true,
+		'secret_default' => true, 'noeviction' => false, 'cron' => array('mode' => 'none', 'report' => null))), $al(array('jobs' => $jl)), $al(array('jobs' => $jw)), $al(array('jobs' => $jn_)), $al(array('salt_default' => true, 'snapshot' => array('generated_at' => 1, 'tz' => array('offset' => 3600)))));
+	foreach ($all as $a) { if (!isset($lang[$a['key']])) { return false; } }
+	return count($all) >= 20;
+})());
+
+// KPI helpers, protection summary, cron setup lines.
+t_ok('kpi change: percent against the previous window, "new" from zero, nothing when unknown', gp_kpi_change(120, 100) === '+20 %' && gp_kpi_change(50, 100) === '-50 %' && gp_kpi_change(5, 0) === 'new' && gp_kpi_change(0, 0) === '0 %' && gp_kpi_change(null, 5) === '' && gp_kpi_change(5, null) === '');
+$pm_cfg = gv_cfg_defaults(array('secret' => 'real-secret-value'));
+$pm_rules = array(array('enabled' => true, 'mode' => 'enforce', 'action' => 'block'), array('enabled' => true, 'mode' => 'monitor', 'action' => 'block'), array('enabled' => false, 'mode' => 'enforce', 'action' => 'block'), array('enabled' => true, 'mode' => 'enforce', 'action' => 'log'));
+t_ok('protection mode: placeholder secret = forced monitor; no toggle and no enforced rule = monitor; any toggle or an enforced block/challenge rule = partly; all three toggles = enforcing',
+	gp_protection_mode(gv_cfg_defaults(array()), $pm_rules)['mode'] === 'monitor' && gp_protection_mode(gv_cfg_defaults(array()), $pm_rules)['forced'] === true
+	&& gp_protection_mode($pm_cfg, array())['mode'] === 'monitor' && gp_protection_mode($pm_cfg, $pm_rules)['mode'] === 'partial' && gp_protection_mode($pm_cfg, $pm_rules)['enforced_rules'] === 1
+	&& gp_protection_mode(array_merge($pm_cfg, array('enforce' => array('block' => true, 'challenge' => false, 'ratelimit' => false))), array())['mode'] === 'partial'
+	&& gp_protection_mode(array_merge($pm_cfg, array('enforce' => array('block' => true, 'challenge' => true, 'ratelimit' => true))), array())['mode'] === 'enforcing');
+t_ok('rules summary: enabled rules by mode and action', gp_rules_summary($pm_rules) === array('total' => 4, 'enabled' => 3, 'by' => array('enforce/block' => 1, 'monitor/block' => 1, 'enforce/log' => 1)));
+$jn_all = array(); foreach (gp_job_defs() as $jn => $jd) { $jn_all[$jn] = gp_job_health_one($jn, $jd, null, 0, 600, $jh_now); }
+$lines_none = gp_cron_setup_lines($jn_all, array('mode' => 'none', 'report' => null), '/home/u/bot-guard');
+t_ok('cron setup lines with an unreadable crontab: the GV_PYTHON line and every required entry, built from the real install directory', $lines_none[0] === 'GV_PYTHON=/path/to/virtualenv/bin/python'
+	&& in_array('* * * * * /home/u/bot-guard/scripts/analyzer-cron.sh worker >/dev/null 2>&1', $lines_none, true) && in_array('10 3 * * * /home/u/bot-guard/scripts/guard-logrotate.sh >/dev/null 2>&1', $lines_none, true)
+	&& count($lines_none) === 6 && !in_array('41 5 * * 0 /home/u/bot-guard/scripts/analyzer-cron.sh train >/dev/null 2>&1', $lines_none, true));
+$cr = array('mode' => 'live', 'age' => 0, 'report' => array('jobs' => array(array('job' => 'worker', 'state' => 'missing', 'required' => true, 'severity' => 'critical', 'schedule' => '', 'message' => 'there is no entry for it'), array('job' => 'verify', 'state' => 'ok', 'required' => true, 'severity' => 'ok', 'schedule' => '*/10 * * * *', 'message' => ''), array('job' => 'geo', 'state' => 'missing', 'required' => false, 'severity' => 'info', 'schedule' => '', 'message' => '')),
+	'gv_python' => array('set' => true, 'ok' => true, 'value' => '/x')));
+t_ok('cron setup lines with a readable crontab: only what is missing or wrong, no GV_PYTHON line when it is fine, recommended entries only when asked', gp_cron_setup_lines($jn_all, $cr, '/home/u/bot-guard') === array('* * * * * /home/u/bot-guard/scripts/analyzer-cron.sh worker >/dev/null 2>&1'));
+t_ok('the cron setup card shows when a required job never ran or an entry is missing, and not when all is well', gp_cron_card_needed($jn_all, array('report' => null)) === true && gp_cron_card_needed($ok_jobs, array('report' => null)) === false
+	&& gp_cron_card_needed($ok_jobs, $cr) === true && gp_cron_card_needed($ok_jobs, array('report' => array('jobs' => array(array('job' => 'verify', 'state' => 'ok', 'required' => true))))) === false);
+
+// The live crontab check: cached for 5 minutes, "Check again" rate-limited, a hanging or noisy child cannot block the page.
+$cc_valid = json_encode(array('v' => 1, 'time' => $jh_now, 'source' => 'crontab', 'root' => '/x', 'jobs' => array(array('job' => 'verify', 'state' => 'ok', 'severity' => 'ok', 'required' => true, 'schedule' => '*/10 * * * *', 'message' => '')),
+	'gv_python' => array('set' => true, 'ok' => true, 'value' => '/x'), 'problems' => 0, 'warnings' => 0, 'ok' => true, 'unreadable' => false));
+$cc_live = $jh_tmp . '/status/.cron-check-live.json';
+file_put_contents($cc_live, $cc_valid);
+touch($cc_live, $jh_now - 100);
+$cch = gp_cron_check($jh_now);
+t_ok('crontab check: a cached live result younger than 5 minutes is used (no process is started), with its age', $cch['mode'] === 'cache' && $cch['age'] === 100 && isset($cch['report']['jobs']));
+touch($cc_live, $jh_now - 299);
+t_ok('...still a hit at 299 s', gp_cron_check($jh_now)['mode'] === 'cache');
+file_put_contents($jh_tmp . '/status/.cron-check.json', $cc_valid);
+touch($jh_tmp . '/status/.cron-check.json', $jh_now - 700);
+touch($cc_live, $jh_now - 301);
+$GLOBALS['gp_test_cron_script'] = $jh_tmp . '/no-such-script.sh';
+$cce = gp_cron_check($jh_now);
+t_ok('crontab check: at 301 s the cache has expired, the live check is tried again and, when it cannot run, the cron-written copy is used (mode file)', $cce['mode'] === 'file' && $cce['age'] === 700);
+file_put_contents($cc_live, 'garbage');
+touch($cc_live, $jh_now - 10);
+t_ok('crontab check: a damaged cache file is ignored', gp_cron_check($jh_now)['mode'] === 'file');
+// A good live run writes the cache
+file_put_contents($jh_tmp . '/good.sh', "#!/bin/bash\ncat <<'J'\n" . $cc_valid . "\nJ\n");
+$GLOBALS['gp_test_cron_script'] = $jh_tmp . '/good.sh';
+@unlink($cc_live);
+$ccl = gp_cron_check($jh_now);
+t_ok('crontab check: a live run succeeds, returns mode live and writes .cron-check-live.json (not world-writable, no temp file left)', $ccl['mode'] === 'live' && is_file($cc_live) && (fileperms($cc_live) & 0002) === 0 && glob($cc_live . '.tmp*') === array()
+	&& gp_cron_check($jh_now + 5)['mode'] === 'cache');
+// Check again: forced refresh, rate limit, audit
+@unlink($jh_tmp . '/status/.cron-check-refresh');
+if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
+$r1 = gp_cron_check_refresh('tester', '198.51.100.1', $jh_now);
+$r2 = gp_cron_check_refresh('tester', '198.51.100.1', $jh_now + 10);
+$r3 = gp_cron_check_refresh('other', '198.51.100.2', $jh_now + 29);
+$r4 = gp_cron_check_refresh('tester', '198.51.100.1', $jh_now + 31);
+t_ok('Check again: the first press refreshes (live), presses within 30 s are refused for every operator, one after 30 s works again', $r1 === array(true, 'cron_refresh_done') && $r2 === array(false, 'cron_refresh_wait') && $r3[0] === false && $r4[0] === true);
+$ca = array_values(array_filter(gp_audit_read(10), function ($e) { return $e['event'] === 'cron_check_refresh'; }));
+t_ok('Check again is audit-logged once per refresh that ran (refused presses are not)', count($ca) === 2 && $ca[0]['actor'] === 'tester');
+t_ok('Check again bypasses a fresh cache (it ran the script even though the cache was 1 s old)', (function () use ($cc_live, $jh_tmp, $jh_now, $cc_valid) {
+	file_put_contents($jh_tmp . '/good.sh', "#!/bin/bash\ncat <<'J'\n" . str_replace('"source":"crontab"', '"source":"refreshed"', $cc_valid) . "\nJ\n");
+	@unlink($jh_tmp . '/status/.cron-check-refresh');
+	gp_cron_check_refresh('t', '1.1.1.1', $jh_now + 1000);
+	return json_decode(file_get_contents($cc_live), true)['source'] === 'refreshed';
+})());
+t_ok('the Jobs page has a Check again button that posts a CSRF token, and the route handles it', strpos(file_get_contents(__DIR__ . '/../panel/views/jobs.php'), 'name="cron_refresh"') !== false && strpos(file_get_contents(__DIR__ . '/../panel/index.php'), "isset(\$_POST['cron_refresh'])") !== false);
+// A child that hangs is killed; a noisy child cannot block.
+file_put_contents($jh_tmp . '/hang.sh', "#!/bin/bash\nsleep 30\n");
+$t0 = microtime(true);
+$hung = gp_cron_check_exec($jh_tmp . '/hang.sh', '/bin/bash', 0.6);
+$el = microtime(true) - $t0;
+t_ok('a child that hangs: gp_cron_check_exec gives up after the timeout, kills it (SIGTERM then SIGKILL) and returns null within about 2 s', $hung === null && $el < 3.0);
+file_put_contents($jh_tmp . '/stubborn.sh', "#!/bin/bash\ntrap '' TERM\nwhile true; do sleep 1; done\n");
+$t0 = microtime(true);
+$stub = gp_cron_check_exec($jh_tmp . '/stubborn.sh', '/bin/bash', 0.5);
+$el2 = microtime(true) - $t0;
+t_ok('a child that ignores SIGTERM: proc_close does not wait for ever, SIGKILL after 1 s', $stub === null && $el2 < 4.0);
+exec('pgrep -f ' . escapeshellarg('[s]tubborn\\.sh') . ' 2>/dev/null', $pg);
+t_ok('...and no stubborn child is left running', empty($pg));
+file_put_contents($jh_tmp . '/noisy.sh', "#!/bin/bash\nhead -c 2000000 /dev/zero | tr '\\\\0' 'x' >&2\ncat <<'J'\n" . $cc_valid . "\nJ\n");
+$t0 = microtime(true);
+$noisy = gp_cron_check_exec($jh_tmp . '/noisy.sh', '/bin/bash', 3.0);
+t_ok('a child that writes 2 MB to stderr cannot block: stderr goes to /dev/null, the report still arrives, quickly', is_array($noisy) && isset($noisy['jobs']) && (microtime(true) - $t0) < 2.5);
+t_ok('the child gets /dev/null for stderr, not a pipe (source check)', strpos(file_get_contents(__DIR__ . '/../panel/health.php'), "2 => array('file', '/dev/null', 'w')") !== false && strpos(file_get_contents(__DIR__ . '/../panel/health.php'), "2 => array('pipe'") === false && strpos(file_get_contents(__DIR__ . '/../panel/health.php'), 'proc_terminate($proc, 9)') !== false);
+file_put_contents($jh_tmp . '/status/.cron-check-live.json', 'x'); @unlink($jh_tmp . '/status/.cron-check-live.json');
+$GLOBALS['gp_test_cron_script'] = $jh_tmp . '/hang.sh';
+$t0 = microtime(true);
+t_ok('end to end: with a hanging live check and a cron-written copy, gp_cron_check falls back to the file source', (function () use ($jh_now, $t0) {
+	// 3 s timeout is the production value; the hang script is killed by it
+	$c = gp_cron_check($jh_now);
+	return $c['mode'] === 'file' && (microtime(true) - $t0) < 6.0;
+})());
+unset($GLOBALS['gp_test_cron_script']);
+
+@unlink($jh_tmp . '/status/.cron-check.json'); @unlink($jh_tmp . '/status/.cron-check-live.json'); @unlink($jh_tmp . '/status/.cron-check-refresh');
+// The crontab check reader: sources in order.
+define('GP_NO_EXEC', 1);
+t_ok('crontab check: nothing available = mode none (heartbeat-only status)', gp_cron_check($jh_now)['mode'] === 'none');
+file_put_contents($jh_tmp . '/status/.cron-check.json', json_encode($cron_ok['report'] + array('time' => $jh_now - 120)));
+touch($jh_tmp . '/status/.cron-check.json', $jh_now - 120);
+$cc = gp_cron_check($jh_now);
+t_ok('crontab check: the copy the cron wrapper left (mode file, with its age)', $cc['mode'] === 'file' && $cc['age'] === 120 && isset($cc['report']['jobs']));
+file_put_contents($jh_tmp . '/status/.cron-check.json', 'garbage');
+t_ok('crontab check: a damaged copy is ignored', gp_cron_check($jh_now)['mode'] === 'none');
+t_ok('crontab check: the live check is tried first and falls back cleanly when it cannot read a crontab (this sandbox has none)', (function () use ($jh_now) {
+	$r = gp_cron_check_exec();
+	return $r === null || (is_array($r) && isset($r['jobs']));
+})());
+
+// Live inputs: degraded rows, guard errors, rules cache.
+$jh_log = $jh_tmp . '/logs/guard-' . date('Ymd') . '.jsonl';
+$jh_rows = '';
+for ($i = 0; $i < 10; $i++) { $jh_rows .= json_encode(array('ts' => time() - 60 - $i, 'rd' => $i < 4 ? 1 : 0, 'act' => 'allow')) . "\n"; }
+$jh_rows .= json_encode(array('ts' => time() - 5000, 'rd' => 1)) . "\n" . json_encode(array('o' => 1, 'ts' => time(), 'rd' => 1)) . "\n";
+file_put_contents($jh_log, $jh_rows);
+t_ok('degraded rows are counted over the last 15 minutes only, outcome lines and old rows excluded', gp_degraded_recent(900) === array(10, 4));
+file_put_contents($jh_tmp . '/logs/guard-errors.log', date('c', time() - 60) . " redis_connect Redis down\n" . date('c', time() - 60) . " redis_connect Redis down\n" . date('c', time() - 7200) . " old_one x\n");
+t_ok('guard errors: only the last hour, counted by code', gp_recent_guard_errors(3600) === array('redis_connect' => 2));
+$jh_rules = $jh_tmp . '/rules.json';
+putenv('GV_RULES=' . $jh_rules);
+file_put_contents($jh_rules, '{"rules":[]}');
+file_put_contents(gv_rules_cache_path($jh_rules), '<?php return array();');
+touch($jh_rules, time() - 100); touch(gv_rules_cache_path($jh_rules), time() - 50);
+t_ok('rules cache: fresh = not stale; older than rules.json = stale; missing cache = stale; no rules.json = not stale', gp_rules_cache_stale() === false
+	&& (function () use ($jh_rules) { touch($jh_rules, time()); return gp_rules_cache_stale() === true; })()
+	&& (function () use ($jh_rules) { @unlink(gv_rules_cache_path($jh_rules)); return gp_rules_cache_stale() === true; })()
+	&& (function () use ($jh_rules) { @unlink($jh_rules); return gp_rules_cache_stale() === false; })());
+putenv('GV_RULES');
+
+// The dashboard and the Jobs page rendered in four situations: no snapshot, stale snapshot, all healthy, everything failing.
+if (!function_exists('gp_age_stub')) { function gp_age_stub() {} }
+$jh_render = function ($view, array $in, array $extra = array()) use ($jh_now, $healthy) {
+	$all_in = array_merge($healthy, $in);
+	$hjobs = $all_in['jobs'];
+	$vars = array_merge(array('snapshot' => $all_in['snapshot'], 'cfg' => gv_cfg_defaults(array()), 'kill' => false, 'redis_up' => $all_in['redis_up'], 'health' => array('breaker' => false, 'last_error' => ''),
+		'rinfo' => array('endpoint' => '127.0.0.1:6379', 'db' => 0, 'prefix' => '', 'auth' => false), 'exposed' => $all_in['exposed'], 'pipeline' => null, 'storage' => array('total' => 0, 'today' => 0, 'live_files' => 0, 'archives' => 0, 'oldest' => '',
+		'free' => null, 'disk' => null, 'min_free_mb' => 200, 'max_mb' => 0, 'retention_days' => 60, 'skip_paths' => array(), 'rotate' => null, 'warnings' => $all_in['storage']['warnings']),
+		'ip_open' => false, 'geo_warn' => $all_in['geo_warn'], 'alerts' => gp_health_alerts($all_in), 'jobs' => $hjobs, 'queue' => array('length' => 0, 'oldest_age' => null, 'stuck' => false, 'redis' => true), 'cron' => $all_in['cron'],
+		'cron_card' => gp_cron_card_needed($hjobs, $all_in['cron']), 'cron_lines' => gp_cron_setup_lines($hjobs, $all_in['cron'], '/home/u/bot-guard'), 'protection' => gp_protection_mode(gv_cfg_defaults(array()), array()), 'rsum' => gp_rules_summary(array()),
+		'route' => 'dashboard', 'user' => 'tester'), $extra);
+	$errs = array();
+	set_error_handler(function ($no, $str) use (&$errs) { $errs[] = $str; return true; });
+	extract($vars, EXTR_SKIP);
+	ob_start();
+	require __DIR__ . '/../panel/views/' . $view . '.php';
+	$html = ob_get_clean();
+	restore_error_handler();
+	return array($html, $errs);
+};
+$kpi_snap = array('generated_at' => $jh_now, 'tz' => array('offset' => 0, 'name' => 'UTC'), 'traffic' => array('requests' => 10, 'devices' => 3, 'addresses' => 4, 'degraded' => 0), 'decisions' => array('allow' => 9, '403' => 1),
+	'kpi' => array('cur' => array('requests' => 120, 'allowed' => 100, 'blocked' => 10, 'limited' => 2, 'challenged' => 8, 'challenge_success' => 91.5, 'rule_hits' => 7, 'honeypot' => 1, 'degraded' => 0), 'prev' => array('requests' => 100, 'allowed' => 90, 'blocked' => 5, 'limited' => 2, 'challenged' => 8, 'challenge_success' => 95.0, 'rule_hits' => 0, 'honeypot' => 1, 'degraded' => 0)),
+	'top' => array('rules' => array(array('r1', 5)), 'reasons' => array(array('UA_SCRIPT', 9)), 'ips' => array(array('203.0.113.5', 4)), 'devices' => array(), 'uas' => array(array('curl/8.4', 4)), 'paths' => array(array('/shop?x=<b>', 3)), 'countries' => array(array('IR', 6))));
+list($h_nosnap, $e_nosnap) = $jh_render('dashboard', array('snapshot' => null));
+t_ok('dashboard with no snapshot: renders without a PHP warning, raises the snapshot alert, says the 24 h numbers are missing', !$e_nosnap && strpos($h_nosnap, 'data-alert="snapshot_missing"') !== false && strpos($h_nosnap, 'gp-grid-kpi') === false);
+list($h_stale, $e_stale) = $jh_render('dashboard', array('snapshot' => array_merge($kpi_snap, array('generated_at' => $jh_now - 9999))));
+t_ok('dashboard with a stale snapshot: the stale alert is raised from a LIVE judgement and the old numbers are still shown', !$e_stale && strpos($h_stale, 'data-alert="snapshot_stale"') !== false && strpos($h_stale, 'gp-grid-kpi') !== false);
+list($h_ok, $e_ok) = $jh_render('dashboard', array('snapshot' => $kpi_snap));
+t_ok('dashboard, everything healthy: no alert strip, no cron card; protection state, 9 KPI tiles with change vs the previous 24 h, top lists linking to the Logs filters', !$e_ok && strpos($h_ok, 'gp-alerts') === false && strpos($h_ok, 'id="cron-setup"') === false
+	&& substr_count($h_ok, 'gp-kpi-label') === 9 && strpos($h_ok, '+20 %') !== false && strpos($h_ok, '-3.5 pt') !== false && strpos($h_ok, 'dash_protection') === false && strpos($h_ok, 'Protection state') !== false);
+t_ok('top lists link to the matching Logs filter, with the value escaped and URL-encoded', strpos($h_ok, 'index.php?r=logs&amp;reason=RULE%3Ar1%2CSH_RULE%3Ar1') !== false && strpos($h_ok, 'index.php?r=logs&amp;ip=203.0.113.5') !== false
+	&& strpos($h_ok, 'index.php?r=logs&amp;cc=IR') !== false && strpos($h_ok, 'index.php?r=logs&amp;path=%2Fshop%3Fx%3D%3Cb%3E') !== false && strpos($h_ok, '<b>') === false);
+$jh_bad = array();
+foreach (gp_job_defs() as $jn => $jd) { $jh_bad[$jn] = gp_job_health_one($jn, $jd, array_merge($st(), array('mode' => $jn, 'status' => 'failed', 'last_exit' => 1, 'last_failure' => $jh_now - 5, 'last_success' => 0, 'last_error' => "Traceback <script>\nValueError: boom")), 0, 600, $jh_now); }
+$jh_bad['worker'] = gp_job_health_one('worker', gp_job_defs()['worker'], null, 0, 60, $jh_now);       // one job that never ran: the cron setup card
+list($h_bad, $e_bad) = $jh_render('dashboard', array('snapshot' => null, 'redis_up' => false, 'jobs' => $jh_bad, 'exposed' => array('/x/logs'), 'storage' => array('warnings' => array('disk_low')), 'queue' => array('stuck' => true, 'oldest_age' => 900, 'length' => 3),
+	'cron' => array('mode' => 'none', 'report' => null, 'age' => null), 'secret_default' => true, 'noeviction' => false, 'rules_state' => 'invalid', 'geo_warn' => array('missing'), 'geo_rules' => 1, 'degraded' => array(10, 10), 'guard_errors' => array('redis_connect' => 4)));
+t_ok('dashboard, everything failing: renders without a warning, many critical alerts, the cron setup card with the exact lines, and nothing unescaped', !$e_bad && substr_count($h_bad, 'gp-alert-critical') >= 8 && strpos($h_bad, 'id="cron-setup"') !== false && strpos($h_bad, 'analyzer-cron.sh worker') !== false
+	&& strpos($h_bad, 'GV_PYTHON=') !== false && strpos($h_bad, '<script>') === false);
+list($h_jobs, $e_jobs) = $jh_render('jobs', array('jobs' => $jh_bad), array('jobs' => array(), 'detail' => 'nightly', 'health' => $jh_bad, 'errors' => array("=== 2026 nightly exit 1 ===\n<script>x</script>"), 'runs' => array(array('end' => $jh_now, 'status' => 'failed', 'exit' => 1, 'duration' => 3, 'error' => '<b>e</b>')), 'route' => 'jobs',
+	'cron' => $cr + array('mode' => 'live'), 'cron_lines' => array('* * * * * x')));
+t_ok('Jobs page: health table, detail with the captured error, recent runs and the crontab check render escaped and without a warning', !$e_jobs && strpos($h_jobs, 'job-detail') !== false && strpos($h_jobs, '<script>') === false && strpos($h_jobs, '<b>e</b>') === false && strpos($h_jobs, 'name="seen"') !== false && strpos($h_jobs, 'id="cron-check"') !== false);
+t_ok('the dashboard and Jobs views post a CSRF token on every POST form', substr_count(file_get_contents(__DIR__ . '/../panel/views/jobs.php'), 'method="post"') === substr_count(file_get_contents(__DIR__ . '/../panel/views/jobs.php'), 'gp_csrf_token()')
+	&& substr_count(file_get_contents(__DIR__ . '/../panel/views/dashboard.php'), 'method="post"') === substr_count(file_get_contents(__DIR__ . '/../panel/views/dashboard.php'), 'gp_csrf_token()'));
+
+foreach ((array)glob($jh_tmp . '/{status,logs}/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+foreach ((array)glob($jh_tmp . '/*') as $f) { if (is_file($f)) { @unlink($f); } }
+foreach (array('/status', '/logs') as $d) { @rmdir($jh_tmp . $d); }
+@rmdir($jh_tmp);
+putenv('GV_JOBSTATUS_DIR'); putenv('GP_JOBS_SEEN');
+if ($jh_prev_cfg !== false) { putenv('GV_CONFIG=' . $jh_prev_cfg); } else { putenv('GV_CONFIG'); }
+if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
+if ($jh_audit_backup !== null) { file_put_contents(gp_audit_path(), $jh_audit_backup); }
 
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');

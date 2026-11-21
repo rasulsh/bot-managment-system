@@ -21,13 +21,14 @@ $groups = array(
 	'paths'    => array('set_group_paths', '', array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'honeypot_path')),
 	'network'  => array('set_group_network', '', array('cdn_ranges')),
 	'bots'     => array('set_group_bots', '', array('known_bots', 'preview_bots', 'bot_suffixes')),
-	'logs'     => array('set_group_logs', 'set_group_logs_sub', array('log_skip_paths', 'log_retention_days', 'log_max_mb', 'log_min_free_mb')),
+	'logs'     => array('set_group_logs', 'set_group_logs_sub', array('log_skip_paths', 'log_retention_days', 'log_max_mb', 'log_min_free_mb', 'log_floor_delete', 'log_floor_keep_days')),
 	'geo'      => array('set_group_geo', 'set_group_geo_sub', array('geo.log')),
 	'analyzer' => array('set_group_analyzer', 'set_group_analyzer_sub', array('analyzer.window_days', 'analyzer.session_gap_s',
 		'analyzer.rep_ttl', 'analyzer.ml_ttl', 'analyzer.botv_ttl', 'analyzer.botbad_ttl', 'analyzer.dns_canary',
 		'analyzer.ml_min_train', 'analyzer.contamination', 'analyzer.clf_min_positive', 'analyzer.clf_target_precision',
 		'analyzer.report_days', 'analyzer.report_top_n', 'analyzer.challenge_success_target', 'analyzer.snapshot_days',
-		'analyzer.job_ttl', 'analyzer.worker_max_jobs', 'analyzer.path_listing', 'analyzer.path_detail')),
+		'analyzer.job_ttl', 'analyzer.worker_max_jobs', 'analyzer.path_listing', 'analyzer.path_detail',
+		'analyzer.interval_verify', 'analyzer.interval_worker', 'analyzer.interval_snapshot', 'analyzer.interval_nightly', 'analyzer.interval_logrotate', 'analyzer.interval_train', 'analyzer.interval_train_clf', 'analyzer.interval_geo', 'analyzer.interval_report')),
 );
 
 // The value to show in a field: what was just typed (after a rejected save),

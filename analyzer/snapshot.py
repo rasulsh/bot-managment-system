@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import classifier as clf_mod
 from analyzer import config as config_mod
+from analyzer import jobreport
 from analyzer import logs as logs_mod
 from analyzer import model as model_mod
 from analyzer import outcomes as outcomes_mod
@@ -134,6 +135,71 @@ def collect_rule_hits(log_dir, now, cache_path=None, days=7):
     for slot in totals.values():
         slot['last'] = round(slot['last'], 3)
     return totals
+
+
+ALLOW_ACTS = ('allow', 'allow_bot', 'allow_preview', 'allow_override', 'exempt')
+SERVED_ACTS = ('403', '429', 'challenge')
+
+
+def kpi_counts(rows):
+    """The dashboard's headline numbers over one window of decision rows. Pure."""
+    out = {'requests': 0, 'allowed': 0, 'blocked': 0, 'limited': 0, 'challenged': 0, 'token_issued': 0,
+           'rule_hits': 0, 'honeypot': 0, 'degraded': 0}
+    for row in rows:
+        act = str(row.get('act') or '')
+        shadow = int(row.get('sh') or 0) == 1
+        out['requests'] += 1
+        if act in SERVED_ACTS and not shadow:
+            out[{'403': 'blocked', '429': 'limited', 'challenge': 'challenged'}[act]] += 1
+        elif act in ALLOW_ACTS or (act in SERVED_ACTS and shadow):
+            out['allowed'] += 1
+        if logs_mod.token_was_issued(row):
+            out['token_issued'] += 1
+        if rule_ids(row):
+            out['rule_hits'] += 1
+        if int(row.get('hp') or 0) == 1:
+            out['honeypot'] += 1
+        if int(row.get('rd') or 0) == 1:
+            out['degraded'] += 1
+    out['challenge_success'] = (100.0 * out['token_issued'] / out['challenged']) if out['challenged'] else None
+    return out
+
+
+def _top(counter, n=8):
+    return [[key, count] for key, count in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))[:n]]
+
+
+def top_lists(rows):
+    """Top lists over one window: rules, reasons, and who/what is being acted on. Pure."""
+    rules, reasons, ips, devs, uas, paths, countries = {}, {}, {}, {}, {}, {}, {}
+
+    def bump(table, key):
+        if key and (key in table or len(table) < 5000):
+            table[key] = table.get(key, 0) + 1
+    for row in rows:
+        for rid in rule_ids(row):
+            bump(rules, rid)
+        for reason in (row.get('rs') or []):
+            if isinstance(reason, str) and not reason.startswith(RULE_PREFIXES):
+                bump(reasons, reason)
+        if str(row.get('cc') or ''):
+            bump(countries, str(row['cc']))
+        if str(row.get('act') or '') in SERVED_ACTS and int(row.get('sh') or 0) != 1:
+            bump(ips, str(row.get('ip') or ''))
+            bump(devs, str(row.get('dev') or ''))
+            bump(uas, str(row.get('ua') or ''))
+            bump(paths, str(row.get('p') or ''))
+    return {'rules': _top(rules), 'reasons': _top(reasons), 'ips': _top(ips), 'devices': _top(devs),
+            'uas': _top(uas), 'paths': _top(paths), 'countries': _top(countries)}
+
+
+def local_tz():
+    """The analyzer host's time zone: daily log names, logrotate and 'today' follow it."""
+    try:
+        offset = datetime.datetime.now().astimezone().utcoffset()
+        return {'name': time.tzname[0], 'offset': int(offset.total_seconds()) if offset is not None else 0}
+    except Exception:
+        return {'name': '', 'offset': 0}
 
 
 def build(rows, cfg, guard_cfg=None):
@@ -404,9 +470,29 @@ def main(argv=None):
         print('ERROR: log directory not readable: %s' % cfg['log_dir'], file=sys.stderr)
         return 2
 
-    rows = list(logs_mod.read_lines(cfg['log_dir'], days))
+    # "Last 24 h" is a rolling window of timestamps (not "today's file", which would
+    # change meaning at local midnight and differ from the panel's time zone): read
+    # enough daily files for the window and the one before it, then cut by ts.
+    now = time.time()
+    window = days * 86400
+    all_rows = list(logs_mod.read_lines(cfg['log_dir'], days * 2 + 1))
+
+    def ts_of(row):
+        try:
+            return float(row.get('ts') or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    rows = [r for r in all_rows if ts_of(r) >= now - window]
+    prev_rows = [r for r in all_rows if now - 2 * window <= ts_of(r) < now - window]
     payload = build(rows, cfg)
+    payload['kpi'] = {'cur': kpi_counts(rows), 'prev': kpi_counts(prev_rows), 'window_h': days * 24}
+    payload['top'] = top_lists(rows)
+    payload['tz'] = local_tz()
     payload['redis'] = redis_io.connect(cfg) is not None
+    if not payload['redis']:
+        jobreport.warn('Redis unreachable: the snapshot has no live Redis status')
+    if not all_rows:
+        jobreport.warn('no log rows in the last %d day(s): the dashboard shows nothing (is the guard logging?)' % (days * 2 + 1))
     try:
         payload['rules'] = collect_rule_hits(
             cfg['log_dir'], time.time(),

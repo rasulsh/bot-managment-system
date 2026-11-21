@@ -83,6 +83,17 @@ check "delete removes the rule" "$(grep -q 'Smoke rule' <<<"$rp" && echo 0 || ec
 code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" -d 'do=starter' "$URL?r=rules")"
 check "a POST without the CSRF token changes nothing (no 303 redirect)" "$([ "$code" != 303 ] && echo 1 || echo 0)"
 
+# Dashboard (alerts, protection state, 24 h KPIs area, top lists) and the Jobs page (job health, crontab check).
+dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
+check "the dashboard shows the protection state and the details section" "$(grep -q 'Protection state' <<<"$dash" && grep -q 'gp-details' <<<"$dash" && echo 1 || echo 0)"
+check "the dashboard raises an alert for a fresh install with no snapshot or job status" "$(grep -q 'gp-alerts' <<<"$dash" && echo 1 || echo 0)"
+jp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=jobs")"
+check "the Jobs page shows job health and the crontab check" "$(grep -q 'Job health' <<<"$jp" && grep -q 'id="cron-check"' <<<"$jp" && grep -q 'job=verify' <<<"$jp" && echo 1 || echo 0)"
+jd="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=jobs&job=verify")"
+check "a job's detail page renders" "$(grep -q 'id="job-detail"' <<<"$jd" && echo 1 || echo 0)"
+jd="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=jobs&job=../../etc/passwd")"
+check "an unknown job name shows no detail (no path is ever read from it)" "$(grep -q 'id="job-detail"' <<<"$jd" && echo 0 || echo 1)"
+
 # GeoIP page: upload a fake source, see it, tester, country rule form, delete it again.
 gp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=geo")"
 check "the GeoIP page renders with an upload form" "$(grep -q 'enctype="multipart/form-data"' <<<"$gp" && grep -q 'Lookup tester' <<<"$gp" && echo 1 || echo 0)"

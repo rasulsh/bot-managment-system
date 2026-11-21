@@ -13,6 +13,8 @@ yes_if() { if "$@"; then echo 1; else echo 0; fi; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+# The job status files must not land in the repository's analyzer/ directory.
+export GV_JOBSTATUS_DIR="$WORK/status"; mkdir -p "$GV_JOBSTATUS_DIR"
 
 day() { date -d "$1 days ago" +%Y%m%d; }
 mkfile() {   # <path> <age in days> <size in KiB>

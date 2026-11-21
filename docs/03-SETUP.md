@@ -222,6 +222,56 @@ The `snapshot` and `worker` lines are the two most-forgotten and the two whose
 absence is hardest to diagnose: without `snapshot`, the panel dashboard is stale;
 without `worker`, panel-triggered jobs sit queued forever.
 
+### Every background job, how often, and what breaks without it
+
+| Job (cron mode) | Interval | Required | If it does not run |
+|---|---|---|---|
+| `verify` | 10 min | yes | Real crawlers never leave the shared `limits.bot_unverified` budget; fake crawlers are not refuted. |
+| `worker` | 1 min | yes | Jobs started from the panel (compile GeoIP, train, promote, replay) wait in the queue for ever. |
+| `snapshot` | 15 min | yes | The dashboard numbers (24 h KPIs, top lists, charts) freeze; the dashboard keeps looking normal. |
+| `nightly` | 24 h | yes | Reputations and anomaly levels expire (14 d / 24 h) and stop being refreshed; scoring gets weaker. |
+| `guard-logrotate.sh` | 24 h | yes | Logs are never compressed or deleted: the disk fills, then the guard stops logging at the floor. |
+| `train`, `train-clf` | 7 d | recommended | The model and the classifier age; no new candidate to promote. |
+| `geo` | 30 d | only with GeoIP rules | Country / ASN rules run on an ageing database (the panel warns at 45 days). |
+| `report` | 7 d | optional | No periodic report. |
+
+The expected interval of each job is editable in Settings > Analyzer; a job is **late** after twice that.
+
+### Is it really running? Job status, error logs and the crontab check
+
+* **Status per job.** Every run of `analyzer-cron.sh` (any mode) and `guard-logrotate.sh` records, in
+  `analyzer/.jobstatus-<mode>.json` (read live by the panel): last start, end, success and failure, exit code, duration,
+  how many firings were skipped because the lock was busy, the last error lines, warnings and a result (a training run
+  records whether a candidate was written, the sample counts and metrics; log rotation records files gzipped and
+  deleted, bytes freed and why: retention, `log_max_mb`, or the free-disk floor `log_min_free_mb`). A trap records a crash
+  or a signal too. States: **ok**, **warning** (it exited 0 but said it did nothing useful: no input rows, Redis unreachable,
+  no model, nothing trained), **late**, **failing**, **never ran**.
+* **Error logs.** Each run adds one JSON line to `logs/jobs.log`; a failure also leaves its captured stderr (the last 64 KiB)
+  in `logs/jobs-errors.log`. The wrapper captures stderr itself, so nothing is lost although cron sends output to
+  `/dev/null`. Both files are rotated and expired by `guard-logrotate.sh`. The Redis password, `secret`, `holdout_salt`
+  and the panel's credentials are redacted before anything is written.
+* **A wrong `GV_PYTHON`.** The wrapper first checks that the chosen Python can import what the mode needs (`redis`; plus
+  `numpy` and `sklearn` for `nightly`, `train`, `train-clf`). If not, the run exits non-zero with the fix in the message and is
+  recorded as a failure. It no longer "succeeds" having stored nothing.
+* **Crontab check.** `bash scripts/cron-check.sh` (English output; exit 0 = all required entries present and right, 1 =
+  something required is missing or wrong, 2 = the crontab could not be read) reads the crontab (`/usr/bin/crontab.cagefs -l`
+  on CloudLinux / CageFS, then `crontab -l`) and reports, per job: missing, **disabled** (commented out), **wrong path**
+  (another install directory), **runs too rarely** for its interval, duplicates; and a missing or invalid `GV_PYTHON=` line.
+  `--json` prints the same as JSON. The panel runs it itself (argv array, no shell, 3 s timeout) when `proc_open` is allowed;
+  otherwise it shows `analyzer/.cron-check.json`, which every cron run refreshes (at most every 10 minutes); the live result is cached for 5 minutes (Jobs page: Check again); otherwise it falls
+  back to the heartbeats above and says "run scripts/cron-check.sh over SSH". It sees the crontab of the user the panel
+  runs as.
+
+### Time zones
+
+Three clocks name the daily files and decide "today", and they can differ: the guard names `logs/guard-YYYYMMDD.jsonl` by
+**PHP's** time zone (`date.timezone`), `guard-logrotate.sh` and the Python analyzer use the **system** time zone of the cron
+user, and the panel shows times in **PHP's** zone. When PHP and the system disagree, a day's file can be rotated while it is
+still being written to (the rotation therefore never touches a file written in the last hour). The dashboard's "last 24 h"
+is a rolling window of **timestamps** (epoch seconds), not "today's file", so it does not depend on any of them; the page
+header shows the panel's and the analyzer host's zone, and an alert appears when their offsets differ. Fix a mismatch by
+setting `date.timezone` in the PHP configuration (and `TZ` in the crontab) to the same zone.
+
 ---
 
 ## Step 5 — Install the admin panel (optional but recommended)

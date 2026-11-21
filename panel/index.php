@@ -21,6 +21,7 @@ require_once __DIR__ . '/jobs.php';
 require_once __DIR__ . '/replay.php';
 require_once __DIR__ . '/filters.php';
 require_once __DIR__ . '/ui.php';
+require_once __DIR__ . '/health.php';
 require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/rules.php';
 
@@ -223,18 +224,30 @@ switch ($gp_route) {
 			}
 			gp_redirect('dashboard');
 		}
+		$hin = gp_health_inputs();
+		$hjobs = $hin['jobs'];
+		$hcfg = gv_cfg_load();
+		$hrules = gp_rules_state();
 		gp_render('dashboard', array(
-			'snapshot' => gp_snapshot(),
-			'cfg'      => gv_cfg_load(),
+			'snapshot' => $hin['snapshot'],
+			'cfg'      => $hcfg,
 			'kill'     => gp_killswitch_on(),
-			'redis_up' => gp_redis_up(),
+			'redis_up' => $hin['redis_up'],
 			'health'   => gp_guard_health(),
 			'rinfo'    => gp_redis_info(),
-			'exposed'  => gp_exposure_warning(),
+			'exposed'  => $hin['exposed'],
 			'pipeline' => gp_pipeline_status(),
-			'storage'  => gp_log_storage(),
+			'storage'  => $hin['storage'],
 			'ip_open'  => empty($gp_cfg['ip_allowlist']),
-			'geo_warn' => gp_geo_dashboard_warnings(),
+			'geo_warn' => $hin['geo_warn'],
+			'alerts'   => gp_health_alerts($hin),
+			'jobs'     => $hjobs,
+			'queue'    => $hin['queue'],
+			'cron'     => $hin['cron'],
+			'cron_card' => gp_cron_card_needed($hjobs, $hin['cron']),
+			'cron_lines' => gp_cron_setup_lines($hjobs, $hin['cron']),
+			'protection' => gp_protection_mode($hcfg, $hrules['rules']),
+			'rsum'     => gp_rules_summary($hrules['rules']),
 		));
 
 	case 'logs':
@@ -456,12 +469,27 @@ switch ($gp_route) {
 
 	case 'jobs':
 		if ($gp_post) {
+			if (isset($_POST['cron_refresh'])) {
+				$r = gp_cron_check_refresh($gp_user, $gp_ip);
+				gp_flash($r[0] ? 'ok' : 'warn', gp_t($r[1]));
+				gp_redirect('jobs');
+			}
+			if (isset($_POST['seen'])) {
+				$r = gp_jobs_mark_seen((string)$_POST['seen'], $gp_user, $gp_ip);
+				gp_flash($r[0] ? 'ok' : 'error', gp_t($r[1]));
+				gp_redirect('jobs', array('job' => (string)$_POST['seen']));
+			}
 			$job = gp_job_enqueue((string)($_POST['job'] ?? ''), array('days' => 7), $gp_user);
 			gp_flash($job['ok'] ? 'ok' : 'error',
 				$job['ok'] ? gp_t('job_enqueued') : ($job['error'] ?? gp_t('err_generic')));
 			gp_redirect('jobs');
 		}
-		gp_render('jobs', array('jobs' => gp_job_list(), 'redis_up' => gp_redis_up()));
+		$jdetail = (isset($_GET['job']) && is_string($_GET['job']) && isset(gp_job_defs()[$_GET['job']])) ? $_GET['job'] : '';
+		$jhealth = gp_job_health();
+		$jcron = gp_cron_check();
+		gp_render('jobs', array('jobs' => gp_job_list(), 'redis_up' => gp_redis_up(), 'health' => $jhealth, 'detail' => $jdetail,
+			'queue' => gp_queue_health(), 'cron' => $jcron, 'cron_lines' => gp_cron_setup_lines($jhealth, $jcron),
+			'runs' => $jdetail !== '' ? gp_job_runs($jdetail) : array(), 'errors' => $jdetail !== '' ? gp_job_error_blocks($jdetail) : array()));
 }
 
 // Unknown route: a small, honest 404. Rendering the dashboard under a 404

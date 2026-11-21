@@ -44,6 +44,10 @@ function gv_cfg_defaults(array $cfg) {
 		'log_retention_days' => 60,
 		'log_max_mb'       => 0,
 		'log_min_free_mb'  => 200,
+		// scripts/guard-logrotate.sh deletes archives for the free-disk floor ONLY when log_floor_delete is on, and never an
+		// archive newer than log_floor_keep_days (the disk is shared with the whole server).
+		'log_floor_delete' => false,
+		'log_floor_keep_days' => 7,
 		'ml_weight'        => 0.4,
 		'clf_weight'       => 0.5,
 		'holdout_pct'      => 0,
@@ -116,7 +120,7 @@ function gv_cfg_defaults(array $cfg) {
 	}
 	// Log storage numbers: retention at least one day, the two MiB limits at
 	// least 0 (0 = off). Anything else falls back to the default.
-	foreach (array('log_retention_days' => array(60, 1), 'log_max_mb' => array(0, 0), 'log_min_free_mb' => array(200, 0)) as $k => $d) {
+	foreach (array('log_retention_days' => array(60, 1), 'log_max_mb' => array(0, 0), 'log_min_free_mb' => array(200, 0), 'log_floor_keep_days' => array(7, 1)) as $k => $d) {
 		$cur = isset($cfg[$k]) ? $cfg[$k] : $d[0];
 		$cfg[$k] = ((is_int($cur) || (is_string($cur) && ctype_digit($cur))) && (int)$cur >= $d[1]) ? (int)$cur : $d[0];
 	}
@@ -124,6 +128,7 @@ function gv_cfg_defaults(array $cfg) {
 	// Off by default: the lookup then only runs when a rule needs it.
 	if (!isset($cfg['geo']) || !is_array($cfg['geo'])) { $cfg['geo'] = array(); }
 	$cfg['geo'] = array_merge(array('log' => false), $cfg['geo']);
+	$cfg['log_floor_delete'] = (bool)filter_var($cfg['log_floor_delete'], FILTER_VALIDATE_BOOLEAN);
 	// 'false' and 'off' are non-empty strings: without this they read as ON.
 	foreach (array('enforce', 'signals', 'geo') as $grp) {
 		if (!isset($cfg[$grp]) || !is_array($cfg[$grp])) { continue; }
@@ -197,6 +202,8 @@ function gv_overlay_whitelist() {
 		'log_retention_days' => array('int', 1, 3650),
 		'log_max_mb'         => array('int', 0, 10000000),
 		'log_min_free_mb'    => array('int', 0, 1000000),
+		'log_floor_delete'   => array('bool'),
+		'log_floor_keep_days' => array('int', 1, 3650),
 		'cdn_ranges'         => array('cidrs4'),
 		'bot_suffixes'       => array('suffixes'),
 		// GeoIP: put the country / ASN of every request into its log row.
@@ -231,6 +238,17 @@ function gv_overlay_whitelist() {
 		'analyzer.snapshot_days'    => array('int', 1, 14),
 		'analyzer.job_ttl'          => array('int', 3600, 604800),
 		'analyzer.worker_max_jobs'  => array('int', 1, 50),
+		// How often each background job is expected to run (minutes). The panel's job health
+		// calls a job late after twice this. Defaults are the documented crontab.
+		'analyzer.interval_verify' => array('int', 1, 1440),
+		'analyzer.interval_worker' => array('int', 1, 1440),
+		'analyzer.interval_snapshot' => array('int', 1, 1440),
+		'analyzer.interval_nightly' => array('int', 60, 10080),
+		'analyzer.interval_logrotate' => array('int', 60, 10080),
+		'analyzer.interval_train' => array('int', 60, 43200),
+		'analyzer.interval_train_clf' => array('int', 60, 43200),
+		'analyzer.interval_geo' => array('int', 60, 129600),
+		'analyzer.interval_report' => array('int', 60, 129600),
 	);
 }
 

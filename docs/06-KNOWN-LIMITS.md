@@ -114,6 +114,34 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
   keyboard focus only, and the link is a plain link.
 - The layout test needs a Chromium; without it only the markup and CSS checks of the selftest run.
 
+## Background jobs, dashboard alerts and the crontab check
+
+- A job's state comes from the status file the cron wrapper writes. Run a mode by hand with `python3 analyzer/...` (not through
+  `scripts/analyzer-cron.sh`) and it leaves only the old `.lastrun-*` heartbeat, no error log.
+- **Without the `verify` cron job** real crawlers stay in the shared `limits.bot_unverified` budget for ever (the dashboard calls
+  `verify` required and alerts when it is missing or late).
+- The panel's crontab check sees the crontab of the user PHP runs as. On a host where PHP runs as another user than the cron
+  jobs, or where `proc_open` is disabled, it can only show the copy the cron wrapper leaves (`analyzer/.cron-check.json`, up to 10
+  minutes old) or, without that, just the heartbeats; run `scripts/cron-check.sh` over SSH there.
+- The schedule check estimates how often an entry runs from its five fields (a list or step counts runs; a day-of-week or
+  day-of-month field restricts them). An unusual schedule such as `0 0 1,15 * 1` is judged approximately.
+- "Late" is judged against the interval you set in Settings > Analyzer, not against the real crontab. If you change the crontab,
+  change the interval too.
+- The dashboard alerts read live files and one cheap Redis command each; a slow disk or Redis makes the dashboard slower, never
+  wrong. `CONFIG GET` can be forbidden on a hosted Redis: "noeviction not set" is then unknown, and no alert is raised.
+- **The free-disk floor only reports by default.** The disk is shared with the whole cPanel server: a full disk caused by backups or
+  another site must never make the log rotation delete the training history. Below `log_min_free_mb` the guard stops writing logs
+  and `guard-logrotate.sh` records a warning (status, `jobs.log`, dashboard alert) and deletes nothing for that reason. Deleting is
+  opt-in: **`log_floor_delete`** (Settings -> Log storage, default off). When on, only archives **older than `log_floor_keep_days`**
+  (default 7, minimum 1) are eligible, the oldest first, **at most 10 files per run** (the status records when the limit was hit; the next
+  run continues), and never an uncompressed file. The size cap (`log_max_mb`) and the retention keep their own rules.
+- **`df` and the quota.** `df` (the rotation script) and PHP's `disk_free_space()` (the guard's logging floor, the dashboard) see the
+  *filesystem*, not the cPanel / CloudLinux **user quota**. An account at its quota can still show plenty of free disk, and the guard keeps
+  trying to log. When `quota` (or `/usr/bin/quota`) exists, the rotation records the user's usage (`quota -s`) in the logrotate status and the
+  dashboard's log-storage card shows it; when it does not exist, nothing is recorded and nothing is reported. Check the quota in cPanel.
+- A failure can be marked "seen" on the Jobs page: that silences its alert only until the next failure.
+- Job status files and `jobs.log` use ASCII only (non-ASCII bytes in error text are dropped) so they are always valid JSON.
+
 ## Crawlers
 
 - Only crawlers in `known_bots` pass. Every other crawler, monitor and SEO tool

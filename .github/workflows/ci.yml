@@ -76,6 +76,8 @@ jobs:
         run: php -d display_errors=1 -d error_reporting=-1 scripts/panel-selftest.php
       - name: access rules end-to-end (block, challenge, log, monitor, precedence)
         run: bash scripts/rules-e2e.sh
+      - name: job status recording (success, failure, crash by signal, lock skip, bad Python, redaction, logrotate fields)
+        run: bash scripts/jobstatus-selftest.sh
       - name: redis self-test (round trips, fail-fast, breaker, auth, prefix, handshake)
         run: php -d display_errors=1 -d error_reporting=-1 scripts/redis-selftest.php
       - name: log rotation self-test (compression, retention, size cap, settings from config)

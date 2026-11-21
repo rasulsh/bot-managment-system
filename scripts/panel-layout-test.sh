@@ -38,6 +38,31 @@ for i in range(60):
                  'cc': 'IR' if i % 2 else 'US', 'asn': 12880 if i % 2 else 15169, 'ms': 1.2})
 open(sys.argv[1], 'w').write('\n'.join(json.dumps(r) for r in rows) + '\n')
 PY
+# Job status, a snapshot with 24 h KPIs and top lists, so the dashboard and the Jobs page have real content:
+# one job failing, one late, one that did nothing useful, the rest fine.
+python3 - "$WORK/bg/analyzer" <<'PY'
+import json, os, sys, time
+d = sys.argv[1]
+now = int(time.time())
+def status(mode, **kw):
+    base = {'v': 1, 'mode': mode, 'status': 'ok', 'last_start': now - 40, 'last_end': now - 30, 'last_success': now - 30, 'last_failure': 0, 'last_exit': 0,
+            'duration': 8, 'skipped': 0, 'runs': 12, 'failures': 0, 'last_error': '', 'warnings': [], 'result_json': '', 'python': '/usr/bin/python3'}
+    base.update(kw)
+    json.dump(base, open(os.path.join(d, '.jobstatus-%s.json' % mode), 'w'))
+for m in ('worker', 'snapshot', 'logrotate'):
+    status(m)
+status('verify', status='failed', last_exit=1, last_failure=now - 120, last_success=now - 3600, failures=3, last_error='Traceback (most recent call last):\nValueError: redis refused the connection')
+status('nightly', last_success=now - 3 * 86400, last_end=now - 3 * 86400)
+status('train', status='warning', warnings=['model training produced no candidate: skipped: 12 clean sessions is below ml_min_train=200'], last_error='model training produced no candidate',
+       last_success=now - 3600, result_json=json.dumps({'ml_trained': False, 'ml_samples': 12}))
+cur = {'requests': 1840, 'allowed': 1500, 'blocked': 210, 'limited': 12, 'challenged': 96, 'challenge_success': 91.4, 'token_issued': 88, 'rule_hits': 140, 'honeypot': 6, 'degraded': 0}
+prev = {'requests': 1500, 'allowed': 1320, 'blocked': 120, 'limited': 12, 'challenged': 40, 'challenge_success': 96.0, 'token_issued': 38, 'rule_hits': 0, 'honeypot': 9, 'degraded': 0}
+json.dump({'generated_at': now - 300, 'tz': {'name': 'UTC', 'offset': 0}, 'traffic': {'requests': 1840, 'devices': 310, 'addresses': 280, 'degraded': 0},
+           'decisions': {'allow': 1500, '403': 210, 'challenge': 96, '429': 12}, 'kpi': {'cur': cur, 'prev': prev, 'window_h': 24},
+           'top': {'rules': [['st-curl', 90], ['r1a2b3c', 50]], 'reasons': [['UA_SCRIPT', 190], ['NO_AL', 40]], 'ips': [['203.0.113.5', 80], ['198.51.100.9', 60]], 'devices': [['dev3', 30]],
+                   'uas': [['curl/8.4.0', 120], ['python-requests/2.31', 60]], 'paths': [['/shop/item-1', 40], ['/login', 22]], 'countries': [['IR', 900], ['US', 400]]}},
+          open(os.path.join(d, 'snapshot.json'), 'w'))
+PY
 # Audit entries with long unbroken values: they must wrap, not widen the page.
 python3 - "$WORK/bg/panel/audit.jsonl" <<'PY'
 import json, sys, time
@@ -50,3 +75,10 @@ PID=$!
 for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/panel/index.php" 2>/dev/null && break; sleep 0.1; done
 [ -n "$SHOTS" ] && mkdir -p "$SHOTS"
 node "$ROOT/scripts/panel-layout-test.js" "http://127.0.0.1:$PORT" /panel admin layout-pass-12345 "$SHOTS"
+rc=$?
+# A PHP warning, notice, deprecation or fatal error on any page is a failure too.
+if grep -E 'Warning|Notice|Deprecated|Fatal error|Parse error' "$WORK/php.log" >/dev/null 2>&1; then
+	echo "FAIL  PHP reported problems while the pages were rendered:"; grep -E 'Warning|Notice|Deprecated|Fatal error|Parse error' "$WORK/php.log" | sort | uniq -c | head -10
+	rc=1
+fi
+exit $rc
