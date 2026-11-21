@@ -174,6 +174,8 @@ is more than two days old.
 | `log_skip_paths` | none | Path prefixes never written to the log (e.g. `/gv-admin/`). The guard still checks them; `exempt_paths` is what skips the checks, and those requests are still logged as `exempt`. |
 | `log_retention_days` | 60 | Archives older than this are deleted (1-3650). |
 | `log_max_mb` | 0 (off) | Total size cap for all `guard-*` files. Oldest archives go first; today's file is never deleted, and a run where it alone is over the cap says so. |
+| `log_floor_delete` | Default false. Lets `scripts/guard-logrotate.sh` delete the oldest archives when free disk space is below `log_min_free_mb`. Off: the condition is only reported. Settings -> Log storage. |
+| `log_floor_keep_days` | Default 7, minimum 1. Archives newer than this are never deleted for the disk floor; at most 10 files are deleted per run. Only matters when `log_floor_delete` is on. |
 | `log_min_free_mb` | 200 | Below this much free space on the log disk the guard stops writing request logs (the site keeps answering) and writes `disk_low` to `guard-errors.log` (at most once a minute). 0 = off. It sees the file system, not a cPanel quota: use `log_max_mb` for a quota. |
 
 Rough size: a decision line is 450-650 bytes, an outcome line about 80. One million PHP

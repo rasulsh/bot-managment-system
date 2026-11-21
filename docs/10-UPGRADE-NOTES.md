@@ -21,6 +21,18 @@ What changed in each release and what to do about it. Newest first.
 * `guard-logrotate.sh` also rotates the job logs and deletes the oldest archives when free disk space is below `log_min_free_mb`.
 * The worker records exit code, duration, warnings and the result in the status of each panel job.
 
+**Review changes (same release)**
+
+* **The free-disk floor is report-only by default.** The first version of this release deleted archives when the disk was low; the disk is shared with the
+  whole server, so that is now opt-in: new settings `log_floor_delete` (default **off**) and `log_floor_keep_days` (default 7, minimum 1) under Settings -> Log storage.
+  With it off, a low disk is only reported (logrotate status *warning*, `jobs.log`, dashboard alert). With it on, only archives older than the keep days are eligible, the
+  oldest first, at most **10 files per run** (the limit being hit is recorded). The size cap and retention are unchanged. `df` and the guard's `disk_free_space()` see the
+  filesystem, not the cPanel / CloudLinux user quota; where `quota` exists its usage is recorded in the logrotate status and shown on the dashboard
+  ([06-KNOWN-LIMITS.md](06-KNOWN-LIMITS.md#background-jobs-dashboard-alerts-and-the-crontab-check)).
+* **The crontab check is cached and cannot block.** The live result is cached in `analyzer/.cron-check-live.json` for 5 minutes; the Jobs page has **Check again** (CSRF,
+  audit-logged, once per 30 s). The child's stderr goes to `/dev/null`, and a child that hangs is killed (SIGTERM, then SIGKILL after 1 s) so `proc_close` cannot wait for ever.
+  New ignored file: `analyzer/.cron-check-live.json` (and `.cron-check-refresh`).
+
 **Upgrade steps** (`/home/cloud/bot-guard`, monitor mode)
 
 1. Deploy the files. No config change, no new extension, no new cron entry is required.

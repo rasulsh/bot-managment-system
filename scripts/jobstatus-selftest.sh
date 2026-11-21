@@ -106,8 +106,45 @@ ok "logrotate writes its jobs.log line" "$(yes_if grep -q '"mode":"logrotate"' "
 for i in 1 2 3; do mkfile() { head -c "$2" /dev/urandom | base64 > "$1"; }; mkfile "$L/guard-$(date -d "$((i + 3)) days ago" +%Y%m%d).jsonl.gz" 300000; touch -d "$((i + 3)) days ago" "$L/guard-$(date -d "$((i + 3)) days ago" +%Y%m%d).jsonl.gz"; done
 GV_PHP=/nonexistent GV_LOG_DIR="$L" GV_RETENTION_DAYS=60 GV_MAX_MB=1 GV_MIN_FREE_MB=0 GV_JOBLOG_DIR="$L" bash "$ROOT/scripts/guard-logrotate.sh" > /dev/null 2>&1
 ok "a deletion for the size cap is recorded with its reason" "$(yes_if python3 -c 'import json,sys; r=json.loads(json.load(open(sys.argv[1]))["result_json"]); sys.exit(0 if r["deleted_size_cap"]>=1 and "size_cap" in r["reasons"] else 1)' "$GV_JOBSTATUS_DIR/.jobstatus-logrotate.json")"
-GV_PHP=/nonexistent GV_LOG_DIR="$L" GV_RETENTION_DAYS=60 GV_MAX_MB=0 GV_MIN_FREE_MB=999999999 GV_JOBLOG_DIR="$L" bash "$ROOT/scripts/guard-logrotate.sh" > /dev/null 2>&1
-ok "a deletion for the free-disk floor is recorded with its reason" "$(yes_if python3 -c 'import json,sys; r=json.loads(json.load(open(sys.argv[1]))["result_json"]); sys.exit(0 if r["deleted_disk_floor"]>=1 and "disk_floor" in r["reasons"] else 1)' "$GV_JOBSTATUS_DIR/.jobstatus-logrotate.json")"
+echo "== the free-disk floor: report by default, delete only when allowed, protect recent files, at most 10 per run"
+F="$WORK/floor"; mkdir -p "$F"
+mkarch() { head -c 2048 /dev/urandom | base64 | gzip > "$1"; touch -d "$2 days ago" "$1"; }
+fresh_floor() { rm -f "$F"/guard-*; for i in $(seq 1 15); do mkarch "$F/guard-$(date -d "$((i + 9)) days ago" +%Y%m%d).jsonl.gz" "$((i + 9))"; done; for i in 1 2 3; do mkarch "$F/guard-$(date -d "$i days ago" +%Y%m%d).jsonl.gz" "$i"; done; }
+floor_run() { GV_PHP=/nonexistent GV_LOG_DIR="$F" GV_RETENTION_DAYS=365 GV_MAX_MB=0 GV_MIN_FREE_MB=999999999 GV_JOBLOG_DIR="$F" "$@" bash "$ROOT/scripts/guard-logrotate.sh" > "$WORK/floor.out" 2>&1; }
+rstat() { python3 -c 'import json,sys; r=json.loads(json.load(open(sys.argv[1]))["result_json"]); print(r[sys.argv[2]])' "$GV_JOBSTATUS_DIR/.jobstatus-logrotate.json" "$1"; }
+count_arch() { find "$F" -name 'guard-*.jsonl.gz' | wc -l | tr -d ' '; }
+fresh_floor
+floor_run env
+ok "floor delete OFF (the default): nothing is deleted for a low disk" "$(yes_if [ "$(count_arch)" = 18 ] && [ "$(rstat deleted_disk_floor)" = 0 ])"
+ok "...the low-disk condition is reported: status warning, disk_low in the result, the reason in the error, a warning line in jobs.log" "$(yes_if [ "$(status logrotate status)" = warning ] && [ "$(rstat disk_low)" = 1 ] && [ "$(rstat floor_delete)" = false ] && status logrotate last_error | grep -q 'log_floor_delete is off' && grep '"mode":"logrotate"' "$F/jobs.log" | tail -1 | grep -q '"status":"warning"')"
+ok "...and the script says so on stdout" "$(yes_if grep -q 'below log_min_free_mb' "$WORK/floor.out")"
+fresh_floor
+floor_run env GV_FLOOR_DELETE=true GV_FLOOR_KEEP_DAYS=30
+ok "floor delete ON with keep_days 30: archives newer than 30 days are never deleted (all 18 are newer)" "$(yes_if [ "$(count_arch)" = 18 ] && [ "$(rstat deleted_disk_floor)" = 0 ])"
+fresh_floor
+floor_run env GV_FLOOR_DELETE=true GV_FLOOR_KEEP_DAYS=7
+ok "floor delete ON, keep_days 7: only the oldest archives go, at most 10 per run, and the limit being hit is recorded" "$(yes_if [ "$(rstat deleted_disk_floor)" = 10 ] && [ "$(count_arch)" = 8 ] && [ "$(rstat floor_limit_hit)" = 1 ] && grep -q 'limit of 10 files' "$WORK/floor.out")"
+ok "...the 10 deleted are the OLDEST ones, and every archive from the last 7 days survives" "$(yes_if [ -f "$F/guard-$(date -d '1 days ago' +%Y%m%d).jsonl.gz" ] && [ -f "$F/guard-$(date -d '3 days ago' +%Y%m%d).jsonl.gz" ] && [ ! -e "$F/guard-$(date -d '24 days ago' +%Y%m%d).jsonl.gz" ] && [ -f "$F/guard-$(date -d '10 days ago' +%Y%m%d).jsonl.gz" ])"
+ok "...the reason disk_floor is recorded" "$(yes_if python3 -c 'import json,sys; r=json.loads(json.load(open(sys.argv[1]))["result_json"]); sys.exit(0 if "disk_floor" in r["reasons"] else 1)' "$GV_JOBSTATUS_DIR/.jobstatus-logrotate.json")"
+floor_run env GV_FLOOR_DELETE=true GV_FLOOR_KEEP_DAYS=7
+ok "the next run continues: the remaining old archives go (5 more), recent ones still survive" "$(yes_if [ "$(rstat deleted_disk_floor)" = 5 ] && [ "$(rstat floor_limit_hit)" = 0 ] && [ "$(count_arch)" = 3 ])"
+fresh_floor
+GV_PHP=/nonexistent GV_LOG_DIR="$F" GV_RETENTION_DAYS=365 GV_MAX_MB=0 GV_MIN_FREE_MB=1 GV_FLOOR_DELETE=true GV_JOBLOG_DIR="$F" bash "$ROOT/scripts/guard-logrotate.sh" > /dev/null 2>&1
+ok "plenty of free disk: nothing is reported or deleted for the floor even when allowed" "$(yes_if [ "$(rstat disk_low)" = 0 ] && [ "$(count_arch)" = 18 ] && [ "$(status logrotate status)" = ok ])"
+fresh_floor
+floor_run env GV_FLOOR_DELETE=true GV_FLOOR_KEEP_DAYS=0
+ok "keep_days below 1 falls back to the default of 7 (a typo cannot make every archive deletable)" "$(yes_if [ "$(rstat floor_keep_days)" = 7 ] && [ "$(count_arch)" -ge 8 ])"
+fresh_floor
+GV_FLOOR_DELETE=true GV_FLOOR_KEEP_DAYS=x floor_run env
+ok "a non-numeric keep_days falls back to 7 as well" "$(yes_if [ "$(rstat floor_keep_days)" = 7 ])"
+mkdir -p "$WORK/fakebin"; printf '#!/bin/sh\nprintf "Disk quotas for user x (uid 1):\\n     Filesystem   space   quota   limit   grace\\n      /dev/sda1   4096M   5120M   5120M\\n"\n' > "$WORK/fakebin/quota"; chmod +x "$WORK/fakebin/quota"
+fresh_floor
+floor_run env PATH="$WORK/fakebin:$PATH"
+ok "when quota exists its usage is recorded in the status (never acted on)" "$(yes_if [ "$(rstat quota | grep -c 4096M)" = 1 ])"
+fresh_floor
+floor_run env PATH="/usr/bin:/bin"
+ok "when quota does not exist it is skipped silently" "$(if [ -n "$(PATH=/usr/bin:/bin command -v quota)" ]; then echo 1; else yes_if [ -z "$(rstat quota)" ] && [ "$(status logrotate status)" != failed ]; fi)"
+
 GV_PHP=/nonexistent GV_LOG_DIR="$WORK/nodir" GV_JOBLOG_DIR="$L" bash "$ROOT/scripts/guard-logrotate.sh" > /dev/null 2>&1
 ok "a missing log directory is a warning, not a silent success" "$(yes_if [ "$(status logrotate status)" = warning ])"
 

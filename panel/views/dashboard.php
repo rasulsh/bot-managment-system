@@ -71,7 +71,7 @@ $queue = isset($queue) && is_array($queue) ? $queue : array('length' => 0, 'olde
 	<p class="gp-help"><?= gp_e(gp_t('cron_help')) ?></p>
 	<p class="gp-help"><?= gp_e(gp_t('cron_open')) ?> <code class="gp-mono">crontab -e</code></p>
 	<pre class="gp-mono gp-ltr gp-pre"><?= gp_e(implode("\n", $cron_lines)) ?></pre>
-	<p class="gp-help"><?= gp_e(gp_t('cron_source_' . $cron['mode'])) ?><?php if ($cron['mode'] === 'file' && $cron['age'] !== null): ?> (<?= gp_e(gp_age(time() - (int)$cron['age'])) ?> <?= gp_e(gp_t('ago')) ?>)<?php endif; ?></p>
+	<p class="gp-help"><?= gp_e(gp_t('cron_source_' . $cron['mode'])) ?><?php if (in_array($cron['mode'], array('file', 'cache'), true) && $cron['age'] !== null): ?> (<?= gp_e(gp_age(time() - (int)$cron['age'])) ?> <?= gp_e(gp_t('ago')) ?>)<?php endif; ?></p>
 </div>
 <?php endif; ?>
 
@@ -242,6 +242,12 @@ $lists = array(
 				<?php if ($storage['disk']): ?> / <?= gp_e(gp_bytes($storage['disk'])) ?><?php endif; ?>
 				<?php if ($storage['min_free_mb'] > 0): ?> · <?= gp_e(sprintf(gp_t('ls_floor'), gp_bytes($storage['min_free_mb'] * 1048576))) ?><?php endif; ?></span>
 		</div>
+		<?php $lq = isset($jobs['logrotate']['result']['quota']) ? (string)$jobs['logrotate']['result']['quota'] : ''; if ($lq !== ''): ?>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('ls_quota')) ?></span>
+			<span class="gp-stat-val gp-mono gp-ltr"><?= gp_e($lq) ?></span>
+		</div>
+		<?php endif; ?>
 		<div class="gp-stat-row">
 			<span class="gp-stat-key"><?= gp_e(gp_t('ls_rotate')) ?></span>
 			<span class="gp-stat-val"><?= $storage['rotate'] === null ? gp_e(gp_t('never'))

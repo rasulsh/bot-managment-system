@@ -129,8 +129,16 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
   change the interval too.
 - The dashboard alerts read live files and one cheap Redis command each; a slow disk or Redis makes the dashboard slower, never
   wrong. `CONFIG GET` can be forbidden on a hosted Redis: "noeviction not set" is then unknown, and no alert is raised.
-- `guard-logrotate.sh` now also deletes the oldest archives when free disk space is below `log_min_free_mb`, and records that as the
-  reason. It never deletes an uncompressed file.
+- **The free-disk floor only reports by default.** The disk is shared with the whole cPanel server: a full disk caused by backups or
+  another site must never make the log rotation delete the training history. Below `log_min_free_mb` the guard stops writing logs
+  and `guard-logrotate.sh` records a warning (status, `jobs.log`, dashboard alert) and deletes nothing for that reason. Deleting is
+  opt-in: **`log_floor_delete`** (Settings -> Log storage, default off). When on, only archives **older than `log_floor_keep_days`**
+  (default 7, minimum 1) are eligible, the oldest first, **at most 10 files per run** (the status records when the limit was hit; the next
+  run continues), and never an uncompressed file. The size cap (`log_max_mb`) and the retention keep their own rules.
+- **`df` and the quota.** `df` (the rotation script) and PHP's `disk_free_space()` (the guard's logging floor, the dashboard) see the
+  *filesystem*, not the cPanel / CloudLinux **user quota**. An account at its quota can still show plenty of free disk, and the guard keeps
+  trying to log. When `quota` (or `/usr/bin/quota`) exists, the rotation records the user's usage (`quota -s`) in the logrotate status and the
+  dashboard's log-storage card shows it; when it does not exist, nothing is recorded and nothing is reported. Check the quota in cPanel.
 - A failure can be marked "seen" on the Jobs page: that silences its alert only until the next failure.
 - Job status files and `jobs.log` use ASCII only (non-ASCII bytes in error text are dropped) so they are always valid JSON.
 

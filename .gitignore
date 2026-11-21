@@ -73,6 +73,9 @@ analyzer/.jobstatus-*.json
 analyzer/.jobstatus-*.json.tmp*
 analyzer/.jobstate-*
 analyzer/.cron-check.json
+analyzer/.cron-check-live.json
+analyzer/.cron-check-live.json.tmp*
+analyzer/.cron-check-refresh
 analyzer/.cron-check.json.tmp*
 panel/jobs-seen.json
 panel/jobs-seen.json.tmp*

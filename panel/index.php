@@ -469,6 +469,11 @@ switch ($gp_route) {
 
 	case 'jobs':
 		if ($gp_post) {
+			if (isset($_POST['cron_refresh'])) {
+				$r = gp_cron_check_refresh($gp_user, $gp_ip);
+				gp_flash($r[0] ? 'ok' : 'warn', gp_t($r[1]));
+				gp_redirect('jobs');
+			}
 			if (isset($_POST['seen'])) {
 				$r = gp_jobs_mark_seen((string)$_POST['seen'], $gp_user, $gp_ip);
 				gp_flash($r[0] ? 'ok' : 'error', gp_t($r[1]));

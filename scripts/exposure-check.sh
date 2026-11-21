@@ -46,6 +46,7 @@ SENSITIVE=(
 	"/guard/geo.php"
 	"/analyzer/.jobstatus-verify.json"
 	"/analyzer/.cron-check.json"
+	"/analyzer/.cron-check-live.json"
 	"/logs/jobs.log"
 	"/logs/jobs-errors.log"
 	"/scripts/cron-check.sh"

@@ -1393,6 +1393,13 @@ t_ok('config: a damaged geo value falls back to the default', gv_cfg_defaults(ar
 putenv('GV_GEO_DIR');
 gv_geo_state(true);
 
+t_section('Log rotation: the free-disk floor is report-only unless allowed');
+t_ok('log_floor_delete defaults to off and log_floor_keep_days to 7', gv_cfg_defaults(array())['log_floor_delete'] === false && gv_cfg_defaults(array())['log_floor_keep_days'] === 7);
+t_ok('log_floor_delete: "off" / "false" in a hand-edited config read as off, "true" as on', gv_cfg_defaults(array('log_floor_delete' => 'off'))['log_floor_delete'] === false && gv_cfg_defaults(array('log_floor_delete' => 'false'))['log_floor_delete'] === false && gv_cfg_defaults(array('log_floor_delete' => 'true'))['log_floor_delete'] === true);
+t_ok('log_floor_keep_days: below 1 or not a number falls back to 7', gv_cfg_defaults(array('log_floor_keep_days' => 0))['log_floor_keep_days'] === 7 && gv_cfg_defaults(array('log_floor_keep_days' => 'x'))['log_floor_keep_days'] === 7 && gv_cfg_defaults(array('log_floor_keep_days' => 30))['log_floor_keep_days'] === 30);
+t_ok('both keys are whitelisted overlay settings with bounds (keep days 1..3650, bool only)', gv_overlay_validate('log_floor_delete', true)[0] === true && gv_overlay_validate('log_floor_delete', 'yes')[0] === false
+	&& gv_overlay_validate('log_floor_keep_days', 1)[0] === true && gv_overlay_validate('log_floor_keep_days', 0)[0] === false && gv_overlay_validate('log_floor_keep_days', 3651)[0] === false);
+
 // --------------------------------------------------------------------------
 t_section('Redis roundtrip (optional)');
 

@@ -93,11 +93,15 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 
 <?php /* ---------------------------------------------------- crontab check */ ?>
 <div class="gp-card" id="cron-check">
-	<div class="gp-card-title"><?= gp_e(gp_t('cron_check_title')) ?></div>
+	<div class="gp-card-title"><?= gp_e(gp_t('cron_check_title')) ?>
+		<form method="post" action="index.php?r=jobs#cron-check" style="display:inline">
+			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
+			<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit" name="cron_refresh" value="1"><?= gp_e(gp_t('cron_refresh_btn')) ?></button>
+		</form></div>
 	<?php if (!is_array($cron['report'])): ?>
 	<p class="gp-note gp-note-strong"><?= gp_e(gp_t('cron_unreadable')) ?> <code class="gp-mono">scripts/cron-check.sh</code></p>
 	<?php else: ?>
-	<p class="gp-help"><?= gp_e(gp_t('cron_source_' . $cron['mode'])) ?><?= ($cron['mode'] === 'file' && $cron['age'] !== null) ? ' (' . gp_e(gp_age(time() - (int)$cron['age'])) . ' ' . gp_e(gp_t('ago')) . ')' : '' ?></p>
+	<p class="gp-help"><?= gp_e(gp_t('cron_source_' . $cron['mode'])) ?><?= (in_array($cron['mode'], array('file', 'cache'), true) && $cron['age'] !== null) ? ' (' . gp_e(gp_age(time() - (int)$cron['age'])) . ' ' . gp_e(gp_t('ago')) . ')' : '' ?></p>
 	<div class="gp-table-wrap"><table class="gp-table">
 		<thead><tr><th><?= gp_e(gp_t('job_c_job')) ?></th><th><?= gp_e(gp_t('job_c_state')) ?></th><th><?= gp_e(gp_t('cron_c_schedule')) ?></th><th></th></tr></thead>
 		<tbody><?php foreach ($cron['report']['jobs'] as $cj): ?>

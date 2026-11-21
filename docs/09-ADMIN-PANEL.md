@@ -274,7 +274,10 @@ A **Cron setup** card shows when a required job has never run or the crontab che
 what is missing, built from this install's real directory and starting with the `GV_PYTHON=` line, and the command to open the
 editor (`crontab -e`).
 
-**Jobs page.** A table per job (state, last success, last failure, next expected run, first line of the last error; the
+**Jobs page.** The crontab check runs `scripts/cron-check.sh` through `proc_open` (argv array, stderr to `/dev/null`, 3 s read limit,
+SIGTERM then SIGKILL after 1 s for a child that hangs); the result is cached in `analyzer/.cron-check-live.json` for 5 minutes, so the dashboard
+and the Jobs page never start a process per view, and **Check again** (CSRF, audit-logged, once per 30 s for everyone) refreshes it. If the live check cannot run,
+the copy the cron wrapper writes is shown. A table per job (state, last success, last failure, next expected run, first line of the last error; the
 expected interval is editable in Settings -> Analyzer), the crontab check, the queue (length and age of the oldest job) and the
 jobs started from the panel (they now record exit code, duration, warnings and the result of a training run). A job's detail
 shows the captured error text (secrets redacted, shown escaped), the last runs from `logs/jobs.log`, and **Mark this error as

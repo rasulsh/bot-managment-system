@@ -258,7 +258,7 @@ The expected interval of each job is editable in Settings > Analyzer; a job is *
   on CloudLinux / CageFS, then `crontab -l`) and reports, per job: missing, **disabled** (commented out), **wrong path**
   (another install directory), **runs too rarely** for its interval, duplicates; and a missing or invalid `GV_PYTHON=` line.
   `--json` prints the same as JSON. The panel runs it itself (argv array, no shell, 3 s timeout) when `proc_open` is allowed;
-  otherwise it shows `analyzer/.cron-check.json`, which every cron run refreshes (at most every 10 minutes); otherwise it falls
+  otherwise it shows `analyzer/.cron-check.json`, which every cron run refreshes (at most every 10 minutes); the live result is cached for 5 minutes (Jobs page: Check again); otherwise it falls
   back to the heartbeats above and says "run scripts/cron-check.sh over SSH". It sees the crontab of the user the panel
   runs as.
 

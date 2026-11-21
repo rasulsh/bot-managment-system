@@ -195,15 +195,31 @@ function gp_queue_health($now = null) {
 // ---------------------------------------------------------------- crontab check
 
 function gp_cron_check_file() { return gp_status_dir() . '/.cron-check.json'; }
+function gp_cron_check_live_file() { return gp_status_dir() . '/.cron-check-live.json'; }
+define('GP_CRON_CACHE_TTL', 300);        // the live result is reused for 5 minutes
+define('GP_CRON_REFRESH_GAP', 30);       // "Check again" at most once per 30 seconds
 
-// The crontab check, first source that works: (1) run scripts/cron-check.sh ourselves with an argv array (no shell,
-// no operator input, fixed binary, 3 s timeout) when proc_open is allowed; (2) the copy the cron wrapper leaves in
-// analyzer/.cron-check.json; (3) nothing. Returns array(mode, report|null, age|null).
-function gp_cron_check($now = null, $allow_exec = true) {
+// The crontab check, first source that works: (1) the live check (scripts/cron-check.sh run through proc_open with an
+// argv array: no shell, no operator input, fixed binary, 3 s timeout), whose result is CACHED in
+// analyzer/.cron-check-live.json for 5 minutes so the dashboard and the Jobs page do not spawn a process per view;
+// (2) the copy the cron wrapper leaves in analyzer/.cron-check.json; (3) nothing. $force skips a fresh cache (the
+// "Check again" button). Returns array(mode live|cache|file|none, report|null, age|null).
+function gp_cron_check($now = null, $allow_exec = true, $force = false) {
 	$now = $now === null ? time() : (int)$now;
 	if ($allow_exec && !defined('GP_NO_EXEC')) {
+		$cf = gp_cron_check_live_file();
+		clearstatcache(true, $cf);
+		if (!$force && is_file($cf)) {
+			$age = max(0, $now - (int)@filemtime($cf));
+			$d = json_decode((string)@file_get_contents($cf), true);
+			if ($age < GP_CRON_CACHE_TTL && is_array($d) && isset($d['jobs'])) { return array('mode' => 'cache', 'report' => $d, 'age' => $age); }
+		}
 		$r = gp_cron_check_exec();
-		if ($r !== null) { return array('mode' => 'live', 'report' => $r, 'age' => 0); }
+		if ($r !== null) {
+			$tmp = $cf . '.tmp' . getmypid();
+			if (@file_put_contents($tmp, json_encode($r), LOCK_EX) !== false) { @chmod($tmp, 0640); if (!@rename($tmp, $cf)) { @unlink($tmp); } }
+			return array('mode' => 'live', 'report' => $r, 'age' => 0);
+		}
 	}
 	$f = gp_cron_check_file();
 	if (is_file($f)) {
@@ -213,31 +229,60 @@ function gp_cron_check($now = null, $allow_exec = true) {
 	return array('mode' => 'none', 'report' => null, 'age' => null);
 }
 
-function gp_cron_check_exec() {
+// "Check again": refresh the live cache now. Rate-limited to once per 30 s (by the cache file's own time, so it holds for
+// every operator), audit-logged. Returns array(ok, lang key).
+function gp_cron_check_refresh($actor, $ip, $now = null) {
+	$now = $now === null ? time() : (int)$now;
+	$cf = gp_cron_check_live_file();
+	$lock = gp_status_dir() . '/.cron-check-refresh';
+	clearstatcache(true, $lock);
+	$last = max((int)@filemtime($lock), 0);
+	if ($now - $last < GP_CRON_REFRESH_GAP) { return array(false, 'cron_refresh_wait'); }
+	@touch($lock, $now);
+	$c = gp_cron_check($now, true, true);
+	gp_audit_append(array('event' => 'cron_check_refresh', 'actor' => (string)$actor, 'ip' => (string)$ip, 'key' => 'cron-check', 'old' => null, 'new' => $c['mode']));
+	return array(true, $c['mode'] === 'live' ? 'cron_refresh_done' : 'cron_refresh_nolive');
+}
+
+// Run scripts/cron-check.sh. Never blocks the page: stderr goes to /dev/null (an unread pipe could fill and stall the
+// child), reading stops at 3 s, and a child that is still alive is terminated and, if it does not exit within 1 s,
+// killed with SIGKILL before proc_close (which would otherwise wait for it for ever). $script / $bash are test seams.
+function gp_cron_check_exec($script = null, $bash = null, $timeout = 3.0) {
 	if (!function_exists('proc_open')) { return null; }
 	$disabled = array_map('trim', explode(',', (string)ini_get('disable_functions')));
 	if (in_array('proc_open', $disabled, true)) { return null; }
-	$bash = is_executable('/bin/bash') ? '/bin/bash' : (is_executable('/usr/bin/bash') ? '/usr/bin/bash' : '');
-	$script = dirname(__DIR__) . '/scripts/cron-check.sh';
+	if ($bash === null) { $bash = is_executable('/bin/bash') ? '/bin/bash' : (is_executable('/usr/bin/bash') ? '/usr/bin/bash' : ''); }
+	if ($script === null) {
+		$script = dirname(__DIR__) . '/scripts/cron-check.sh';
+		// Test seam: only the self-test (which defines GP_SELFTEST) can point this at another script.
+		if (defined('GP_SELFTEST') && isset($GLOBALS['gp_test_cron_script'])) { $script = (string)$GLOBALS['gp_test_cron_script']; }
+	}
 	if ($bash === '' || !is_file($script)) { return null; }
-	$proc = @proc_open(array($bash, $script, '--json'), array(0 => array('pipe', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $pipes);
+	$proc = @proc_open(array($bash, $script, '--json'), array(0 => array('pipe', 'r'), 1 => array('pipe', 'w'), 2 => array('file', '/dev/null', 'w')), $pipes);
 	if (!is_resource($proc)) { return null; }
 	fclose($pipes[0]);
 	stream_set_blocking($pipes[1], false);
 	$out = '';
-	$deadline = microtime(true) + 3.0;
+	$deadline = microtime(true) + $timeout;
+	$done = false;
 	while (microtime(true) < $deadline) {
 		$r = array($pipes[1]); $w = null; $e = null;
 		if (@stream_select($r, $w, $e, 0, 100000) > 0) {
 			$chunk = fread($pipes[1], 65536);
-			if ($chunk === '' || $chunk === false) { if (feof($pipes[1])) { break; } } else { $out .= $chunk; }
+			if ($chunk === '' || $chunk === false) { if (feof($pipes[1])) { $done = true; break; } } else { $out .= $chunk; }
 		}
 		if (strlen($out) > 262144) { break; }
 	}
+	fclose($pipes[1]);
 	$st = proc_get_status($proc);
-	if ($st['running']) { proc_terminate($proc); }
-	fclose($pipes[1]); fclose($pipes[2]);
+	if ($st['running']) {
+		proc_terminate($proc);
+		$kill_at = microtime(true) + 1.0;
+		while (microtime(true) < $kill_at) { $st = proc_get_status($proc); if (!$st['running']) { break; } usleep(50000); }
+		if ($st['running']) { proc_terminate($proc, 9); }
+	}
 	proc_close($proc);
+	if (!$done && $out === '') { return null; }
 	$d = json_decode($out, true);
 	return (is_array($d) && isset($d['jobs']) && empty($d['unreadable'])) ? $d : null;
 }

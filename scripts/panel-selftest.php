@@ -2258,6 +2258,78 @@ t_ok('cron setup lines with a readable crontab: only what is missing or wrong, n
 t_ok('the cron setup card shows when a required job never ran or an entry is missing, and not when all is well', gp_cron_card_needed($jn_all, array('report' => null)) === true && gp_cron_card_needed($ok_jobs, array('report' => null)) === false
 	&& gp_cron_card_needed($ok_jobs, $cr) === true && gp_cron_card_needed($ok_jobs, array('report' => array('jobs' => array(array('job' => 'verify', 'state' => 'ok', 'required' => true))))) === false);
 
+// The live crontab check: cached for 5 minutes, "Check again" rate-limited, a hanging or noisy child cannot block the page.
+$cc_valid = json_encode(array('v' => 1, 'time' => $jh_now, 'source' => 'crontab', 'root' => '/x', 'jobs' => array(array('job' => 'verify', 'state' => 'ok', 'severity' => 'ok', 'required' => true, 'schedule' => '*/10 * * * *', 'message' => '')),
+	'gv_python' => array('set' => true, 'ok' => true, 'value' => '/x'), 'problems' => 0, 'warnings' => 0, 'ok' => true, 'unreadable' => false));
+$cc_live = $jh_tmp . '/status/.cron-check-live.json';
+file_put_contents($cc_live, $cc_valid);
+touch($cc_live, $jh_now - 100);
+$cch = gp_cron_check($jh_now);
+t_ok('crontab check: a cached live result younger than 5 minutes is used (no process is started), with its age', $cch['mode'] === 'cache' && $cch['age'] === 100 && isset($cch['report']['jobs']));
+touch($cc_live, $jh_now - 299);
+t_ok('...still a hit at 299 s', gp_cron_check($jh_now)['mode'] === 'cache');
+file_put_contents($jh_tmp . '/status/.cron-check.json', $cc_valid);
+touch($jh_tmp . '/status/.cron-check.json', $jh_now - 700);
+touch($cc_live, $jh_now - 301);
+$GLOBALS['gp_test_cron_script'] = $jh_tmp . '/no-such-script.sh';
+$cce = gp_cron_check($jh_now);
+t_ok('crontab check: at 301 s the cache has expired, the live check is tried again and, when it cannot run, the cron-written copy is used (mode file)', $cce['mode'] === 'file' && $cce['age'] === 700);
+file_put_contents($cc_live, 'garbage');
+touch($cc_live, $jh_now - 10);
+t_ok('crontab check: a damaged cache file is ignored', gp_cron_check($jh_now)['mode'] === 'file');
+// A good live run writes the cache
+file_put_contents($jh_tmp . '/good.sh', "#!/bin/bash\ncat <<'J'\n" . $cc_valid . "\nJ\n");
+$GLOBALS['gp_test_cron_script'] = $jh_tmp . '/good.sh';
+@unlink($cc_live);
+$ccl = gp_cron_check($jh_now);
+t_ok('crontab check: a live run succeeds, returns mode live and writes .cron-check-live.json (not world-writable, no temp file left)', $ccl['mode'] === 'live' && is_file($cc_live) && (fileperms($cc_live) & 0002) === 0 && glob($cc_live . '.tmp*') === array()
+	&& gp_cron_check($jh_now + 5)['mode'] === 'cache');
+// Check again: forced refresh, rate limit, audit
+@unlink($jh_tmp . '/status/.cron-check-refresh');
+if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
+$r1 = gp_cron_check_refresh('tester', '198.51.100.1', $jh_now);
+$r2 = gp_cron_check_refresh('tester', '198.51.100.1', $jh_now + 10);
+$r3 = gp_cron_check_refresh('other', '198.51.100.2', $jh_now + 29);
+$r4 = gp_cron_check_refresh('tester', '198.51.100.1', $jh_now + 31);
+t_ok('Check again: the first press refreshes (live), presses within 30 s are refused for every operator, one after 30 s works again', $r1 === array(true, 'cron_refresh_done') && $r2 === array(false, 'cron_refresh_wait') && $r3[0] === false && $r4[0] === true);
+$ca = array_values(array_filter(gp_audit_read(10), function ($e) { return $e['event'] === 'cron_check_refresh'; }));
+t_ok('Check again is audit-logged once per refresh that ran (refused presses are not)', count($ca) === 2 && $ca[0]['actor'] === 'tester');
+t_ok('Check again bypasses a fresh cache (it ran the script even though the cache was 1 s old)', (function () use ($cc_live, $jh_tmp, $jh_now, $cc_valid) {
+	file_put_contents($jh_tmp . '/good.sh', "#!/bin/bash\ncat <<'J'\n" . str_replace('"source":"crontab"', '"source":"refreshed"', $cc_valid) . "\nJ\n");
+	@unlink($jh_tmp . '/status/.cron-check-refresh');
+	gp_cron_check_refresh('t', '1.1.1.1', $jh_now + 1000);
+	return json_decode(file_get_contents($cc_live), true)['source'] === 'refreshed';
+})());
+t_ok('the Jobs page has a Check again button that posts a CSRF token, and the route handles it', strpos(file_get_contents(__DIR__ . '/../panel/views/jobs.php'), 'name="cron_refresh"') !== false && strpos(file_get_contents(__DIR__ . '/../panel/index.php'), "isset(\$_POST['cron_refresh'])") !== false);
+// A child that hangs is killed; a noisy child cannot block.
+file_put_contents($jh_tmp . '/hang.sh', "#!/bin/bash\nsleep 30\n");
+$t0 = microtime(true);
+$hung = gp_cron_check_exec($jh_tmp . '/hang.sh', '/bin/bash', 0.6);
+$el = microtime(true) - $t0;
+t_ok('a child that hangs: gp_cron_check_exec gives up after the timeout, kills it (SIGTERM then SIGKILL) and returns null within about 2 s', $hung === null && $el < 3.0);
+file_put_contents($jh_tmp . '/stubborn.sh', "#!/bin/bash\ntrap '' TERM\nwhile true; do sleep 1; done\n");
+$t0 = microtime(true);
+$stub = gp_cron_check_exec($jh_tmp . '/stubborn.sh', '/bin/bash', 0.5);
+$el2 = microtime(true) - $t0;
+t_ok('a child that ignores SIGTERM: proc_close does not wait for ever, SIGKILL after 1 s', $stub === null && $el2 < 4.0);
+exec('pgrep -f ' . escapeshellarg('[s]tubborn\\.sh') . ' 2>/dev/null', $pg);
+t_ok('...and no stubborn child is left running', empty($pg));
+file_put_contents($jh_tmp . '/noisy.sh', "#!/bin/bash\nhead -c 2000000 /dev/zero | tr '\\\\0' 'x' >&2\ncat <<'J'\n" . $cc_valid . "\nJ\n");
+$t0 = microtime(true);
+$noisy = gp_cron_check_exec($jh_tmp . '/noisy.sh', '/bin/bash', 3.0);
+t_ok('a child that writes 2 MB to stderr cannot block: stderr goes to /dev/null, the report still arrives, quickly', is_array($noisy) && isset($noisy['jobs']) && (microtime(true) - $t0) < 2.5);
+t_ok('the child gets /dev/null for stderr, not a pipe (source check)', strpos(file_get_contents(__DIR__ . '/../panel/health.php'), "2 => array('file', '/dev/null', 'w')") !== false && strpos(file_get_contents(__DIR__ . '/../panel/health.php'), "2 => array('pipe'") === false && strpos(file_get_contents(__DIR__ . '/../panel/health.php'), 'proc_terminate($proc, 9)') !== false);
+file_put_contents($jh_tmp . '/status/.cron-check-live.json', 'x'); @unlink($jh_tmp . '/status/.cron-check-live.json');
+$GLOBALS['gp_test_cron_script'] = $jh_tmp . '/hang.sh';
+$t0 = microtime(true);
+t_ok('end to end: with a hanging live check and a cron-written copy, gp_cron_check falls back to the file source', (function () use ($jh_now, $t0) {
+	// 3 s timeout is the production value; the hang script is killed by it
+	$c = gp_cron_check($jh_now);
+	return $c['mode'] === 'file' && (microtime(true) - $t0) < 6.0;
+})());
+unset($GLOBALS['gp_test_cron_script']);
+
+@unlink($jh_tmp . '/status/.cron-check.json'); @unlink($jh_tmp . '/status/.cron-check-live.json'); @unlink($jh_tmp . '/status/.cron-check-refresh');
 // The crontab check reader: sources in order.
 define('GP_NO_EXEC', 1);
 t_ok('crontab check: nothing available = mode none (heartbeat-only status)', gp_cron_check($jh_now)['mode'] === 'none');

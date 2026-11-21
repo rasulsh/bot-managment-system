@@ -19,6 +19,11 @@
 # logs/jobs.log): files gzipped, files deleted, bytes freed and why (retention, size cap, or the
 # free-disk floor log_min_free_mb), plus a failure with its error text.
 #
+# The free-disk floor only REPORTS by default. The disk is shared with the whole server (backups,
+# other sites): a full disk that is not the logs' fault must never make this script delete the
+# training history. Deleting for the floor is opt-in (log_floor_delete), never touches an archive
+# newer than log_floor_keep_days (default 7), and removes at most 10 files per run.
+#
 # What this script is careful about:
 #   * It never compresses a file that was written to in the last hour. The
 #     guard names its file by PHP's date and this script by the system's; when
@@ -53,6 +58,9 @@ LOG_DIR="${GV_LOG_DIR:-$(cfg_get log_dir)}"
 RETENTION_DAYS="$(int_or "${GV_RETENTION_DAYS:-$(cfg_get log_retention_days)}" 1 60)"
 MAX_MB="$(int_or "${GV_MAX_MB:-$(cfg_get log_max_mb)}" 0 0)"
 MIN_FREE_MB="$(int_or "${GV_MIN_FREE_MB:-$(cfg_get log_min_free_mb)}" 0 200)"
+FLOOR_DELETE="${GV_FLOOR_DELETE:-$(cfg_get log_floor_delete)}"
+FLOOR_KEEP_DAYS="$(int_or "${GV_FLOOR_KEEP_DAYS:-$(cfg_get log_floor_keep_days)}" 1 7)"
+FLOOR_MAX_FILES=10
 MIN_IDLE_MINUTES=60
 
 # The job logs live in the same directory: tell the status writer where.
@@ -125,6 +133,8 @@ deleted=$(find "$LOG_DIR" -maxdepth 1 -name '*.jsonl.gz' -type f -mtime "+$RETEN
 capped=0
 over=0
 floor_deleted=0
+floor_limit_hit=0
+disk_low=0
 if [ "$MAX_MB" -gt 0 ]; then
 	limit=$((MAX_MB * 1048576))
 	while [ "$(total_bytes)" -gt "$limit" ]; do
@@ -135,29 +145,50 @@ if [ "$MAX_MB" -gt 0 ]; then
 fi
 
 # Free-disk floor: when the disk holding the logs is below log_min_free_mb the guard has already stopped
-# logging; delete the oldest archives (never an uncompressed file) until there is room again.
+# logging. This script always REPORTS that (status warning, jobs.log, dashboard alert). It deletes for it only
+# when log_floor_delete is on: the oldest archives first, never an uncompressed file, never an archive newer
+# than log_floor_keep_days, and at most FLOOR_MAX_FILES per run (the limit being hit is recorded).
+# df sees the filesystem, not the cPanel / CloudLinux user quota (docs/06-KNOWN-LIMITS.md).
 free_mb() { df -Pm "$LOG_DIR" 2>/dev/null | awk 'NR==2 {print $4+0}'; }
-if [ "$MIN_FREE_MB" -gt 0 ]; then
-	while [ "$(free_mb)" != "" ] && [ "$(free_mb)" -lt "$MIN_FREE_MB" ]; do
-		oldest="$(find "$LOG_DIR" -maxdepth 1 -type f \( -name 'guard-*.jsonl.gz' -o -name 'guard-errors-*.log.gz' \) -printf '%T@ %p\n' | sort -n | head -1 | cut -d' ' -f2-)"
-		[ -n "$oldest" ] || break
-		if rm -f -- "$oldest"; then floor_deleted=$((floor_deleted + 1)); else failed=$((failed + 1)); break; fi
-	done
+if [ "$MIN_FREE_MB" -gt 0 ] && [ -n "$(free_mb)" ] && [ "$(free_mb)" -lt "$MIN_FREE_MB" ]; then
+	disk_low=1
+	if [ "$FLOOR_DELETE" = "true" ]; then
+		while [ "$(free_mb)" -lt "$MIN_FREE_MB" ]; do
+			if [ "$floor_deleted" -ge "$FLOOR_MAX_FILES" ]; then floor_limit_hit=1; break; fi
+			oldest="$(find "$LOG_DIR" -maxdepth 1 -type f \( -name 'guard-*.jsonl.gz' -o -name 'guard-errors-*.log.gz' \) -mtime "+$FLOOR_KEEP_DAYS" -printf '%T@ %p\n' | sort -n | head -1 | cut -d' ' -f2-)"
+			[ -n "$oldest" ] || break
+			if rm -f -- "$oldest"; then floor_deleted=$((floor_deleted + 1)); else failed=$((failed + 1)); break; fi
+		done
+	fi
 fi
+# The user's own quota, when the tools exist (cPanel / CloudLinux): recorded, never acted on.
+quota_text=""
+for q in quota /usr/bin/quota; do
+	if command -v "$q" >/dev/null 2>&1; then
+		quota_text="$("$q" -s -w 2>/dev/null | sed -n '3,4p' | tr -s ' ' | tr '\n' ' ' | tr -cd 'A-Za-z0-9 ./:_+%-' | cut -c1-160)"
+		break
+	fi
+done
 [ "$capped" -eq 0 ] || reasons="${reasons:+$reasons,}size_cap"
 [ "$floor_deleted" -eq 0 ] || reasons="${reasons:+$reasons,}disk_floor"
 
 bytes="$(total_bytes)"
 freed=$((bytes_before > bytes ? bytes_before - bytes : 0))
-JS_EXTRA_RESULT="$(printf '{"compressed":%s,"deleted_retention":%s,"deleted_size_cap":%s,"deleted_disk_floor":%s,"bytes_freed":%s,"bytes_now":%s,"reasons":"%s","over_cap":%s}' \
-	"$gzipped" "$deleted" "$capped" "$floor_deleted" "$freed" "$bytes" "$reasons" "$over")"
+JS_EXTRA_RESULT="$(printf '{"compressed":%s,"deleted_retention":%s,"deleted_size_cap":%s,"deleted_disk_floor":%s,"bytes_freed":%s,"bytes_now":%s,"reasons":"%s","over_cap":%s,"disk_low":%s,"free_mb":%s,"floor_delete":%s,"floor_keep_days":%s,"floor_limit_hit":%s,"quota":"%s"}' \
+	"$gzipped" "$deleted" "$capped" "$floor_deleted" "$freed" "$bytes" "$reasons" "$over" "$disk_low" "$(free_mb | grep -E '^[0-9]+$' || echo 0)" \
+	"$([ "$FLOOR_DELETE" = true ] && echo true || echo false)" "$FLOOR_KEEP_DAYS" "$floor_limit_hit" "$quota_text")"
 [ "$over" -eq 0 ] || JS_WARN_EXTRA="the uncompressed log files alone exceed log_max_mb (${MAX_MB} MiB)"
+if [ "$disk_low" -eq 1 ]; then
+	JS_WARN_EXTRA="${JS_WARN_EXTRA:+$JS_WARN_EXTRA
+}free disk space is below log_min_free_mb (${MIN_FREE_MB} MiB)$([ "$FLOOR_DELETE" = true ] || echo '; log_floor_delete is off, nothing was deleted for it')$([ "$floor_limit_hit" -eq 0 ] || echo "; stopped at the limit of $FLOOR_MAX_FILES files per run")"
+fi
 printf '{"ts":%s,"compressed":%s,"deleted":%s,"capped":%s,"over_cap":%s,"failures":%s,"retention_days":%s,"max_mb":%s,"bytes":%s}\n' \
 	"$(date +%s)" "$gzipped" "$deleted" "$capped" "$over" "$failed" "$RETENTION_DAYS" "$MAX_MB" "$bytes" \
 	> "$LOG_DIR/.last-rotate.tmp" && mv -f -- "$LOG_DIR/.last-rotate.tmp" "$LOG_DIR/.last-rotate" || failed=$((failed + 1))
 
 echo "Bot Guard log rotation: compressed $gzipped file(s), deleted $deleted archive(s) older than $RETENTION_DAYS days, $capped more for the ${MAX_MB} MiB cap, skipped $skipped non-regular entr(ies), $failed failure(s) in $LOG_DIR ($bytes bytes now)"
 [ "$over" -eq 0 ] || echo "WARNING: the uncompressed log files alone exceed log_max_mb (${MAX_MB} MiB); lower traffic logging (log_skip_paths) or raise the cap."
-[ "$floor_deleted" -eq 0 ] || echo "NOTICE: deleted $floor_deleted oldest archive(s) because free disk space was below log_min_free_mb (${MIN_FREE_MB} MiB)."
+[ "$disk_low" -eq 0 ] || echo "WARNING: free disk space is below log_min_free_mb (${MIN_FREE_MB} MiB); deleted $floor_deleted archive(s) for it (log_floor_delete=${FLOOR_DELETE:-false}, keeping the last $FLOOR_KEEP_DAYS days)."
+[ "$floor_limit_hit" -eq 0 ] || echo "NOTICE: stopped at the limit of $FLOOR_MAX_FILES files per run; the next run continues."
 if [ "$failed" -ne 0 ]; then JS_NOTE="$failed failure(s) while rotating logs in $LOG_DIR"; exit 1; fi
 exit 0
