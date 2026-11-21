@@ -17,6 +17,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import config as config_mod
+from analyzer import jobreport
 from analyzer import botverify
 from analyzer import logs as logs_mod
 from analyzer import redis_io
@@ -142,6 +143,9 @@ def main(argv=None, resolver=None):
 
     if client is None:
         print('Redis unavailable: verdicts were computed but not stored.')
+        jobreport.warn('Redis unavailable: verdicts were computed but not stored')
+    if not claims:
+        jobreport.warn('no known-bot claims in the last %s day(s) of logs: nothing to verify' % cfg['window_days'])
     print('Bot verification: verified %d, flagged %d, unknown %d, skipped %d, candidates %d.'
           % (verified, flagged, unknown, skipped, len(claims)))
     if unknown:
@@ -151,6 +155,7 @@ def main(argv=None, resolver=None):
         snapshot_mod.record_stats(cfg, 'run_verify', {
             'verified': verified, 'flagged': flagged, 'unknown': unknown,
             'skipped': skipped, 'candidates': len(claims)})
+    jobreport.result({'verified': verified, 'flagged': flagged, 'unknown': unknown, 'skipped': skipped, 'candidates': len(claims)})
     snapshot_mod.touch_run(cfg, 'run_verify')
     return 0
 

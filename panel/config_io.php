@@ -148,7 +148,9 @@ function gp_analyzer_defaults() {
 		'botv_ttl' => 86400, 'botbad_ttl' => 3600, 'dns_canary' => 'www.google.com', 'ml_min_train' => 200,
 		'contamination' => 0.05, 'clf_min_positive' => 50, 'clf_target_precision' => 0.98,
 		'path_listing' => array(), 'path_detail' => array(), 'report_days' => 7, 'report_top_n' => 20,
-		'challenge_success_target' => 0.95, 'snapshot_days' => 1, 'job_ttl' => 86400, 'worker_max_jobs' => 4);
+		'challenge_success_target' => 0.95, 'snapshot_days' => 1, 'job_ttl' => 86400, 'worker_max_jobs' => 4,
+		'interval_verify' => 10, 'interval_worker' => 1, 'interval_snapshot' => 15, 'interval_nightly' => 1440, 'interval_logrotate' => 1440,
+		'interval_train' => 10080, 'interval_train_clf' => 10080, 'interval_geo' => 43200, 'interval_report' => 10080);
 }
 
 // The effective configuration as the panel shows it: the guard's, plus the

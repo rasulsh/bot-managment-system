@@ -67,3 +67,16 @@ guard/rules.json.lock
 analyzer/.rule-hits.json
 guard/rules.cache.php
 guard/rules.cache.php.tmp*
+
+# Job status written by the cron wrappers (scripts/lib-jobstatus.sh) and the panel.
+analyzer/.jobstatus-*.json
+analyzer/.jobstatus-*.json.tmp*
+analyzer/.jobstate-*
+analyzer/.cron-check.json
+analyzer/.cron-check.json.tmp*
+panel/jobs-seen.json
+panel/jobs-seen.json.tmp*
+logs/jobs.log
+logs/jobs-errors.log
+logs/jobs-*.log.gz
+logs/jobs-errors-*.log.gz

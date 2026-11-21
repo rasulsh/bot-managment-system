@@ -78,7 +78,7 @@ def entry(tag, nets):
     return field(1, body)
 open(sys.argv[1], 'wb').write(entry('us', [((127, 0, 0, 0), 8)]) + entry('IR', [((5, 0, 0, 0), 8)]) + entry('private', [((10, 0, 0, 0), 8)]))
 PY
-GV_GEO_DIR="$WORK/geo" GV_GEO_MIN_RANGES=1 GV_PYTHON=python3 bash "$ROOT/scripts/analyzer-cron.sh" geo >"$WORK/geo.out" 2>&1 \
+GV_JOBSTATUS_DIR="$WORK" GV_JOBLOG_DIR="$WORK" GV_LOCK_DIR="$WORK" GV_GEO_DIR="$WORK/geo" GV_GEO_MIN_RANGES=1 GV_PYTHON=python3 bash "$ROOT/scripts/analyzer-cron.sh" geo >"$WORK/geo.out" 2>&1 \
 	&& echo "PASS  analyzer-cron.sh geo compiled geoip.dat into country.bin" || { echo "FAIL  analyzer-cron.sh geo"; cat "$WORK/geo.out" >&2; }
 export GV_GEO_DIR="$WORK/geo"
 
@@ -168,6 +168,13 @@ else
 	status=1
 fi
 rm -f "$ROOT/analyzer/.rule-hits.json"
+# The snapshot's 24 h KPIs, top lists and time zone (dashboard redesign): built from the same rows.
+if python3 -c "import json,sys; d=json.load(open(sys.argv[1])); k=d['kpi']['cur']; sys.exit(0 if k['requests']>20 and k['allowed']>0 and 'tz' in d and isinstance(d['tz']['offset'], int) and 'ips' in d['top'] and d['kpi']['window_h']==24 else 1)" "$WORK/snapshot.json"; then
+	echo "PASS  snapshot: 24 h KPIs (rolling window), top lists and time zone are present"
+else
+	echo "FAIL  snapshot: kpi / top / tz missing or empty"
+	status=1
+fi
 # GeoIP logging: every decision row of this run carries the country, and the readers above accepted them.
 rows_total=$(cat "$LOGS"/guard-*.jsonl | grep -vc '"o":1')
 rows_cc=$(cat "$LOGS"/guard-*.jsonl | grep -c '"cc":"US"')

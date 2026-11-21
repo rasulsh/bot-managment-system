@@ -19,7 +19,7 @@ const ROOT = BASE.replace(/\/$/, '') + '/' + (PANEL || '/panel').replace(/^\/|\/
 const ORIGIN = new URL(BASE).origin;
 const VIEWS = [{ name: 'desktop', width: 1600, height: 1000 }, { name: 'mobile', width: 390, height: 844 }];
 const PAGES = ['dashboard', 'logs', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'identity&id=203.0.113.5', 'overrides', 'rules', 'rules&new=1', 'rules&edit=ZZ',
-	'geo', 'geo&test=1&ip=203.0.113.7', 'replay', 'models', 'settings', 'config_file', 'jobs', 'audit&event=config&event_op=not'];
+	'geo', 'geo&test=1&ip=203.0.113.7', 'replay', 'models', 'settings', 'config_file', 'jobs', 'jobs&job=verify', 'audit&event=config&event_op=not'];
 let failed = 0;
 const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } else { failed++; console.log('FAIL  ' + name + (extra ? ' (' + extra + ')' : '')); } };
 

@@ -2654,5 +2654,174 @@ else:
     ok('...and the answers are the expected ones, not just equal', php_vals[:5] == ['US', 'IR', 'IR', '', 'TR'] and php_vals[7] == 'DE')
 shutil.rmtree(geo_work, ignore_errors=True)
 
+# ---------------------------------------------------------------------------
+section('Crontab check (scripts/cron-check.sh): parser, states, schedules, GV_PYTHON, CageFS, CRLF')
+import importlib.util as ilu_cc
+import json as json_cc
+import subprocess as sp_cc
+
+cc_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts', 'cron_check.py')
+cc_spec = ilu_cc.spec_from_file_location('cron_check', cc_path)
+cron_check = ilu_cc.module_from_spec(cc_spec)
+cc_spec.loader.exec_module(cron_check)
+CC_ROOT = '/home/u/bot-guard'
+CC_PY = sys.executable
+CC_FULL = '\n'.join([
+    'GV_PYTHON=' + CC_PY,
+    'MAILTO=""',
+    '*/10 * * * * %s/scripts/analyzer-cron.sh verify    >/dev/null 2>&1' % CC_ROOT,
+    '* * * * * %s/scripts/analyzer-cron.sh worker >/dev/null 2>&1' % CC_ROOT,
+    '*/15 * * * * %s/scripts/analyzer-cron.sh snapshot >/dev/null 2>&1' % CC_ROOT,
+    '17 4 * * * %s/scripts/analyzer-cron.sh nightly >/dev/null 2>&1' % CC_ROOT,
+    '10 3 * * * %s/scripts/guard-logrotate.sh >/dev/null 2>&1' % CC_ROOT,
+    '# reverse-DNS bot verification, frequent',
+]) + '\n'
+
+
+def cc_state(report, job):
+    return [j for j in report['jobs'] if j['job'] == job][0]
+
+
+full = cron_check.evaluate(CC_FULL, CC_ROOT, geo_used=False, now=1)
+ok('a complete crontab: every required entry ok, exit-style ok flag, no problems', full['ok'] and full['problems'] == 0
+   and all(cc_state(full, j)['state'] == 'ok' for j in ('verify', 'worker', 'snapshot', 'nightly', 'logrotate')))
+ok('recommended entries (train, train-clf, report) are only informational when missing; geo is left out when GeoIP is unused',
+   cc_state(full, 'train')['severity'] == 'info' and cc_state(full, 'report')['state'] == 'missing' and 'geo' not in [j['job'] for j in full['jobs']] and full['ok'])
+ok('a prose comment is not an entry', all(cc_state(full, j)['state'] == 'ok' for j in ('verify',)))
+ok('GV_PYTHON pointing at an executable file is ok', full['gv_python']['set'] and full['gv_python']['ok'])
+
+empty = cron_check.evaluate('', CC_ROOT, geo_used=False)
+ok('an empty crontab: every required entry missing (critical), not an error of the check', not empty['ok'] and empty['problems'] == 5
+   and all(cc_state(empty, j)['severity'] == 'critical' for j in ('verify', 'worker', 'snapshot', 'nightly', 'logrotate')))
+ok('missing entries come with the exact line for THIS install, and the GV_PYTHON hint', cc_state(empty, 'worker')['install_line'] == '* * * * * %s/scripts/analyzer-cron.sh worker >/dev/null 2>&1' % CC_ROOT
+   and cc_state(empty, 'logrotate')['install_line'].endswith('/scripts/guard-logrotate.sh >/dev/null 2>&1') and empty['gv_python']['suggest'].startswith('GV_PYTHON=') and empty['editor'] == 'crontab -e')
+
+commented = cron_check.evaluate(CC_FULL.replace('*/15 * * * * ', '#*/15 * * * * ').replace('17 4', '# 17 4'), CC_ROOT, geo_used=False)
+ok('a commented-out entry counts as DISABLED (a warning, still a problem for the exit code), and its line is offered again',
+   cc_state(commented, 'snapshot')['state'] == 'disabled' and cc_state(commented, 'nightly')['state'] == 'disabled' and cc_state(commented, 'snapshot')['severity'] == 'warning'
+   and not commented['ok'] and 'snapshot' in cc_state(commented, 'snapshot')['install_line'])
+
+dup = cron_check.evaluate(CC_FULL + '*/10 * * * * %s/scripts/analyzer-cron.sh verify\n' % CC_ROOT, CC_ROOT, geo_used=False)
+ok('duplicates are reported (warning)', cc_state(dup, 'verify')['state'] == 'duplicate' and cc_state(dup, 'verify')['severity'] == 'warning' and dup['ok'])
+
+wrong = cron_check.evaluate(CC_FULL.replace(CC_ROOT + '/scripts/guard-logrotate.sh', '/home/other/bot-guard/scripts/guard-logrotate.sh'), CC_ROOT, geo_used=False)
+ok('an entry pointing at another install directory is "wrong path"', cc_state(wrong, 'logrotate')['state'] == 'wrong_path' and not wrong['ok'] and '/home/other' in cc_state(wrong, 'logrotate')['message'])
+ok('a relative script path is "wrong path" too, a path through .. or a symlink to this install is fine',
+   cron_check.evaluate('* * * * * scripts/analyzer-cron.sh worker\n', CC_ROOT, geo_used=False)['jobs'][1]['state'] == 'wrong_path'
+   and cc_state(cron_check.evaluate('* * * * * %s/x/../scripts/analyzer-cron.sh worker\n' % CC_ROOT, CC_ROOT, geo_used=False), 'worker')['state'] == 'ok')
+
+daily = cron_check.evaluate(CC_FULL.replace('17 4 * * *', '@daily').replace('10 3 * * *', '@midnight'), CC_ROOT, geo_used=False)
+ok('@daily / @midnight style schedules are understood', cc_state(daily, 'nightly')['state'] == 'ok' and cc_state(daily, 'logrotate')['state'] == 'ok' and cc_state(daily, 'nightly')['period_min'] == 1440)
+slow = cron_check.evaluate(CC_FULL.replace('*/10 * * * *', '*/30 * * * *').replace('17 4 * * *', '@weekly').replace('* * * * * %s/scripts/analyzer-cron.sh worker' % CC_ROOT, '@hourly %s/scripts/analyzer-cron.sh worker' % CC_ROOT), CC_ROOT, geo_used=False)
+ok('a schedule that runs less often than the job needs is "wrong schedule" (verify */30, nightly @weekly, worker @hourly)',
+   all(cc_state(slow, j)['state'] == 'wrong_schedule' for j in ('verify', 'nightly', 'worker')) and 'every 30' in cc_state(slow, 'verify')['message'] and not slow['ok'])
+ok('@reboot never runs the job', cc_state(cron_check.evaluate(CC_FULL.replace('17 4 * * *', '@reboot'), CC_ROOT, geo_used=False), 'nightly')['state'] == 'wrong_schedule')
+ok('period estimate: */10, every minute, hourly list, weekdays only, monthly, @yearly',
+   cron_check.period_minutes('*/10 * * * *') == 10 and cron_check.period_minutes('* * * * *') == 1 and cron_check.period_minutes('0 * * * *') == 60
+   and cron_check.period_minutes('0 0 * * 1-5') == 10080 / 5 and cron_check.period_minutes('23 3 1 * *') > 40000 and cron_check.period_minutes('@yearly') == 525600
+   and cron_check.period_minutes('0,30 * * * *') == 30 and cron_check.period_minutes('nonsense') is None and cron_check.period_minutes('1 2 3') is None)
+ok('weekly (41 5 * * 0) and monthly (23 3 1 * *) defaults satisfy their 7 d / 30 d expectations',
+   all(cc_state(cron_check.evaluate('41 5 * * 0 %s/scripts/analyzer-cron.sh train\n23 3 1 * * %s/scripts/analyzer-cron.sh geo\n' % (CC_ROOT, CC_ROOT), CC_ROOT, geo_used=True), j)['state'] == 'ok' for j in ('train', 'geo')))
+
+env_only = cron_check.parse_crontab('SHELL=/bin/bash\nPATH=/usr/bin:/bin\nGV_PYTHON="/x/py"\nMAILTO=\n')
+ok('environment lines are read (quotes stripped) and are not entries', env_only[0]['GV_PYTHON'] == '/x/py' and env_only[0]['SHELL'] == '/bin/bash' and env_only[1] == [])
+gp_bad = cron_check.evaluate(CC_FULL.replace('GV_PYTHON=' + CC_PY, 'GV_PYTHON=/nonexistent/venv/bin/python'), CC_ROOT, geo_used=False)
+ok('a GV_PYTHON that is not an executable file is a problem; a missing one is only a warning', gp_bad['gv_python']['set'] and not gp_bad['gv_python']['ok'] and not gp_bad['ok']
+   and cron_check.evaluate(CC_FULL.replace('GV_PYTHON=' + CC_PY + '\n', ''), CC_ROOT, geo_used=False)['ok'] and cron_check.evaluate(CC_FULL.replace('GV_PYTHON=' + CC_PY + '\n', ''), CC_ROOT, geo_used=False)['warnings'] >= 1)
+crlf = cron_check.evaluate(CC_FULL.replace('\n', '\r\n'), CC_ROOT, geo_used=False)
+ok('CRLF line endings (a crontab edited on Windows) give the same result', crlf['ok'] and crlf['gv_python']['ok'] and [j['state'] for j in crlf['jobs']] == [j['state'] for j in full['jobs']])
+
+cage = ('# DO NOT EDIT THIS FILE - edit the master and reinstall.\n# (/tmp/crontab.XXXX installed on Fri Nov 20 10:00:00 2026)\n# (Cron version -- $Id: crontab.c,v 2.13 1994/01/17 03:20:37 vixie Exp $)\n' + CC_FULL)
+ok('CageFS / vixie-cron header comments are ignored', cron_check.evaluate(cage, CC_ROOT, geo_used=False)['ok'])
+ok('the geo entry is required-looking only when GeoIP is used (recommended, warning level)', cc_state(cron_check.evaluate(CC_FULL, CC_ROOT, geo_used=True), 'geo')['state'] == 'missing')
+
+# the live crontab: crontab.cagefs first, then crontab; "no crontab for user" is empty
+cc_calls = []
+real_run = cron_check.subprocess.run
+
+
+def fake_run_factory(table):
+    def fake_run(cmd, **kw):
+        cc_calls.append(cmd[0])
+        entry = table.get(cmd[0])
+        if entry is None:
+            raise OSError('not found')
+        return sp_cc.CompletedProcess(cmd, entry[0], entry[1], entry[2])
+    return fake_run
+
+
+cron_check.subprocess.run = fake_run_factory({'/usr/bin/crontab.cagefs': (0, CC_FULL, ''), 'crontab': (0, 'wrong', '')})
+text_cc, src_cc = cron_check.read_live()
+ok('crontab.cagefs is tried first and wins', src_cc == 'crontab.cagefs' and text_cc == CC_FULL and cc_calls == ['/usr/bin/crontab.cagefs'])
+cc_calls[:] = []
+cron_check.subprocess.run = fake_run_factory({'crontab': (0, CC_FULL, '')})
+ok('without crontab.cagefs the plain crontab -l is used', cron_check.read_live() == (CC_FULL, 'crontab') and cc_calls == ['/usr/bin/crontab.cagefs', 'crontab'])
+cron_check.subprocess.run = fake_run_factory({'crontab': (1, '', 'no crontab for cloud')})
+ok('"no crontab for user" is an empty crontab, not an error', cron_check.read_live() == ('', 'crontab'))
+cron_check.subprocess.run = fake_run_factory({})
+ok('no crontab command at all: unreadable (None), reported as such', cron_check.read_live() == (None, ''))
+cron_check.subprocess.run = real_run
+
+# the script itself: exit codes and JSON
+cc_tmp = tempfile.mkdtemp(prefix='gv-cc-')
+with open(os.path.join(cc_tmp, 'ok.txt'), 'w') as fh:
+    fh.write(CC_FULL)
+with open(os.path.join(cc_tmp, 'empty.txt'), 'w') as fh:
+    fh.write('')
+cc_script = os.path.join(os.path.dirname(cc_path), 'cron-check.sh')
+r_ok = sp_cc.run(['bash', cc_script, '--file', os.path.join(cc_tmp, 'ok.txt'), '--root', CC_ROOT], stdout=sp_cc.PIPE, universal_newlines=True)
+r_empty = sp_cc.run(['bash', cc_script, '--file', os.path.join(cc_tmp, 'empty.txt'), '--root', CC_ROOT], stdout=sp_cc.PIPE, universal_newlines=True)
+r_json = sp_cc.run(['bash', cc_script, '--json', '--file', os.path.join(cc_tmp, 'empty.txt'), '--root', CC_ROOT], stdout=sp_cc.PIPE, universal_newlines=True)
+ok('cron-check.sh exits 0 when all required entries are right and 1 when something is missing', r_ok.returncode == 0 and r_empty.returncode == 1)
+ok('the report is English and names the fix; --json is valid JSON with the same verdict', 'RESULT:' in r_empty.stdout and 'crontab -e' in r_empty.stdout and json_cc.loads(r_json.stdout)['problems'] == 5
+   and not re.search(r'[^\x00-\x7f]', r_empty.stdout))
+shutil.rmtree(cc_tmp, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+section('Job reports, 24 h KPIs, top lists, time zone (PR 4)')
+import io as io_p4
+import contextlib as ctx_p4
+from analyzer import jobreport as jr_p4
+from analyzer import snapshot as snap_p4
+
+buf_p4 = io_p4.StringIO()
+with ctx_p4.redirect_stderr(buf_p4):
+    jr_p4.warn('Redis unavailable:\n verdicts   not stored')
+    jr_p4.result({'ml_trained': False, 'ml_samples': 12, 'clf_metrics': {'precision': 0.9}})
+    jr_p4.warn('x' * 1000)
+warns_p4, res_p4 = jr_p4.parse(buf_p4.getvalue() + 'ordinary output\nGV_JOB_RESULT: not json\n')
+ok('jobreport: warnings are single-line and capped, the result round-trips, junk lines are ignored',
+   warns_p4[0] == 'Redis unavailable: verdicts not stored' and len(warns_p4[1]) == 300 and res_p4 == {'ml_trained': False, 'ml_samples': 12, 'clf_metrics': {'precision': 0.9}})
+ok('jobreport: an unserialisable result is dropped, not a crash; no markers = nothing', jr_p4.parse('plain') == ([], None))
+
+now_p4 = 1_800_000_000.0
+rows_p4 = [
+    {'ts': now_p4 - 100, 'act': 'allow', 'ip': '1.1.1.1', 'ua': 'Mozilla', 'p': '/a', 'sh': 0, 'rs': []},
+    {'ts': now_p4 - 90, 'act': '403', 'ip': '2.2.2.2', 'dev': 'd1', 'ua': 'curl/8', 'p': '/shop', 'sh': 0, 'rs': ['UA_SCRIPT', 'RULE:r1'], 'cc': 'IR'},
+    {'ts': now_p4 - 80, 'act': '403', 'ip': '2.2.2.2', 'dev': 'd1', 'ua': 'curl/8', 'p': '/shop', 'sh': 0, 'rs': ['UA_SCRIPT', 'SH_RULE:r2'], 'cc': 'IR'},
+    {'ts': now_p4 - 70, 'act': '429', 'ip': '3.3.3.3', 'ua': 'x', 'p': '/api', 'sh': 0, 'rs': [], 'cc': 'US'},
+    {'ts': now_p4 - 60, 'act': 'challenge', 'ip': '4.4.4.4', 'sh': 0, 'rs': []},
+    {'ts': now_p4 - 50, 'act': 'challenge', 'ip': '4.4.4.4', 'sh': 1, 'rs': []},
+    {'ts': now_p4 - 40, 'act': 'token_issued', 'ip': '4.4.4.4', 'sh': 0, 'rs': []},
+    {'ts': now_p4 - 30, 'act': '404_hp', 'hp': 1, 'ip': '5.5.5.5', 'sh': 0, 'rs': []},
+    {'ts': now_p4 - 20, 'act': 'allow', 'rd': 1, 'ip': '6.6.6.6', 'sh': 0, 'rs': []},
+]
+kc_p4 = snap_p4.kpi_counts(rows_p4)
+ok('kpi: requests, allowed (shadow rows count as allowed), blocked, limited, challenged (shadow excluded)',
+   kc_p4['requests'] == 9 and kc_p4['blocked'] == 2 and kc_p4['limited'] == 1 and kc_p4['challenged'] == 1 and kc_p4['allowed'] == 3)
+ok('kpi: rule hits count rows (RULE: and SH_RULE:), honeypot, degraded', kc_p4['rule_hits'] == 2 and kc_p4['honeypot'] == 1 and kc_p4['degraded'] == 1)
+ok('kpi: challenge success rate = tokens issued / challenges served, None when none was served',
+   kc_p4['token_issued'] == 1 and kc_p4['challenge_success'] == 100.0 and snap_p4.kpi_counts([])['challenge_success'] is None and snap_p4.kpi_counts([])['requests'] == 0)
+tl_p4 = snap_p4.top_lists(rows_p4)
+ok('top lists: rules (enforced and monitor ids), reasons without the rule ids', tl_p4['rules'] == [['r1', 1], ['r2', 1]] and tl_p4['reasons'] == [['UA_SCRIPT', 2]])
+ok('top lists: ips, devices, UAs and paths of the clients being acted on (403 / 429 / challenge, not shadow), most first',
+   tl_p4['ips'][0] == ['2.2.2.2', 2] and tl_p4['devices'] == [['d1', 2]] and tl_p4['uas'][0] == ['curl/8', 2] and tl_p4['paths'][0] == ['/shop', 2] and ['1.1.1.1', 1] not in tl_p4['ips'])
+ok('top lists: countries over all rows that carry one; empty when none does', tl_p4['countries'] == [['IR', 2], ['US', 1]] and snap_p4.top_lists([{'act': 'allow'}])['countries'] == [])
+ok('top lists are bounded (8 entries) and deterministic', len(snap_p4.top_lists([{'act': '403', 'ip': '10.0.0.%d' % i} for i in range(30)])['ips']) == 8
+   and snap_p4.top_lists([{'act': '403', 'ip': 'b'}, {'act': '403', 'ip': 'a'}])['ips'] == [['a', 1], ['b', 1]])
+tz_p4 = snap_p4.local_tz()
+ok('the analyzer reports its time zone offset (daily logs, logrotate and "today" follow it)', isinstance(tz_p4['offset'], int) and abs(tz_p4['offset']) <= 14 * 3600 and 'name' in tz_p4)
+ok('the worker records exit, warnings and the result of a job it ran', (lambda w: ('warnings' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read() and 'jobreport.parse' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read()))(0))
+
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)

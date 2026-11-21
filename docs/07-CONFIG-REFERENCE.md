@@ -63,6 +63,7 @@ See [09-ADMIN-PANEL.md](09-ADMIN-PANEL.md#where-each-setting-lives).
 | `signals.ml` | Phase 2. Add the scaled `gv:ml:{dev}` anomaly level to the score. Default off (shadow). |
 | `ml_weight` | Phase 2. Multiplier turning an anomaly level of 0..100 into a score contribution. Default 0.4. |
 | `bot_suffixes` | Phase 2. Reverse-DNS suffixes per known bot. Consumed by the Python verifier; kept here as one source of truth. |
+| `analyzer.interval_verify`, `_worker`, `_snapshot`, `_nightly`, `_logrotate`, `_train`, `_train_clf`, `_geo`, `_report` | Expected run interval of each background job in minutes (defaults 10, 1, 15, 1440, 1440, 10080, 10080, 43200, 10080). Read by the panel's job health only: a job is late after twice its interval. Settings -> Analyzer. |
 | `geo.log` | Default false. Add the country (`cc`) and, when `geo/asn.bin` exists, the AS number (`asn`) to every log row. Without it the lookup only runs for a rule that needs it. Settings -> GeoIP. |
 | `capture_outcomes` | Phase 4. Record what the application did with each allowed request as a second tiny log line. Default off. |
 
@@ -91,6 +92,19 @@ Not part of `config.php`: written by the panel (Rules page), read by the guard o
 
 At least one of `ua` / `path` / `country` / `asn`. An unknown country or ASN matches neither `include` nor `exclude`. Limits: 200 rules, 50 values per condition, 300 chars per value.
 Conditions of one rule are AND-ed.
+
+## Job status files (written by the cron wrappers)
+
+| File | Meaning |
+|---|---|
+| `analyzer/.jobstatus-<mode>.json` | Latest state of a job: status, last start / end / success / failure, exit code, duration, skipped-by-lock count, last error, warnings, result. Modes: `verify nightly train train-clf snapshot worker report geo logrotate`. |
+| `analyzer/.jobstate-<mode>` | Numbers that survive runs (last success / failure, skip count, runs, failures). |
+| `analyzer/.cron-check.json` | The last crontab check (`scripts/cron-check.sh --json`), refreshed by every cron run at most every 10 minutes. |
+| `logs/jobs.log`, `logs/jobs-errors.log` | One JSON line per run; the captured stderr (64 KiB cap, redacted) of a failed run. Rotated and expired like the guard logs. |
+| `panel/jobs-seen.json` | Failures an operator marked as seen (panel-written). |
+
+Environment (tests and unusual installs): `GV_JOBSTATUS_DIR` (status files, default `analyzer/`), `GV_JOBLOG_DIR` (default the
+configured `log_dir`), `GV_LOCK_DIR` (lock files, default `analyzer/`), `GV_MIN_FREE_MB` (logrotate's disk floor override).
 
 ## GeoIP files (`geo/`)
 

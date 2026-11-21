@@ -549,6 +549,9 @@ def main(argv=None):
         print('ignored geoip.dat tags: ' + ', '.join(sorted(status['ignored_tags'])))
     for err in status['errors']:
         print('ERROR: ' + err, file=sys.stderr)
+    # Same one-line report protocol as analyzer/jobreport.py (this file runs standalone).
+    print('GV_JOB_RESULT: ' + json.dumps({'country': status['country'], 'asn': status['asn'], 'errors': len(status['errors'])},
+                                         sort_keys=True, default=str)[:2000], file=sys.stderr)
     print('geo compile: ' + ('ok' if status['ok'] else 'FAILED'))
     return 0 if status['ok'] and not status['errors'] else 1
 

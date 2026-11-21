@@ -2,6 +2,42 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Dashboard redesign and background job health
+
+**New**
+
+* The dashboard is reordered: critical alerts, protection state, last-24 h KPIs against the previous 24 h, top lists linking to the
+  Logs filters, then collapsible details. See [09-ADMIN-PANEL.md](09-ADMIN-PANEL.md#dashboard-job-health-and-alerts). It also surfaces the
+  alerts of earlier releases: rules file invalid, rules cache stale, GeoIP database missing / corrupt while a geo rule is enabled,
+  GeoIP database older than 45 days.
+* **Every** cron mode and `guard-logrotate.sh` now record `analyzer/.jobstatus-<mode>.json`, `logs/jobs.log` and (on failure)
+  `logs/jobs-errors.log` (see [03-SETUP.md](03-SETUP.md#every-background-job-how-often-and-what-breaks-without-it)). A Python that cannot import the packages is a recorded
+  failure (exit 3) instead of a silent success. A run skipped by the lock is counted. Jobs that did nothing useful (no input, Redis
+  down, no model, nothing trained) are `warning`s. Training runs record their result; log rotation records its fields and reasons.
+* New `scripts/cron-check.sh` (crontab report; `--json`), `scripts/jobstatus-selftest.sh`, `scripts/lib-jobstatus.sh`, `scripts/secret-values.php`.
+* The Jobs page shows job health, the crontab check, the queue, error details and "mark as seen". Expected intervals are Settings -> Analyzer
+  (`analyzer.interval_*`).
+* The snapshot gains `kpi`, `top` and `tz`; its "last 24 h" is now a rolling window of timestamps (it used to be today's file).
+* `guard-logrotate.sh` also rotates the job logs and deletes the oldest archives when free disk space is below `log_min_free_mb`.
+* The worker records exit code, duration, warnings and the result in the status of each panel job.
+
+**Upgrade steps** (`/home/cloud/bot-guard`, monitor mode)
+
+1. Deploy the files. No config change, no new extension, no new cron entry is required.
+2. Run `bash scripts/cron-check.sh` over SSH and fix what it reports (add missing entries, add a `GV_PYTHON=` line if the packages live in a
+   virtualenv). Until each job has run once with the new wrapper, the dashboard uses the old `.lastrun-*` heartbeat where there is one and
+   says "never ran" otherwise; the **Cron setup** card shows the exact lines.
+3. Open the dashboard. Fix what is critical first. Mark a known, understood failure as seen on the Jobs page.
+4. If the analyzer and the panel show different time zones, set `date.timezone` (PHP) and `TZ` (crontab) to the same zone.
+5. Optional: adjust the expected intervals in Settings -> Analyzer if your crontab differs from the documented one.
+
+**Rollback**: redeploy the previous release. The new files (`.jobstatus-*`, `.jobstate-*`, `.cron-check.json`, `logs/jobs*.log`,
+`panel/jobs-seen.json`) are ignored by git and harmless to leave; delete them if you like.
+
+**Cost**: none on the request path. Each cron run adds a few small file writes and, at most every 10 minutes, one run of `cron-check.sh`.
+The dashboard performs a few small live reads (status files, the log tails, one `LLEN`/`LINDEX`/`CONFIG GET` each); the crontab check
+spawns one bash + python process (3 s limit).
+
 ## Panel layout: width, tabs, tooltips, include / exclude filters
 
 **New** (panel only; the guard, the log format and Redis are untouched)

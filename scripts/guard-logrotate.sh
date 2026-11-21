@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # the JS_* variables are read by scripts/lib-jobstatus.sh
 # Daily rotation for the Bot Guard JSONL logs.
 # Gzips every finished day, drops archives older than the retention window and,
 # when a size cap is set, the oldest archives until the logs fit under it.
@@ -13,7 +14,10 @@
 # Environment overrides: GV_LOG_DIR, GV_RETENTION_DAYS, GV_MAX_MB. GV_PHP names
 # the PHP binary (cron has a minimal PATH). Without PHP the defaults apply.
 #
-# Every run writes logs/.last-rotate (one JSON line) for the panel dashboard.
+# Every run writes logs/.last-rotate (one JSON line) for the panel dashboard, and records its
+# status for the job-health page (scripts/lib-jobstatus.sh: analyzer/.jobstatus-logrotate.json,
+# logs/jobs.log): files gzipped, files deleted, bytes freed and why (retention, size cap, or the
+# free-disk floor log_min_free_mb), plus a failure with its error text.
 #
 # What this script is careful about:
 #   * It never compresses a file that was written to in the last hour. The
@@ -30,6 +34,10 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHP_BIN="${GV_PHP:-php}"
+JS_ROOT="$REPO"
+# shellcheck source=lib-jobstatus.sh
+. "$REPO/scripts/lib-jobstatus.sh"
+js_begin logrotate
 
 # One effective setting, or nothing when PHP or the key is unavailable.
 cfg_get() {
@@ -44,13 +52,23 @@ LOG_DIR="${GV_LOG_DIR:-$(cfg_get log_dir)}"
 [ -n "$LOG_DIR" ] || LOG_DIR="$REPO/logs"
 RETENTION_DAYS="$(int_or "${GV_RETENTION_DAYS:-$(cfg_get log_retention_days)}" 1 60)"
 MAX_MB="$(int_or "${GV_MAX_MB:-$(cfg_get log_max_mb)}" 0 0)"
+MIN_FREE_MB="$(int_or "${GV_MIN_FREE_MB:-$(cfg_get log_min_free_mb)}" 0 200)"
 MIN_IDLE_MINUTES=60
+
+# The job logs live in the same directory: tell the status writer where.
+export GV_JOBLOG_DIR="$LOG_DIR"
 
 if [ ! -d "$LOG_DIR" ]; then
 	echo "Bot Guard log rotation: log directory not found: $LOG_DIR"
+	JS_WARN_EXTRA="the log directory was not found: $LOG_DIR, nothing was rotated"
 	exit 0
 fi
 
+total_bytes() {
+	find "$LOG_DIR" -maxdepth 1 -type f \( -name 'guard-*' -o -name 'jobs*.log*' \) -printf '%s\n' 2>/dev/null | awk '{s+=$1} END {print s+0}'
+}
+bytes_before="$(total_bytes)"
+reasons=""
 TODAY="guard-$(date +%Y%m%d).jsonl"
 gzipped=0
 skipped=0
@@ -87,16 +105,26 @@ if [ -f "$ERR" ] && [ ! -L "$ERR" ] && [ "$(wc -c < "$ERR")" -gt 1048576 ]; then
 fi
 find "$LOG_DIR" -maxdepth 1 -name 'guard-errors-*.log.gz' -type f -mtime "+$RETENTION_DAYS" -delete || failed=$((failed + 1))
 
+# The job logs (jobs.log, jobs-errors.log) are rotated the same way: past 1 MiB they are archived and
+# restarted, and archives older than the retention window are deleted.
+for jl in jobs jobs-errors; do
+	JF="$LOG_DIR/$jl.log"
+	if [ -f "$JF" ] && [ ! -L "$JF" ] && [ "$(wc -c < "$JF")" -gt 1048576 ]; then
+		JA="$LOG_DIR/$jl-$(date +%Y%m%d%H%M%S).log"
+		if mv -- "$JF" "$JA" && gzip -- "$JA"; then :; else failed=$((failed + 1)); fi
+	fi
+done
+find "$LOG_DIR" -maxdepth 1 \( -name 'jobs-*.log.gz' -o -name 'jobs-errors-*.log.gz' \) -type f -mtime "+$RETENTION_DAYS" -delete || failed=$((failed + 1))
+
 deleted=$(find "$LOG_DIR" -maxdepth 1 -name '*.jsonl.gz' -type f -mtime "+$RETENTION_DAYS" -print -delete | wc -l | tr -d ' ')
+[ "$deleted" -eq 0 ] || reasons="retention"
 
 # Size cap: delete the oldest daily archives until every guard-* file together
 # fits under log_max_mb. Uncompressed files (today, or a day not yet idle for an
 # hour) are never deleted; if they alone are over the cap, that is reported.
 capped=0
 over=0
-total_bytes() {
-	find "$LOG_DIR" -maxdepth 1 -type f -name 'guard-*' -printf '%s\n' 2>/dev/null | awk '{s+=$1} END {print s+0}'
-}
+floor_deleted=0
 if [ "$MAX_MB" -gt 0 ]; then
 	limit=$((MAX_MB * 1048576))
 	while [ "$(total_bytes)" -gt "$limit" ]; do
@@ -106,12 +134,30 @@ if [ "$MAX_MB" -gt 0 ]; then
 	done
 fi
 
+# Free-disk floor: when the disk holding the logs is below log_min_free_mb the guard has already stopped
+# logging; delete the oldest archives (never an uncompressed file) until there is room again.
+free_mb() { df -Pm "$LOG_DIR" 2>/dev/null | awk 'NR==2 {print $4+0}'; }
+if [ "$MIN_FREE_MB" -gt 0 ]; then
+	while [ "$(free_mb)" != "" ] && [ "$(free_mb)" -lt "$MIN_FREE_MB" ]; do
+		oldest="$(find "$LOG_DIR" -maxdepth 1 -type f \( -name 'guard-*.jsonl.gz' -o -name 'guard-errors-*.log.gz' \) -printf '%T@ %p\n' | sort -n | head -1 | cut -d' ' -f2-)"
+		[ -n "$oldest" ] || break
+		if rm -f -- "$oldest"; then floor_deleted=$((floor_deleted + 1)); else failed=$((failed + 1)); break; fi
+	done
+fi
+[ "$capped" -eq 0 ] || reasons="${reasons:+$reasons,}size_cap"
+[ "$floor_deleted" -eq 0 ] || reasons="${reasons:+$reasons,}disk_floor"
+
 bytes="$(total_bytes)"
+freed=$((bytes_before > bytes ? bytes_before - bytes : 0))
+JS_EXTRA_RESULT="$(printf '{"compressed":%s,"deleted_retention":%s,"deleted_size_cap":%s,"deleted_disk_floor":%s,"bytes_freed":%s,"bytes_now":%s,"reasons":"%s","over_cap":%s}' \
+	"$gzipped" "$deleted" "$capped" "$floor_deleted" "$freed" "$bytes" "$reasons" "$over")"
+[ "$over" -eq 0 ] || JS_WARN_EXTRA="the uncompressed log files alone exceed log_max_mb (${MAX_MB} MiB)"
 printf '{"ts":%s,"compressed":%s,"deleted":%s,"capped":%s,"over_cap":%s,"failures":%s,"retention_days":%s,"max_mb":%s,"bytes":%s}\n' \
 	"$(date +%s)" "$gzipped" "$deleted" "$capped" "$over" "$failed" "$RETENTION_DAYS" "$MAX_MB" "$bytes" \
 	> "$LOG_DIR/.last-rotate.tmp" && mv -f -- "$LOG_DIR/.last-rotate.tmp" "$LOG_DIR/.last-rotate" || failed=$((failed + 1))
 
 echo "Bot Guard log rotation: compressed $gzipped file(s), deleted $deleted archive(s) older than $RETENTION_DAYS days, $capped more for the ${MAX_MB} MiB cap, skipped $skipped non-regular entr(ies), $failed failure(s) in $LOG_DIR ($bytes bytes now)"
 [ "$over" -eq 0 ] || echo "WARNING: the uncompressed log files alone exceed log_max_mb (${MAX_MB} MiB); lower traffic logging (log_skip_paths) or raise the cap."
-[ "$failed" -eq 0 ] || exit 1
+[ "$floor_deleted" -eq 0 ] || echo "NOTICE: deleted $floor_deleted oldest archive(s) because free disk space was below log_min_free_mb (${MIN_FREE_MB} MiB)."
+if [ "$failed" -ne 0 ]; then JS_NOTE="$failed failure(s) while rotating logs in $LOG_DIR"; exit 1; fi
 exit 0

@@ -231,6 +231,17 @@ function gv_overlay_whitelist() {
 		'analyzer.snapshot_days'    => array('int', 1, 14),
 		'analyzer.job_ttl'          => array('int', 3600, 604800),
 		'analyzer.worker_max_jobs'  => array('int', 1, 50),
+		// How often each background job is expected to run (minutes). The panel's job health
+		// calls a job late after twice this. Defaults are the documented crontab.
+		'analyzer.interval_verify' => array('int', 1, 1440),
+		'analyzer.interval_worker' => array('int', 1, 1440),
+		'analyzer.interval_snapshot' => array('int', 1, 1440),
+		'analyzer.interval_nightly' => array('int', 60, 10080),
+		'analyzer.interval_logrotate' => array('int', 60, 10080),
+		'analyzer.interval_train' => array('int', 60, 43200),
+		'analyzer.interval_train_clf' => array('int', 60, 43200),
+		'analyzer.interval_geo' => array('int', 60, 129600),
+		'analyzer.interval_report' => array('int', 60, 129600),
 	);
 }
 

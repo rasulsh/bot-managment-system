@@ -70,6 +70,19 @@ It needs `php`, `curl`, `python3` and `redis-server`. Expected last line: `PASS 
 
 It cannot test: a real cache or CDN in front of PHP, real browsers, IPv6 on your network, or your server's `auto_prepend_file`. Those need the manual test above.
 
+## Background jobs, job health and the dashboard
+
+```bash
+bash scripts/jobstatus-selftest.sh    # status recording: success, failure, crash by signal, lock skip, bad Python, warnings, results, redaction, 64 KiB cap, logrotate fields
+python3 analyzer/selftest.py          # includes the crontab parser (CageFS, empty, commented, duplicates, wrong path, @daily, env lines, CRLF), KPI / top-list folding
+php scripts/panel-selftest.php        # job health (all states, clock skew, missing / corrupt file), every alert, the cron setup lines, the dashboard and Jobs page in four situations
+bash scripts/cron-check.sh            # on a real install: the live crontab report
+```
+
+`jobstatus-selftest.sh` uses a fake Python and temporary directories only; it needs `php` (for the secret redaction) and `python3`.
+The dashboard is rendered with no snapshot, a stale snapshot, everything healthy and everything failing, with PHP warnings turned into failures.
+`panel-layout-test.sh` seeds job status and a snapshot so the dashboard and Jobs pages render with real content, and fails on any PHP warning.
+
 ## Panel layout (tabs, tooltips, include / exclude filters)
 
 ```bash

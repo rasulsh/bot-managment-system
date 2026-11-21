@@ -114,6 +114,26 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
   keyboard focus only, and the link is a plain link.
 - The layout test needs a Chromium; without it only the markup and CSS checks of the selftest run.
 
+## Background jobs, dashboard alerts and the crontab check
+
+- A job's state comes from the status file the cron wrapper writes. Run a mode by hand with `python3 analyzer/...` (not through
+  `scripts/analyzer-cron.sh`) and it leaves only the old `.lastrun-*` heartbeat, no error log.
+- **Without the `verify` cron job** real crawlers stay in the shared `limits.bot_unverified` budget for ever (the dashboard calls
+  `verify` required and alerts when it is missing or late).
+- The panel's crontab check sees the crontab of the user PHP runs as. On a host where PHP runs as another user than the cron
+  jobs, or where `proc_open` is disabled, it can only show the copy the cron wrapper leaves (`analyzer/.cron-check.json`, up to 10
+  minutes old) or, without that, just the heartbeats; run `scripts/cron-check.sh` over SSH there.
+- The schedule check estimates how often an entry runs from its five fields (a list or step counts runs; a day-of-week or
+  day-of-month field restricts them). An unusual schedule such as `0 0 1,15 * 1` is judged approximately.
+- "Late" is judged against the interval you set in Settings > Analyzer, not against the real crontab. If you change the crontab,
+  change the interval too.
+- The dashboard alerts read live files and one cheap Redis command each; a slow disk or Redis makes the dashboard slower, never
+  wrong. `CONFIG GET` can be forbidden on a hosted Redis: "noeviction not set" is then unknown, and no alert is raised.
+- `guard-logrotate.sh` now also deletes the oldest archives when free disk space is below `log_min_free_mb`, and records that as the
+  reason. It never deletes an uncompressed file.
+- A failure can be marked "seen" on the Jobs page: that silences its alert only until the next failure.
+- Job status files and `jobs.log` use ASCII only (non-ASCII bytes in error text are dropped) so they are always valid JSON.
+
 ## Crawlers
 
 - Only crawlers in `known_bots` pass. Every other crawler, monitor and SEO tool

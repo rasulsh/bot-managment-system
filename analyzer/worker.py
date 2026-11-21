@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import config as config_mod
 from analyzer import geo as geo_mod
+from analyzer import jobreport
 from analyzer import promote as promote_mod
 from analyzer import redis_io
 from analyzer import replay as replay_mod
@@ -215,11 +216,20 @@ def run_one(client, cfg, raw):
         sys.stdout, sys.stderr = real_stdout, real_stderr
 
     duration = round(time.time() - started, 2)
+    # The same fields a cron run records in .jobstatus-<mode>.json: exit code, duration,
+    # warnings ("succeeded but did nothing useful") and the result of a training run.
+    warnings, result = jobreport.parse(''.join(captured.parts))
+    extra = {'warnings': warnings[:5]}
+    if result is not None:
+        extra['result'] = result
+    if status == 'done' and warnings:
+        extra['warning'] = True
     set_status(client, job_id, dict(envelope, status=status,
                                     output=captured.value(),
                                     exit_code=code if isinstance(code, int) else None,
                                     duration=duration,
-                                    finished_at=round(time.time(), 3)))
+                                    started_at=round(started, 3),
+                                    finished_at=round(time.time(), 3), **extra))
     print('Job %s (%s): %s in %.2fs.' % (job_id, job_type, status, duration))
     return status == 'done'
 

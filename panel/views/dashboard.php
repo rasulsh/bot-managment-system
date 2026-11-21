@@ -1,16 +1,27 @@
 <?php if (!defined('GP_BOOT')) { http_response_code(404); exit; }
-// Dashboard. Reads only analyzer/snapshot.json, so it renders in the same time
-// whether the site served a thousand requests yesterday or ten million.
+// Dashboard, most important first:
+//   1. critical alerts (only when something is wrong; every one is read LIVE, not from the snapshot)
+//   2. protection state (kill switch, enforce toggles, rules, global mode)
+//   3. last-24 h KPIs against the previous 24 h
+//   4. top lists, each linking to the Logs page with the matching filter
+//   5. details (collapsible): log storage, data pipeline, jobs, models, charts
+// Heavy numbers come from analyzer/snapshot.json; anything that decides an alert does not,
+// because the snapshot job is one of the things that can die.
 $s = is_array($snapshot) ? $snapshot : array();
 $traffic = isset($s['traffic']) && is_array($s['traffic']) ? $s['traffic'] : array();
 $decisions = isset($s['decisions']) && is_array($s['decisions']) ? $s['decisions'] : array();
 $funnel = isset($s['funnel']) && is_array($s['funnel']) ? $s['funnel'] : array();
 $coverage = isset($s['coverage']) && is_array($s['coverage']) ? $s['coverage'] : array();
 $holdout = isset($s['holdout']) && is_array($s['holdout']) ? $s['holdout'] : array();
-$runs = isset($s['last_runs']) && is_array($s['last_runs']) ? $s['last_runs'] : array();
+$kpi = isset($s['kpi']) && is_array($s['kpi']) ? $s['kpi'] : array();
+$top = isset($s['top']) && is_array($s['top']) ? $s['top'] : array();
 $generated = isset($s['generated_at']) ? (float)$s['generated_at'] : 0;
 $snapshot_stale = $generated > 0 && (time() - $generated) > 3600;
 $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
+$alerts = isset($alerts) && is_array($alerts) ? $alerts : array();
+$jobs = isset($jobs) && is_array($jobs) ? $jobs : array();
+$cron = isset($cron) && is_array($cron) ? $cron : array('mode' => 'none', 'report' => null, 'age' => null);
+$queue = isset($queue) && is_array($queue) ? $queue : array('length' => 0, 'oldest_age' => null, 'stuck' => false, 'redis' => false);
 ?>
 
 <div>
@@ -18,103 +29,71 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 	<p class="gp-page-sub">
 		<?php if ($generated > 0): ?>
 			<?= gp_e(gp_t('dash_snapshot_age')) ?>: <?= gp_e(gp_age($generated)) ?> <?= gp_e(gp_t('ago')) ?>
-			<?php if ($snapshot_stale): ?>
-				<span class="gp-badge gp-badge-warn"><?= gp_e(gp_t('dash_stale')) ?></span>
-			<?php endif; ?>
+			<?php if ($snapshot_stale): ?><span class="gp-badge gp-badge-warn"><?= gp_e(gp_t('dash_stale')) ?></span><?php endif; ?>
 		<?php else: ?>
 			<?= gp_e(gp_t('dash_no_snapshot')) ?>
 		<?php endif; ?>
+		<span class="gp-sep">·</span>
+		<?= gp_e(gp_t('dash_tz')) ?>: <span class="gp-mono"><?= gp_e(date('T P')) ?></span>
+		<?php if (isset($s['tz']['offset'])): ?> / <?= gp_e(gp_t('dash_tz_analyzer')) ?>: <span class="gp-mono"><?= gp_e(($s['tz']['name'] ?? '') . ' ' . sprintf('%+03d:%02d', intdiv((int)$s['tz']['offset'], 3600), abs((int)$s['tz']['offset'] % 3600) / 60)) ?></span><?php endif; ?>
 	</p>
 </div>
 
-<?php if (!empty($exposed)): ?>
-<div class="gp-card gp-card-danger">
-	<span class="gp-badge gp-badge-bad"><?= gp_e(gp_t('dash_exposed')) ?></span>
-	<p class="gp-help"><?= gp_e(gp_t('dash_exposed_help')) ?></p>
-	<p class="gp-mono" dir="ltr"><?= gp_e(implode('  ', $exposed)) ?></p>
-</div>
+<?php /* ------------------------------------------------------------ 1. critical alerts */ ?>
+<?php if ($alerts): ?>
+<section class="gp-alerts" aria-label="<?= gp_e(gp_t('al_title')) ?>" role="alert">
+	<div class="gp-card gp-card-danger">
+		<div class="gp-card-title"><?= gp_e(gp_t('al_title')) ?>
+			<span class="gp-card-sub"><?= gp_num(count($alerts)) ?></span></div>
+		<ul class="gp-alert-list">
+		<?php foreach ($alerts as $al):
+			$crit = ($al['level'] === 'critical'); ?>
+			<li class="gp-alert gp-alert-<?= $crit ? 'critical' : 'warning' ?>" data-alert="<?= gp_e($al['id']) ?>">
+				<span class="gp-badge <?= $crit ? 'gp-badge-bad' : 'gp-badge-warn' ?>"><?= gp_e(gp_t($crit ? 'al_critical' : 'al_warning')) ?></span>
+				<span class="gp-alert-text"><?= gp_e(gp_t($al['key'])) ?><?php if ($al['detail'] !== ''): ?>
+					<span class="gp-mono gp-ltr"> — <?= gp_e($al['detail']) ?></span><?php endif; ?></span>
+				<?php if ($al['link'] !== ''): ?><a class="gp-btn gp-btn-ghost gp-btn-sm" href="index.php?r=<?= gp_e($al['link']) ?>"><?= gp_e(gp_t('al_open')) ?></a><?php endif; ?>
+			</li>
+		<?php endforeach; ?>
+		</ul>
+	</div>
+</section>
 <?php endif; ?>
-
-<?php if (!empty($geo_warn)): ?>
-<div class="gp-card gp-card-danger">
-	<span class="gp-badge gp-badge-warn"><?= gp_e(gp_t('geo_title')) ?></span>
-	<?php foreach ($geo_warn as $w): ?><p class="gp-help"><?= gp_e(gp_t('geo_w_' . $w)) ?></p><?php endforeach; ?>
-	<a class="gp-btn gp-btn-ghost gp-btn-sm" href="index.php?r=geo"><?= gp_e(gp_t('geo_open')) ?></a>
-</div>
-<?php endif; ?>
-
-<div class="gp-cardgrid">
-<?php if (!empty($pipeline) && is_array($pipeline)):
-	$pv = (string)$pipeline['verdict']; ?>
-<div class="gp-card">
-	<div class="gp-card-title"><?= gp_e(gp_t('pipe_title')) ?>
-		<span class="gp-badge <?= $pv === 'ok' ? 'gp-badge-on' : 'gp-badge-bad' ?>"><?= gp_e(gp_t('pipe_' . $pv)) ?></span>
-	</div>
-	<?php if ($pipeline['last_age'] !== null): ?>
-	<div class="gp-stat-row">
-		<span class="gp-stat-key"><?= gp_e(gp_t('pipe_last')) ?></span>
-		<span class="gp-stat-val"><?= gp_e(gp_age((float)$pipeline['last_ts'])) ?> <?= gp_e(gp_t('ago')) ?></span>
-	</div>
-	<?php endif; ?>
-	<div class="gp-stat-row">
-		<span class="gp-stat-key"><?= gp_e(gp_t('pipe_dir')) ?></span>
-		<span class="gp-mono" dir="ltr"><?= gp_e($pipeline['dir']) ?></span>
-	</div>
-	<p class="gp-help"><?= gp_e(gp_t('pipe_snapshot_note')) ?></p>
-</div>
-<?php endif; ?>
-
-<?php if (!empty($storage) && is_array($storage)):
-	$sw = $storage['warnings']; ?>
-<div class="gp-card">
-	<div class="gp-card-title"><?= gp_e(gp_t('ls_title')) ?>
-		<span class="gp-badge <?= $sw ? 'gp-badge-warn' : 'gp-badge-on' ?>"><?= gp_e($sw ? gp_t('ls_attention') : gp_t('ls_ok')) ?></span>
-	</div>
-	<?php foreach ($sw as $w): ?>
-	<p class="gp-note gp-note-strong" style="margin-bottom:.5rem"><?= gp_e(gp_t('ls_w_' . $w)) ?></p>
-	<?php endforeach; ?>
-	<div class="gp-stat-row">
-		<span class="gp-stat-key"><?= gp_e(gp_t('ls_total')) ?></span>
-		<span class="gp-stat-val"><?= gp_e(gp_bytes($storage['total'])) ?>
-			<?php if ($storage['max_mb'] > 0): ?> / <?= gp_e(gp_bytes($storage['max_mb'] * 1048576)) ?><?php endif; ?></span>
-	</div>
-	<div class="gp-stat-row">
-		<span class="gp-stat-key"><?= gp_e(gp_t('ls_today')) ?></span>
-		<span class="gp-stat-val"><?= gp_e(gp_bytes($storage['today'])) ?></span>
-	</div>
-	<div class="gp-stat-row">
-		<span class="gp-stat-key"><?= gp_e(gp_t('ls_archives')) ?></span>
-		<span class="gp-stat-val"><?= gp_e(gp_num($storage['archives'])) ?>
-			<?php if ($storage['oldest'] !== ''): ?> · <?= gp_e(gp_t('ls_oldest')) ?> <?= gp_e(substr($storage['oldest'], 0, 4) . '-' . substr($storage['oldest'], 4, 2) . '-' . substr($storage['oldest'], 6, 2)) ?><?php endif; ?>
-			· <?= gp_e(sprintf(gp_t('ls_kept'), gp_num($storage['retention_days']))) ?></span>
-	</div>
-	<div class="gp-stat-row">
-		<span class="gp-stat-key"><?= gp_e(gp_t('ls_free')) ?></span>
-		<span class="gp-stat-val"><?= $storage['free'] === null ? gp_e(gp_t('unknown')) : gp_e(gp_bytes($storage['free'])) ?>
-			<?php if ($storage['disk']): ?> / <?= gp_e(gp_bytes($storage['disk'])) ?><?php endif; ?>
-			<?php if ($storage['min_free_mb'] > 0): ?> · <?= gp_e(sprintf(gp_t('ls_floor'), gp_bytes($storage['min_free_mb'] * 1048576))) ?><?php endif; ?></span>
-	</div>
-	<div class="gp-stat-row">
-		<span class="gp-stat-key"><?= gp_e(gp_t('ls_rotate')) ?></span>
-		<span class="gp-stat-val"><?= $storage['rotate'] === null ? gp_e(gp_t('never'))
-			: gp_e(gp_age((int)$storage['rotate']['ts'])) . ' ' . gp_e(gp_t('ago')) ?></span>
-	</div>
-	<?php if ($storage['skip_paths']): ?>
-	<div class="gp-stat-row">
-		<span class="gp-stat-key"><?= gp_e(gp_t('ls_skipped')) ?></span>
-		<span class="gp-mono"><?= gp_e(implode('  ', $storage['skip_paths'])) ?></span>
-	</div>
-	<?php endif; ?>
-	<p class="gp-help"><?= gp_e(gp_t('ls_help')) ?></p>
-</div>
-<?php endif; ?>
-
-</div>
 
 <?php if (!empty($ip_open)): ?>
 <div class="gp-note"><?= gp_e(gp_t('dash_ip_open')) ?></div>
 <?php endif; ?>
 
+<?php /* ------------------------------------------------------------ cron setup help (some job has never run) */ ?>
+<?php if (!empty($cron_card)): ?>
+<div class="gp-card" id="cron-setup">
+	<div class="gp-card-title"><?= gp_e(gp_t('cron_title')) ?></div>
+	<p class="gp-help"><?= gp_e(gp_t('cron_help')) ?></p>
+	<p class="gp-help"><?= gp_e(gp_t('cron_open')) ?> <code class="gp-mono">crontab -e</code></p>
+	<pre class="gp-mono gp-ltr gp-pre"><?= gp_e(implode("\n", $cron_lines)) ?></pre>
+	<p class="gp-help"><?= gp_e(gp_t('cron_source_' . $cron['mode'])) ?><?php if ($cron['mode'] === 'file' && $cron['age'] !== null): ?> (<?= gp_e(gp_age(time() - (int)$cron['age'])) ?> <?= gp_e(gp_t('ago')) ?>)<?php endif; ?></p>
+</div>
+<?php endif; ?>
+
+<?php /* ------------------------------------------------------------ 2. protection state */ ?>
+<?php $pm = $protection; ?>
+<section aria-label="<?= gp_e(gp_t('dash_protection')) ?>">
+<div class="gp-cardgrid">
+	<div class="gp-card">
+		<div class="gp-card-title"><?= gp_e(gp_t('dash_protection')) ?>
+			<span class="gp-badge <?= $pm['mode'] === 'enforcing' ? 'gp-badge-on' : ($pm['mode'] === 'partial' ? 'gp-badge-warn' : 'gp-badge-off') ?>"><?= gp_e(gp_t('dash_mode_' . $pm['mode'])) ?></span></div>
+		<?php if ($pm['forced']): ?><p class="gp-note gp-note-strong"><?= gp_e(gp_t('dash_mode_forced')) ?></p><?php endif; ?>
+		<?php foreach (array('block', 'challenge', 'ratelimit') as $k): $on = !empty($cfg['enforce'][$k]); ?>
+		<div class="gp-stat-row"><span class="gp-stat-key gp-mono">enforce.<?= gp_e($k) ?></span>
+			<span class="gp-badge <?= $on ? 'gp-badge-on' : 'gp-badge-off' ?>"><?= gp_e($on ? gp_t('on') : gp_t('off')) ?></span></div>
+		<?php endforeach; ?>
+		<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('dash_rules')) ?></span>
+			<span class="gp-stat-val"><a href="index.php?r=rules"><?= gp_num($rsum['enabled']) ?> / <?= gp_num($rsum['total']) ?></a></span></div>
+		<?php foreach ($rsum['by'] as $k => $n): list($rm, $ra) = explode('/', $k); ?>
+		<div class="gp-stat-row"><span class="gp-stat-key gp-mono"><?= gp_e(gp_t('rules_mode_' . $rm)) ?> · <?= gp_e(gp_t('rules_act_' . $ra)) ?></span>
+			<span class="gp-stat-val"><?= gp_num($n) ?></span></div>
+		<?php endforeach; ?>
+	</div>
 <!-- The kill switch: the single most important control in this panel. -->
 <div class="gp-kill <?= $kill ? 'gp-kill-stopped' : 'gp-kill-armed' ?>">
 	<div class="gp-card-title" style="margin-bottom:.5rem">
@@ -134,8 +113,153 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 		</button>
 	</form>
 </div>
+</div>
+</section>
 
-<!-- Status strip -->
+<?php /* ------------------------------------------------------------ 3. last 24 h */ ?>
+<?php
+$kcur = isset($kpi['cur']) && is_array($kpi['cur']) ? $kpi['cur'] : array();
+$kprev = isset($kpi['prev']) && is_array($kpi['prev']) ? $kpi['prev'] : array();
+$tiles = array('requests' => 'dash_k_requests', 'allowed' => 'dash_k_allowed', 'blocked' => 'dash_k_blocked', 'limited' => 'dash_k_limited',
+	'challenged' => 'dash_k_challenged', 'challenge_success' => 'dash_k_success', 'rule_hits' => 'dash_k_rules', 'honeypot' => 'dash_k_honeypot', 'degraded' => 'dash_k_degraded');
+?>
+<section aria-label="<?= gp_e(gp_t('dash_24h')) ?>">
+	<h2 class="gp-card-title"><?= gp_e(gp_t('dash_24h')) ?> <span class="gp-card-sub"><?= gp_e(gp_t('dash_24h_sub')) ?></span></h2>
+	<?php if (!$kcur): ?><div class="gp-note"><?= gp_e(gp_t('dash_k_none')) ?></div><?php else: ?>
+	<div class="gp-grid-kpi">
+		<?php foreach ($tiles as $k => $label): $cv = $kcur[$k] ?? null; $pv = $kprev[$k] ?? null;
+			$pct = ($k === 'challenge_success');
+			$chg = $pct ? (($cv === null || $pv === null) ? '' : sprintf('%+.1f pt', $cv - $pv)) : gp_kpi_change($cv, $pv);
+			$bad = in_array($k, array('blocked', 'limited', 'degraded'), true) && $chg !== '' && $chg[0] === '+'; ?>
+		<div class="gp-kpi">
+			<div class="gp-kpi-label"><?= gp_e(gp_t($label)) ?></div>
+			<div class="gp-kpi-value"><?= $cv === null ? '—' : ($pct ? gp_e(gp_num((float)$cv, 1)) . '%' : gp_e(gp_num((int)$cv))) ?></div>
+			<div class="gp-kpi-hint <?= $bad ? 'gp-text-bad' : '' ?>"><?= $chg === '' ? '' : gp_e($chg) . ' ' . gp_e(gp_t('dash_vs_prev')) ?></div>
+		</div>
+		<?php endforeach; ?>
+	</div>
+	<?php endif; ?>
+</section>
+
+<?php /* ------------------------------------------------------------ 4. top lists, each links to the Logs filter */ ?>
+<?php
+$lists = array(
+	'rules' => array('dash_top_rules', function ($k) { return 'index.php?r=logs&reason=' . gp_u('RULE:' . $k . ',SH_RULE:' . $k); }),
+	'reasons' => array('dash_top_reasons', function ($k) { return 'index.php?r=logs&reason=' . gp_u($k); }),
+	'ips' => array('dash_top_ips', function ($k) { return 'index.php?r=logs&ip=' . gp_u($k); }),
+	'devices' => array('dash_top_devices', function ($k) { return 'index.php?r=logs&dev=' . gp_u($k); }),
+	'uas' => array('dash_top_uas', function ($k) { return 'index.php?r=logs&ua=' . gp_u($k); }),
+	'paths' => array('dash_top_paths', function ($k) { return 'index.php?r=logs&path=' . gp_u($k); }),
+	'countries' => array('dash_top_countries', function ($k) { return 'index.php?r=logs&cc=' . gp_u($k); }),
+);
+?>
+<section aria-label="<?= gp_e(gp_t('dash_top')) ?>">
+	<h2 class="gp-card-title"><?= gp_e(gp_t('dash_top')) ?> <span class="gp-card-sub"><?= gp_e(gp_t('dash_top_sub')) ?></span></h2>
+	<div class="gp-cardgrid gp-cardgrid-3">
+	<?php foreach ($lists as $lk => $ld): $rows = isset($top[$lk]) && is_array($top[$lk]) ? $top[$lk] : array(); ?>
+		<div class="gp-card">
+			<div class="gp-card-title"><?= gp_e(gp_t($ld[0])) ?></div>
+			<?php if (!$rows): ?>
+				<p class="gp-help"><?= gp_e(gp_t($lk === 'countries' ? 'dash_top_nogeo' : 'dash_top_none')) ?></p>
+			<?php else: foreach ($rows as $r): ?>
+			<div class="gp-stat-row">
+				<a class="gp-stat-key gp-mono gp-ltr gp-truncate" href="<?= gp_e($ld[1]((string)$r[0])) ?>"><?= gp_e((string)$r[0]) ?></a>
+				<span class="gp-stat-val"><?= gp_e(gp_num((int)$r[1])) ?></span>
+			</div>
+			<?php endforeach; endif; ?>
+		</div>
+	<?php endforeach; ?>
+	</div>
+</section>
+
+<?php /* ------------------------------------------------------------ 5. details */ ?>
+<details class="gp-more gp-details">
+	<summary><?= gp_e(gp_t('dash_details')) ?></summary>
+
+	<div class="gp-cardgrid">
+	<?php /* jobs */ ?>
+	<div class="gp-card gp-span-all">
+		<div class="gp-card-title"><?= gp_e(gp_t('dash_jobs')) ?>
+			<a class="gp-btn gp-btn-ghost gp-btn-sm" href="index.php?r=jobs"><?= gp_e(gp_t('al_open')) ?></a></div>
+		<div class="gp-table-wrap"><table class="gp-table">
+			<thead><tr><th><?= gp_e(gp_t('job_c_job')) ?></th><th><?= gp_e(gp_t('job_c_state')) ?></th><th><?= gp_e(gp_t('job_c_success')) ?></th><th><?= gp_e(gp_t('job_c_next')) ?></th></tr></thead>
+			<tbody>
+			<?php foreach ($jobs as $jn => $h): ?>
+			<tr><td class="gp-mono"><a href="index.php?r=jobs&amp;job=<?= gp_u($jn) ?>"><?= gp_e($jn) ?></a></td>
+				<td><span class="gp-badge <?= gp_job_badge($h['state']) ?>"><?= gp_e(gp_t('job_s_' . $h['state'])) ?></span></td>
+				<td class="gp-mono"><?= $h['last_success'] > 0 ? gp_e(gp_age($h['last_success'])) . ' ' . gp_e(gp_t('ago')) : '—' ?></td>
+				<td class="gp-mono"><?= $h['next_expected'] > 0 ? gp_e(gmdate('H:i', $h['next_expected'])) . ' UTC' : '—' ?></td></tr>
+			<?php endforeach; ?>
+			</tbody></table></div>
+		<p class="gp-help"><?= gp_e(gp_t('job_queue')) ?>: <span class="gp-mono"><?= gp_num((int)$queue['length']) ?></span><?= $queue['oldest_age'] !== null ? ' · ' . gp_e(gp_t('job_oldest')) . ' ' . gp_e(gp_age(time() - (int)$queue['oldest_age'])) : '' ?></p>
+	</div>
+	<?php if (!empty($pipeline) && is_array($pipeline)):
+		$pv = (string)$pipeline['verdict']; ?>
+	<div class="gp-card">
+		<div class="gp-card-title"><?= gp_e(gp_t('pipe_title')) ?>
+			<span class="gp-badge <?= $pv === 'ok' ? 'gp-badge-on' : 'gp-badge-bad' ?>"><?= gp_e(gp_t('pipe_' . $pv)) ?></span>
+		</div>
+		<?php if ($pipeline['last_age'] !== null): ?>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('pipe_last')) ?></span>
+			<span class="gp-stat-val"><?= gp_e(gp_age((float)$pipeline['last_ts'])) ?> <?= gp_e(gp_t('ago')) ?></span>
+		</div>
+		<?php endif; ?>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('pipe_dir')) ?></span>
+			<span class="gp-mono" dir="ltr"><?= gp_e($pipeline['dir']) ?></span>
+		</div>
+		<p class="gp-help"><?= gp_e(gp_t('pipe_snapshot_note')) ?></p>
+	</div>
+	<?php endif; ?>
+	<?php if (!empty($storage) && is_array($storage)):
+		$sw = $storage['warnings']; ?>
+	<div class="gp-card">
+		<div class="gp-card-title"><?= gp_e(gp_t('ls_title')) ?>
+			<span class="gp-badge <?= $sw ? 'gp-badge-warn' : 'gp-badge-on' ?>"><?= gp_e($sw ? gp_t('ls_attention') : gp_t('ls_ok')) ?></span>
+		</div>
+		<?php foreach ($sw as $w): ?>
+		<p class="gp-note gp-note-strong" style="margin-bottom:.5rem"><?= gp_e(gp_t('ls_w_' . $w)) ?></p>
+		<?php endforeach; ?>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('ls_total')) ?></span>
+			<span class="gp-stat-val"><?= gp_e(gp_bytes($storage['total'])) ?>
+				<?php if ($storage['max_mb'] > 0): ?> / <?= gp_e(gp_bytes($storage['max_mb'] * 1048576)) ?><?php endif; ?></span>
+		</div>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('ls_today')) ?></span>
+			<span class="gp-stat-val"><?= gp_e(gp_bytes($storage['today'])) ?></span>
+		</div>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('ls_archives')) ?></span>
+			<span class="gp-stat-val"><?= gp_e(gp_num($storage['archives'])) ?>
+				<?php if ($storage['oldest'] !== ''): ?> · <?= gp_e(gp_t('ls_oldest')) ?> <?= gp_e(substr($storage['oldest'], 0, 4) . '-' . substr($storage['oldest'], 4, 2) . '-' . substr($storage['oldest'], 6, 2)) ?><?php endif; ?>
+				· <?= gp_e(sprintf(gp_t('ls_kept'), gp_num($storage['retention_days']))) ?></span>
+		</div>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('ls_free')) ?></span>
+			<span class="gp-stat-val"><?= $storage['free'] === null ? gp_e(gp_t('unknown')) : gp_e(gp_bytes($storage['free'])) ?>
+				<?php if ($storage['disk']): ?> / <?= gp_e(gp_bytes($storage['disk'])) ?><?php endif; ?>
+				<?php if ($storage['min_free_mb'] > 0): ?> · <?= gp_e(sprintf(gp_t('ls_floor'), gp_bytes($storage['min_free_mb'] * 1048576))) ?><?php endif; ?></span>
+		</div>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('ls_rotate')) ?></span>
+			<span class="gp-stat-val"><?= $storage['rotate'] === null ? gp_e(gp_t('never'))
+				: gp_e(gp_age((int)$storage['rotate']['ts'])) . ' ' . gp_e(gp_t('ago')) ?></span>
+		</div>
+		<?php if ($storage['skip_paths']): ?>
+		<div class="gp-stat-row">
+			<span class="gp-stat-key"><?= gp_e(gp_t('ls_skipped')) ?></span>
+			<span class="gp-mono"><?= gp_e(implode('  ', $storage['skip_paths'])) ?></span>
+		</div>
+		<?php endif; ?>
+		<p class="gp-help"><?= gp_e(gp_t('ls_help')) ?></p>
+	</div>
+	<?php endif; ?>
+	</div>
+
+	<?php /* system status and signals */ ?>
+	
 <div class="gp-grid-3">
 	<div class="gp-card">
 		<div class="gp-card-title"><?= gp_e(gp_t('dash_enforce')) ?></div>
@@ -202,7 +326,8 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 	</div>
 </div>
 
-<?php $bv = isset($s['bot_verify']) && is_array($s['bot_verify']) ? $s['bot_verify'] : array();
+
+	<?php $bv = isset($s['bot_verify']) && is_array($s['bot_verify']) ? $s['bot_verify'] : array();
 if (!empty($bv['unknown'])): ?>
 <div class="gp-card">
 	<span class="gp-badge gp-badge-warn"><?= gp_e(gp_t('dash_verify_unknown')) ?></span>
@@ -234,36 +359,8 @@ if (!empty($bv['unknown'])): ?>
 	<?php endforeach; ?>
 </div>
 
-<!-- KPI cards -->
-<div class="gp-grid-4">
-	<div class="gp-kpi">
-		<div class="gp-kpi-label"><?= gp_e(gp_t('dash_requests')) ?></div>
-		<div class="gp-kpi-value"><?= gp_num((int)($traffic['requests'] ?? 0)) ?></div>
-	</div>
-	<div class="gp-kpi">
-		<div class="gp-kpi-label"><?= gp_e(gp_t('dash_devices')) ?></div>
-		<div class="gp-kpi-value"><?= gp_num((int)($traffic['devices'] ?? 0)) ?></div>
-	</div>
-	<div class="gp-kpi">
-		<div class="gp-kpi-label"><?= gp_e(gp_t('dash_addresses')) ?></div>
-		<div class="gp-kpi-value"><?= gp_num((int)($traffic['addresses'] ?? 0)) ?></div>
-	</div>
-	<div class="gp-kpi">
-		<div class="gp-kpi-label"><?= gp_e(gp_t('dash_challenge_rate')) ?></div>
-		<div class="gp-kpi-value">
-			<?= $rate === null ? gp_e(gp_t('unknown')) : gp_num($rate, 1) . '%' ?>
-		</div>
-		<?php if ($rate !== null && $rate < 95): ?>
-		<div class="gp-kpi-hint gp-text-bad">
-			<?= gp_e(gp_t('dash_challenge_hint')) ?>
-		</div>
-		<?php else: ?>
-		<div class="gp-kpi-hint"><?= gp_e(gp_t('dash_challenge_hint')) ?></div>
-		<?php endif; ?>
-	</div>
-</div>
 
-<div class="gp-grid-2">
+	<div class="gp-grid-2">
 	<div class="gp-card">
 		<div class="gp-card-title"><?= gp_e(gp_t('dash_holdout_gap')) ?></div>
 		<?php if (empty($holdout['enabled'])): ?>
@@ -337,10 +434,9 @@ if (!empty($bv['unknown'])): ?>
 	</div>
 </div>
 
-<?php if (!empty($traffic['degraded'])): ?>
-<div class="gp-note gp-note-strong">
-	<?= gp_e(gp_t('dash_degraded')) ?>:
-	<?= gp_num((int)$traffic['degraded']) ?>
-	(<?= gp_pct((int)$traffic['degraded'], (int)($traffic['requests'] ?: 1)) ?>)
-</div>
-<?php endif; ?>
+
+	<?php if (!empty($traffic['degraded'])): ?>
+	<div class="gp-note gp-note-strong"><?= gp_e(gp_t('dash_degraded')) ?>: <?= gp_num((int)$traffic['degraded']) ?>
+		(<?= gp_pct((int)$traffic['degraded'], (int)($traffic['requests'] ?: 1)) ?>)</div>
+	<?php endif; ?>
+</details>
