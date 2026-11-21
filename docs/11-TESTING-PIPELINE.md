@@ -69,3 +69,13 @@ It starts a private PHP server, Redis and log directory, and sends real traffic:
 It needs `php`, `curl`, `python3` and `redis-server`. Expected last line: `PASS 35  FAIL 0`.
 
 It cannot test: a real cache or CDN in front of PHP, real browsers, IPv6 on your network, or your server's `auto_prepend_file`. Those need the manual test above.
+
+## Access rules
+
+```bash
+php scripts/guard-selftest.php        # engine: every condition, op, <empty>, regex errors, precedence helpers
+bash scripts/rules-e2e.sh             # HTTP: block/challenge/log/monitor + the whole precedence chain
+bash scripts/bench-gv-run.sh          # gv_run p50/p99 with 0 / 20 / 200 rules (run on both branches)
+```
+
+`rules-e2e.sh` needs `php`, `curl`, `redis-server`; it creates and removes `guard.off` in the project root.

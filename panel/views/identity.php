@@ -140,6 +140,11 @@ $v = is_array($verdicts) ? $verdicts : array();
 				<?php foreach ((array)($row['rs'] ?? array()) as $reason): ?>
 					<span class="gp-badge gp-badge-off"><?= gp_e($reason) ?></span>
 				<?php endforeach; ?>
+				<?php if (isset($row['ua'])): ?>
+				<a class="gp-btn gp-btn-ghost gp-btn-sm"
+					href="index.php?r=rules&amp;new=1&amp;qua=<?= gp_u($row['ua']) ?>">
+					<?= gp_e(gp_t('rules_quick_block')) ?></a>
+				<?php endif; ?>
 			</div>
 		</div>
 		<?php endforeach; ?>

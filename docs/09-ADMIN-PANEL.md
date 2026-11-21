@@ -210,6 +210,19 @@ who steals the session.
   `gv_decide()`, so the preview and the live decision cannot drift.
 - **Models** — bundle status, staleness, classifier precision, and the buttons
   that queue training and promotion.
+- **Rules** — block / challenge / log by User-Agent or path (see
+  [02-ARCHITECTURE.md](02-ARCHITECTURE.md#access-rules) for precedence). Create, edit,
+  duplicate, enable/disable, delete (confirmed), reorder (renumbers 10, 20, ...). Every change
+  is audited with before/after. Non-blocking warnings before saving: pattern also matches a
+  `known_bots`/`preview_bots` entry, matches current real browsers (a fixed sample list in
+  `panel/rules.php`), is a `contains` under 4 chars, overlaps an exempt path. A **Test** box
+  shows which rule would match a UA/path (and what happens) without changing anything.
+  **Install starter set** adds 16 disabled monitor rules (python-requests, python-urllib,
+  aiohttp, httpx, Go-http-client, curl/, Wget, Scrapy, HeadlessChrome, PhantomJS, node-fetch,
+  axios/, okhttp, Java/, libwww-perl, empty UA). **Quick block** on a log or identity row opens
+  a pre-filled monitor rule (exact UA; a UA cut at 120 chars becomes a prefix rule). Hits come
+  from the snapshot (log-derived), never from Redis counters. If `guard/rules.json` is
+  invalid the page says so and refuses writes until it is fixed or the invalid part discarded.
 - **Audit** — the append-only trail, searchable.
 
 ## Testing

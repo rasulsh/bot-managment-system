@@ -129,6 +129,51 @@ branch winning:
     slice, log what *would* have happened, allow, and let the app run. If
     enforcement is on, emit the block / 429 / challenge response and exit.
 
+### Access rules
+
+`guard/rules.php`, data in `guard/rules.json` (panel-written, atomic rename). Evaluation is a
+pure function of the request facts: **no Redis, no DNS, no file write**. A bad file, a bad rule or
+a PCRE error is "no match" plus one rate-limited line in `guard-errors.log`.
+
+Where it sits in `gv_run`, and precedence, highest first:
+
+1. Kill switch (`guard.off`) and `exempt_paths` / `exempt_params`: bypass rules entirely.
+2. Operator **allow** override (device or IP): beats any rule (step 7c, before the rule is applied).
+3. A **verified** known bot (verdict `ok`) skips a rule with `skip_verified_bots` (default).
+   A claimed but unverified, or refuted (`bad`), bot is **not** skipped.
+4. Operator **deny**: as before.
+5. The first matching enabled, unexpired rule by priority, in `enforce` mode:
+   `block` = 403; `challenge` = the existing JS + proof-of-work page for a gated request
+   without a valid token (the rule's `pow_bits` if set); with a valid token the request
+   continues normally, so a solved challenge cannot loop. A token-less POST with
+   `challenge.gate_post` off is logged as a shadow challenge, like the built-in rule.
+   `log` only adds the reason.
+6. Rule actions are operator actions: the holdout never suppresses them and
+   `enforce.block` / `enforce.challenge` do not gate them. Only the rule's `mode` does.
+   With the secret unconfigured (`CHANGE_ME`) no rule is loaded.
+
+An enforced `block`/`challenge` rule replaces the free pass of known bots and link-preview
+fetchers; a `monitor` or `log` rule does not (the row just carries `SH_RULE:<id>`).
+Every request that matched carries `RULE:<id>` (`SH_RULE:<id>` in monitor) in `rs`; still
+exactly one log row per request.
+
+**Counters.** The counters (`rd`, `rdh`, `rdd`, `riu`, `ri`) are bumped exactly as for any
+request, in the same single pipeline, before the rule's 403/challenge is served. A blocked
+client keeps counting up (like under an operator deny) and nothing resets its counters.
+No extra Redis round trip is added.
+
+**Score.** Rules and the static score are independent. `UA_SCRIPT` (+30) and `UA_EMPTY` (+40)
+still apply and still count toward `hard_block_score`; a rule on the same UA simply acts
+sooner and does not depend on the score or `enforce.block`. A matched rule adds nothing to the score.
+
+**Regex safety.** Saved patterns are compiled and stress-tested (catastrophic backtracking is
+refused), capped at 300 chars, no back-references. All values of a rule are joined into one
+alternation. At request time a PCRE error = no match (also for `exclude`).
+
+**File stamp.** The panel writes `{"v":1,"crc":...,"rules":[...]}`. A good checksum lets the
+guard skip per-rule validation (which costs more than everything else); a hand-edited or
+unstamped file is validated rule by rule and works the same, slower.
+
 ### Redis contract (request path)
 
 At most two round trips per request: one pipeline of every `GET` the request can need

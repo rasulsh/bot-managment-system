@@ -40,6 +40,8 @@ SENSITIVE=(
 	"/logs/.last-rotate"
 	"/guard/config.php"
 	"/guard/config.local.json"
+	"/guard/rules.json"
+	"/guard/rules.php"
 	"/guard/config-backups/"
 	"/guard/guard.php"
 	"/guard/config.php.bak"

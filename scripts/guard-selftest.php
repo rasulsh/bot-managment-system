@@ -939,6 +939,222 @@ t_ok('a trustworthy reputation keeps a scored device out of the block',
 	gv_decide(gv_effective_score(65, -20, -1, -1, $on_cfg), false, true, 'v', 60, '') === 'allow');
 
 // --------------------------------------------------------------------------
+t_section('Access rules');
+
+function t_rule(array $over = array()) {
+	return array_merge(array(
+		'id' => 'r-test1', 'name' => 'test', 'enabled' => true, 'mode' => 'enforce', 'action' => 'block',
+		'priority' => 100, 'skip_verified_bots' => true,
+		'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('badbot')),
+		'path' => null, 'expires_at' => 0, 'pow_bits' => 0, 'note' => '', 'created_by' => '',
+		'created_at' => 0, 'updated_at' => 0,
+	), $over);
+}
+function t_cond($type, array $values, $op = 'include') {
+	return array('op' => $op, 'type' => $type, 'values' => $values);
+}
+function t_rule_hit(array $rule, $ua, $path = '/') {
+	return gv_rule_matches($rule, array('ua' => $ua, 'path' => $path));
+}
+$now = 1800000000;
+
+// Every UA condition type, both ops, case-insensitive.
+t_ok('exact matches the whole UA, any case',
+	t_rule_hit(t_rule(array('ua' => t_cond('exact', array('CurL/8.0')))), 'curl/8.0'));
+t_ok('exact does not match a longer UA',
+	!t_rule_hit(t_rule(array('ua' => t_cond('exact', array('curl/8.0')))), 'curl/8.0.1'));
+t_ok('exact does not match a UA with a trailing newline',
+	!t_rule_hit(t_rule(array('ua' => t_cond('exact', array('curl')))), "curl\n"));
+t_ok('contains matches inside the UA',
+	t_rule_hit(t_rule(array('ua' => t_cond('contains', array('HeadlessChrome')))), 'Mozilla/5.0 headlesschrome/120'));
+t_ok('contains takes a regex metacharacter literally',
+	!t_rule_hit(t_rule(array('ua' => t_cond('contains', array('a.c')))), 'abc')
+	&& t_rule_hit(t_rule(array('ua' => t_cond('contains', array('a.c')))), 'xa.cx'));
+t_ok('prefix matches only at the start',
+	t_rule_hit(t_rule(array('ua' => t_cond('prefix', array('Go-http')))), 'go-http-client/1.1')
+	&& !t_rule_hit(t_rule(array('ua' => t_cond('prefix', array('Go-http')))), 'x Go-http-client'));
+t_ok('regex matches with the case-insensitive flag',
+	t_rule_hit(t_rule(array('ua' => t_cond('regex', array('^python-(requests|urllib)/\d')))), 'Python-Requests/2.31'));
+t_ok('regex values are alternatives of one pattern',
+	t_rule_hit(t_rule(array('ua' => t_cond('regex', array('^aaa$', '^bbb$')))), 'bbb'));
+t_ok('any of several values matches (include)',
+	t_rule_hit(t_rule(array('ua' => t_cond('contains', array('one', 'two', 'three')))), 'xx two xx'));
+t_ok('exclude matches when NO value matches',
+	t_rule_hit(t_rule(array('ua' => t_cond('contains', array('mozilla'), 'exclude'))), 'curl/8')
+	&& !t_rule_hit(t_rule(array('ua' => t_cond('contains', array('mozilla'), 'exclude'))), 'Mozilla/5.0'));
+
+// <empty> means a missing or blank UA.
+$empty_rule = t_rule(array('ua' => t_cond('exact', array(GV_RULE_EMPTY))));
+t_ok('<empty> matches a missing UA', t_rule_hit($empty_rule, ''));
+t_ok('<empty> matches a blank UA', t_rule_hit($empty_rule, "  \t"));
+t_ok('<empty> does not match a real UA', !t_rule_hit($empty_rule, 'curl/8'));
+t_ok('<empty> next to other values: either one matches',
+	t_rule_hit(t_rule(array('ua' => t_cond('contains', array('curl', GV_RULE_EMPTY)))), '')
+	&& t_rule_hit(t_rule(array('ua' => t_cond('contains', array('curl', GV_RULE_EMPTY)))), 'curl/8'));
+t_ok('exclude <empty> matches every non-blank UA',
+	t_rule_hit(t_rule(array('ua' => t_cond('exact', array(GV_RULE_EMPTY), 'exclude'))), 'curl/8')
+	&& !t_rule_hit(t_rule(array('ua' => t_cond('exact', array(GV_RULE_EMPTY), 'exclude'))), ''));
+
+// Path conditions and AND.
+$pr = t_rule(array('ua' => null, 'path' => t_cond('prefix', array('/admin'))));
+t_ok('a path prefix matches the raw path', t_rule_hit($pr, 'x', '/admin/login') && !t_rule_hit($pr, 'x', '/shop'));
+t_ok('path exclude matches everything outside the prefix',
+	t_rule_hit(t_rule(array('ua' => null, 'path' => t_cond('prefix', array('/api/'), 'exclude'))), 'x', '/shop'));
+$both = t_rule(array('path' => t_cond('prefix', array('/admin'))));
+t_ok('UA and path are AND-ed',
+	t_rule_hit($both, 'a badbot b', '/admin') && !t_rule_hit($both, 'a badbot b', '/shop')
+	&& !t_rule_hit($both, 'nice', '/admin'));
+
+// A pattern engine error is "no match", never an exception, whatever the op.
+$old_bt = ini_get('pcre.backtrack_limit');
+$old_jit = ini_get('pcre.jit');
+ini_set('pcre.jit', '0');
+ini_set('pcre.backtrack_limit', '100');
+$evil_inc = t_rule(array('ua' => t_cond('regex', array('(a+)+$'))));
+$evil_exc = t_rule(array('ua' => t_cond('regex', array('(a+)+$'), 'exclude')));
+$ua_evil = str_repeat('a', 40) . '!';
+t_ok('a backtrack-limit error counts as no match (include)', !t_rule_hit($evil_inc, $ua_evil));
+t_ok('a backtrack-limit error counts as no match (exclude too)', !t_rule_hit($evil_exc, $ua_evil));
+t_ok('the error is reported in guard-errors.log',
+	is_file($GV_TMP_LOGS . '/guard-errors.log') && strpos((string)file_get_contents($GV_TMP_LOGS . '/guard-errors.log'), 'rules_pcre') !== false);
+ini_set('pcre.backtrack_limit', (string)$old_bt);
+ini_set('pcre.jit', (string)$old_jit);
+
+// Validation: what the panel writes is what the guard reads.
+$v = gv_rule_validate(t_rule(), true);
+t_ok('a well-formed rule validates', $v[0] === true);
+foreach (array(
+	'no condition'            => array('ua' => null, 'path' => null),
+	'bad mode'                => array('mode' => 'maybe'),
+	'bad action'              => array('action' => 'nuke'),
+	'name too long'           => array('name' => str_repeat('n', 81)),
+	'empty name'              => array('name' => '  '),
+	'bad id'                  => array('id' => 'Bad Id!'),
+	'pow_bits 5 is below 12'  => array('pow_bits' => 5),
+	'pow_bits 30 is above 22' => array('pow_bits' => 30),
+	'non-int priority'        => array('priority' => '5'),
+	'non-bool enabled'        => array('enabled' => 'yes'),
+	'bad op'                  => array('ua' => array('op' => 'maybe', 'type' => 'exact', 'values' => array('x'))),
+	'bad type'                => array('ua' => t_cond('fuzzy', array('x'))),
+	'no values'               => array('ua' => t_cond('exact', array())),
+	'51 values'               => array('ua' => t_cond('exact', array_map('strval', range(1, 51)))),
+	'value of 301 chars'      => array('ua' => t_cond('contains', array(str_repeat('a', 301)))),
+	'control char in value'   => array('ua' => t_cond('contains', array("a\nb"))),
+	'path without slash'      => array('ua' => null, 'path' => t_cond('prefix', array('admin'))),
+	'path with regex type'    => array('ua' => null, 'path' => t_cond('regex', array('/a'))),
+	'broken regex'            => array('ua' => t_cond('regex', array('(unclosed'))),
+	'regex backreference'     => array('ua' => t_cond('regex', array('(a)\1'))),
+	'catastrophic regex'      => array('ua' => t_cond('regex', array('(a+)+$'))),
+) as $label => $over) {
+	$r = gv_rule_validate(t_rule($over), true);
+	t_ok('rejected: ' . $label, $r[0] === false);
+}
+$r = gv_rule_validate(t_rule(array('ua' => t_cond('regex', array('ok', '(bad')))), true);
+t_ok('a regex error names the offending value', $r[0] === false && isset($r[2]['ua']) && strpos($r[2]['ua'], 'value 2') === 0);
+t_ok('the guard-side check does not compile (deep off): a bad regex is caught by the panel',
+	gv_rule_validate(t_rule(array('ua' => t_cond('regex', array('(unclosed')))), false)[0] === true);
+t_ok('a regex of 301 chars is refused', gv_rule_validate(t_rule(array('ua' => t_cond('regex', array(str_repeat('a', 301))))), true)[0] === false);
+$l = gv_rules_validate_list(array(t_rule(), t_rule()), true);
+t_ok('duplicate ids in one list are refused', $l[0] === false);
+t_ok('more than 200 rules are refused', gv_rules_validate_list(array_fill(0, 201, t_rule()), false)[0] === false);
+
+// Reading the file: invalid = no rules; one bad rule is dropped alone.
+$rf = $GV_TMP_LOGS . '/rules-test.json';
+@mkdir($GV_TMP_LOGS, 0775, true);
+t_ok('a missing file means no rules', gv_rules_read($GV_TMP_LOGS . '/nope.json') === array());
+foreach (array('' => 'empty', 'not json' => 'not json', '[1,2]' => 'a list', '{"rules":"x"}' => 'rules not a list',
+	'{"rules":{"a":1}}' => 'rules a map', 'null' => 'null') as $body => $label) {
+	file_put_contents($rf, $body);
+	t_ok('an invalid file means no rules: ' . $label, gv_rules_read($rf) === array());
+}
+file_put_contents($rf, str_repeat(' ', GV_RULES_MAX_BYTES + 1));
+t_ok('an oversized file means no rules', gv_rules_read($rf) === array());
+$good2 = t_rule(array('id' => 'r-test2', 'priority' => 10));
+$bad = t_rule(array('id' => 'r-bad', 'mode' => 'nope'));
+file_put_contents($rf, json_encode(array('rules' => array(t_rule(), $bad, $good2, t_rule()))));
+$read = gv_rules_read($rf);
+t_ok('one bad rule and one duplicate are dropped, the rest stay', count($read) === 2);
+t_ok('rules come back sorted by priority', $read[0]['id'] === 'r-test2');
+
+// The panel's stamp (a checksum of the rules text) lets the guard skip validation.
+$stamp_rules = array(t_rule(array('id' => 'r-s1', 'priority' => 5)), t_rule(array('id' => 'r-s2', 'priority' => 9)));
+$stamped = gv_rules_encode($stamp_rules);
+file_put_contents($rf, $stamped);
+t_ok('a stamped file is read back whole', gv_rules_read($rf) === $stamp_rules);
+t_ok('the stamped file is still plain JSON a hand can read', is_array(json_decode($stamped, true)) && json_decode($stamped, true)['v'] === 1);
+file_put_contents($rf, preg_replace('/"crc":"[0-9a-f]{8}"/', '"crc":"00000000"', $stamped));
+t_ok('a wrong checksum falls back to full validation and still works', count(gv_rules_read($rf)) === 2);
+$tampered = str_replace('"mode":"enforce"', '"mode":"bogus!!"', $stamped);
+file_put_contents($rf, $tampered);
+t_ok('a tampered stamped file fails the check and its invalid rules are dropped by full validation', gv_rules_read($rf) === array());
+t_ok('a truncated stamped file is no rules, not an error', (function () use ($rf, $stamped) { file_put_contents($rf, substr($stamped, 0, 120)); return gv_rules_read($rf) === array(); })());
+
+// First match by priority, disabled and expired are ignored.
+$rl = array(
+	t_rule(array('id' => 'r-a', 'priority' => 10, 'ua' => t_cond('contains', array('zzz')))),
+	t_rule(array('id' => 'r-b', 'priority' => 20, 'action' => 'challenge')),
+	t_rule(array('id' => 'r-c', 'priority' => 30, 'action' => 'log')),
+);
+$f = t_facts(array('ua' => 'x badbot x'));
+t_ok('the first matching rule by priority wins', gv_rules_match($f, $rl, $now)['id'] === 'r-b');
+t_ok('match_all lists every live match in order', count(gv_rules_match_all($f, $rl, $now)) === 2);
+$rl[1]['enabled'] = false;
+t_ok('a disabled rule is skipped', gv_rules_match($f, $rl, $now)['id'] === 'r-c');
+$rl[2]['expires_at'] = $now - 1;
+t_ok('an expired rule is skipped', gv_rules_match($f, $rl, $now) === null);
+$rl[2]['expires_at'] = $now + 100;
+t_ok('a rule that has not expired yet matches', gv_rules_match($f, $rl, $now)['id'] === 'r-c');
+t_ok('no rules, no match', gv_rules_match($f, array(), $now) === null);
+
+// What a rule demands (mode, action, token, gate).
+$blk = t_rule(array('action' => 'block'));
+$chl = t_rule(array('action' => 'challenge'));
+$log = t_rule(array('action' => 'log'));
+$mon = t_rule(array('mode' => 'monitor', 'action' => 'block'));
+t_ok('an enforced block serves 403 whatever the token',
+	gv_rule_act($blk, 'v', true, true) === array('403', '403'));
+t_ok('a monitor rule never acts', gv_rule_act($mon, 'm', true, true) === array('', ''));
+t_ok('a log rule never acts', gv_rule_act($log, 'm', true, true) === array('', ''));
+t_ok('a challenge without a token is served', gv_rule_act($chl, 'm', true, true) === array('challenge', 'challenge'));
+t_ok('a challenge with a bad token is served', gv_rule_act($chl, 'b', true, true) === array('challenge', 'challenge'));
+t_ok('a client holding a valid token is never challenged again (no loop)',
+	gv_rule_act($chl, 'v', true, true) === array('', ''));
+t_ok('a POST with gate_post off is a shadow challenge: intended, not served',
+	gv_rule_act($chl, 'm', true, false) === array('challenge', ''));
+t_ok('a request outside the gate is never challenged', gv_rule_act($chl, 'm', false, true) === array('', ''));
+t_ok('an enforced block or challenge replaces the bot pass', gv_rule_overrides_pass($blk) && gv_rule_overrides_pass($chl));
+t_ok('a monitor or log rule leaves the bot pass alone', !gv_rule_overrides_pass($mon) && !gv_rule_overrides_pass($log));
+t_ok('the log reason is RULE:<id> when enforcing, SH_RULE:<id> in monitor',
+	gv_rule_reason($blk) === 'RULE:r-test1' && gv_rule_reason($mon) === 'SH_RULE:r-test1');
+
+// The starter set is valid, disabled and in monitor mode.
+$starter = gv_rules_validate_list(gv_rules_starter(), true);
+t_ok('the starter set validates', $starter[0] === true && count($starter[1]) === 16);
+$all_off = true;
+foreach (gv_rules_starter() as $s) { if ($s['enabled'] !== false || $s['mode'] !== 'monitor') { $all_off = false; } }
+t_ok('every starter rule is disabled and in monitor mode', $all_off);
+$ua_samples = array('python-requests/2.31.0' => 'st-pyreq', 'curl/8.4.0' => 'st-curl', '' => 'st-empty',
+	'Mozilla/5.0 HeadlessChrome/120.0' => 'st-headless', 'Java/17.0.2' => 'st-java');
+foreach ($ua_samples as $ua => $id) {
+	$hit = false;
+	foreach (gv_rules_starter() as $s) { if ($s['id'] === $id && gv_rule_matches($s, array('ua' => $ua, 'path' => '/'))) { $hit = true; } }
+	t_ok('starter ' . $id . ' matches its client', $hit);
+}
+$browser_hit = false;
+foreach (gv_rules_starter() as $s) { if (gv_rule_matches($s, t_facts())) { $browser_hit = true; } }
+t_ok('no starter rule matches a current Chrome', !$browser_hit);
+
+// Rules add no Redis round trip: the request-path functions take no connection.
+$no_conn = true;
+foreach (array('gv_rules_match', 'gv_rule_act', 'gv_rule_matches', 'gv_rule_ua_eval') as $fn) {
+	foreach ((new ReflectionFunction($fn))->getParameters() as $p) {
+		if (stripos($p->getName(), 'conn') !== false) { $no_conn = false; }
+	}
+}
+t_ok('rule evaluation takes no Redis connection (no extra round trip)', $no_conn);
+@unlink($rf);
+
+// --------------------------------------------------------------------------
 t_section('Redis roundtrip (optional)');
 
 $redis_bin = trim((string)@shell_exec('command -v redis-server 2>/dev/null'));

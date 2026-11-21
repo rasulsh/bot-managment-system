@@ -2259,5 +2259,61 @@ ok('a model is written through a temp file and no temp file is left behind',
 shutil.rmtree(hr_dir, ignore_errors=True)
 ok('reputation expires in two weeks, not a month', config_mod.DEFAULTS['rep_ttl'] == 1209600)
 
+
+# ---------------------------------------------------------------------------
+section('Access rules: hit counts from the logs')
+
+import datetime as dt_rh
+import gzip as gzip_rh
+import json as json_rh
+import time as time_rh
+from analyzer import snapshot as snapshot_rh
+
+rh_now = time_rh.time()
+ok('rule_ids reads RULE: and SH_RULE: reasons, ignores everything else',
+   snapshot_rh.rule_ids({'rs': ['UA_SCRIPT', 'RULE:r1', 'SH_RULE:st-curl', 'RULE:', 5, 'XRULE:z']}) == ['r1', 'st-curl'])
+ok('rule_ids tolerates a missing or wrong-typed rs',
+   snapshot_rh.rule_ids({}) == [] and snapshot_rh.rule_ids({'rs': None}) == [] and snapshot_rh.rule_ids({'rs': 'RULE:x'}) == [])
+rh_rows = [{'ts': 100.0, 'rs': ['RULE:a']}, {'ts': 200.0, 'rs': ['SH_RULE:a', 'RULE:b']}, {'ts': 'bad', 'rs': ['RULE:a']},
+           {'ts': 300.0, 'rs': []}]
+rh_c = snapshot_rh.count_rule_hits(rh_rows)
+ok('count_rule_hits counts monitor and enforced hits per id and the last timestamp',
+   rh_c == {'a': [2, 200.0], 'b': [1, 200.0]})
+ok('count_rule_hits honours the since window', snapshot_rh.count_rule_hits(rh_rows, since=150.0)['a'] == [1, 200.0])
+
+rh_dir = tempfile.mkdtemp(prefix='gv-rules-')
+rh_cache = os.path.join(rh_dir, 'cache.json')
+rh_today = dt_rh.date.fromtimestamp(rh_now)
+
+
+def rh_write(offset, rows, gz=False):
+    day = rh_today - dt_rh.timedelta(days=offset)
+    path = os.path.join(rh_dir, 'guard-%s.jsonl' % day.strftime('%Y%m%d'))
+    opener = (lambda p: gzip_rh.open(p + '.gz', 'wt')) if gz else (lambda p: open(p, 'w'))
+    with opener(path) as fh:
+        for r in rows:
+            fh.write(json_rh.dumps(r) + '\n')
+
+
+rh_write(0, [{'ts': rh_now - 60, 'act': '403', 'rs': ['RULE:a']}, {'ts': rh_now - 30, 'act': 'allow', 'rs': ['SH_RULE:b']}])
+rh_write(1, [{'ts': rh_now - 3600 * 30, 'act': '403', 'rs': ['RULE:a']}, {'ts': rh_now - 3600 * 20, 'act': '403', 'rs': ['RULE:a']}])
+rh_write(3, [{'ts': rh_now - 86400 * 3, 'act': '403', 'rs': ['RULE:a']}], gz=True)
+rh_write(9, [{'ts': rh_now - 86400 * 9, 'act': '403', 'rs': ['RULE:a']}])
+rh_res = snapshot_rh.collect_rule_hits(rh_dir, rh_now, rh_cache)
+ok('24 h counts reach back into yesterday but only as far as 24 hours', rh_res['a']['h24'] == 2 and rh_res['b']['h24'] == 1)
+ok('7 d counts cover the week, gzipped days included, and skip older days', rh_res['a']['d7'] == 4 and rh_res['b']['d7'] == 1)
+ok('last hit is the newest timestamp', abs(rh_res['a']['last'] - (rh_now - 60)) < 0.01)
+ok('finished days are cached, today and yesterday are not',
+   set(json_rh.load(open(rh_cache))['days']) == set((rh_today - dt_rh.timedelta(days=n)).strftime('%Y%m%d') for n in range(2, 7)))
+os.remove(os.path.join(rh_dir, 'guard-%s.jsonl.gz' % (rh_today - dt_rh.timedelta(days=3)).strftime('%Y%m%d')))
+ok('a cached day is not re-read (file gone, count stays)',
+   snapshot_rh.collect_rule_hits(rh_dir, rh_now, rh_cache)['a']['d7'] == 4)
+with open(rh_cache, 'w') as fh:
+    fh.write('{broken')
+ok('a corrupt cache is ignored and rebuilt',
+   snapshot_rh.collect_rule_hits(rh_dir, rh_now, rh_cache)['a']['d7'] == 3)
+ok('an empty log directory gives no hits', snapshot_rh.collect_rule_hits(tempfile.mkdtemp(prefix='gv-empty-'), rh_now, None) == {})
+shutil.rmtree(rh_dir, ignore_errors=True)
+
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)

@@ -626,7 +626,7 @@ foreach ($it as $f) {
 	$path = $f->getPathname();
 	if (!preg_match('/\.(php|py|sh)$/', $path)) { continue; }
 	if (preg_match('#/(\.git|\.venv|docs|node_modules)/#', $path)) { continue; }
-	if (preg_match('#(selftest|guard-test\.sh|identity-check|verify-e2e|redis-selftest)#', basename($path))) { continue; }
+	if (preg_match('#(selftest|guard-test\.sh|identity-check|verify-e2e|redis-selftest|rules-e2e)#', basename($path))) { continue; }
 	if (in_array(realpath($path), $skip, true)) { continue; }
 	foreach (file($path) as $n => $line) {
 		if (preg_match('/[\'"]g[vp]:/', $line)) { $offenders[] = substr($path, strlen(__DIR__) - 7) . ':' . ($n + 1); }

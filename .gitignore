@@ -47,3 +47,9 @@ analyzer/*.tmp
 
 # Panel backups of the overlay (every save keeps the previous version).
 guard/config-backups/
+
+# Access rules: written by the panel, local to each install.
+guard/rules.json
+guard/rules.json.tmp*
+guard/rules.json.lock
+analyzer/.rule-hits.json

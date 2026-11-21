@@ -53,11 +53,36 @@ if grep -qi 'name="identity"' <<<"$ov"; then
 	fi
 fi
 
+# Access rules: create (monitor), find it, test box, quick-block prefill, toggle, delete.
+rp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=rules")"
+tok="$(printf '%s' "$rp" | csrf)"
+code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=save' -d 'name=Smoke rule' \
+	-d 'enabled=1' -d 'mode=monitor' -d 'action=block' -d 'priority=900' -d 'ua_op=include' -d 'ua_type=exact' \
+	--data-urlencode 'ua_values=smoke-test-client/1.0' -d 'ack=1' "$URL?r=rules")"
+check "rule create answers 303" "$([ "$code" = 303 ] && echo 1 || echo 0)"
+rp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=rules")"
+check "the new rule is listed" "$(grep -q 'Smoke rule' <<<"$rp" && echo 1 || echo 0)"
+rid="$(grep -o 'name="id" value="r[0-9a-f]\{6\}"' <<<"$rp" | head -1 | sed 's/.*value="//; s/"$//')"
+tp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'test=1' --data-urlencode 'test_ua=smoke-test-client/1.0' "$URL?r=rules")"
+check "the test box names the rule" "$(grep -q "$rid" <<<"$tp" && grep -q 'Winning rule' <<<"$tp" && echo 1 || echo 0)"
+qp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'new=1' --data-urlencode 'qua=curl/8.4.0' "$URL?r=rules")"
+check "quick block pre-fills the form" "$(grep -q 'curl/8.4.0' <<<"$qp" && grep -q 'name="ua_values"' <<<"$qp" && echo 1 || echo 0)"
+tok="$(printf '%s' "$rp" | csrf)"
+curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=toggle' -d "id=$rid" "$URL?r=rules"
+rp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=rules")"
+check "toggle disables the rule" "$(grep -q 'Smoke rule' <<<"$rp" && grep -q '>Enable<' <<<"$rp" && echo 1 || echo 0)"
+tok="$(printf '%s' "$rp" | csrf)"
+curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=delete' -d "id=$rid" "$URL?r=rules"
+rp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=rules")"
+check "delete removes the rule" "$(grep -q 'Smoke rule' <<<"$rp" && echo 0 || echo 1)"
+code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" -d 'do=starter' "$URL?r=rules")"
+check "a POST without the CSRF token changes nothing (no 303 redirect)" "$([ "$code" != 303 ] && echo 1 || echo 0)"
+
 # Every page is English and left-to-right, with Latin digits only. The logs,
 # identity, settings and config file pages are checked for direction only: they
 # show request data or operator-written values (the challenge page text, which
 # ships in Persian) as they are, and those may contain any script.
-for r in dashboard logs identity overrides replay models settings config_file jobs audit; do
+for r in dashboard logs identity overrides rules replay models settings config_file jobs audit; do
 	page="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=$r")"
 	check "page $r is English and left-to-right" "$(grep -q '<html lang="en" dir="ltr">' <<<"$page" && echo 1 || echo 0)"
 	case "$r" in logs|identity|settings|config_file) continue ;; esac

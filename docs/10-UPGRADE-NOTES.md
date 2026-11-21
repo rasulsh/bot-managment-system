@@ -2,6 +2,36 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Access rules (User-Agent / path)
+
+**New**
+
+* `guard/rules.php` and `guard/rules.json` (written only by the panel): block, challenge or log
+  a client by User-Agent (`exact`, `contains`, `prefix`, `regex`, `<empty>`) and/or path prefix,
+  each with `include`/`exclude`, a priority, an expiry, and a `monitor` or `enforce` mode.
+  See [02-ARCHITECTURE.md](02-ARCHITECTURE.md#access-rules) and [09-ADMIN-PANEL.md](09-ADMIN-PANEL.md).
+* New panel page **Rules** (test box, starter set, "Quick block" on log and identity rows).
+* Log reasons `RULE:<id>` / `SH_RULE:<id>`; the snapshot gains `rules` (hits per rule, 24 h / 7 d).
+* Without `guard/rules.json` nothing changes: no file read beyond one `is_file()`.
+
+**Upgrade steps (existing install, monitor mode)**
+
+1. Deploy the files. No config change, no new cron job, no new extension. Run
+   `bash scripts/exposure-check.sh` (it now also probes `guard/rules.json`).
+2. Open **Rules**, press **Install starter set** (16 rules, all disabled, monitor mode).
+3. Enable the ones you care about, still in monitor mode, and read the hits (Logs filter
+   `reason = SH_RULE:<id>`, or the Hits column after the next snapshot run).
+4. Switch a rule to `enforce` only after its monitor hits look right. Rule actions do not
+   depend on `enforce.block` / `enforce.challenge`: the rule's own mode decides.
+
+**Rollback**: disable or delete the rule in the panel, or delete `guard/rules.json`
+(takes effect on the next request). The kill switch (`guard.off`) also bypasses all rules.
+
+**Cost** (`scripts/bench-gv-run.sh`, PHP 8.3, p50 of `gv_run`, allowed request, same machine,
+interleaved runs): no rules = same as before (about 0.24 ms); 20 rules +0.08 ms;
+200 rules of 5 values +0.6 ms; 200 rules of 50 values +1.4 ms. Cost is mostly reading
+the file, so keep the list short.
+
 ## Log storage limits
 
 **New**

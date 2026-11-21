@@ -57,7 +57,9 @@ EOF
 
 redis-server --port "$RPORT" --save "" --appendonly no --daemonize no --dir "$WORK" >"$WORK/redis.log" 2>&1 &
 PIDS+=($!)
-GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "0.0.0.0:$PORT" "$ROOT/scripts/dev-router.php" >"$WORK/php.log" 2>&1 &
+# One access rule in monitor mode (scenario 4b): it must reach the logs and the snapshot.
+printf '{"rules":[{"id":"pipe1","name":"pipeline","enabled":true,"mode":"monitor","action":"block","priority":10,"skip_verified_bots":true,"ua":{"op":"include","type":"contains","values":["pipeline-rule-bot"]},"path":null,"expires_at":0,"pow_bits":0,"note":"","created_by":"","created_at":0,"updated_at":0}]}' > "$WORK/rules.json"
+GV_RULES="$WORK/rules.json" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "0.0.0.0:$PORT" "$ROOT/scripts/dev-router.php" >"$WORK/php.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 50); do
 	curl -s -o /dev/null "$BASE/t/404" 2>/dev/null && break
@@ -118,9 +120,25 @@ expect head 1 1 -1
 expect exempt 1 1 -1
 expect notfound 1 1 -1
 
+echo "== 4b. An access rule in monitor mode: logged as SH_RULE, never acts"
+for _ in 1 2 3; do
+	curl -s -o /dev/null --interface 127.0.0.41 -H "User-Agent: x pipeline-rule-bot/1.0" "${HDR[@]}" "$BASE/?t=rulehit"
+done
+expect rulehit 3 1 -1
+
 echo "== 5. The analyzer snapshot reads the same data"
 python3 "$ROOT/analyzer/snapshot.py" --log-dir "$LOGS" --out "$WORK/snapshot.json" >"$WORK/snapshot.out" 2>&1 || cat "$WORK/snapshot.out" >&2
 
 echo "== 6. Verify: log file, panel readers, snapshot"
 GV_CONFIG="$WORK/config.php" "$PHP_BIN" "$ROOT/scripts/e2e-verify.php" "$LOGS" "$EXPECT" "$WORK/snapshot.json"
-exit $?
+status=$?
+# The snapshot carries the per-rule hit counts the Rules page shows.
+if python3 -c "import json,sys; r=json.load(open(sys.argv[1])).get('rules',{}).get('pipe1',{}); sys.exit(0 if r.get('h24')==3 and r.get('d7')==3 and r.get('last',0)>0 else 1)" "$WORK/snapshot.json"; then
+	echo "PASS  snapshot rules: pipe1 has 3 hits in 24h and 7d"
+else
+	echo "FAIL  snapshot rules: pipe1 hit counts missing or wrong"
+	python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('rules'))" "$WORK/snapshot.json" >&2; cat "$WORK/snapshot.out" >&2; grep -c SH_RULE "$LOGS"/guard-*.jsonl >&2
+	status=1
+fi
+rm -f "$ROOT/analyzer/.rule-hits.json"
+exit $status

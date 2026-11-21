@@ -50,6 +50,92 @@ def bucketize(values):
     return out
 
 
+RULE_PREFIXES = ('RULE:', 'SH_RULE:')
+
+
+def rule_ids(row):
+    """Access-rule ids a decision row carries (RULE:<id> or SH_RULE:<id>). Pure."""
+    out = []
+    for reason in (row.get('rs') or []):
+        if not isinstance(reason, str):
+            continue
+        for prefix in RULE_PREFIXES:
+            if reason.startswith(prefix) and 0 < len(reason) - len(prefix) <= 16:
+                out.append(reason[len(prefix):])
+    return out
+
+
+def count_rule_hits(rows, since=0.0):
+    """{id: [hits with ts >= since, last ts]} over decision rows. Pure."""
+    out = {}
+    for row in rows:
+        ids = rule_ids(row)
+        if not ids:
+            continue
+        try:
+            ts = float(row.get('ts') or 0)
+        except (TypeError, ValueError):
+            continue
+        for rid in ids:
+            slot = out.setdefault(rid, [0, 0.0])
+            if ts >= since:
+                slot[0] += 1
+            slot[1] = max(slot[1], ts)
+    return out
+
+
+def collect_rule_hits(log_dir, now, cache_path=None, days=7):
+    """Per-rule hit counts for the panel's Rules page: {id: {h24, d7, last}}.
+
+    Hits come from the logs, never from Redis counters in the request path. The
+    last two days are always re-read (the 24 h window reaches back into
+    yesterday); older finished days are counted once and kept in a small cache
+    file, so the 15-minute snapshot does not re-read a week of logs every time.
+    """
+    today = datetime.date.fromtimestamp(now)
+    cache = {}
+    if cache_path:
+        try:
+            with open(cache_path, 'r') as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict) and isinstance(loaded.get('days'), dict):
+                cache = loaded['days']
+        except Exception:
+            cache = {}
+    totals = {}
+    fresh = {}
+    for offset in range(int(days)):
+        day = today - datetime.timedelta(days=offset)
+        key = day.strftime('%Y%m%d')
+        recent = {}
+        if offset >= 2 and isinstance(cache.get(key), dict):
+            counts = cache[key]
+        else:
+            rows = list(logs_mod.read_lines(log_dir, 1, today=day, join_outcomes=False))
+            counts = count_rule_hits(rows)
+            if offset < 2:
+                recent = count_rule_hits(rows, since=now - 86400)
+        if offset >= 2:
+            fresh[key] = counts
+        for rid, pair in counts.items():
+            slot = totals.setdefault(rid, {'h24': 0, 'd7': 0, 'last': 0.0})
+            slot['d7'] += int(pair[0])
+            slot['last'] = max(slot['last'], float(pair[1]))
+        for rid, pair in recent.items():
+            totals.setdefault(rid, {'h24': 0, 'd7': 0, 'last': 0.0})['h24'] += int(pair[0])
+    if cache_path:
+        try:
+            tmp = cache_path + '.tmp'
+            with open(tmp, 'w') as handle:
+                json.dump({'days': fresh}, handle)
+            os.replace(tmp, cache_path)
+        except Exception:
+            pass
+    for slot in totals.values():
+        slot['last'] = round(slot['last'], 3)
+    return totals
+
+
 def build(rows, cfg, guard_cfg=None):
     """Fold decision rows into the snapshot payload. Pure."""
     rows = list(rows)
@@ -321,6 +407,12 @@ def main(argv=None):
     rows = list(logs_mod.read_lines(cfg['log_dir'], days))
     payload = build(rows, cfg)
     payload['redis'] = redis_io.connect(cfg) is not None
+    try:
+        payload['rules'] = collect_rule_hits(
+            cfg['log_dir'], time.time(),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), '.rule-hits.json'))
+    except Exception as exc:                  # hit counts are a convenience, never fatal
+        print('WARNING: rule hit counts skipped: %s' % exc, file=sys.stderr)
 
     out_path = args.out or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), 'snapshot.json')

@@ -1320,6 +1320,169 @@ foreach (glob($pl_dir . '/*') as $pl_f) { @unlink($pl_f); }
 @rmdir($pl_dir); @unlink($pl_cfg);
 putenv($pl_prev === false ? 'GV_CONFIG' : 'GV_CONFIG=' . $pl_prev);
 
+t_section('Access rules page');
+require_once __DIR__ . '/../panel/rules.php';
+$ar_file = sys_get_temp_dir() . '/gp-rules-selftest-' . getmypid() . '.json';
+@unlink($ar_file);
+putenv('GV_RULES=' . $ar_file);
+$ar_audit_backup = is_file(gp_audit_path()) ? file_get_contents(gp_audit_path()) : null;
+if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
+$ar_cfg = gv_cfg_defaults(array());
+$ar_cfg['known_bots'] = array('googlebot', 'bingbot');
+$ar_cfg['preview_bots'] = array('telegrambot');
+$ar_cfg['exempt_paths'] = array();
+$ar_post = array('do' => 'save', 'id' => '', 'name' => 'Block curl', 'enabled' => '1', 'skip_verified_bots' => '1',
+	'mode' => 'monitor', 'action' => 'block', 'priority' => '100', 'ua_op' => 'include', 'ua_type' => 'contains',
+	'ua_values' => "curl/\r\nWget\r\n", 'path_values' => '', 'pow_bits' => '0', 'expires_date' => '', 'note' => '');
+
+t_ok('no file: state is missing and the list is empty', gp_rules_state()['state'] === 'missing' && gp_rules_state()['rules'] === array());
+$ar = gp_rules_action('save', $ar_post, 'tester', '198.51.100.1', $ar_cfg);
+t_ok('a valid rule is saved', $ar['ok'] === true && $ar['msg'] === 'rule_saved');
+$ar_rules = gv_rules_read($ar_file);
+t_ok('the guard reads back what the panel wrote (same validator)', count($ar_rules) === 1 && $ar_rules[0]['name'] === 'Block curl'
+	&& $ar_rules[0]['ua']['values'] === array('curl/', 'Wget') && $ar_rules[0]['created_by'] === 'tester');
+$ar_id = $ar_rules[0]['id'];
+t_ok('the generated id is short and safe for a log reason', (bool)preg_match('/^r[0-9a-f]{6}$/', $ar_id));
+t_ok('the file is not group- or world-writable', (fileperms($ar_file) & 0022) === 0);
+t_ok('no temp file is left behind', glob($ar_file . '.tmp*') === array());
+$ar_aud = gp_audit_read(10);
+t_ok('creating a rule is audited with before (null) and after', count($ar_aud) === 1 && $ar_aud[0]['event'] === 'rule_create'
+	&& $ar_aud[0]['key'] === $ar_id && $ar_aud[0]['old'] === null && $ar_aud[0]['new']['name'] === 'Block curl');
+
+// Validation failures are reported per field and nothing is written.
+$bad = $ar_post; $bad['ua_type'] = 'regex'; $bad['ua_values'] = '(unclosed'; $bad['name'] = 'bad regex';
+$ar = gp_rules_action('save', $bad, 'tester', '198.51.100.1', $ar_cfg);
+t_ok('a broken regex is refused with a message on the UA field', $ar['ok'] === false && isset($ar['errors']['ua']) && $ar['errors']['ua'] === 'bad_regex'
+	&& isset($ar['details']['ua']));
+t_ok('the refused rule was not written', count(gv_rules_read($ar_file)) === 1);
+$bad = $ar_post; $bad['ua_values'] = ''; $bad['path_values'] = '';
+t_ok('a rule without any condition is refused', gp_rules_action('save', $bad, 't', '1.1.1.1', $ar_cfg)['errors']['ua'] === 'no_condition');
+$bad = $ar_post; $bad['expires_date'] = '2026-13-45';
+t_ok('an invalid expiry date is refused', isset(gp_rules_action('save', $bad, 't', '1.1.1.1', $ar_cfg)['errors']['expires_at']));
+$bad = $ar_post; $bad['name'] = str_repeat('n', 81);
+t_ok('a name over 80 characters is refused', isset(gp_rules_action('save', $bad, 't', '1.1.1.1', $ar_cfg)['errors']['name']));
+
+// Warnings are non-blocking, shown once, then "save anyway".
+$warn = $ar_post; $warn['name'] = 'Too wide'; $warn['ua_type'] = 'contains'; $warn['ua_values'] = 'Mozilla';
+$ar = gp_rules_action('save', $warn, 'tester', '1.1.1.1', $ar_cfg);
+$ar_codes = array_column($ar['warnings'], 0);
+t_ok('a pattern matching real browsers warns and is not saved yet', $ar['ok'] === false && $ar['msg'] === 'rule_warnings' && in_array('browsers', $ar_codes, true));
+$warn['ack'] = '1';
+t_ok('with the acknowledgement the same rule is saved', gp_rules_action('save', $warn, 'tester', '1.1.1.1', $ar_cfg)['ok'] === true);
+$gb = array_merge(gp_rule_blank(), array('id' => 'r-x1', 'name' => 'x', 'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('googlebot'))));
+t_ok('a pattern matching a known bot warns', in_array('bots', array_column(gp_rule_warnings($gb, $ar_cfg), 0), true));
+$short = array_merge(gp_rule_blank(), array('id' => 'r-x2', 'name' => 'x', 'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('ab'))));
+t_ok('a "contains" pattern under 4 characters warns', in_array('short', array_column(gp_rule_warnings($short, $ar_cfg), 0), true));
+$ex_cfg = array_merge($ar_cfg, array('exempt_paths' => array('/pay/')));
+$pathrule = array_merge(gp_rule_blank(), array('id' => 'r-x3', 'name' => 'x', 'ua' => null, 'path' => array('op' => 'include', 'type' => 'prefix', 'values' => array('/pay/cb'))));
+t_ok('a path rule that overlaps an exempt path warns', in_array('exempt', array_column(gp_rule_warnings($pathrule, $ex_cfg), 0), true));
+$exact = array_merge(gp_rule_blank(), array('id' => 'r-x4', 'name' => 'x', 'ua' => array('op' => 'include', 'type' => 'exact', 'values' => array('weird-client/1'))));
+t_ok('a precise pattern warns about nothing', gp_rule_warnings($exact, $ar_cfg) === array());
+t_ok('every browser sample is a Mozilla UA string', count(gp_rules_browser_samples()) >= 8);
+
+// Edit, toggle, duplicate, move, delete: each audited.
+$edit = $ar_post; $edit['id'] = $ar_id; $edit['name'] = 'Block curl v2';
+t_ok('an existing rule can be edited', gp_rules_action('save', $edit, 'tester', '1.1.1.1', $ar_cfg)['ok'] === true);
+t_ok('an edit keeps created_by and created_at', gv_rules_read($ar_file)[0]['created_by'] === 'tester' && gv_rules_read($ar_file)[0]['name'] === 'Block curl v2');
+$edit['id'] = 'rnotthere';
+t_ok('editing a rule that does not exist is refused', gp_rules_action('save', $edit, 't', '1.1.1.1', $ar_cfg)['msg'] === 'rule_not_found');
+$ar_before = gv_rules_read($ar_file)[0]['enabled'];
+gp_rules_action('toggle', array('id' => $ar_id), 'tester', '1.1.1.1', $ar_cfg);
+t_ok('toggle flips enabled', gv_rules_read($ar_file)[0]['enabled'] === !$ar_before);
+$n0 = count(gv_rules_read($ar_file));
+gp_rules_action('duplicate', array('id' => $ar_id), 'tester', '1.1.1.1', $ar_cfg);
+$ar_all = gv_rules_read($ar_file);
+$ar_copy = null; foreach ($ar_all as $r) { if (substr($r['name'], -7) === ' (copy)') { $ar_copy = $r; } }
+t_ok('duplicate adds a disabled monitor copy with a new id', count($ar_all) === $n0 + 1 && $ar_copy && !$ar_copy['enabled'] && $ar_copy['mode'] === 'monitor' && $ar_copy['id'] !== $ar_id);
+$ar_pre = array_column(gv_rules_read($ar_file), 'id');
+$ar_pos = array_search($ar_copy['id'], $ar_pre);
+gp_rules_action('move', array('id' => $ar_copy['id'], 'dir' => 'up'), 'tester', '1.1.1.1', $ar_cfg);
+$ar_order = array_column(gv_rules_read($ar_file), 'id');
+t_ok('move up swaps with the neighbour and renumbers by 10', $ar_order[$ar_pos - 1] === $ar_copy['id'] && $ar_order[$ar_pos] === $ar_pre[$ar_pos - 1]
+	&& array_column(gv_rules_read($ar_file), 'priority') === range(10, 10 * count($ar_order), 10));
+gp_rules_action('delete', array('id' => $ar_copy['id']), 'tester', '1.1.1.1', $ar_cfg);
+t_ok('delete removes the rule', !in_array($ar_copy['id'], array_column(gv_rules_read($ar_file), 'id'), true));
+$ar_events = array_column(gp_audit_read(50), 'event');
+t_ok('toggle, duplicate, reorder and delete are all audited',
+	in_array('rule_toggle', $ar_events, true) && in_array('rule_duplicate', $ar_events, true)
+	&& in_array('rule_reorder', $ar_events, true) && in_array('rule_delete', $ar_events, true) && in_array('rule_update', $ar_events, true));
+
+// Starter set.
+gp_rules_action('starter', array(), 'tester', '1.1.1.1', $ar_cfg);
+$n1 = count(gv_rules_read($ar_file));
+gp_rules_action('starter', array(), 'tester', '1.1.1.1', $ar_cfg);
+t_ok('the starter set adds 16 disabled monitor rules, once', count(gv_rules_read($ar_file)) === $n1 && $n1 >= 16);
+
+// An invalid file blocks writes (the guard ignores it; overwriting would hide it).
+$ar_keep = file_get_contents($ar_file);
+file_put_contents($ar_file, '{"rules":[{"id":"r-ok1"},"x"]}');
+t_ok('a file with invalid rules is reported as invalid', gp_rules_state()['state'] === 'invalid');
+t_ok('writes are refused while the file is invalid', gp_rules_action('toggle', array('id' => 'r-ok1'), 't', '1.1.1.1', $ar_cfg)['msg'] === 'rules_file_invalid');
+t_ok('the invalid file was not touched', file_get_contents($ar_file) === '{"rules":[{"id":"r-ok1"},"x"]}');
+file_put_contents($ar_file, 'garbage');
+t_ok('unreadable JSON is invalid too', gp_rules_state()['state'] === 'invalid');
+file_put_contents($ar_file, $ar_keep);
+
+// The test box: pure function.
+$ar_t = gp_rules_test(array(
+	array_merge(gp_rule_blank(), array('id' => 'r-t1', 'name' => 't1', 'mode' => 'enforce', 'action' => 'block', 'priority' => 5,
+		'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('googlebot')))),
+	array_merge(gp_rule_blank(), array('id' => 'r-t2', 'name' => 't2', 'mode' => 'monitor', 'action' => 'log', 'priority' => 6,
+		'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('googlebot')), 'skip_verified_bots' => false)),
+), 'Googlebot/2.1', '/', false, $ar_cfg, time());
+t_ok('the test box names the winning rule and the known bot', $ar_t['winner']['id'] === 'r-t1' && $ar_t['bot'] === 'googlebot' && count($ar_t['matches']) === 2);
+$ar_t = gp_rules_test(array(
+	array_merge(gp_rule_blank(), array('id' => 'r-t1', 'name' => 't1', 'mode' => 'enforce', 'action' => 'block', 'priority' => 5,
+		'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('googlebot')))),
+), 'Googlebot/2.1', '/', true, $ar_cfg, time());
+t_ok('a verified crawler skips the rule in the test box', $ar_t['winner'] === null && $ar_t['skipped'] === array('r-t1'));
+t_ok('the test box on an empty UA matches an <empty> rule',
+	gp_rules_test(array(array_merge(gp_rule_blank(), array('id' => 'r-t3', 'name' => 't', 'ua' => array('op' => 'include', 'type' => 'exact', 'values' => array(GV_RULE_EMPTY))))), '', '/', false, $ar_cfg, time())['winner']['id'] === 'r-t3');
+t_ok('the test box changes nothing: the file is as it was', file_get_contents($ar_file) === $ar_keep);
+
+// Quick block pre-fill.
+$qb = gp_rule_from_ua('curl/8.4.0');
+t_ok('quick block: exact UA rule in monitor mode', $qb['mode'] === 'monitor' && $qb['ua']['type'] === 'exact' && $qb['ua']['values'] === array('curl/8.4.0') && $qb['action'] === 'block');
+t_ok('quick block of a UA cut at 120 chars becomes a prefix rule', gp_rule_from_ua(str_repeat('a', 120))['ua']['type'] === 'prefix');
+t_ok('quick block of an empty UA uses <empty>', gp_rule_from_ua('')['ua']['values'] === array(GV_RULE_EMPTY));
+t_ok('the pre-filled rule validates', gv_rule_validate(array_merge($qb, array('id' => 'r-qb1')), true)[0] === true);
+
+// Table filters: is / is not, several values, text contains / does not contain.
+$fr = array(array_merge(gp_rule_blank(), array('id' => 'r-f1', 'name' => 'Alpha scraper', 'action' => 'block', 'mode' => 'enforce', 'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('x')))),
+	array_merge(gp_rule_blank(), array('id' => 'r-f2', 'name' => 'Beta', 'action' => 'challenge', 'mode' => 'monitor', 'enabled' => false, 'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('y')))));
+$fl = function ($get) use ($fr) { $f = gp_rules_filter_from_request($get); return array_column(array_filter($fr, function ($r) use ($f) { return gp_rules_filter_match($r, $f, time()); }), 'id'); };
+t_ok('filter: action is block', $fl(array('action' => 'block')) === array('r-f1'));
+t_ok('filter: action is not block', array_values($fl(array('action' => 'block', 'action_op' => 'not'))) === array('r-f2'));
+t_ok('filter: several values are OR-ed', count($fl(array('action' => 'block,challenge'))) === 2);
+t_ok('filter: state is disabled', $fl(array('state' => 'disabled')) === array('r-f2'));
+t_ok('filter: fields are AND-ed', $fl(array('action' => 'block', 'mode' => 'monitor')) === array());
+t_ok('filter: text contains / does not contain', $fl(array('q' => 'scraper')) === array('r-f1') && array_values($fl(array('q' => 'scraper', 'q_op' => 'not'))) === array('r-f2'));
+t_ok('filter: no filter shows everything', count($fl(array())) === 2);
+
+// Every dynamic translation key the page builds exists.
+$ar_lang = require __DIR__ . '/../panel/lang.php';
+$ar_miss = array();
+foreach (array_merge(
+	array_map(function ($a) { return 'rules_act_' . $a; }, gv_rule_actions()),
+	array_map(function ($a) { return 'rules_type_' . $a; }, gv_rule_ua_types()),
+	array('rules_mode_enforce', 'rules_mode_monitor', 'rwarn_bots', 'rwarn_browsers', 'rwarn_short', 'rwarn_exempt', 'rwarn_wide',
+		'rerr_bad_id', 'rerr_empty', 'rerr_too_long', 'rerr_not_allowed', 'rerr_out_of_range', 'rerr_bad_condition', 'rerr_bad_op',
+		'rerr_bad_type', 'rerr_not_list', 'rerr_no_values', 'rerr_too_many', 'rerr_no_condition', 'rerr_must_start_slash',
+		'rerr_bad_regex', 'rerr_regex_backref', 'rerr_regex_costly', 'rerr_regex_join', 'rerr_duplicate_id', 'rerr_not_utf8',
+		'rerr_control_chars', 'rerr_not_string', 'rule_saved', 'rule_done', 'rule_not_found', 'rule_warnings', 'rules_invalid',
+		'rules_file_invalid', 'rule_starter_done', 'write_failed')) as $k) {
+	if (!isset($ar_lang[$k])) { $ar_miss[] = $k; }
+}
+t_ok('every translation key the rules page builds dynamically exists' . ($ar_miss ? ' (missing: ' . implode(',', $ar_miss) . ')' : ''), !$ar_miss);
+$ar_view = file_get_contents(__DIR__ . '/../panel/views/rules.php');
+t_ok('the rules page posts a CSRF token on every form', substr_count($ar_view, '<form method="post"') <= substr_count($ar_view, 'gp_csrf_token()'));
+t_ok('the rules page escapes through gp_e (no raw echo of a variable)', preg_match('/<\?= \$[a-z_]+\s*\?>/', $ar_view) === 0);
+
+@unlink($ar_file); @unlink($ar_file . '.lock');
+putenv('GV_RULES');
+if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
+if ($ar_audit_backup !== null) { file_put_contents(gp_audit_path(), $ar_audit_backup); }
+
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');
 // The panel is English and left-to-right. No Persian or Arabic script (letters
