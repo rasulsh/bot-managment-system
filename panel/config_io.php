@@ -54,15 +54,28 @@ function gp_audit_append(array $row) {
 
 // Read the audit trail newest-first, bounded. Never loads the whole file when
 // it has grown: it reads the tail and parses only that.
+// Audit rows against a parsed filter (panel/filters.php): event and actor are
+// choices / identities, q is a text search over the whole row. Pure.
+function gp_audit_match(array $row, array $f) {
+	if (isset($f['event']) && !gp_filter_test('choice', $f['event'], (string)($row['event'] ?? ''))) { return false; }
+	if (isset($f['actor']) && !gp_filter_test('ident', $f['actor'], (string)($row['actor'] ?? ''))) { return false; }
+	if (isset($f['q']) && !gp_filter_test('text', $f['q'], json_encode($row))) { return false; }
+	return true;
+}
+
+// $filter: a search string (contains), or a parsed filter array (see gp_audit_match).
 function gp_audit_read($limit = 200, $filter = '') {
 	$path = gp_audit_path();
 	if (!is_file($path)) { return array(); }
-	$lines = gp_tail_lines($path, max(1, (int)$limit) * 4, 1048576);
+	// An exclude filter needs more lines to find enough rows: scan a bigger tail.
+	$lines = gp_tail_lines($path, max(1, (int)$limit) * (is_array($filter) ? 20 : 4), 1048576);
 	$out = array();
 	foreach (array_reverse($lines) as $line) {
 		$row = json_decode($line, true);
 		if (!is_array($row)) { continue; }
-		if ($filter !== '') {
+		if (is_array($filter)) {
+			if (!gp_audit_match($row, $filter)) { continue; }
+		} elseif ($filter !== '') {
 			$hay = strtolower(json_encode($row));
 			if (strpos($hay, strtolower($filter)) === false) { continue; }
 		}

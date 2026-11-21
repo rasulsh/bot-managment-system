@@ -198,6 +198,10 @@ jobs:
           npx --prefix "$RUNNER_TEMP/pw" playwright install --with-deps chromium firefox
           node scripts/browser-test.js chromium
           node scripts/browser-test.js firefox
+      - name: panel layout in a real browser (1600 px and 390 px, no horizontal scroll, tabs, tooltips, filters)
+        run: |
+          export NODE_PATH="$RUNNER_TEMP/pw/node_modules"
+          bash scripts/panel-layout-test.sh
 
   # ------------------------------------------------------------ web servers
   webservers:

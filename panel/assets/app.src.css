@@ -226,7 +226,7 @@
 .gp-body { @apply min-h-screen pb-20 lg:pb-0; }
 
 .gp-topbar { @apply sticky top-0 z-30 border-b border-line bg-surface/90 backdrop-blur; }
-.gp-topbar-inner { @apply mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3; }
+.gp-topbar-inner { @apply mx-auto flex max-w-[1680px] flex-wrap items-center justify-between gap-3 px-4 py-3; }
 .gp-brand { @apply flex items-center gap-2 no-underline; }
 .gp-brand-mark { @apply text-accent text-lg leading-none; }
 .gp-brand-text { @apply flex flex-col leading-tight; }
@@ -235,7 +235,7 @@
 .gp-topbar-actions { @apply flex flex-wrap items-center gap-2; }
 .gp-user { @apply hidden text-xs text-subtle sm:inline; }
 
-.gp-shell { @apply mx-auto flex w-full max-w-7xl gap-6 px-4 py-5; }
+.gp-shell { @apply mx-auto flex w-full max-w-[1680px] gap-6 px-4 py-5 xl:px-6; }
 .gp-shell-bare { @apply justify-center; }
 .gp-main { @apply min-w-0 flex-1 space-y-5; }
 .gp-main-bare { @apply flex items-center justify-center; }
@@ -269,7 +269,7 @@
 .gp-card-sub { @apply text-xs font-normal text-subtle; }
 .gp-grid { @apply grid gap-4; }
 .gp-grid-2 { @apply grid gap-4 sm:grid-cols-2; }
-.gp-grid-3 { @apply grid gap-4 sm:grid-cols-2 lg:grid-cols-3; }
+.gp-grid-3 { @apply grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4; }
 .gp-grid-4 { @apply grid gap-4 grid-cols-2 lg:grid-cols-4; }
 
 .gp-page-title { @apply text-lg font-bold text-ink; }
@@ -327,6 +327,7 @@
 .gp-filters { @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-4; }
 /* the five always-visible log filters fit one row on wide screens */
 .gp-filters-5 { @apply lg:grid-cols-5; }
+.gp-filters-3 { @apply lg:grid-cols-3 2xl:grid-cols-4; }
 .gp-error { @apply mt-1 block text-[11px] font-bold text-bad-fg; }
 
 /* --- tables that become cards -------------------------------------- */
@@ -483,3 +484,57 @@
 	0%, 100% { opacity: 1; transform: scale(1); }
 	50% { opacity: 0.55; transform: scale(0.86); }
 }
+
+/* --- wide layout: card grids ----------------------------------------
+ * One column on a phone, two from 1024 px, three from 1500 px. .gp-span-all
+ * keeps a card (an alert, a table, a form) on the full row. */
+.gp-cardgrid { @apply grid gap-5 lg:grid-cols-2; }
+@media (min-width: 1500px) { .gp-cardgrid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.gp-cardgrid > * { @apply min-w-0; }
+.gp-span-all { grid-column: 1 / -1; }
+
+/* --- tabs ------------------------------------------------------------
+ * Without JavaScript every panel is shown, stacked, and the tab strip is
+ * hidden. The script adds .gp-tabs-on, builds the keyboard behaviour and hides
+ * the inactive panels. */
+.gp-tablist { @apply hidden flex-wrap gap-1 border-b border-line; }
+.gp-tabs-on > .gp-tablist { @apply flex; }
+.gp-tab { @apply -mb-px inline-flex min-h-[44px] cursor-pointer items-center gap-2 rounded-t-lg border
+	border-transparent bg-transparent px-4 py-2 text-sm text-muted transition-colors hover:text-ink; }
+.gp-tab[aria-selected="true"] { @apply border-line border-b-surface bg-surface font-bold text-ink; }
+.gp-tab:focus-visible { @apply outline-none ring-2 ring-accent/60; }
+.gp-tab-badge { @apply inline-flex min-w-[20px] items-center justify-center rounded-full bg-danger px-1.5 py-0.5
+	text-[11px] font-bold leading-none text-on-danger; }
+.gp-tabpanel { @apply space-y-4 pt-4; }
+.gp-tabs:not(.gp-tabs-on) > .gp-tabpanel + .gp-tabpanel { @apply mt-4 border-t border-line; }
+.gp-tabpanel-title { @apply text-sm font-bold text-ink; }
+.gp-tabs-on .gp-tabpanel-title { @apply sr-only; }
+
+/* --- help tooltips ---------------------------------------------------- */
+.gp-tip { @apply relative inline-flex align-middle; }
+.gp-tip-btn { @apply ms-1 inline-flex h-5 w-5 cursor-help items-center justify-center rounded-full border
+	border-field bg-sunken p-0 text-[11px] font-bold leading-none text-muted hover:text-ink; }
+.gp-tip-btn:focus-visible { @apply outline-none ring-2 ring-accent/60; }
+.gp-tip-box { @apply absolute start-0 top-full z-40 mt-1 hidden w-72 max-w-[80vw] rounded-lg
+	border border-field bg-surface p-3 text-left text-[12px] font-normal leading-relaxed text-ink shadow-lg; }
+html[dir="rtl"] .gp-tip-box { text-align: right; }
+.gp-tip:hover .gp-tip-box, .gp-tip:focus-within .gp-tip-box, .gp-tip.gp-open .gp-tip-box { @apply block; }
+.gp-tip.gp-esc .gp-tip-box { @apply hidden; }
+.gp-tip-box b { @apply block text-[11px] uppercase tracking-wide text-subtle; }
+
+/* --- include / exclude filters ----------------------------------------- */
+.gp-op { @apply min-h-[44px] w-full text-xs; }
+.gp-fgroup { @apply grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,9.5rem)_minmax(0,1fr)]; }
+.gp-chips { @apply m-0 flex flex-wrap gap-2 p-0; list-style: none; }
+.gp-chip { @apply inline-flex max-w-full items-center gap-1.5 rounded-full border border-line bg-sunken py-1 ps-3 pe-1 text-xs; }
+.gp-chip-not { @apply border-warn-line bg-warn-bg text-warn-fg; }
+.gp-chip-k { @apply font-bold; }
+.gp-chip-op { @apply text-subtle; }
+.gp-chip-not .gp-chip-op { @apply font-bold text-warn-fg; }
+.gp-chip-v { @apply truncate; }
+.gp-chip-x { @apply inline-flex h-7 w-7 items-center justify-center rounded-full text-base leading-none text-muted no-underline hover:bg-surface hover:text-ink; }
+
+/* Long unbroken values (JSON in the audit trail, a UA, a path) wrap inside their row
+ * instead of widening the page. */
+.gp-row, .gp-row-meta, .gp-row-head { @apply min-w-0; }
+.gp-row code, .gp-row .gp-mono { overflow-wrap: anywhere; max-width: 100%; }

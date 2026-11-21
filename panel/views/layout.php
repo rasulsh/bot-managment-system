@@ -150,6 +150,105 @@
 			button.setAttribute('aria-expanded', hidden ? 'true' : 'false');
 		});
 	});
+	// Tabs: the markup already contains every panel, stacked. With the script the
+	// strip appears, only the active panel shows, the arrow keys move between tabs
+	// (role=tablist), and the URL hash (#group-tab) remembers the tab. A server-side
+	// error opens the tab that holds the first error (data-open) over the hash.
+	document.querySelectorAll('[data-tabs]').forEach(function (box) {
+		var group = box.getAttribute('data-tabs');
+		var tabs = Array.prototype.slice.call(box.querySelectorAll(':scope > .gp-tablist > [role=tab]'));
+		var panels = Array.prototype.slice.call(box.querySelectorAll(':scope > [role=tabpanel]'));
+		if (!tabs.length) { return; }
+		box.classList.add('gp-tabs-on');
+		var select = function (id, focus, remember) {
+			var found = false;
+			tabs.forEach(function (t) { if (t.getAttribute('data-tab') === id) { found = true; } });
+			if (!found) { id = tabs[0].getAttribute('data-tab'); }
+			tabs.forEach(function (t) {
+				var on = t.getAttribute('data-tab') === id;
+				t.setAttribute('aria-selected', on ? 'true' : 'false');
+				t.setAttribute('tabindex', on ? '0' : '-1');
+				if (on && focus) { t.focus(); }
+			});
+			panels.forEach(function (p) {
+				if (p.getAttribute('data-panel') === id) { p.removeAttribute('hidden'); } else { p.setAttribute('hidden', ''); }
+			});
+			if (remember) { try { window.history.replaceState(null, '', '#' + group + '-' + id); } catch (e) {} }
+		};
+		var fromHash = function () {
+			var h = window.location.hash.replace(/^#/, '');
+			return h.indexOf(group + '-') === 0 ? h.slice(group.length + 1) : '';
+		};
+		select(box.getAttribute('data-open') || fromHash() || tabs[0].getAttribute('data-tab'), false, false);
+		tabs.forEach(function (t, i) {
+			t.addEventListener('click', function () { select(t.getAttribute('data-tab'), false, true); });
+			t.addEventListener('keydown', function (e) {
+				var to = -1;
+				if (e.key === 'ArrowRight') { to = (i + 1) % tabs.length; }
+				else if (e.key === 'ArrowLeft') { to = (i + tabs.length - 1) % tabs.length; }
+				else if (e.key === 'Home') { to = 0; }
+				else if (e.key === 'End') { to = tabs.length - 1; }
+				if (to >= 0) { e.preventDefault(); select(tabs[to].getAttribute('data-tab'), true, true); }
+			});
+		});
+		window.addEventListener('hashchange', function () { var id = fromHash(); if (id) { select(id, false, false); } });
+	});
+	// Help tooltips: hover and keyboard focus work in CSS alone. A tap toggles the
+	// bubble, Esc or a tap anywhere else closes it, and the bubble is nudged back
+	// inside the screen when it would be cut off at an edge.
+	(function () {
+		var tips = document.querySelectorAll('.gp-tip');
+		var place = function (tip) {
+			var box = tip.querySelector('.gp-tip-box');
+			if (!box) { return; }
+			box.style.insetInlineStart = '';
+			box.style.transform = '';
+			var r = box.getBoundingClientRect();
+			var w = document.documentElement.clientWidth;
+			var shift = 0;
+			if (r.right > w - 8) { shift = (w - 8) - r.right; }
+			if (r.left + shift < 8) { shift = 8 - r.left; }
+			if (shift) { box.style.transform = 'translateX(' + Math.round(shift) + 'px)'; }
+		};
+		var closeAll = function (except) {
+			tips.forEach(function (t) { if (t !== except) { t.classList.remove('gp-open'); } });
+		};
+		tips.forEach(function (tip) {
+			var btn = tip.querySelector('.gp-tip-btn');
+			btn.addEventListener('click', function (e) {
+				e.preventDefault();
+				e.stopPropagation();
+				closeAll(tip);
+				tip.classList.toggle('gp-open');
+				place(tip);
+			});
+			tip.addEventListener('mouseenter', function () { place(tip); });
+			btn.addEventListener('focus', function () { place(tip); });
+		});
+		document.addEventListener('click', function (e) { if (!e.target.closest || !e.target.closest('.gp-tip')) { closeAll(null); } });
+		document.addEventListener('keydown', function (e) {
+			if (e.key !== 'Escape') { return; }
+			closeAll(null);
+			tips.forEach(function (t) { t.classList.add('gp-esc'); });
+			if (document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('gp-tip-btn')) { document.activeElement.blur(); }
+		});
+		tips.forEach(function (t) {
+			t.addEventListener('mouseleave', function () { t.classList.remove('gp-esc'); });
+			t.addEventListener('mouseenter', function () { t.classList.remove('gp-esc'); });
+			t.addEventListener('focusin', function () { t.classList.remove('gp-esc'); });
+		});
+	})();
+	// "Share link": copy the absolute filter URL; without clipboard access the link
+	// simply opens as a normal link.
+	document.querySelectorAll('[data-copy-link]').forEach(function (a) {
+		a.addEventListener('click', function (e) {
+			if (!navigator.clipboard || !navigator.clipboard.writeText) { return; }
+			e.preventDefault();
+			navigator.clipboard.writeText(new URL(a.getAttribute('href'), window.location.href).href).then(function () {
+				var t = a.textContent; a.textContent = '\u2713'; window.setTimeout(function () { a.textContent = t; }, 1200);
+			}, function () { window.location.href = a.href; });
+		});
+	});
 	// Live slider read-outs on the replay page.
 	document.querySelectorAll('input[type=range][data-output]').forEach(function (input) {
 		var out = document.getElementById(input.getAttribute('data-output'));

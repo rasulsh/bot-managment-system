@@ -10,6 +10,7 @@ if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 
 require_once __DIR__ . '/../guard/guard.php';
 require_once __DIR__ . '/config_io.php';
+require_once __DIR__ . '/filters.php';
 
 define('GP_MAX_ROWS', 200);              // rows returned per page, hard cap
 define('GP_MAX_SCAN_BYTES', 4194304);    // bytes scanned per query, hard cap
@@ -104,8 +105,24 @@ function gp_num_raw($text) {
 // Log explorer helpers (used by views/logs.php)
 // --------------------------------------------------------------------------
 
+// Read the log filter set out of the query string, typed and bounded.
+function gp_logs_filter_from_request() {
+	$get = $_GET;
+	$spec = array();
+	foreach (gp_log_filter_spec() as $key => $def) { $spec[$key] = $def[1] === 'choice' && !empty($def[2]) ? array('choice', 'ci' => true) : $def[1]; }
+	$out = gp_filter_parse($get, $spec);
+	$date = isset($get['date']) ? trim((string)$get['date']) : '';
+	if ($date !== '') { $out['date'] = substr($date, 0, 200); }
+	foreach (array('sc_min', 'sc_max', 'esc_min', 'esc_max') as $key) {
+		if (isset($get[$key]) && $get[$key] !== '') { $out[$key] = (int)$get[$key]; }
+	}
+	return $out;
+}
+
 function gp_logs_qs(array $filter, array $extra = array()) {
-	$query = array_merge(array('r' => 'logs'), $filter, $extra);
+	// Operators ride along (act=403&act_op=not), so paging, the CSV export and a
+	// shared link keep the exact filter.
+	$query = array_merge(array('r' => 'logs'), gp_filter_qs($filter), $extra);
 	return 'index.php?' . http_build_query($query);
 }
 
@@ -452,48 +469,78 @@ function gp_log_query(array $filter, $cursor = 0, $limit = 50) {
 	return array($rows, $meta);
 }
 
-// A decision row against the filter set. Pure.
+// The log filter fields: filter key => array(row key, type, case-insensitive).
+// Types as in panel/filters.php. A row that lacks the value reads as '' (so "cc is
+// not IR" also lists rows that were never looked up).
+function gp_log_filter_spec() {
+	return array(
+		'act' => array('act', 'choice'), 'ovr' => array('ovr', 'choice'), 'tok' => array('tok', 'choice'),
+		'reason' => array('rs', 'choice'), 'sh' => array('sh', 'choice'), 'hold' => array('hold', 'choice'),
+		'cc' => array('cc', 'choice', true), 'asn' => array('asn', 'choice'), 'status' => array('_status', 'choice'),
+		'dev' => array('dev', 'ident'), 'ip' => array('ip', 'ident'),
+		'path' => array('p', 'text'), 'ua' => array('ua', 'text'),
+	);
+}
+
+// Whether a row's outcome status is in one of the classes of a "status" filter value.
+function gp_log_status_is($row, $want) {
+	$out = isset($row['_out']) && is_array($row['_out']) ? $row['_out'] : null;
+	if (!$out) { return false; }
+	$got = (int)($out['st'] ?? 0);
+	if ($want === '2xx') { return $got >= 200 && $got < 300; }
+	if ($want === '3xx') { return $got >= 300 && $got < 400; }
+	if ($want === '404') { return $got === 404; }
+	if ($want === '4xx') { return $got >= 400 && $got < 500 && $got !== 404; }
+	if ($want === '5xx') { return $got >= 500; }
+	return false;
+}
+
+// A decision row against the filter set. Pure. Each field is include ("is" /
+// "contains") or exclude ("is not" / "does not contain"); a bare scalar means "is".
+// Fields are AND-ed; the score ranges keep no operator.
 function gp_log_match(array $row, array $f) {
-	if (!empty($f['act']) && (string)($row['act'] ?? '') !== (string)$f['act']) { return false; }
-	if (isset($f['sh']) && $f['sh'] !== '' && (int)($row['sh'] ?? 0) !== (int)$f['sh']) { return false; }
-	if (isset($f['hold']) && $f['hold'] !== '' && (int)($row['hold'] ?? 0) !== (int)$f['hold']) { return false; }
-	if (!empty($f['ovr']) && (string)($row['ovr'] ?? '') !== (string)$f['ovr']) { return false; }
-	if (!empty($f['tok']) && (string)($row['tok'] ?? '') !== (string)$f['tok']) { return false; }
-	if (!empty($f['cc']) && strtoupper((string)($row['cc'] ?? '')) !== strtoupper((string)$f['cc'])) { return false; }
-	if (!empty($f['asn']) && (int)($row['asn'] ?? 0) !== (int)$f['asn']) { return false; }
-	if (!empty($f['dev']) && (string)($row['dev'] ?? '') !== (string)$f['dev']) { return false; }
-	if (!empty($f['ip']) && (string)($row['ip'] ?? '') !== (string)$f['ip']) { return false; }
-	if (!empty($f['path'])) {
-		if (stripos((string)($row['p'] ?? ''), (string)$f['path']) === false) { return false; }
+	foreach (gp_log_filter_spec() as $key => $def) {
+		if (!isset($f[$key])) { continue; }
+		$fd = gp_filter_def($f[$key]);
+		if ($fd === null) { continue; }
+		if ($key === 'status') {
+			$hit = false;
+			foreach ($fd['v'] as $want) { if (gp_log_status_is($row, $want)) { $hit = true; break; } }
+			if (!empty($fd['not']) ? $hit : !$hit) { return false; }
+			continue;
+		}
+		$actual = isset($row[$def[0]]) ? $row[$def[0]] : '';
+		if (is_array($actual) && $def[0] !== 'rs') { $actual = ''; }
+		if ($def[0] === 'rs') { $actual = array_values(array_filter((array)$actual, 'is_string')); }
+		elseif (is_int($actual) || is_float($actual)) { $actual = (string)(int)$actual; }
+		if (!gp_filter_test($def[1], $fd, $actual, !empty($def[2]))) { return false; }
 	}
-	if (!empty($f['reason'])) {
-		$reasons = isset($row['rs']) && is_array($row['rs']) ? $row['rs'] : array();
-		if (!in_array((string)$f['reason'], $reasons, true)) { return false; }
-	}
-	if (isset($f['sc_min']) && $f['sc_min'] !== '' && (int)($row['sc'] ?? 0) < (int)$f['sc_min']) { return false; }
-	if (isset($f['sc_max']) && $f['sc_max'] !== '' && (int)($row['sc'] ?? 0) > (int)$f['sc_max']) { return false; }
-	if (isset($f['esc_min']) && $f['esc_min'] !== '' && (int)($row['esc'] ?? 0) < (int)$f['esc_min']) { return false; }
-	if (isset($f['esc_max']) && $f['esc_max'] !== '' && (int)($row['esc'] ?? 0) > (int)$f['esc_max']) { return false; }
-	if (!empty($f['status'])) {
-		$out = isset($row['_out']) && is_array($row['_out']) ? $row['_out'] : null;
-		if (!$out) { return false; }
-		$want = (string)$f['status'];
-		$got = (int)($out['st'] ?? 0);
-		if ($want === '2xx' && !($got >= 200 && $got < 300)) { return false; }
-		if ($want === '3xx' && !($got >= 300 && $got < 400)) { return false; }
-		if ($want === '404' && $got !== 404) { return false; }
-		if ($want === '4xx' && !($got >= 400 && $got < 500 && $got !== 404)) { return false; }
-		if ($want === '5xx' && $got < 500) { return false; }
+	foreach (array('sc_min' => array('sc', 1), 'sc_max' => array('sc', -1), 'esc_min' => array('esc', 1), 'esc_max' => array('esc', -1)) as $k => $d) {
+		if (!isset($f[$k]) || $f[$k] === '') { continue; }
+		$v = (int)($row[$d[0]] ?? 0);
+		if ($d[1] === 1 ? $v < (int)$f[$k] : $v > (int)$f[$k]) { return false; }
 	}
 	return true;
 }
 
 // Recent rows for one identity, device id or address.
-function gp_identity_rows($identity, $limit = 60) {
+// The overrides list under the kind / identity filters (include or exclude; an
+// address also matches a CIDR value). Pure.
+function gp_overrides_filter(array $items, array $f) {
+	$out = array();
+	foreach ($items as $it) {
+		if (isset($f['kind']) && !gp_filter_test('choice', $f['kind'], (string)$it['kind'])) { continue; }
+		if (isset($f['identity']) && !gp_filter_test('ident', $f['identity'], (string)$it['identity'])) { continue; }
+		$out[] = $it;
+	}
+	return $out;
+}
+
+function gp_identity_rows($identity, $limit = 60, array $extra = array()) {
 	$rows = array();
 	foreach (gp_log_dates(4) as $date) {
 		$is_ip = filter_var($identity, FILTER_VALIDATE_IP) !== false;
-		$filter = array('date' => $date);
+		$filter = array_merge($extra, array('date' => $date));
 		$filter[$is_ip ? 'ip' : 'dev'] = $identity;
 		$found = gp_log_query($filter, 0, $limit - count($rows));
 		$rows = array_merge($rows, $found[0]);

@@ -66,40 +66,27 @@ $err_text = function ($field) use ($errors, $details) {
 
 	<div class="gp-grid-2">
 		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('rules_f_name')) ?></span>
+			<span class="gp-label"><?= gp_e(gp_t('rules_f_name')) ?><?= gp_tip('rule_name') ?></span>
 			<input class="gp-input" type="text" name="name" maxlength="80" value="<?= gp_e($form['name']) ?>">
 			<span class="gp-help"><?= gp_e(gp_t('rules_h_name')) ?></span>
 			<?php if ($err_text('name') !== ''): ?><span class="gp-error" role="alert"><?= gp_e($err_text('name')) ?></span><?php endif; ?>
 		</label>
-		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('rules_f_priority')) ?></span>
-			<input class="gp-input gp-ltr" type="number" name="priority" min="1" max="100000" value="<?= gp_e((string)$form['priority']) ?>">
-			<span class="gp-help"><?= gp_e(gp_t('rules_h_priority')) ?></span>
-			<?php if ($err_text('priority') !== ''): ?><span class="gp-error" role="alert"><?= gp_e($err_text('priority')) ?></span><?php endif; ?>
-		</label>
-		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('rules_f_action')) ?></span>
-			<select class="gp-input" name="action">
-				<?php foreach (gv_rule_actions() as $a): ?>
-				<option value="<?= gp_e($a) ?>"<?= $sel($form['action'], $a) ?>><?= gp_e(gp_t('rules_act_' . $a)) ?></option>
-				<?php endforeach; ?>
-			</select>
-			<span class="gp-help"><?= gp_e(gp_t('rules_h_action')) ?></span>
-			<?php if ($err_text('action') !== ''): ?><span class="gp-error" role="alert"><?= gp_e($err_text('action')) ?></span><?php endif; ?>
-		</label>
-		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('rules_f_mode')) ?></span>
-			<select class="gp-input" name="mode">
-				<option value="monitor"<?= $sel($form['mode'], 'monitor') ?>><?= gp_e(gp_t('rules_mode_monitor')) ?></option>
-				<option value="enforce"<?= $sel($form['mode'], 'enforce') ?>><?= gp_e(gp_t('rules_mode_enforce')) ?></option>
-			</select>
-			<span class="gp-help"><?= gp_e(gp_t('rules_h_mode')) ?></span>
-			<?php if ($err_text('mode') !== ''): ?><span class="gp-error" role="alert"><?= gp_e($err_text('mode')) ?></span><?php endif; ?>
-		</label>
 	</div>
 
+	<?php
+	// Tabs: conditions / action / advanced. A rejected save opens the tab with the
+	// first error and badges every tab that has one. One form, one Save button.
+	$rt_map = array('ua' => 'conditions', 'path' => 'conditions', 'country' => 'conditions', 'asn' => 'conditions',
+		'action' => 'action', 'mode' => 'action', 'skip_verified_bots' => 'action', 'pow_bits' => 'action',
+		'priority' => 'advanced', 'expires_at' => 'advanced', 'note' => 'advanced', 'enabled' => 'advanced');
+	$rt_err = array('conditions' => 0, 'action' => 0, 'advanced' => 0);
+	foreach ($errors as $ef => $ec) { if (isset($rt_map[$ef])) { $rt_err[$rt_map[$ef]]++; } }
+	$rt_tabs = array('conditions' => gp_t('rules_tab_conditions'), 'action' => gp_t('rules_tab_action'), 'advanced' => gp_t('rules_tab_advanced'));
+	gp_tabs_begin('rule', $rt_tabs, $rt_err);
+	gp_tab_begin('rule', 'conditions', $rt_tabs['conditions']); ?>
+	<p class="gp-help"><?= gp_e(gp_t('rules_tab_conditions_help')) ?></p>
 	<fieldset class="gp-section">
-		<legend class="gp-label"><?= gp_e(gp_t('rules_f_ua')) ?></legend>
+		<legend class="gp-label"><?= gp_e(gp_t('rules_f_ua')) ?><?= gp_tip('rule_ua') ?></legend>
 		<div class="gp-grid-2">
 			<label class="gp-field">
 				<span class="gp-label"><?= gp_e(gp_t('rules_f_op')) ?></span>
@@ -126,7 +113,7 @@ $err_text = function ($field) use ($errors, $details) {
 	</fieldset>
 
 	<fieldset class="gp-section">
-		<legend class="gp-label"><?= gp_e(gp_t('rules_f_path')) ?></legend>
+		<legend class="gp-label"><?= gp_e(gp_t('rules_f_path')) ?><?= gp_tip('rule_path') ?></legend>
 		<div class="gp-grid-2">
 			<label class="gp-field">
 				<span class="gp-label"><?= gp_e(gp_t('rules_f_op')) ?></span>
@@ -143,12 +130,10 @@ $err_text = function ($field) use ($errors, $details) {
 			</label>
 		</div>
 	</fieldset>
-
-
 	<?php foreach (array('country' => array($co, 'rules_f_country', 'rules_h_country', 'IR, US', 'country_values'),
 		'asn' => array($as, 'rules_f_asn', 'rules_h_asn', '13335, 15169', 'asn_values')) as $gk => $gdef): ?>
 	<fieldset class="gp-section">
-		<legend class="gp-label"><?= gp_e(gp_t($gdef[1])) ?></legend>
+		<legend class="gp-label"><?= gp_e(gp_t($gdef[1])) ?><?= gp_tip('rule_' . $gk) ?></legend>
 		<div class="gp-grid-2">
 			<label class="gp-field">
 				<span class="gp-label"><?= gp_e(gp_t('rules_f_op')) ?></span>
@@ -167,32 +152,66 @@ $err_text = function ($field) use ($errors, $details) {
 		</div>
 	</fieldset>
 	<?php endforeach; ?>
-
+	<?php gp_tab_end(); gp_tab_begin('rule', 'action', $rt_tabs['action']); ?>
 	<div class="gp-grid-2">
 		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('rules_f_expires')) ?></span>
-			<input class="gp-input gp-ltr" type="date" name="expires_date" value="<?= gp_e($exp_date) ?>">
-			<span class="gp-help"><?= gp_e(gp_t('rules_h_expires')) ?></span>
-			<?php if ($err_text('expires_at') !== ''): ?><span class="gp-error" role="alert"><?= gp_e($err_text('expires_at')) ?></span><?php endif; ?>
+			<span class="gp-label"><?= gp_e(gp_t('rules_f_action')) ?><?= gp_tip('rule_action') ?></span>
+			<select class="gp-input" name="action">
+				<?php foreach (gv_rule_actions() as $a): ?>
+				<option value="<?= gp_e($a) ?>"<?= $sel($form['action'], $a) ?>><?= gp_e(gp_t('rules_act_' . $a)) ?></option>
+				<?php endforeach; ?>
+			</select>
+			<span class="gp-help"><?= gp_e(gp_t('rules_h_action')) ?></span>
+			<?php if ($err_text('action') !== ''): ?><span class="gp-error" role="alert"><?= gp_e($err_text('action')) ?></span><?php endif; ?>
 		</label>
 		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('rules_f_pow')) ?></span>
+			<span class="gp-label"><?= gp_e(gp_t('rules_f_mode')) ?><?= gp_tip('rule_mode') ?></span>
+			<select class="gp-input" name="mode">
+				<option value="monitor"<?= $sel($form['mode'], 'monitor') ?>><?= gp_e(gp_t('rules_mode_monitor')) ?></option>
+				<option value="enforce"<?= $sel($form['mode'], 'enforce') ?>><?= gp_e(gp_t('rules_mode_enforce')) ?></option>
+			</select>
+			<span class="gp-help"><?= gp_e(gp_t('rules_h_mode')) ?></span>
+			<?php if ($err_text('mode') !== ''): ?><span class="gp-error" role="alert"><?= gp_e($err_text('mode')) ?></span><?php endif; ?>
+		</label>
+		<label class="gp-field">
+			<span class="gp-label"><?= gp_e(gp_t('rules_f_pow')) ?><?= gp_tip('rule_pow') ?></span>
 			<input class="gp-input gp-ltr" type="number" name="pow_bits" min="0" max="22" value="<?= gp_e((string)$form['pow_bits']) ?>">
 			<span class="gp-help"><?= gp_e(gp_t('rules_h_pow')) ?></span>
 			<?php if ($err_text('pow_bits') !== ''): ?><span class="gp-error" role="alert"><?= gp_e($err_text('pow_bits')) ?></span><?php endif; ?>
 		</label>
-		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('rules_f_note')) ?></span>
-			<input class="gp-input" type="text" name="note" maxlength="300" value="<?= gp_e($form['note']) ?>">
-		</label>
+
 		<div class="gp-field">
-			<label class="gp-check"><input type="checkbox" name="enabled" value="1"<?= $form['enabled'] ? ' checked' : '' ?>>
-				<span><?= gp_e(gp_t('rules_f_enabled')) ?></span></label>
 			<label class="gp-check"><input type="checkbox" name="skip_verified_bots" value="1"<?= $form['skip_verified_bots'] ? ' checked' : '' ?>>
-				<span><?= gp_e(gp_t('rules_f_skip')) ?></span></label>
+				<span><?= gp_e(gp_t('rules_f_skip')) ?></span><?= gp_tip('rule_skip') ?></label>
 			<span class="gp-help"><?= gp_e(gp_t('rules_h_skip')) ?></span>
 		</div>
 	</div>
+	<?php gp_tab_end(); gp_tab_begin('rule', 'advanced', $rt_tabs['advanced']); ?>
+	<div class="gp-grid-2">
+		<label class="gp-field">
+			<span class="gp-label"><?= gp_e(gp_t('rules_f_priority')) ?><?= gp_tip('rule_priority') ?></span>
+			<input class="gp-input gp-ltr" type="number" name="priority" min="1" max="100000" value="<?= gp_e((string)$form['priority']) ?>">
+			<span class="gp-help"><?= gp_e(gp_t('rules_h_priority')) ?></span>
+			<?php if ($err_text('priority') !== ''): ?><span class="gp-error" role="alert"><?= gp_e($err_text('priority')) ?></span><?php endif; ?>
+		</label>
+		<label class="gp-field">
+			<span class="gp-label"><?= gp_e(gp_t('rules_f_expires')) ?><?= gp_tip('rule_expires') ?></span>
+			<input class="gp-input gp-ltr" type="date" name="expires_date" value="<?= gp_e($exp_date) ?>">
+			<span class="gp-help"><?= gp_e(gp_t('rules_h_expires')) ?></span>
+			<?php if ($err_text('expires_at') !== ''): ?><span class="gp-error" role="alert"><?= gp_e($err_text('expires_at')) ?></span><?php endif; ?>
+		</label>
+
+		<label class="gp-field">
+			<span class="gp-label"><?= gp_e(gp_t('rules_f_note')) ?><?= gp_tip('rule_note') ?></span>
+			<input class="gp-input" type="text" name="note" maxlength="300" value="<?= gp_e($form['note']) ?>">
+		</label>
+
+		<div class="gp-field">
+		<label class="gp-check"><input type="checkbox" name="enabled" value="1"<?= $form['enabled'] ? ' checked' : '' ?>>
+			<span><?= gp_e(gp_t('rules_f_enabled')) ?></span><?= gp_tip('rule_enabled') ?></label>
+		</div>
+	</div>
+	<?php gp_tab_end(); gp_tabs_end(); ?>
 
 	<?php if (is_array($impact ?? null)): $im = $impact; $mt = $im['meta']; ?>
 	<div class="gp-note<?= $im['danger'] ? ' gp-note-strong' : '' ?>" role="status"<?= $im['danger'] ? ' style="border-color:#c0392b"' : '' ?>>
@@ -286,40 +305,35 @@ $err_text = function ($field) use ($errors, $details) {
 		<?= gp_e(gp_t('rules_list')) ?> <span class="gp-card-sub"><?= gp_num(count($visible)) ?> / <?= gp_num(count($all)) ?></span>
 	</div>
 
+	<?php
+	$rflt = array('action' => array('rules_flt_action', 'is', array('block', 'challenge', 'log')), 'mode' => array('rules_flt_mode', 'is', array('enforce', 'monitor')),
+		'state' => array('rules_flt_state', 'is', array('active', 'disabled', 'expired')), 'cc' => array('geo_cc', 'is', array()),
+		'asn' => array('geo_asn', 'is', array()), 'ua' => array('logs_ua', 'has', array()), 'q' => array('rules_flt_q', 'has', array()));
+	$rchips = gp_filter_chips($filter, array_map(function ($d) { return gp_t($d[0]); }, $rflt),
+		array_map(function ($d) { return $d[1] === 'has' ? 'text' : 'choice'; }, $rflt),
+		function ($q) { return 'index.php?' . http_build_query(array_merge(array('r' => 'rules'), $q)); });
+	?>
 	<form method="get" action="index.php" class="gp-form">
 		<input type="hidden" name="r" value="rules">
-		<div class="gp-filters">
-			<?php foreach (array('action' => array('block', 'challenge', 'log'), 'mode' => array('enforce', 'monitor'),
-				'state' => array('active', 'disabled', 'expired')) as $fk => $opts): ?>
+		<div class="gp-filters gp-filters-3">
+			<?php foreach ($rflt as $fk => $fd): $fv = isset($filter[$fk]) ? $filter[$fk] : null; ?>
 			<div class="gp-field">
-				<span class="gp-label"><?= gp_e(gp_t('rules_flt_' . $fk)) ?></span>
-				<select class="gp-input" name="<?= gp_e($fk) ?>_op" aria-label="<?= gp_e(gp_t('rules_flt_op')) ?>">
-					<option value="is"><?= gp_e(gp_t('rules_flt_is')) ?></option>
-					<option value="not"<?= (($filter[$fk . '_op'] ?? '') === 'not') ? ' selected' : '' ?>><?= gp_e(gp_t('rules_flt_not')) ?></option>
-				</select>
-				<select class="gp-input" name="<?= gp_e($fk) ?>">
-					<option value=""><?= gp_e(gp_t('any')) ?></option>
-					<?php foreach ($opts as $o): ?>
-					<option value="<?= gp_e($o) ?>"<?= (isset($filter[$fk]) && $filter[$fk] === array($o)) ? ' selected' : '' ?>><?= gp_e($o) ?></option>
-					<?php endforeach; ?>
-				</select>
+				<label class="gp-label" for="rf-<?= gp_e($fk) ?>"><?= gp_e(gp_t($fd[0])) ?><?= gp_tip($fk === 'q' ? 'flt_q' : ($fk === 'action' || $fk === 'mode' ? 'rule_' . $fk : 'flt_' . $fk)) ?></label>
+				<div class="gp-fgroup">
+					<?= gp_filter_op_select($fk, $fv, $fd[1]) ?>
+					<input class="gp-input gp-ltr" type="text" id="rf-<?= gp_e($fk) ?>" name="<?= gp_e($fk) ?>" value="<?= gp_e(gp_filter_text($fv)) ?>"
+						<?= $fd[2] ? 'list="rdl-' . gp_e($fk) . '"' : '' ?> spellcheck="false" autocomplete="off">
+					<?php if ($fd[2]): ?><datalist id="rdl-<?= gp_e($fk) ?>"><?php foreach ($fd[2] as $o): ?><option value="<?= gp_e($o) ?>"><?php endforeach; ?></datalist><?php endif; ?>
+				</div>
 			</div>
 			<?php endforeach; ?>
-			<div class="gp-field">
-				<span class="gp-label"><?= gp_e(gp_t('rules_flt_q')) ?></span>
-				<select class="gp-input" name="q_op" aria-label="<?= gp_e(gp_t('rules_flt_op')) ?>">
-					<option value="is"><?= gp_e(gp_t('rules_flt_has')) ?></option>
-					<option value="not"<?= (($filter['q_op'] ?? '') === 'not') ? ' selected' : '' ?>><?= gp_e(gp_t('rules_flt_hasnot')) ?></option>
-				</select>
-				<input class="gp-input" type="text" name="q" value="<?= gp_e($filter['q'] ?? '') ?>">
-			</div>
 		</div>
 		<div class="gp-row-head">
 			<button class="gp-btn gp-btn-ghost" type="submit"><?= gp_e(gp_t('filter')) ?></button>
 			<a class="gp-btn gp-btn-ghost" href="index.php?r=rules"><?= gp_e(gp_t('reset')) ?></a>
 			<a class="gp-btn gp-btn-primary" href="index.php?r=rules&amp;new=1"><?= gp_e(gp_t('rules_new')) ?></a>
-			<span style="margin-inline-start:auto"></span>
 		</div>
+		<?= gp_filter_chips_html($rchips) ?>
 	</form>
 	<form method="post" action="index.php?r=rules" style="margin-top:.5rem">
 		<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">

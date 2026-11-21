@@ -113,6 +113,10 @@ $v = is_array($verdicts) ? $verdicts : array();
 	</div>
 </div>
 
+<?= gp_filter_form_html('identity', array(
+	'act' => array('logs_act', 'is', array('allow', 'challenge', '403', '429', 'allow_bot', 'allow_override', '404_hp'), 'flt_act'),
+	'path' => array('logs_path', 'has', array(), 'flt_path')), $filter, array('id' => $identity)) ?>
+
 <div class="gp-card">
 	<div class="gp-card-title">
 		<?= gp_e(gp_t('id_recent')) ?>

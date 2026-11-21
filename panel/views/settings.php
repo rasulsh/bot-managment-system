@@ -59,9 +59,10 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 			<input type="hidden" name="present[<?= gp_e($key) ?>]" value="1">
 			<input type="checkbox" id="<?= gp_e($id) ?>" name="<?= gp_e($name) ?>" value="1" <?= !empty($value) ? 'checked' : '' ?>>
 			<span class="gp-set-label"><?= gp_e($lbl($key)) ?></span>
+			<?= gp_tip('set_' . str_replace('.', '_', $key)) ?>
 		</label>
 	<?php else: ?>
-		<label class="gp-set-label" for="<?= gp_e($id) ?>"><?= gp_e($lbl($key)) ?></label>
+		<div><label class="gp-set-label" for="<?= gp_e($id) ?>"><?= gp_e($lbl($key)) ?></label><?= gp_tip('set_' . str_replace('.', '_', $key)) ?></div>
 		<?php if ($type === 'int' || $type === 'float'): ?>
 			<input class="gp-input" type="number" id="<?= gp_e($id) ?>" name="<?= gp_e($name) ?>"
 				inputmode="<?= $type === 'int' ? 'numeric' : 'decimal' ?>"
@@ -118,12 +119,6 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 		<a class="gp-link" href="index.php?r=config_file"><?= gp_e(gp_t('set_open_editor')) ?></a></p>
 </div>
 
-<nav class="gp-toc" aria-label="<?= gp_e(gp_t('set_contents')) ?>">
-	<?php foreach ($groups as $gid => $g): ?>
-	<a href="#set-<?= gp_e($gid) ?>"><?= gp_e(gp_t($g[0])) ?></a>
-	<?php endforeach; ?>
-	<a href="#set-file-only"><?= gp_e(gp_t('set_group_file_only')) ?></a>
-</nav>
 
 <?php if ($errors): ?>
 <div class="gp-flash gp-flash-error" role="alert"><?= gp_e(gp_t('set_errors_below')) ?></div>
@@ -155,15 +150,26 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 	<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 	<input type="hidden" name="action" value="save">
 
-	<?php foreach ($groups as $gid => $g): ?>
-	<section class="gp-card" id="set-<?= gp_e($gid) ?>">
-		<div class="gp-card-title"><?= gp_e(gp_t($g[0])) ?></div>
+	<?php
+	// One tab per group; a rejected save opens the tab holding the first error and
+	// badges every tab that has any.
+	$tab_labels = array();
+	$tab_errors = array();
+	foreach ($groups as $gid => $g) {
+		$tab_labels[$gid] = gp_t($g[0]);
+		$tab_errors[$gid] = 0;
+		foreach ($g[2] as $k) { if (isset($errors[$k])) { $tab_errors[$gid]++; } }
+	}
+	gp_tabs_begin('set', $tab_labels, $tab_errors);
+	foreach ($groups as $gid => $g):
+		gp_tab_begin('set', $gid, $tab_labels[$gid]); ?>
+		<div class="gp-card">
 		<?php if ($g[1] !== ''): ?><p class="gp-help" style="margin-bottom:.75rem"><?= gp_e(gp_t($g[1])) ?></p><?php endif; ?>
 		<div class="gp-set-grid">
 			<?php foreach ($g[2] as $k) { if (isset($rules[$k])) { $field($k); } } ?>
 		</div>
-	</section>
-	<?php endforeach; ?>
+		</div>
+	<?php gp_tab_end(); endforeach; gp_tabs_end(); ?>
 
 	<div class="gp-savebar">
 		<button class="gp-btn gp-btn-primary" type="submit"><?= gp_e(gp_t('save')) ?></button>

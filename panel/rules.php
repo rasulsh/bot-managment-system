@@ -274,34 +274,36 @@ function gp_rule_cond_text($label, $cond) {
 		. (count($vals) > 4 ? ' +' . (count($vals) - 4) : '');
 }
 
-// Table filters: each field has an operator, "is" (default) or "is not"
-// (<key>_op=not). Choice fields allow several comma-separated values. Pure.
+// The Rules table filters (include / exclude, see panel/filters.php): action, mode and
+// state are choices; cc and asn match the codes a rule's conditions list; ua and q are
+// text (q searches name, note and every condition value). Pure.
+function gp_rules_filter_spec() {
+	return array('action' => 'choice', 'mode' => 'choice', 'state' => 'choice', 'cc' => array('choice', 'ci' => true),
+		'asn' => 'choice', 'ua' => 'text', 'q' => 'text');
+}
+
 function gp_rules_filter_from_request(array $get) {
-	$out = array();
-	foreach (array('action', 'mode', 'state') as $k) {
-		$v = isset($get[$k]) && is_string($get[$k]) ? trim($get[$k]) : '';
-		if ($v !== '') { $out[$k] = array_slice(array_filter(array_map('trim', explode(',', substr($v, 0, 100)))), 0, 5); }
-		if (isset($out[$k])) { $out[$k . '_op'] = (isset($get[$k . '_op']) && $get[$k . '_op'] === 'not') ? 'not' : 'is'; }
-	}
-	$q = isset($get['q']) && is_string($get['q']) ? trim(substr($get['q'], 0, 100)) : '';
-	if ($q !== '') { $out['q'] = $q; $out['q_op'] = (isset($get['q_op']) && $get['q_op'] === 'not') ? 'not' : 'is'; }
-	return $out;
+	return gp_filter_parse($get, gp_rules_filter_spec());
 }
 
 function gp_rules_filter_match(array $rule, array $f, $now) {
 	$state = empty($rule['enabled']) ? 'disabled' : (((int)$rule['expires_at'] !== 0 && (int)$rule['expires_at'] <= $now) ? 'expired' : 'active');
+	$vals = function ($c) { return (is_array($c) && isset($c['values'])) ? $c['values'] : array(); };
+	$country = $vals($rule['country'] ?? null);
+	$asn = $vals($rule['asn'] ?? null);
+	$ua = $vals($rule['ua'] ?? null);
 	foreach (array('action' => $rule['action'], 'mode' => $rule['mode'], 'state' => $state) as $k => $val) {
-		if (!isset($f[$k])) { continue; }
-		$in = in_array($val, $f[$k], true);
-		if (($f[$k . '_op'] === 'not') ? $in : !$in) { return false; }
+		if (isset($f[$k]) && !gp_filter_test('choice', $f[$k], $val)) { return false; }
 	}
+	// "country is IR" means: the rule has a country condition that lists IR. A rule
+	// with no country condition is "not IR" like any other.
+	if (isset($f['cc']) && !gp_filter_test('choice', $f['cc'], $country, true)) { return false; }
+	if (isset($f['asn']) && !gp_filter_test('choice', $f['asn'], $asn)) { return false; }
+	if (isset($f['ua']) && !gp_filter_test('text', $f['ua'], implode("\n", $ua))) { return false; }
 	if (isset($f['q'])) {
-		$hay = $rule['name'] . ' ' . $rule['note'] . ' ' . (isset($rule['ua']['values']) ? implode(' ', $rule['ua']['values']) : '')
-			. ' ' . (isset($rule['country']['values']) ? implode(' ', $rule['country']['values']) : '')
-			. ' ' . (isset($rule['asn']['values']) ? implode(' ', $rule['asn']['values']) : '')
+		$hay = $rule['name'] . ' ' . $rule['note'] . ' ' . implode(' ', $ua) . ' ' . implode(' ', $country) . ' ' . implode(' ', $asn)
 			. ' ' . (isset($rule['path']['values']) ? implode(' ', $rule['path']['values']) : '');
-		$has = stripos($hay, $f['q']) !== false;
-		if (($f['q_op'] === 'not') ? $has : !$has) { return false; }
+		if (!gp_filter_test('text', $f['q'], $hay)) { return false; }
 	}
 	return true;
 }
