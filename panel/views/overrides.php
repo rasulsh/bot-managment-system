@@ -21,6 +21,11 @@
 <div class="gp-note gp-note-strong"><?= gp_e(gp_t('err_redis')) ?></div>
 <?php endif; ?>
 
+<?php $shadow = isset($shadow) && is_array($shadow) ? $shadow : array(); foreach ($shadow as $sid => $slist): ?>
+<div class="gp-note gp-note-strong" role="alert" data-shadow="<?= gp_e($sid) ?>"><span class="gp-mono gp-ltr"><?= gp_e($sid) ?></span>: <?= gp_e(str_replace('%s', $slist, gp_t('ovr_deny_shadowed'))) ?>
+	<a href="index.php?r=iplists&amp;list=<?= gp_u($slist) ?>#ipl-entries"><?= gp_e(gp_t('ovr_shadow_link')) ?></a></div>
+<?php endforeach; ?>
+
 <div class="gp-card">
 	<div class="gp-card-title"><?= gp_e(gp_t('ovr_add')) ?></div>
 	<form method="post" action="index.php?r=overrides" class="gp-form">

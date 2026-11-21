@@ -1201,6 +1201,21 @@ function gv_run($t0) {
 	$st  = gv_state_new();
 	gv_redis_ctx(array('log_dir' => $log));       // where swallowed errors are reported
 
+	// 1b. Enforced IP block list (lists/block.bin): decided BEFORE the challenge handshake, so a listed
+	// address cannot drive handshake POSTs (nonce claim, counters, a Redis round trip) either. It still
+	// honours the exemptions (a payment callback from a listed address is exempt, as for every
+	// enforcement) and an enforced allow list (allow wins). No Redis, no DNS. The lookup result is
+	// kept for step 3a. With the secret unconfigured a block list is not applied (monitor-first).
+	$ipl = gv_iplist_check($f['ip']);
+	if ($ipl['block'] !== null && !$ipl['block']['monitor'] && $cfg['secret'] !== 'CHANGE_ME'
+		&& ($ipl['allow'] === null || $ipl['allow']['monitor'])
+		&& !gv_is_exempt($f, $cfg['exempt_paths'], $cfg['exempt_params'], $cfg['exempt_params_paths'])) {
+		$st['rs'][] = gv_iplist_reason('block', $ipl['block']);
+		gv_emit($f, $st, '403', 0, $t0, $log);
+		gv_send_403();
+		exit;
+	}
+
 	// 2. Verify handshake intercept. Runs before exemptions so the challenge
 	// page can always complete its own POST back to the same URL.
 	//
@@ -1360,19 +1375,11 @@ function gv_run($t0) {
 	$gate = gv_is_gate($f, !empty($cfg['challenge']['trust_headers']));
 	$st['gate'] = $gate ? 1 : 0;
 
-	// 3a. IP lists (lists/allow.bin, lists/block.bin). A binary search on the
-	// compiled files, only when an enabled list of that type exists. No Redis.
-	//   allow list, enforce: same effect as an operator allow override, decided
-	//     here: no rules, scoring, counters or challenge, and not even a Redis
-	//     connection. It beats a block list and every rule.
-	//   block list, enforce: 403 now. Evaluated BEFORE the known-bot pass, so a
-	//     listed address cannot get through by claiming to be Googlebot, and before
-	//     the counters (a blocked address costs no Redis work). The holdout and
-	//     enforce.block do not apply: the list's own mode decides, like a rule.
-	//   monitor list: only SH_IPL_*:<id> in rs, the request goes on as usual.
-	// With the secret unconfigured a block list is not applied (like every other
-	// enforcement); an allow list only ever relaxes, so it is.
-	$ipl = gv_iplist_check($f['ip']);
+	// 3a. IP lists, the rest (the lookup ran at step 1b, where an enforced block list already answered).
+	//   allow list, enforce: same effect as an operator allow override, decided here: no rules, scoring,
+	//     counters or challenge, and not even a Redis connection. It beats a block list and every rule.
+	//   monitor list (allow or block): only SH_IPL_*:<id> in rs, the request goes on as usual.
+	// An allow list only ever relaxes, so it applies with the secret unconfigured; a block list does not.
 	if ($ipl['allow'] !== null) {
 		$st['rs'][] = gv_iplist_reason('allow', $ipl['allow']);
 		if (!$ipl['allow']['monitor']) {
@@ -1382,13 +1389,8 @@ function gv_run($t0) {
 			return;                                   // zero bytes of output
 		}
 	}
-	if ($ipl['block'] !== null && $cfg['secret'] !== 'CHANGE_ME') {
+	if ($ipl['block'] !== null && $ipl['block']['monitor'] && $cfg['secret'] !== 'CHANGE_ME') {
 		$st['rs'][] = gv_iplist_reason('block', $ipl['block']);
-		if (!$ipl['block']['monitor']) {
-			gv_emit($f, $st, '403', 0, $t0, $log);
-			gv_send_403();
-			exit;
-		}
 	}
 
 	// 3b. Access rules (guard/rules.json). A pure match on the request facts: no

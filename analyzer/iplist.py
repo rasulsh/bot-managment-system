@@ -12,6 +12,16 @@ Compiled file layout: guard/geo.php (kind 3). Value of a range = uint16, bit 15
 monitor mode, bits 0-14 the list index. Where lists overlap the SMALLER value
 wins: an enforced list beats a monitor list, then the lower index.
 
+SAFETY CAPS, applied to every entry here (a file copied over SFTP never went through the panel form;
+panel/iplists.php gp_ipl_refusal() is the PHP mirror and a test compares the output byte for byte):
+  * 0.0.0.0/0 and ::/0 are ALWAYS dropped, even for a forced list,
+  * an allow entry wider than /16 (IPv4) or /32 (IPv6) is dropped,
+  * a block entry wider than /8 (IPv4) or /32 (IPv6) is dropped,
+  * a block entry covering private, loopback, link-local space or an address in lists.json "own" (the
+    server's own addresses, recorded by the panel) is dropped.
+The list's "force" flag (set only from the panel, audit-logged) keeps everything except 0/0. Dropped
+entries and unparseable lines are counted per list and reason in lists-status.json, with samples.
+
 A type with no enabled list that has entries gets its file DELETED: the guard
 opens a list file only while an enabled list needs it. A type whose source
 cannot be read keeps its old file and the error is reported.
@@ -47,8 +57,14 @@ STATUS_FILE = 'lists-status.json'
 META_FILE = 'lists.json'
 MONITOR = 0x8000
 WIDE_V4 = 8                             # a block entry wider than /8 ...
-WIDE_V6 = 32                            # ... or /32 (IPv6) is refused unless the list is forced
+WIDE_V6 = 32                            # ... or /32 (IPv6) is dropped unless the list is forced
+ALLOW_WIDE_V4 = 16                      # an allow entry wider than /16 ...
+ALLOW_WIDE_V6 = 32                      # ... or /32 (IPv6) likewise
 MAX_LINES = 300000
+SAMPLES = 10                            # dropped entries / invalid lines kept per list in the status
+REASONS = ('all', 'allow_wide', 'wide', 'protected')
+PRIVATE = ('0.0.0.0/8', '10.0.0.0/8', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16',
+           '::/128', '::1/128', 'fc00::/7', 'fe80::/10')
 
 
 def default_dir():
@@ -184,8 +200,51 @@ def read_meta(lists_dir):
     return out
 
 
-def _wide(version, prefix):
-    return prefix < (WIDE_V4 if version == 4 else WIDE_V6)
+def protected_ranges(own=()):
+    """(version, start, end) of the space a block entry must not cover: private, loopback, link-local,
+    unspecified, plus the server's own addresses. Pure."""
+    out = []
+    for token in list(PRIVATE) + [str(x) for x in own]:
+        parsed = parse_entry(token)
+        if parsed is not None:
+            out.append(parsed[:3])
+    return out
+
+
+def refusal(entry, kind, protected, force=False):
+    """Why an entry of a list of this type is dropped, or ''. Mirror of gp_ipl_refusal() in panel/iplists.php. Pure."""
+    version, start, end, prefix = entry
+    if prefix == 0:
+        return 'all'
+    if force:
+        return ''
+    if kind == 'allow':
+        return 'allow_wide' if prefix < (ALLOW_WIDE_V4 if version == 4 else ALLOW_WIDE_V6) else ''
+    if prefix < (WIDE_V4 if version == 4 else WIDE_V6):
+        return 'wide'
+    for pv, ps, pe in protected:
+        if pv == version and start <= pe and end >= ps:
+            return 'protected'
+    return ''
+
+
+def entry_text(entry):
+    """Canonical text of a parsed entry, as the panel stores it: 203.0.113.0/24, 198.51.100.7, 2001:db8::/32."""
+    version, start, _end, prefix = entry
+    full = 32 if version == 4 else 128
+    addr = str(ipaddress.ip_address(start) if version == 4 else ipaddress.IPv6Address(start))
+    return addr if prefix == full else '%s/%d' % (addr, prefix)
+
+
+def read_own(lists_dir):
+    """The server's own addresses recorded in lists.json ("own"). Never raises."""
+    try:
+        with open(os.path.join(lists_dir, META_FILE), 'r') as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    own = data.get('own') if isinstance(data, dict) else None
+    return [x for x in (own if isinstance(own, list) else []) if isinstance(x, str) and parse_entry(x) is not None][:16]
 
 
 def compile_lists(lists_dir, now=None):
@@ -201,8 +260,9 @@ def compile_lists(lists_dir, now=None):
             lock = None
     try:
         meta = sorted(read_meta(lists_dir), key=lambda l: l['idx'])
+        protected = protected_ranges(read_own(lists_dir))
         for kind in ('allow', 'block'):
-            _compile_type(lists_dir, kind, [l for l in meta if l['type'] == kind and l.get('enabled')], now, status)
+            _compile_type(lists_dir, kind, [l for l in meta if l['type'] == kind and l.get('enabled')], now, status, protected)
         status['ok'] = not status['errors']
         try:
             geo._write_json_atomic(os.path.join(lists_dir, STATUS_FILE), status)
@@ -215,7 +275,7 @@ def compile_lists(lists_dir, now=None):
     return status
 
 
-def _compile_type(lists_dir, kind, lists, now, status):
+def _compile_type(lists_dir, kind, lists, now, status, protected=()):
     path = os.path.join(lists_dir, kind + '.bin')
     ranges4, ranges6 = [], []
     digest = hashlib.sha256()
@@ -230,17 +290,28 @@ def _compile_type(lists_dir, kind, lists, now, status):
             failed = True
             continue
         digest.update(('%d:%s:' % (item['idx'], item.get('mode'))).encode('ascii') + raw)
+        # The same checks as a panel upload, for a file that never went through the form: lines that do not
+        # parse are counted and shown, entries over a cap are dropped. Nothing here is fatal.
         entries, bad = parse_text(raw.decode('utf-8', 'replace'))
-        wide = 0
+        dropped = dict((reason, 0) for reason in REASONS)
+        samples = []
+        huge = 0
         own4, own6 = [], []
-        for version, start, end, prefix in entries:
-            if kind == 'block' and not item.get('force') and _wide(version, prefix):
-                wide += 1
+        for entry in entries:
+            why = refusal(entry, kind, protected, bool(item.get('force')))
+            if why:
+                dropped[why] += 1
+                if kind == 'allow' and entry[3] < 8:
+                    huge += 1
+                if len(samples) < SAMPLES:
+                    samples.append([entry_text(entry), why])
                 continue
-            (own4 if version == 4 else own6).append((start, end))
+            (own4 if entry[0] == 4 else own6).append((entry[1], entry[2]))
         u4, u6 = union(own4), union(own6)
-        status['lists'][item['id']] = {'entries': len(entries) - wide, 'v4': len(u4), 'v6': len(u6),
-                                       'addresses': sum(e - s + 1 for s, e in u4), 'invalid': len(bad), 'wide': wide}
+        status['lists'][item['id']] = {'entries': len(entries) - sum(dropped.values()), 'v4': len(u4), 'v6': len(u6),
+                                       'addresses': sum(e - s + 1 for s, e in u4), 'invalid': len(bad),
+                                       'invalid_samples': [[n, t] for n, t in bad[:SAMPLES]], 'dropped': dropped,
+                                       'dropped_n': sum(dropped.values()), 'dropped_huge': huge, 'dropped_samples': samples}
         ranges4.extend((s, e, value) for s, e in u4)
         ranges6.extend((s, e, value) for s, e in u6)
     if failed:

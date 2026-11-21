@@ -1618,18 +1618,24 @@ t_ok('iplist: a 5000-range table, boundaries of every 7th range (' . $bad . ' wr
 
 // What gv_run does with a hit: spelled out in the source, checked here so the guarantees cannot drift.
 $gsrc = file_get_contents(__DIR__ . '/../guard/guard.php');
+$strip = function ($code) { return preg_replace('#^\s*//.*$#m', '', $code); };   // code only: the comments talk about Redis and the holdout
+$a1 = strpos($gsrc, '// 1b. Enforced IP block list');
+$a2 = strpos($gsrc, '// 2. Verify handshake intercept');
 $a3 = strpos($gsrc, '// 3a. IP lists');
 $a3b = strpos($gsrc, '// 3b. Access rules');
-$blk = ($a3 !== false && $a3b !== false) ? substr($gsrc, $a3, $a3b - $a3) : '';
-$blk = preg_replace('#^\s*//.*$#m', '', $blk);              // code only: the comments talk about Redis and the holdout
-t_ok('iplist: step 3a sits after the exemptions and before the rules, the bot pass and every Redis call',
-	$a3 !== false && $a3b > $a3 && strpos($gsrc, 'gv_is_exempt($f') < $a3 && strpos($gsrc, '$conn = gv_redis_connect($cfg[\'redis\'], $log);', $a3) > $a3b);
-t_ok('iplist: step 3a makes no Redis round trip and sends no network request', $blk !== '' && !preg_match('/gv_redis|gv_bump|gv_r_|gethostby|dns_|curl_|fsockopen/', $blk));
-t_ok('iplist: an enforced allow returns before any Redis or rule code; an enforced block sends 403 and exits; monitor only adds a reason',
-	strpos($blk, "gv_emit(\$f, \$st, 'allow_override'") !== false && strpos($blk, "gv_emit(\$f, \$st, '403'") !== false && strpos($blk, 'gv_send_403();') !== false
-	&& substr_count($blk, "['monitor']") >= 2);
-t_ok('iplist: a block list is not applied while the secret is unconfigured (monitor-first), an allow list is', strpos($blk, "\$cfg['secret'] !== 'CHANGE_ME'") !== false);
-t_ok('iplist: lists do not depend on enforce.block / the holdout', strpos($blk, "enforce'") === false && strpos($blk, 'holdout') === false && strpos($blk, 'gv_is_holdout') === false);
+$blk1 = ($a1 !== false && $a2 > $a1) ? $strip(substr($gsrc, $a1, $a2 - $a1)) : '';
+$blk = ($a3 !== false && $a3b > $a3) ? $strip(substr($gsrc, $a3, $a3b - $a3)) : '';
+t_ok('iplist: the enforced block check (1b) sits before the challenge handshake (2); the allow check (3a) after the exemptions and before the rules and every Redis call',
+	$a1 !== false && $a1 < $a2 && $a2 < strpos($gsrc, 'gv_is_exempt($f', $a2) && strpos($gsrc, 'gv_is_exempt($f', $a2) < $a3 && $a3b > $a3 && strpos($gsrc, '$conn = gv_redis_connect($cfg[\'redis\'], $log);', $a3) > $a3b
+	&& strpos($gsrc, 'gv_redis_connect', $a1) > $a2);
+t_ok('iplist: 1b and 3a make no Redis round trip and no network request', $blk1 !== '' && $blk !== '' && !preg_match('/gv_redis|gv_bump|gv_r_|gethostby|dns_|curl_|fsockopen/', $blk1 . $blk));
+t_ok('iplist: an enforced block sends 403 and exits before the handshake; an enforced allow returns before any Redis or rule code; monitor only adds a reason',
+	strpos($blk1, "gv_emit(\$f, \$st, '403'") !== false && strpos($blk1, 'gv_send_403();') !== false && strpos($blk1, 'exit;') !== false
+	&& strpos($blk, "gv_emit(\$f, \$st, 'allow_override'") !== false && strpos($blk, "['monitor']") !== false && strpos($blk1, "['monitor']") !== false);
+t_ok('iplist: the block check keeps the exemptions and lets an enforced allow list win', strpos($blk1, 'gv_is_exempt(') !== false && strpos($blk1, "\$ipl['allow'] === null || \$ipl['allow']['monitor']") !== false);
+t_ok('iplist: a block list is not applied while the secret is unconfigured (monitor-first), an allow list is', strpos($blk1, "\$cfg['secret'] !== 'CHANGE_ME'") !== false && strpos($blk, "\$cfg['secret'] !== 'CHANGE_ME'") !== false
+	&& strpos($blk, "\$ipl['allow'] !== null") !== false);
+t_ok('iplist: lists do not depend on enforce.block / the holdout', strpos($blk1 . $blk, "enforce'") === false && strpos($blk1 . $blk, 'holdout') === false && strpos($blk1 . $blk, 'gv_is_holdout') === false);
 putenv('GV_LISTS_DIR');
 gv_geo_state(true);
 

@@ -277,6 +277,7 @@ switch ($gp_route) {
 			'identity' => $identity,
 			'verdicts' => $identity !== '' ? gp_identity_verdicts($identity) : array(),
 			'rows'     => $identity !== '' ? gp_identity_rows($identity, 60, $idfilter) : array(),
+			'shadow'   => $identity !== '' ? gp_iplists_deny_shadow(array($identity)) : array(),
 			'redis_up' => gp_redis_up(),
 		));
 
@@ -290,6 +291,7 @@ switch ($gp_route) {
 			'filter'   => $ofilter,
 			'items_all' => $oall = gp_overrides_list(),
 			'items'    => gp_overrides_filter($oall, $ofilter),
+			'shadow'   => gp_iplists_deny_shadow(array_values(array_map(function ($i) { return $i['identity']; }, array_filter($oall, function ($i) { return $i['kind'] === 'deny'; })))),
 			'redis_up' => gp_redis_up(),
 		));
 
@@ -630,6 +632,11 @@ function gp_handle_override_post($user, $ip) {
 				'ip' => $ip, 'key' => $identity, 'old' => null,
 				'new' => array('ttl' => $ttl)));
 			gp_flash('ok', gp_t('ovr_added'));
+			// A deny under an ENFORCED allow list does nothing: the allow list is checked first.
+			if ($action === 'deny') {
+				$sh = gp_iplists_deny_shadow(array(gp_identity_canon($identity)));
+				if ($sh) { gp_flash('warn', str_replace('%s', (string)reset($sh), gp_t('ovr_deny_shadowed'))); }
+			}
 		} else {
 			gp_flash('error', gp_t('err_generic'));
 		}

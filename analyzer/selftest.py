@@ -2725,7 +2725,7 @@ ok('compile: one file per type from the ENABLED lists; the disabled list is not 
    and st1['types']['block']['lists'] == ['l1', 'l2'] and st1['types']['allow']['lists'] == ['l3'])
 ok('compile: the enforced list wins over the monitor list on an overlap (value 1, not 0x8002), the monitor-only part keeps bit 15',
    geo_mod.lookup(blk, '203.0.113.9') == 1 and geo_mod.lookup(blk, '192.0.2.9') == 0x8002 and geo_mod.lookup(blk, '2001:db8::1') == 1)
-ok('compile: per-list counts (entries, ranges, addresses, skipped invalid lines)', st1['lists']['l1'] == {'entries': 3, 'v4': 2, 'v6': 1, 'addresses': 384, 'invalid': 1, 'wide': 0}
+ok('compile: per-list counts (entries, ranges, addresses, skipped invalid lines)', {k: st1['lists']['l1'][k] for k in ('entries', 'v4', 'v6', 'addresses', 'invalid', 'dropped_n')} == {'entries': 3, 'v4': 2, 'v6': 1, 'addresses': 384, 'invalid': 1, 'dropped_n': 0}
    and st1['lists']['l3']['addresses'] == 64 and 'l4' not in st1['lists'])
 ok('compile: lists-status.json is written, atomically, with the time and no leftovers', json_geo.load(open(os.path.join(d1, 'lists-status.json')))['time'] == 1800000000
    and not [n for n in os.listdir(d1) if '.tmp' in n])
@@ -2738,12 +2738,52 @@ il_mod.compile_lists(d1, now=1800000100)
 blk2 = open(os.path.join(d1, 'block.bin'), 'rb').read()
 ok('compile: a changed source gives a new file and a new sha; the previous file stays as block.bin.prev',
    geo_mod.parse_header(blk2)['sha'] != sha_before and geo_mod.lookup(blk2, '8.8.4.9') == 1 and open(os.path.join(d1, 'block.bin.prev'), 'rb').read() == blk)
-# wide entries, force, nothing to compile, a missing source
-d2 = il_dir('c2', [il_list(1, 'block'), il_list(2, 'block', force=True), il_list(3, 'allow')], {'l1': '64.0.0.0/4\n11.0.0.0/8\n2400::/31\n', 'l2': '96.0.0.0/3\n', 'l3': '64.0.0.0/4\n'})
-st2 = il_mod.compile_lists(d2, now=1)
-ok('compile: a block entry wider than /8 (IPv4) or /32 (IPv6) is dropped and counted unless the list is forced; an allow list is never limited',
-   st2['lists']['l1'] == {'entries': 1, 'v4': 1, 'v6': 0, 'addresses': 16777216, 'invalid': 0, 'wide': 2} and st2['lists']['l2']['wide'] == 0 and st2['lists']['l3']['wide'] == 0
-   and geo_mod.lookup(open(os.path.join(d2, 'block.bin'), 'rb').read(), '100.1.1.1') == 2 and geo_mod.lookup(open(os.path.join(d2, 'block.bin'), 'rb').read(), '70.1.1.1') is None)
+# the safety caps, force, own addresses
+def il_status(d, now=1):
+    return il_mod.compile_lists(d, now=now)
+
+
+d2 = il_dir('c2', [il_list(1, 'block'), il_list(2, 'block', force=True), il_list(3, 'allow'), il_list(4, 'allow', force=True)],
+            {'l1': '64.0.0.0/4\n11.0.0.0/8\n2400::/31\n', 'l2': '96.0.0.0/3\n0.0.0.0/0\n', 'l3': '64.0.0.0/12\n2400::/31\n0.0.0.0/0\n::/0\n203.0.113.0/24\n', 'l4': '80.0.0.0/12\n0.0.0.0/0\n::/0\n'})
+st2 = il_status(d2)
+blk2 = open(os.path.join(d2, 'block.bin'), 'rb').read()
+alw2 = open(os.path.join(d2, 'allow.bin'), 'rb').read()
+ok('caps: a block entry wider than /8 (IPv4) or /32 (IPv6) is dropped and counted unless the list is forced',
+   st2['lists']['l1']['dropped'] == {'all': 0, 'allow_wide': 0, 'wide': 2, 'protected': 0} and st2['lists']['l1']['entries'] == 1 and st2['lists']['l2']['dropped']['wide'] == 0
+   and geo_mod.lookup(blk2, '100.1.1.1') == 2 and geo_mod.lookup(blk2, '70.1.1.1') is None)
+ok('caps: an allow entry wider than /16 (IPv4) or /32 (IPv6) is dropped unless the list is forced; the huge ones are counted for the dashboard',
+   st2['lists']['l3']['dropped'] == {'all': 2, 'allow_wide': 2, 'wide': 0, 'protected': 0} and st2['lists']['l3']['dropped_huge'] == 2 and st2['lists']['l3']['entries'] == 1
+   and geo_mod.lookup(alw2, '64.1.1.1') is None and geo_mod.lookup(alw2, '203.0.113.5') == 3 and geo_mod.lookup(alw2, '80.1.1.1') == 4)
+ok('caps: 0.0.0.0/0 and ::/0 are ALWAYS dropped, in allow and block, with and without force (an allow 0/0 never switches the guard off)',
+   st2['lists']['l4']['dropped']['all'] == 2 and st2['lists']['l2']['dropped']['all'] == 1 and geo_mod.lookup(alw2, '8.8.8.8') is None and geo_mod.lookup(alw2, '2001:db8::1') is None
+   and geo_mod.lookup(blk2, '8.8.8.8') is None and st2['lists']['l3']['dropped']['all'] == 2)
+d2b = il_dir('c2b', [il_list(1, 'block'), il_list(2, 'block', force=True), il_list(3, 'allow')],
+             {'l1': '10.1.0.0/16\n127.0.0.1\n169.254.9.9\n172.20.0.0/14\n192.168.5.0/24\n0.0.0.0/9\nfc00:1::/32\n::1\nfe80::/64\n198.51.100.77\n198.51.100.0/24\n203.0.113.0/24\n2a02::/32\njunk\n', 'l2': '10.2.0.0/16\n127.0.0.2\n', 'l3': '10.3.0.0/16\n127.0.0.3\n'})
+with open(os.path.join(d2b, 'lists.json')) as handle:
+    meta_b = json_geo.load(handle)
+meta_b['own'] = ['198.51.100.77', 'not-an-ip']
+with open(os.path.join(d2b, 'lists.json'), 'w') as handle:
+    json_geo.dump(meta_b, handle)
+st2b = il_status(d2b)
+blk2b = open(os.path.join(d2b, 'block.bin'), 'rb').read()
+alw2b = open(os.path.join(d2b, 'allow.bin'), 'rb').read()
+ok('caps: a block entry covering private, loopback, link-local space (IPv4 and IPv6) or the server\'s own address (lists.json "own") is dropped; public entries stay; the bad line is counted',
+   st2b['lists']['l1']['dropped'] == {'all': 0, 'allow_wide': 0, 'wide': 0, 'protected': 11} and st2b['lists']['l1']['entries'] == 2 and st2b['lists']['l1']['invalid'] == 1
+   and st2b['lists']['l1']['invalid_samples'] == [[14, 'junk']] and ['198.51.100.77', 'protected'] in st2b['lists']['l1']['dropped_samples'] and geo_mod.lookup(blk2b, '203.0.113.9') == 1 and geo_mod.lookup(blk2b, '10.1.2.3') != 1
+   and geo_mod.lookup(blk2b, '2a02::5') == 1 and geo_mod.lookup(blk2b, '198.51.100.77') is None)
+ok('caps: a forced block list keeps private entries, an ALLOW list is not checked for private space',
+   geo_mod.lookup(blk2b, '10.2.0.5') == 2 and geo_mod.lookup(blk2b, '127.0.0.2') == 2 and geo_mod.lookup(alw2b, '10.3.0.5') == 3 and st2b['lists']['l3']['dropped_n'] == 0)
+ok('caps: the status keeps at most %d samples per list and the four reason keys are always there' % il_mod.SAMPLES,
+   all(set(v['dropped']) == set(il_mod.REASONS) and len(v['dropped_samples']) <= il_mod.SAMPLES and len(v['invalid_samples']) <= il_mod.SAMPLES for v in list(st2['lists'].values()) + list(st2b['lists'].values())))
+d2c = il_dir('c2c', [il_list(1, 'block')], {'l1': '203.0.113.0/24\r\nnot an address\r\n999.1.1.1\r\n# c\r\n198.51.100.0/25 junk\r\n2001:db8::/32\r\n'})
+st2c = il_status(d2c)
+ok('caps: a mixed valid / invalid file copied over SFTP is validated like an upload: bad lines counted with their numbers and shown, the valid ones compiled, never fatal',
+   st2c['ok'] and st2c['lists']['l1']['entries'] == 2 and st2c['lists']['l1']['invalid'] == 3 and [n for n, _t in il_mod.parse_text(open(os.path.join(d2c, 'l1.txt')).read())[1]] == [2, 3, 5]
+   and st2c['lists']['l1']['invalid_samples'][0] == [2, 'not an address'] and geo_mod.lookup(open(os.path.join(d2c, 'block.bin'), 'rb').read(), '203.0.113.7') == 1)
+ok('caps: refusal() is pure and mirrors the panel (spot checks)', il_mod.refusal(il_mod.parse_entry('0.0.0.0/0'), 'allow', [], True) == 'all' and il_mod.refusal(il_mod.parse_entry('::/0'), 'block', []) == 'all'
+   and il_mod.refusal(il_mod.parse_entry('64.0.0.0/16'), 'allow', []) == '' and il_mod.refusal(il_mod.parse_entry('64.0.0.0/15'), 'allow', []) == 'allow_wide'
+   and il_mod.refusal(il_mod.parse_entry('2400::/32'), 'block', []) == '' and il_mod.refusal(il_mod.parse_entry('10.9.9.9'), 'block', il_mod.protected_ranges()) == 'protected'
+   and il_mod.refusal(il_mod.parse_entry('10.9.9.9'), 'allow', il_mod.protected_ranges()) == '')
 d3 = il_dir('c3', [il_list(1, 'block'), il_list(2, 'allow', enabled=False)], {'l1': '203.0.113.0/24\n', 'l2': '1.2.3.4\n'})
 il_mod.compile_lists(d3, now=1)
 ok('compile: no enabled allow list: no allow.bin at all (the guard opens nothing)', os.path.exists(os.path.join(d3, 'block.bin')) and not os.path.exists(os.path.join(d3, 'allow.bin')))
@@ -2788,10 +2828,16 @@ else:
     lists_p = [il_list(1, 'allow'), il_list(2, 'block'), il_list(3, 'block', 'monitor'), il_list(4, 'allow', 'monitor'), il_list(5, 'block', force=True)]
     sources_p = {}
     for item in lists_p:
-        lines = [r4() for _ in range(1500)] + [r6() for _ in range(150)] + ['::ffff:1.2.3.0/120', '# c', 'junk', '10.1.0.0/9', '0.0.0.0/0', '203.0.113.0/24', '203.0.113.64/26']
+        lines = [r4() for _ in range(1500)] + [r6() for _ in range(150)] + ['::ffff:1.2.3.0/120', '# c', 'junk', '10.1.0.0/9', '0.0.0.0/0', '::/0', '203.0.113.0/24', '203.0.113.64/26', '203.0.113.77', '2001:db8::/48', '127.1.2.3', '64.0.0.0/12', '2400::/31', 'fc00:5::/32']
         sources_p[item['id']] = '\r\n'.join(lines) + '\r\n'
     dp1 = il_dir('p1', lists_p, sources_p)
     dp2 = il_dir('p2', lists_p, sources_p)
+    for dd in (dp1, dp2):             # the server's own addresses, recorded by the panel, protect block lists in both compilers
+        with open(os.path.join(dd, 'lists.json')) as handle:
+            mm = json_geo.load(handle)
+        mm['own'] = ['203.0.113.77', '2001:db8::77']
+        with open(os.path.join(dd, 'lists.json'), 'w') as handle:
+            json_geo.dump(mm, handle)
     stp = il_mod.compile_lists(dp1, now=1700000000)
     code = ('define("GV_BOOT", 1); define("GV_NO_AUTORUN", 1); define("GP_BOOT", 1); $r = $argv[1];'
             'require $r . "/guard/guard.php"; require $r . "/panel/config_io.php"; require $r . "/panel/jobs.php"; require $r . "/panel/iplists.php";'

@@ -240,6 +240,13 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 	<?php else: ?>
 	<p class="gp-help"><?= gp_num($entries[1]) ?> / <?= gp_num($entries[2]) ?> <?= gp_e(gp_t('ipl_c_entries')) ?><?= $entries[3] ? ', ' . gp_num($entries[3]) . ' ' . gp_e(gp_t('ipl_invalid_short')) : '' ?>
 		<?= $entries[1] > GP_IPL_SHOW_MAX ? '— ' . gp_e(gp_t('ipl_first')) . ' ' . gp_num(GP_IPL_SHOW_MAX) : '' ?></p>
+	<?php $ec = ($status && isset($status['lists'][$eid]) && is_array($status['lists'][$eid])) ? $status['lists'][$eid] : array(); ?>
+	<?php if ($ec && ((int)($ec['dropped_n'] ?? 0) > 0 || (int)($ec['invalid'] ?? 0) > 0)): ?>
+	<div class="gp-note gp-note-strong" role="status"><strong><?= gp_e(gp_t('ipl_dropped_title')) ?>:</strong>
+		<?php foreach ((array)($ec['dropped'] ?? array()) as $why => $n): if ((int)$n > 0): ?><span class="gp-badge gp-badge-warn"><?= gp_e(gp_t('ipl_why_' . $why)) ?>: <?= gp_e(gp_num((int)$n)) ?></span> <?php endif; endforeach; ?>
+		<span class="gp-mono gp-ltr"><?php foreach ((array)($ec['dropped_samples'] ?? array()) as $sm): ?><br><?= gp_e((string)$sm[0]) ?> (<?= gp_e((string)$sm[1]) ?>)<?php endforeach; ?>
+		<?php foreach ((array)($ec['invalid_samples'] ?? array()) as $sm): ?><br><?= gp_e(gp_t('ipl_c_line') . ' ' . (string)$sm[0] . ': ' . (string)$sm[1]) ?><?php endforeach; ?></span></div>
+	<?php endif; ?>
 	<?php if ($entries[0]): ?>
 	<div class="gp-table-wrap"><table class="gp-table"><thead><tr><th><?= gp_e(gp_t('ipl_c_line')) ?></th><th><?= gp_e(gp_t('ipl_c_text')) ?></th><th><?= gp_e(gp_t('ipl_c_family')) ?></th></tr></thead><tbody>
 		<?php foreach ($entries[0] as $en): ?><tr><td class="gp-mono"><?= gp_e((string)$en['line']) ?></td><td class="gp-mono gp-ltr"><?= gp_e($en['text']) ?></td><td class="gp-mono">IPv<?= gp_e((string)$en['v']) ?></td></tr><?php endforeach; ?>
@@ -295,6 +302,24 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 	<p class="gp-help"><?= gp_e(gp_t('geo_last_compile')) ?>: <?= gp_e(gp_age((int)$status['time'])) ?> <?= gp_e(gp_t('ago')) ?> (<?= gp_e((string)($status['by'] ?? '?')) ?>)
 		<span class="gp-badge <?= !empty($status['ok']) ? 'gp-badge-on' : 'gp-badge-bad' ?>"><?= gp_e(gp_t(!empty($status['ok']) ? 'geo_ok' : 'geo_failed')) ?></span></p>
 	<?php foreach ((array)($status['errors'] ?? array()) as $e): ?><p class="gp-text-bad gp-ltr gp-mono"><?= gp_e((string)$e) ?></p><?php endforeach; ?>
+	<?php endif; ?>
+	<div class="gp-card-title"><?= gp_e(gp_t('ipl_dropped_title')) ?></div>
+	<p class="gp-help"><?= gp_e(gp_t('ipl_dropped_help')) ?></p>
+	<?php
+	$ipl_drop_rows = array();
+	foreach ($all as $r) { $c = $r['stat']; if ($c && ((int)($c['dropped_n'] ?? 0) > 0 || (int)($c['invalid'] ?? 0) > 0)) { $ipl_drop_rows[] = array($r, $c); } }
+	?>
+	<?php if (!$ipl_drop_rows): ?><p class="gp-help"><?= gp_e(gp_t('ipl_none_dropped')) ?></p>
+	<?php else: ?>
+	<div class="gp-table-wrap"><table class="gp-table"><thead><tr><th><?= gp_e(gp_t('ipl_f_name')) ?></th><th><?= gp_e(gp_t('ipl_c_dropped')) ?></th><th><?= gp_e(gp_t('ipl_invalid_short')) ?></th><th><?= gp_e(gp_t('ipl_c_text')) ?></th></tr></thead><tbody>
+		<?php foreach ($ipl_drop_rows as $dr): $r = $dr[0]; $c = $dr[1]; ?>
+		<tr><td><strong><?= gp_e($r['name']) ?></strong> <code class="gp-mono"><?= gp_e($r['id']) ?></code></td>
+			<td class="gp-mono"><?php foreach ((array)($c['dropped'] ?? array()) as $why => $n): if ((int)$n > 0): ?><span class="gp-badge gp-badge-warn"><?= gp_e(gp_t('ipl_why_' . $why)) ?>: <?= gp_e(gp_num((int)$n)) ?></span> <?php endif; endforeach; ?></td>
+			<td class="gp-mono"><?= gp_e(gp_num((int)($c['invalid'] ?? 0))) ?></td>
+			<td class="gp-mono gp-ltr"><?php foreach ((array)($c['dropped_samples'] ?? array()) as $sm): ?><?= gp_e((string)$sm[0]) ?> (<?= gp_e((string)$sm[1]) ?>)<br><?php endforeach; ?>
+				<?php foreach ((array)($c['invalid_samples'] ?? array()) as $sm): ?><?= gp_e(gp_t('ipl_c_line') . ' ' . (string)$sm[0] . ': ' . (string)$sm[1]) ?><br><?php endforeach; ?></td></tr>
+		<?php endforeach; ?>
+	</tbody></table></div>
 	<?php endif; ?>
 	<form method="post" action="index.php?r=iplists">
 		<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">

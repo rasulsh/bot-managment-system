@@ -86,6 +86,10 @@ $v = is_array($verdicts) ? $verdicts : array();
 			</span>
 		</div>
 
+		<?php foreach ((isset($shadow) && is_array($shadow) ? $shadow : array()) as $slist): ?>
+		<div class="gp-note gp-note-strong" role="alert" data-shadow="1"><?= gp_e(str_replace('%s', $slist, gp_t('ovr_deny_shadowed'))) ?>
+			<a href="index.php?r=iplists&amp;list=<?= gp_u($slist) ?>#ipl-entries"><?= gp_e(gp_t('ovr_shadow_link')) ?></a></div>
+		<?php endforeach; ?>
 		<form method="post" action="index.php?r=identity&amp;id=<?= gp_u($identity) ?>"
 			class="gp-form" style="margin-top:.75rem">
 			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">

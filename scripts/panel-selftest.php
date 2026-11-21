@@ -2491,14 +2491,22 @@ t_ok('sweep: the output is sorted and non-overlapping', $okorder);
 
 // ---- refusals and metadata
 $prot = gp_ipl_protected(array('198.51.100.200', '2001:db8:ffff::5', 'not-an-ip'));
-$rf = function ($t, $type) use ($prot) { return gp_ipl_refusal(gp_ipl_parse_entry($t), $type, $prot); };
-t_ok('refusal: a block entry wider than /8 (IPv4) or /32 (IPv6) is "wide", /8 and /32 are fine, an allow entry is never "wide"',
-	$rf('64.0.0.0/7', 'block') === 'wide' && $rf('64.0.0.0/8', 'block') === '' && $rf('2400::/31', 'block') === 'wide' && $rf('2400::/32', 'block') === '' && $rf('64.0.0.0/4', 'allow') === '' && $rf('0.0.0.0/0', 'block') === 'wide');
-t_ok('refusal: anything touching private, loopback, link-local space is "protected", for both types',
-	$rf('10.1.2.3', 'block') === 'protected' && $rf('192.168.0.0/16', 'allow') === 'protected' && $rf('127.0.0.1', 'block') === 'protected' && $rf('169.254.1.1', 'block') === 'protected' && $rf('172.20.0.0/14', 'block') === 'protected'
-	&& $rf('::1', 'block') === 'protected' && $rf('fc00:1::/32', 'block') === 'protected' && $rf('fc00::/8', 'allow') === 'protected' && $rf('fe80::/64', 'block') === 'protected' && $rf('0.0.0.0', 'block') === 'protected');
-t_ok('refusal: a /9 that CONTAINS a private block is protected too; public space is fine', $rf('0.0.0.0/9', 'block') === 'protected' && $rf('203.0.113.0/24', 'block') === '' && $rf('11.0.0.0/8', 'block') === '' && $rf('172.32.0.0/16', 'block') === '');
-t_ok('refusal: the server\'s and the operator\'s own addresses are protected, a bad extra is ignored', $rf('198.51.100.200', 'block') === 'protected' && $rf('198.51.100.0/24', 'block') === 'protected' && $rf('2001:db8:ffff::/48', 'block') === 'protected' && $rf('198.51.101.1', 'block') === '');
+$rf = function ($t, $type, $force = false) use ($prot) { return gp_ipl_refusal(gp_ipl_parse_entry($t), $type, $prot, $force); };
+t_ok('caps: 0.0.0.0/0 and ::/0 are dropped for BOTH types, and even when the list is forced (also as a mapped /96)',
+	$rf('0.0.0.0/0', 'allow') === 'all' && $rf('0.0.0.0/0', 'block') === 'all' && $rf('::/0', 'allow') === 'all' && $rf('::/0', 'block') === 'all'
+	&& $rf('0.0.0.0/0', 'allow', true) === 'all' && $rf('::/0', 'block', true) === 'all' && $rf('::ffff:0.0.0.0/96', 'allow', true) === 'all' && $rf('0.0.0.0', 'allow') === '');
+t_ok('caps: an allow entry wider than /16 (IPv4) or /32 (IPv6) is "allow_wide"; /16 and /32 are fine; forced keeps it',
+	$rf('64.0.0.0/12', 'allow') === 'allow_wide' && $rf('64.0.0.0/15', 'allow') === 'allow_wide' && $rf('64.0.0.0/16', 'allow') === '' && $rf('2400::/31', 'allow') === 'allow_wide' && $rf('2400::/32', 'allow') === ''
+	&& $rf('64.0.0.0/8', 'allow') === 'allow_wide' && $rf('64.0.0.0/12', 'allow', true) === '' && $rf('64.0.0.0/4', 'allow', true) === '');
+t_ok('caps: a block entry wider than /8 (IPv4) or /32 (IPv6) is "wide", /8 and /32 are fine, forced keeps it',
+	$rf('64.0.0.0/7', 'block') === 'wide' && $rf('64.0.0.0/8', 'block') === '' && $rf('2400::/31', 'block') === 'wide' && $rf('2400::/32', 'block') === '' && $rf('64.0.0.0/4', 'block', true) === '');
+t_ok('caps: a BLOCK entry touching private, loopback, link-local space is "protected" (v4 and v6); allow entries are not checked for it; forced keeps it',
+	$rf('10.1.2.3', 'block') === 'protected' && $rf('192.168.0.0/16', 'block') === 'protected' && $rf('127.0.0.1', 'block') === 'protected' && $rf('169.254.1.1', 'block') === 'protected' && $rf('172.20.0.0/14', 'block') === 'protected'
+	&& $rf('::1', 'block') === 'protected' && $rf('fc00:1::/32', 'block') === 'protected' && $rf('fe80::/64', 'block') === 'protected' && $rf('0.0.0.0', 'block') === 'protected'
+	&& $rf('192.168.0.0/16', 'allow') === '' && $rf('10.1.2.3', 'block', true) === '');
+t_ok('caps: a /9 that CONTAINS a private block is protected too; public space is fine', $rf('0.0.0.0/9', 'block') === 'protected' && $rf('203.0.113.0/24', 'block') === '' && $rf('11.0.0.0/8', 'block') === '' && $rf('172.32.0.0/16', 'block') === '');
+t_ok('caps: the server\'s own addresses are protected in a block list, a bad extra is ignored', $rf('198.51.100.200', 'block') === 'protected' && $rf('198.51.100.0/24', 'block') === 'protected' && $rf('2001:db8:ffff::/48', 'block') === 'protected' && $rf('198.51.101.1', 'block') === '');
+t_ok('caps: the reasons are the four known ones; "huge" means wider than /8', gp_ipl_reasons() === array('all', 'allow_wide', 'wide', 'protected') && gp_ipl_is_huge(gp_ipl_parse_entry('64.0.0.0/7')) && !gp_ipl_is_huge(gp_ipl_parse_entry('64.0.0.0/8')));
 $mv = function ($o) { return gp_ipl_validate_meta(array_merge(array('id' => 'a-list', 'idx' => 3, 'name' => 'A list', 'type' => 'block', 'mode' => 'monitor', 'enabled' => true, 'note' => ''), $o)); };
 t_ok('meta: a good record round-trips, every bad field is refused',
 	$mv(array())[0] && $mv(array('id' => 'A'))[0] === false && $mv(array('id' => '-a'))[0] === false && $mv(array('id' => str_repeat('a', 25)))[0] === false && $mv(array('name' => ''))[0] === false
@@ -2546,8 +2554,8 @@ $stw = gp_iplists_status();
 file_put_contents($il_tmp . '/lists/second.txt', "192.0.2.0/24\n");
 gp_iplists_compile();
 gv_geo_state(true);
-t_ok('compile: a forced list keeps its wide entry; an unforced one drops it and counts it', $stt['lists']['wide']['entries'] === 2 && $stt['lists']['wide']['wide'] === 0 && gv_iplist_check('70.1.1.1')['block'] !== null
-	&& $cw['ok'] && $stw['lists']['second']['entries'] === 1 && $stw['lists']['second']['wide'] === 1);
+t_ok('compile: a forced list keeps its wide entry; an unforced one drops it and counts it', $stt['lists']['wide']['entries'] === 2 && $stt['lists']['wide']['dropped_n'] === 0 && gv_iplist_check('70.1.1.1')['block'] !== null
+	&& $cw['ok'] && $stw['lists']['second']['entries'] === 1 && $stw['lists']['second']['dropped']['wide'] === 1 && $stw['lists']['second']['dropped_n'] === 1);
 $ids = array_map(function ($l) { return $l['id'] . ':' . $l['idx']; }, gp_iplists_state()['lists']);
 t_ok('save: ids are slugs of the name, indexes count up and are never reused', $ids === array('scrapers:1', 'second:2', 'wide:3'));
 t_ok('save: the same name gets a distinct id', $sv(array('name' => 'Scrapers', 'text' => '203.0.114.0/24'))['ok'] && gp_ipl_find(gp_iplists_state()['lists'], 'scrapers-2')['idx'] === 4);
@@ -2621,7 +2629,7 @@ t_ok('tester: IPv6 and IPv4-mapped input', gp_iplists_test('2001:db8::9')['effec
 $warn_lists = gp_iplists_state()['lists'];
 $wc = array_column(gp_iplists_warnings($warn_lists), 0);
 t_ok('warnings: an address in both an allow and a block list is reported with its lists', in_array('conflict', $wc, true) && (function () use ($warn_lists) { foreach (gp_iplists_warnings($warn_lists) as $w) { if ($w[0] === 'conflict') { return strpos($w[1], '203.0.113.64 - 203.0.113.127') !== false && strpos($w[1], 'partners / scrapers') !== false; } } return false; })());
-$sv(array('name' => 'Big allow', 'type' => 'allow', 'mode' => 'enforce', 'text' => "20.0.0.0/8\n100.64.5.0/24\n2a00::/16\n"));
+$sv(array('name' => 'Big allow', 'type' => 'allow', 'mode' => 'enforce', 'force' => '1', 'text' => "20.0.0.0/8\n100.64.5.0/24\n2a00::/16\n0.0.0.0/0\n", 'accept' => '1'));
 $ww = gp_iplists_warnings(gp_iplists_state()['lists']);
 $wm = array(); foreach ($ww as $w) { $wm[$w[0]] = $w[1]; }
 t_ok('warnings: an allow entry wider than /16 (or an IPv6 /16), and one in the shared CGNAT range', isset($wm['allow_wide']) && strpos($wm['allow_wide'], '20.0.0.0/8') !== false && strpos($wm['allow_wide'], '2a00::/16') !== false && isset($wm['allow_shared']) && strpos($wm['allow_shared'], '100.64.5.0/24') !== false);
@@ -2703,6 +2711,99 @@ t_ok('delete: with every list gone no compiled file is left, so the guard opens 
 file_put_contents($il_tmp . '/lists/lists.json', '{not json');
 t_ok('state: an unreadable lists.json is "invalid" and every write refuses until it is repaired', gp_iplists_state()['state'] === 'invalid' && $sv(array('name' => 'Z', 'text' => '1.2.3.4'))['msg'] === 'ipl_file_invalid' && gp_iplists_set(array('id' => 'a', 'enabled' => '1'), 't', '1')[0] === false);
 @unlink($il_tmp . '/lists/lists.json');
+// ---- the compile enforces the caps on files that never went through the form (SFTP, the worker)
+$_SERVER['SERVER_ADDR'] = '198.51.100.77';
+$cp1 = $sv(array('name' => 'Cap allow', 'type' => 'allow', 'mode' => 'enforce'));
+$cp2 = $sv(array('name' => 'Cap block', 'type' => 'block', 'mode' => 'enforce'));
+$cp3 = $sv(array('name' => 'Cap forced', 'type' => 'allow', 'mode' => 'enforce', 'force' => '1'));
+t_ok('caps: the panel records the server\'s own address in lists.json on every metadata write', $cp1['ok'] && $cp2['ok'] && $cp3['ok'] && gp_iplists_state()['own'] === array('198.51.100.77')
+	&& json_decode(file_get_contents($il_tmp . '/lists/lists.json'), true)['own'] === array('198.51.100.77'));
+unset($_SERVER['SERVER_ADDR']);
+file_put_contents($il_tmp . '/lists/cap-allow.txt', "0.0.0.0/0\n::/0\n64.0.0.0/12\n2400::/31\n203.0.113.0/24\nnot an address\r\n198.51.100.0/24\n");
+file_put_contents($il_tmp . '/lists/cap-block.txt', "0.0.0.0/0\n::/0\n10.1.0.0/16\n127.0.0.1\n169.254.9.9\nfc00:1::/32\n::1\nfe80::/64\n198.51.100.77\n64.0.0.0/7\n2400::/31\n203.0.114.0/24\nbogus\n2a02::/32\n");
+file_put_contents($il_tmp . '/lists/cap-forced.txt', "0.0.0.0/0\n::/0\n64.0.0.0/12\n2400::/31\n");
+$cpc = gp_iplists_compile();
+$cps = gp_iplists_status();
+$ca_ = $cps['lists']['cap-allow']; $cb_ = $cps['lists']['cap-block']; $cf_ = $cps['lists']['cap-forced'];
+t_ok('caps (SFTP file, allow): 0/0 and ::/0 and a /12 and an IPv6 /31 are dropped, valid entries kept, bad lines counted with their number, nothing fatal',
+	$cpc['ok'] && $ca_['dropped'] === array('all' => 2, 'allow_wide' => 2, 'wide' => 0, 'protected' => 0) && $ca_['dropped_n'] === 4 && $ca_['entries'] === 2 && $ca_['invalid'] === 1 && $ca_['invalid_samples'] === array(array(6, 'not an address'))
+	&& $ca_['dropped_samples'][0] === array('0.0.0.0/0', 'all') && $ca_['dropped_samples'][3] === array('2400::/31', 'allow_wide') && $ca_['dropped_huge'] === 2);
+t_ok('caps (SFTP file, block): 0/0, ::/0, private, loopback, link-local, ULA, the server\'s own address and a /7 or an IPv6 /31 are dropped; public entries kept',
+	$cb_['dropped'] === array('all' => 2, 'allow_wide' => 0, 'wide' => 2, 'protected' => 7) && $cb_['entries'] === 2 && $cb_['invalid'] === 1 && $cb_['dropped_huge'] === 0
+	&& in_array(array('198.51.100.77', 'protected'), $cb_['dropped_samples'], true));
+gv_geo_state(true);
+t_ok('caps: nothing dropped reached the compiled files: the guard finds the kept entries and none of the dropped ones',
+	gv_iplist_check('203.0.113.9')['allow'] !== null && gv_iplist_check('8.8.8.8')['allow'] === null && gv_iplist_check('1.1.1.1')['allow'] === null && gv_iplist_check('2a03::1')['allow'] === null && gv_iplist_check('0.0.0.5')['allow'] === null
+	&& gv_iplist_check('203.0.114.9')['block'] !== null && gv_iplist_check('10.1.2.3')['block'] === null && gv_iplist_check('127.0.0.1')['block'] === null && gv_iplist_check('198.51.100.77')['block'] === null && gv_iplist_check('2a02::1')['block'] !== null);
+t_ok('caps (forced list): 0/0 and ::/0 are STILL dropped, the /12 and the IPv6 /31 are kept', $cf_['dropped'] === array('all' => 2, 'allow_wide' => 0, 'wide' => 0, 'protected' => 0) && $cf_['entries'] === 2 && $cf_['dropped_huge'] === 2 && gv_iplist_check('64.1.1.1')['allow'] !== null && gv_iplist_check('8.8.8.8')['allow'] === null);
+$cph = gp_iplists_health(time(), array());
+$cphm = array(); foreach ($cph as $w) { $cphm[$w[0]] = $w[1]; }
+t_ok('caps: the dashboard gets a "dropped" warning (total and lists) and a critical "allow_huge" for the allow lists that lost an entry wider than /8; the block list alone does not raise allow_huge',
+	isset($cphm['dropped']) && strpos($cphm['dropped'], '17') === 0 && strpos($cphm['dropped'], 'cap-block') !== false && isset($cphm['allow_huge']) && strpos($cphm['allow_huge'], 'cap-allow') !== false && strpos($cphm['allow_huge'], 'cap-forced') !== false && strpos($cphm['allow_huge'], 'cap-block') === false);
+$cha = array(); foreach (gp_health_alerts(array('now' => time(), 'redis_up' => true, 'jobs' => array(), 'storage' => array('warnings' => array()), 'snapshot' => array('generated_at' => time(), 'tz' => array('offset' => 0)), 'tz_offset' => 0,
+	'queue' => array('stuck' => false), 'cron' => array('mode' => 'none', 'report' => null), 'iplist_warn' => $cph)) as $a_) { $cha[$a_['id']] = $a_['level']; }
+t_ok('caps: alert levels: allow_huge critical, dropped warning', ($cha['iplist_allow_huge'] ?? '') === 'critical' && ($cha['iplist_dropped'] ?? '') === 'warning');
+t_ok('caps (form): 0/0 pasted into a list is refused with the reason "all" even with the box ticked; a /12 in an allow list is refused unless forced',
+	(function () use ($sv) {
+		$a = $sv(array('name' => 'Cap form', 'type' => 'allow', 'force' => '1', 'text' => "0.0.0.0/0\n203.0.200.0/24\n"));
+		$b = $sv(array('name' => 'Cap form2', 'type' => 'allow', 'text' => "64.0.0.0/12\n"));
+		return !$a['ok'] && $a['report']['refused'][0][2] === 'all' && !$b['ok'] && $b['report']['refused'][0][2] === 'allow_wide';
+	})());
+$cap_render = function (array $vars) {
+	$errs = array();
+	set_error_handler(function ($no, $str) use (&$errs) { $errs[] = $str; return true; });
+	$state = gp_iplists_state();
+	$vars = array_merge(array('state' => $state, 'filter' => array(), 'edit' => null, 'save' => null, 'warnings' => array(), 'pending' => false, 'health' => array(), 'efilter' => array(), 'test_ip' => '', 'test' => null,
+		'test_ran' => false, 'limit' => 2097152, 'jobs' => array(), 'prev' => array('allow' => false, 'block' => false), 'snapshot' => null, 'route' => 'iplists', 'user' => 'tester'), $vars);
+	$vars['visible'] = $vars['all'];
+	extract($vars, EXTR_SKIP);
+	ob_start();
+	require __DIR__ . '/../panel/views/iplists.php';
+	$html = ob_get_clean();
+	restore_error_handler();
+	return array($html, $errs);
+};
+$cps_html = $cap_render(array('status' => $cps, 'all' => gp_iplists_rows(gp_iplists_state()['lists'], $cps, null), 'eid' => 'cap-block', 'entries' => gp_iplists_entries('cap-block', array())));
+t_ok('caps: the Compile and Entries tabs show what was dropped (counts per reason, samples) and the skipped lines, escaped; no PHP warning',
+	!$cps_html[1] && strpos($cps_html[0], '198.51.100.77 (protected)') !== false && strpos($cps_html[0], '0.0.0.0/0 (all)') !== false && strpos($cps_html[0], 'bogus') !== false && substr_count($cps_html[0], 'gp-badge-warn') >= 4);
+foreach (array('cap-allow', 'cap-block', 'cap-forced') as $d) { gp_iplists_delete($d, 'tester', '1.1.1.1'); }
+t_ok('caps: the test lists are gone again', gp_iplists_state()['lists'] === array() && !is_file($il_tmp . '/lists/block.bin'));
+
+// ---- a deny override under an ENFORCED allow list has no effect: warn, with a link to the list
+$sd1 = $sv(array('name' => 'Shadow allow', 'type' => 'allow', 'mode' => 'enforce', 'text' => "203.0.113.0/24\n2001:db8:aa::/48\n"));
+$sd2 = $sv(array('name' => 'Shadow monitor', 'type' => 'allow', 'mode' => 'monitor', 'text' => "198.51.100.0/24\n"));
+gv_geo_state(true);
+$sd_logs = $il_tmp . '/logs';
+file_put_contents($sd_logs . '/guard-' . date('Ymd') . '.jsonl', json_encode(array('ts' => time(), 'ip' => '203.0.113.50', 'dev' => 'devcovered', 'act' => 'allow')) . "\n"
+	. json_encode(array('ts' => time(), 'ip' => '192.0.2.50', 'dev' => 'devfree', 'act' => 'allow')) . "\n");
+$sd_cfg = $il_tmp . '/config-shadow.php';
+file_put_contents($sd_cfg, "<?php\nif (!defined('GV_BOOT')) { exit; }\n\$c = require " . var_export(__DIR__ . '/config.dev.php', true) . ";\n\$c['log_dir'] = " . var_export($sd_logs, true) . ";\nreturn \$c;\n");
+putenv('GV_CONFIG=' . $sd_cfg);
+$sh = gp_iplists_deny_shadow(array('203.0.113.9', '::ffff:203.0.113.9', '2001:db8:aa::5', '198.51.100.7', '8.8.8.8', 'devcovered', 'devfree', 'devunknown', '', 'x y'));
+putenv('GV_CONFIG');
+t_ok('shadow: an address inside an ENFORCED allow list (v4, mapped, v6) and a device seen on such an address are reported with the list id; a monitor allow list, other addresses, unknown or odd identities are not',
+	$sh === array('203.0.113.9' => 'shadow-allow', '::ffff:203.0.113.9' => 'shadow-allow', '2001:db8:aa::5' => 'shadow-allow', 'devcovered' => 'shadow-allow') && gp_iplists_allow_cover('198.51.100.7') === '' && gp_iplists_allow_cover('nonsense') === '');
+$sd_over = function (array $shadow) {
+	$errs = array();
+	set_error_handler(function ($no, $str) use (&$errs) { $errs[] = $str; return true; });
+	$vars = array('redis_up' => true, 'filter' => array(), 'items_all' => array(array('kind' => 'deny', 'identity' => '203.0.113.9', 'ttl' => 100)), 'items' => array(array('kind' => 'deny', 'identity' => '203.0.113.9', 'ttl' => 100)), 'shadow' => $shadow, 'route' => 'overrides', 'user' => 't');
+	extract($vars, EXTR_SKIP);
+	ob_start();
+	require __DIR__ . '/../panel/views/overrides.php';
+	$h = ob_get_clean();
+	restore_error_handler();
+	return array($h, $errs);
+};
+list($sd_h, $sd_e) = $sd_over(array('203.0.113.9' => 'shadow-allow'));
+t_ok('shadow: the Overrides page says the deny has no effect, names the list and links to its entries', !$sd_e && strpos($sd_h, 'data-shadow="203.0.113.9"') !== false && strpos($sd_h, 'has NO effect') !== false && strpos($sd_h, 'enforced allow list &quot;shadow-allow&quot;') !== false
+	&& strpos($sd_h, 'index.php?r=iplists&amp;list=shadow-allow#ipl-entries') !== false);
+list($sd_h2, $sd_e2) = $sd_over(array());
+t_ok('shadow: no warning when no deny is covered', !$sd_e2 && strpos($sd_h2, 'data-shadow') === false);
+$sd_src = file_get_contents(__DIR__ . '/../panel/index.php');
+t_ok('shadow: creating a deny override flashes the warning (the handler calls the check)', strpos($sd_src, "if (\$action === 'deny') {\n\t\t\t\t\$sh = gp_iplists_deny_shadow(") !== false && strpos((require __DIR__ . '/../panel/lang.php')['ovr_deny_shadowed'], '%s') !== false);
+foreach (array('shadow-allow', 'shadow-monitor') as $d) { gp_iplists_delete($d, 'tester', '1.1.1.1'); }
+t_ok('shadow: the test lists are gone again', gp_iplists_state()['lists'] === array());
+
 // Big lists go through the worker.
 $sv(array('name' => 'Huge', 'text' => '203.0.113.0/24'));
 file_put_contents($il_tmp . '/lists/huge.txt', str_repeat("203.0.113.0/24\n", 50000));

@@ -21,8 +21,7 @@ What changed in each release and what to do about it. Newest first.
 * New log reasons `IPL_ALLOW:<id>` / `IPL_BLOCK:<id>` (`SH_IPL_*` in monitor); the snapshot gains `iplists` (hits per list, 24 h / 7 d / last).
   A list hit that returns early writes the usual single log row (`allow_override` / `403`).
 * Saving checks every line: invalid lines are reported by line number and nothing is saved until the operator accepts the valid ones;
-  a block entry wider than /8 (IPv4) or /32 (IPv6), and any entry covering private, loopback, link-local space, the server's own address
-  or the operator's own address, is refused unless "I know what I'm doing" is ticked.
+  entries over the safety caps (see the review changes below) are refused unless "I know what I'm doing" is ticked, and the compile applies the same caps.
 * New dashboard alerts: a compiled list file missing or corrupt while its list is enabled (critical), a failed compile or compile job
   (critical), lists changed and not compiled for more than 10 minutes (warning). The dashboard's protection card counts enabled lists.
 * The IP lists page has tabs (Lists / Editor / Entries / Lookup tester / Compile), a tooltip on every field and include / exclude
@@ -71,6 +70,21 @@ sit within the run-to-run noise of this shared machine (+/- 15 us p50, much more
 benchmark process used to keep the generated test table (tens of MB) alive next to the timed loop, which inflated every number
 by 30-100 us; it is freed now (this also applies to the GeoIP rows of the previous release). A request that a list **hits** costs less than
 one it does not: it returns at step 3a, before any Redis connection (0 Redis commands, checked in `rules-e2e.sh`).
+
+**Review changes (same release)**
+
+* **The compile enforces the safety caps, not only the form.** `analyzer/iplist.py` (the worker, and files copied over SFTP) and the panel's compile share
+  one rule set (`gp_ipl_refusal()` / `refusal()`, kept in byte-parity by a test): `0.0.0.0/0` and `::/0` are **always** dropped, even with "force"; allow entries
+  wider than /16 (IPv4) or /32 (IPv6) are dropped; block entries wider than /8 or /32 are dropped; block entries covering private, loopback, link-local space
+  or the server's own addresses are dropped. `force` (panel only, audit-logged) keeps all but `0/0`. Dropped entries and bad lines are counted per list and reason
+  in `lists/lists-status.json` (shape changed: `wide` became `dropped` / `dropped_n` / `dropped_huge` / `dropped_samples`, plus `invalid_samples`), shown on the
+  Compile and Entries tabs, with a dashboard warning, and a **critical** alert when an allow list lost an entry wider than /8. `lists/lists.json` gains `own` (the server's
+  own addresses, written by the panel). **Check after upgrading:** an existing *allow* list with an entry wider than /16 (or a block list with private ranges) now loses it at the next compile
+  unless it is saved with the force box ticked; the Compile tab lists what was dropped.
+* **The enforced block list is decided before the challenge handshake** (step 1b of `gv_run`), so a block-listed address cannot drive handshake `POST`s (nonce claim,
+  counters, a Redis round trip): 403, zero Redis commands. Exempt paths and an enforced allow list still win; a monitor block list leaves the handshake unchanged.
+  The allow list stays after the handshake step.
+* **Deny override under an enforced allow list:** the Overrides and Identity pages (and the flash after creating the deny) now warn that the deny has no effect, with a link to the list.
 
 **Known and not changed:** see [06-KNOWN-LIMITS.md](06-KNOWN-LIMITS.md#ip-lists).
 

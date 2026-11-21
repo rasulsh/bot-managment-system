@@ -100,12 +100,13 @@ write_rules() {
 }
 
 
-# ilist ID IDX TYPE MODE ENABLED CIDR...  -> one list (record + source); lists_compile writes lists.json and runs the
+# ilist ID IDX TYPE MODE ENABLED CIDR...  -> one list (record + source; FORCE=true sets the list's force flag: the compile
+# drops loopback / private entries of a block list otherwise); lists_compile writes lists.json and runs the
 # worker's compiler (analyzer/iplist.py), exactly what the panel's job does for a big list.
 ILS=()
 ilist() {
 	local id=$1 idx=$2 type=$3 mode=$4 en=$5; shift 5
-	ILS+=("{\"id\":\"$id\",\"idx\":$idx,\"name\":\"$id\",\"type\":\"$type\",\"mode\":\"$mode\",\"enabled\":$en,\"force\":false,\"note\":\"\",\"created_by\":\"\",\"created_at\":0,\"updated_at\":0}")
+	ILS+=("{\"id\":\"$id\",\"idx\":$idx,\"name\":\"$id\",\"type\":\"$type\",\"mode\":\"$mode\",\"enabled\":$en,\"force\":${FORCE:-false},\"note\":\"\",\"created_by\":\"\",\"created_at\":0,\"updated_at\":0}")
 	printf '%s\n' "$@" > "$WORK/lists/$id.txt"
 }
 lists_compile() {
@@ -401,7 +402,7 @@ warn=$(GV_LISTS_DIR="$WORK/lists" GV_GEO_DIR="$WORK/geo" "$PHP_BIN" -r 'define("
 ok "L33 the panel's warning lists the conflicting range and both lists" "$(echo "$warn" | grep -q '^conflict 203.0.113.64 - 203.0.113.127 (partners / scrapers)' && echo 1 || echo 0)"
 
 echo "-- L: kill switch, exempt paths and the holdout"
-ilist hold 1 block enforce true 127.0.0.1
+FORCE=true ilist hold 1 block enforce true 127.0.0.1
 lists_compile
 eq "L34 a held-out client (127.0.0.1 is in the holdout here) is still refused by a block list" "$(get "$UA" /l34)" 403
 eq "L35 an exempt path bypasses a block list" "$(get "$UA" /exempt-me)" 200
@@ -409,6 +410,52 @@ touch "$ROOT/guard.off"
 eq "L36 the kill switch bypasses a block list" "$(get "$UA" /l36)" 200
 rm -f "$ROOT/guard.off"
 eq "L37 without the kill switch the list acts again" "$(get "$UA" /l37)" 403
+
+echo "-- L: an enforced block list is decided BEFORE the challenge handshake (no nonce claim, no counters, no Redis)"
+ilist none 1 block enforce false 1.2.3.4
+lists_compile
+write_rules "$(rule r-chal Chal enforce challenge '["chalbot"]')"
+XF='X-Forwarded-For: 203.0.113.9'
+hs() { curl -s -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: x chalbot' -H "$XF" -H "X-GV: $1" -H "X-GV-P: $2" "http://127.0.0.1:$PORT/"; }
+nonce() { body 'x chalbot' "$1" -H "$XF" | sed -n "s/.*var N = '\([^']*\)'.*/\1/p" | head -1; }
+N1=$(nonce /l60); C1=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$N1")
+N2=$(nonce /l61); C2=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$N2")
+N3=$(nonce /l62); C3=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$N3")
+ok "L60 three valid challenge nonces were issued to the not-yet-listed address" "$([ -n "$N1" ] && [ -n "$N2" ] && [ -n "$N3" ] && echo 1 || echo 0)"
+ilist scrapers 1 block enforce true 203.0.113.0/24
+lists_compile
+a=$(cmds); code=$(hs "$N1" "$C1"); b=$(cmds)
+eq "L61 a block-listed address POSTing a VALID handshake gets 403" "$code" 403
+eq "L62 ...with ZERO Redis commands (no nonce claim, no counters)" "$(( b - a ))" "$idle"
+has '"IPL_BLOCK:scrapers"'; ok "L63 ...logged once as act 403 with IPL_BLOCK" "$([ $? -eq 0 ] && has '"act":"403"' && echo 1 || echo 0)"
+ok "L64 ...and the nonce was NOT claimed: no nonce key exists in Redis" "$([ "$(redis-cli -p "$RPORT" --scan --pattern 'gv:nonce:*' | wc -l | tr -d ' ')" = 0 ] && echo 1 || echo 0)"
+ilist scrapers 1 block monitor true 203.0.113.0/24
+lists_compile
+eq "L65 a MONITOR block list leaves the handshake unchanged: the same valid POST gives 204" "$(hs "$N1" "$C1")" 204
+ilist scrapers 1 block enforce true 203.0.113.0/24
+ilist partners 2 allow enforce true 203.0.113.9
+lists_compile
+eq "L66 an enforced ALLOW list for the same address wins over the block list: the handshake goes through (204)" "$(hs "$N2" "$C2")" 204
+ilist scrapers 1 block enforce true 203.0.113.0/24
+ilist partners 2 allow monitor true 203.0.113.9
+lists_compile
+eq "L67 a MONITOR allow list does not protect it: the block list answers 403 before the handshake" "$(hs "$N3" "$C3")" 403
+eq "L68 an exempt path is not blocked: the handshake POST to it is not refused by the list" "$([ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: x chalbot' -H "$XF" "http://127.0.0.1:$PORT/exempt-me")" != 403 ] && echo ok)" ok
+write_rules
+
+echo "-- L: the compiler enforces the safety caps (an allow 0.0.0.0/0 copied over SFTP must not switch the guard off)"
+ilist everyone 1 allow enforce true 0.0.0.0/0 ::/0 64.0.0.0/12 2400::/31
+FORCE=true ilist everyone2 2 allow enforce true 0.0.0.0/0 ::/0
+lists_compile
+write_rules "$(rule r-evil Evil enforce block '["evilbot"]')"
+eq "L70 an allow list holding 0.0.0.0/0, ::/0 and a /12 (forced or not): everything is dropped, an enforced block rule still blocks" "$(get 'x evilbot' /l70)" 403
+ok "L71 ...no allow file was written at all" "$([ ! -e "$WORK/lists/allow.bin" ] && echo 1 || echo 0)"
+ok "L72 ...and lists-status.json records the dropped entries per list and reason (also the forced list's 0/0)" "$(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["lists"]; print(1 if d["everyone"]["dropped"]=={"all":2,"allow_wide":2,"wide":0,"protected":0} and d["everyone"]["dropped_huge"]==2 and d["everyone2"]["dropped"]["all"]==2 else 0)' "$WORK/lists/lists-status.json")"
+ilist blockall 1 block enforce true 0.0.0.0/0 10.0.0.0/8 127.0.0.1
+lists_compile
+eq "L73 a block list of 0.0.0.0/0, private and loopback entries drops them all: nobody is refused" "$(get "$UA" /l73)" 200
+ok "L74 ...no block file was written" "$([ ! -e "$WORK/lists/block.bin" ] && echo 1 || echo 0)"
+write_rules
 
 echo "-- L: broken files fail open, and the dashboard can see them"
 ilist scrapers 1 block enforce true 203.0.113.0/24

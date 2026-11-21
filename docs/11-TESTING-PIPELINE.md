@@ -124,6 +124,6 @@ counts), `rules-e2e.sh` section L over HTTP (block / allow / monitor, allow beat
 known-bot pass, both lists = allow wins with the panel warning, kill switch, exempt paths, holdout, zero Redis commands, broken
 files, Redis down) and `panel-smoke.sh` / `panel-layout-test.sh` (the page at desktop and phone width).
 `php scripts/bench-gv-run.php --list-lookup` times the lookup alone, `--lists=100000,10000` the whole `gv_run` with an allow and a
-block file of 100k IPv4 + 10k IPv6 ranges each. All of it works in temp directories (`GV_LISTS_DIR`, `GV_AUDIT`).
+block file of 100k IPv4 + 10k IPv6 ranges each. The safety caps are tested in PHP and Python (0/0 in allow with and without force, a /12 in allow, private / loopback / link-local / server address / IPv6 equivalents in block, a mixed valid / invalid SFTP-style file, byte parity of the files and the status, `rules-e2e.sh` L70-L74), the block check before the handshake in `rules-e2e.sh` L60-L68, and the "deny under an allow list" warning in `panel-selftest.php`. All of it works in temp directories (`GV_LISTS_DIR`, `GV_AUDIT`).
 
 `rules-e2e.sh` needs `php`, `python3`, `curl`, `redis-server`; it creates and removes `guard.off` in the project root.

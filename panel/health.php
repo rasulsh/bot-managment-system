@@ -398,7 +398,7 @@ function gp_health_alerts(array $in) {
 	foreach ((array)($in['iplist_warn'] ?? array()) as $w) {
 		// A list file that is missing or corrupt while its list is enabled, or a failed compile: the guard
 		// silently treats the list as empty (fail-open), so these are critical. A pending compile is a warning.
-		$add('iplist_' . $w[0] . ($w[0] === 'file_missing' || $w[0] === 'file_corrupt' ? '_' . $w[1] : ''), $w[0] === 'pending' ? 'warning' : 'critical',
+		$add('iplist_' . $w[0] . ($w[0] === 'file_missing' || $w[0] === 'file_corrupt' ? '_' . $w[1] : ''), in_array($w[0], array('pending', 'dropped'), true) ? 'warning' : 'critical',
 			'al_iplist_' . $w[0], $w[1], 'iplists');
 	}
 	if (($in['rules_state'] ?? '') === 'invalid') { $add('rules_invalid', 'critical', 'al_rules_invalid', '', 'rules'); }

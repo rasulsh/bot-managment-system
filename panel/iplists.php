@@ -29,6 +29,7 @@ define('GP_IPL_WIDE_V6', 32);               // ... or /32 (IPv6) needs "I know w
 define('GP_IPL_ALLOW_WIDE_V4', 16);         // an allow entry wider than /16 is warned about
 define('GP_IPL_ALLOW_WIDE_V6', 32);
 define('GP_IPL_SHOW_MAX', 200);
+define('GP_IPL_SAMPLES', 10);              // dropped entries / invalid lines kept per list in lists-status.json
 
 // ---------------------------------------------------------------- paths
 
@@ -245,25 +246,59 @@ function gp_ipl_protected($extra = array()) {
 	return $out;
 }
 
-// The addresses to protect for this request: the server's own and the operator's own.
-function gp_ipl_own_addresses($client_ip = '') {
+// The server's own addresses as this request sees them (SERVER_ADDR / LOCAL_ADDR).
+function gp_ipl_server_addresses() {
 	$own = array();
-	foreach (array('SERVER_ADDR', 'LOCAL_ADDR') as $k) { if (!empty($_SERVER[$k]) && is_string($_SERVER[$k])) { $own[] = $_SERVER[$k]; } }
+	foreach (array('SERVER_ADDR', 'LOCAL_ADDR') as $k) {
+		if (!empty($_SERVER[$k]) && is_string($_SERVER[$k]) && filter_var($_SERVER[$k], FILTER_VALIDATE_IP) !== false) { $own[] = gv_ip_canon($_SERVER[$k]); }
+	}
+	return $own;
+}
+
+// The server's own addresses kept in lists.json ("own"): the panel adds the ones it sees on every metadata
+// write, so the compile step (here and the worker's) can protect them without a request. 16 at most.
+function gp_ipl_merge_own(array $stored, array $seen) {
+	$out = array();
+	foreach (array_merge($stored, $seen) as $ip) {
+		if (is_string($ip) && filter_var($ip, FILTER_VALIDATE_IP) !== false && !in_array($ip, $out, true)) { $out[] = $ip; }
+	}
+	return array_slice($out, 0, 16);
+}
+
+// The addresses to protect at save time: the stored server addresses and the operator's own.
+function gp_ipl_own_addresses($client_ip = '', array $stored = array()) {
+	$own = gp_ipl_merge_own($stored, gp_ipl_server_addresses());
 	if ($client_ip !== '') { $own[] = $client_ip; }
 	return $own;
 }
 
-// Why an entry is refused for a list of this type, or '' when it is fine. Pure.
-// 'wide': a block entry wider than /8 (IPv4) or /32 (IPv6). 'protected': it covers
-// private, loopback, own addresses.
-function gp_ipl_refusal(array $en, $type, array $protected) {
-	if ($type === 'block' && $en['p'] < ($en['v'] === 4 ? GP_IPL_WIDE_V4 : GP_IPL_WIDE_V6)) { return 'wide'; }
+// THE SAFETY CAPS: one function, used by the compile step (here and analyzer/iplist.py, which mirrors
+// it exactly) and by the form's save check. Why an entry of a list of this type is dropped, or '' when
+// it is kept. Pure.
+//   'all'        0.0.0.0/0 or ::/0: ALWAYS dropped, even with "force" (an allow list with it would switch
+//                the whole guard off, a block list would refuse everybody).
+//   'allow_wide' an allow entry wider than /16 (IPv4) or /32 (IPv6)
+//   'wide'       a block entry wider than /8 (IPv4) or /32 (IPv6)
+//   'protected'  a block entry that covers private, loopback, link-local space or the server's own address
+// The list's "force" flag (set only from the panel, audit-logged) keeps everything except 'all'.
+function gp_ipl_refusal(array $en, $type, array $protected, $force = false) {
+	if ($en['p'] === 0) { return 'all'; }
+	if ($force) { return ''; }
+	if ($type === 'allow') { return $en['p'] < ($en['v'] === 4 ? GP_IPL_ALLOW_WIDE_V4 : GP_IPL_ALLOW_WIDE_V6) ? 'allow_wide' : ''; }
+	if ($en['p'] < ($en['v'] === 4 ? GP_IPL_WIDE_V4 : GP_IPL_WIDE_V6)) { return 'wide'; }
 	foreach ($protected as $p) {
 		if ($p['v'] !== $en['v']) { continue; }
 		if (strcmp($en['s'], $p['e']) <= 0 && strcmp($en['e'], $p['s']) >= 0) { return 'protected'; }
 	}
 	return '';
 }
+
+// The reasons, in the order they are reported.
+function gp_ipl_reasons() { return array('all', 'allow_wide', 'wide', 'protected'); }
+
+// An allow entry wider than /8 would skip the guard for a huge part of the internet: the dashboard calls
+// this one critical.
+function gp_ipl_is_huge(array $en) { return $en['p'] < 8; }
 
 // ---------------------------------------------------------------- metadata (lists.json)
 
@@ -299,7 +334,7 @@ function gp_ipl_validate_meta($l) {
 // The metadata file as the panel sees it. state: missing | ok | invalid.
 function gp_iplists_state() {
 	$path = gv_iplist_meta_path();
-	$out = array('state' => 'missing', 'lists' => array(), 'next_idx' => 1, 'path' => $path);
+	$out = array('state' => 'missing', 'lists' => array(), 'next_idx' => 1, 'own' => array(), 'path' => $path);
 	if (!is_file($path)) { return $out; }
 	$raw = @file_get_contents($path);
 	if ($raw === false || trim($raw) === '') { $out['state'] = 'ok'; return $out; }
@@ -311,6 +346,7 @@ function gp_iplists_state() {
 		if ($v[0]) { $out['lists'][] = $v[1]; } else { $out['state'] = 'invalid'; }
 	}
 	$out['next_idx'] = max(1, isset($d['next_idx']) ? (int)$d['next_idx'] : 1);
+	$out['own'] = gp_ipl_merge_own(isset($d['own']) && is_array($d['own']) ? $d['own'] : array(), array());
 	foreach ($out['lists'] as $l) { $out['next_idx'] = max($out['next_idx'], $l['idx'] + 1); }
 	return $out;
 }
@@ -323,9 +359,9 @@ function gp_ipl_ensure_dir() {
 }
 
 // Write lists.json (temp + rename). Returns true or false.
-function gp_iplists_write(array $lists, $next_idx) {
+function gp_iplists_write(array $lists, $next_idx, array $own = array()) {
 	if (!gp_ipl_ensure_dir()) { return false; }
-	$json = json_encode(array('v' => 1, 'next_idx' => (int)$next_idx, 'lists' => array_values($lists)), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+	$json = json_encode(array('v' => 1, 'next_idx' => (int)$next_idx, 'own' => array_values($own), 'lists' => array_values($lists)), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
 	if ($json === false) { return false; }
 	$path = gv_iplist_meta_path();
 	$tmp = $path . '.tmp' . getmypid();
@@ -346,7 +382,8 @@ function gp_iplists_update($fn) {
 		if ($st['state'] === 'invalid') { return array(false, 'ipl_file_invalid'); }
 		$new = $fn($st['lists'], $st['next_idx']);
 		if (is_string($new)) { return array(false, $new); }
-		return gp_iplists_write($new[0], $new[1]) ? array(true, '') : array(false, 'write_failed');
+		// every metadata write also records the server's own addresses this request sees
+		return gp_iplists_write($new[0], $new[1], gp_ipl_merge_own($st['own'], gp_ipl_server_addresses())) ? array(true, '') : array(false, 'write_failed');
 	} finally {
 		if ($lock) { @flock($lock, LOCK_UN); @fclose($lock); }
 	}
@@ -381,10 +418,11 @@ function gp_iplists_compile($now = null) {
 	try {
 		$st = gp_iplists_state();
 		$lists = $st['lists'];
+		$protected = gp_ipl_protected($st['own']);          // private space + the server's own addresses (block lists)
 		usort($lists, function ($a, $b) { return $a['idx'] <=> $b['idx']; });
 		foreach (gv_iplist_types() as $type) {
 			$mine = array_values(array_filter($lists, function ($l) use ($type) { return $l['type'] === $type && $l['enabled']; }));
-			gp_ipl_compile_type($type, $mine, $now, $status);
+			gp_ipl_compile_type($type, $mine, $now, $status, $protected);
 		}
 		$status['ok'] = !$status['errors'];
 		$path = gp_ipl_status_path();
@@ -397,7 +435,7 @@ function gp_iplists_compile($now = null) {
 	return $status;
 }
 
-function gp_ipl_compile_type($type, array $lists, $now, array &$status) {
+function gp_ipl_compile_type($type, array $lists, $now, array &$status, array $protected = array()) {
 	$path = gv_iplist_file($type);
 	$r4 = array();
 	$r6 = array();
@@ -408,18 +446,29 @@ function gp_ipl_compile_type($type, array $lists, $now, array &$status) {
 		$raw = @file_get_contents(gp_ipl_source_path($l['id']));
 		if ($raw === false) { $status['errors'][] = $l['id'] . ': cannot read the source'; $failed = true; continue; }
 		hash_update($digest, $l['idx'] . ':' . $l['mode'] . ':' . $raw);
+		// The same checks as a panel upload, for a file that never went through the form (SFTP, the worker):
+		// lines that do not parse are counted and shown, entries over a cap are dropped; nothing is fatal.
 		list($entries, $bad) = gp_ipl_parse_text($raw);
-		$wide = 0;
+		$dropped = array_fill_keys(gp_ipl_reasons(), 0);
+		$samples = array();
+		$huge = 0;
 		$own4 = array();
 		$own6 = array();
 		foreach ($entries as $en) {
-			if ($type === 'block' && !$l['force'] && $en['p'] < ($en['v'] === 4 ? GP_IPL_WIDE_V4 : GP_IPL_WIDE_V6)) { $wide++; continue; }
+			$why = gp_ipl_refusal($en, $type, $protected, $l['force']);
+			if ($why !== '') {
+				$dropped[$why]++;
+				if ($type === 'allow' && gp_ipl_is_huge($en)) { $huge++; }
+				if (count($samples) < GP_IPL_SAMPLES) { $samples[] = array(gp_ipl_entry_text($en), $why); }
+				continue;
+			}
 			if ($en['v'] === 4) { $own4[] = array($en['s'], $en['e']); } else { $own6[] = array($en['s'], $en['e']); }
 		}
 		$u4 = gp_ipl_union($own4);
 		$u6 = gp_ipl_union($own6);
-		$status['lists'][$l['id']] = array('entries' => count($entries) - $wide, 'v4' => count($u4), 'v6' => count($u6),
-			'addresses' => gp_ipl_count4($u4), 'invalid' => count($bad), 'wide' => $wide);
+		$status['lists'][$l['id']] = array('entries' => count($entries) - array_sum($dropped), 'v4' => count($u4), 'v6' => count($u6),
+			'addresses' => gp_ipl_count4($u4), 'invalid' => count($bad), 'invalid_samples' => array_slice($bad, 0, GP_IPL_SAMPLES),
+			'dropped' => $dropped, 'dropped_n' => array_sum($dropped), 'dropped_huge' => $huge, 'dropped_samples' => $samples);
 		foreach ($u4 as $r) { $r4[] = array($r[0], $r[1], $value); }
 		foreach ($u6 as $r) { $r6[] = array($r[0], $r[1], $value); }
 	}
@@ -447,8 +496,17 @@ function gp_iplists_compile_mode(array $lists, $force_job = false) {
 	return (!$force_job && gp_ipl_enabled_bytes($lists) <= GP_IPL_INLINE_BYTES) ? 'inline' : 'job';
 }
 
+// Record the server's own addresses (see gp_ipl_merge_own) when this request sees one that is not stored yet.
+function gp_iplists_touch_own() {
+	$st = gp_iplists_state();
+	if ($st['state'] === 'ok' && $st['lists'] && gp_ipl_merge_own($st['own'], gp_ipl_server_addresses()) !== $st['own']) {
+		gp_iplists_update(function ($lists, $next) { return array($lists, $next); });        // the update records the server addresses
+	}
+}
+
 // Compile now (small) or queue the job (big). Returns array(ok, lang key, detail).
 function gp_iplists_compile_auto($actor, $force_job = false) {
+	gp_iplists_touch_own();                          // the worker compiles with the addresses stored in lists.json
 	$st = gp_iplists_state();
 	if (gp_iplists_compile_mode($st['lists'], $force_job) === 'inline') {
 		$r = gp_iplists_compile();
@@ -526,11 +584,11 @@ function gp_iplists_save(array $p, $file, $actor, $client_ip) {
 	$sum = null;
 	if ($text !== null) {
 		list($entries, $bad) = gp_ipl_parse_text($text);
-		$prot = gp_ipl_protected(gp_ipl_own_addresses($client_ip));
+		$prot = gp_ipl_protected(gp_ipl_own_addresses($client_ip, $st['own']));
 		$ok_entries = array();
 		$refused = array();
 		foreach ($entries as $en) {
-			$why = $meta['force'] ? '' : gp_ipl_refusal($en, $meta['type'], $prot);
+			$why = gp_ipl_refusal($en, $meta['type'], $prot, $meta['force']);
 			if ($why === '') { $ok_entries[] = $en; } else { $refused[] = array($en['line'], gp_ipl_entry_text($en), $why); }
 		}
 		$report = array('invalid' => array_slice($bad, 0, GP_IPL_SHOW_MAX), 'invalid_n' => count($bad), 'refused' => array_slice($refused, 0, GP_IPL_SHOW_MAX), 'refused_n' => count($refused));
@@ -743,6 +801,52 @@ function gp_iplists_test($ip) {
 	return $res;
 }
 
+// ---------------------------------------------------------------- deny overrides under an allow list
+
+// The id of the ENFORCED allow list that holds this address (the guard checks it before any override,
+// so such an address is never denied), or ''. Reads the live compiled file, like the guard.
+function gp_iplists_allow_cover($ip) {
+	$ip = gp_geo_clean_ip($ip);
+	if ($ip === '') { return ''; }
+	$h = gv_iplist_check($ip);
+	return ($h['allow'] !== null && !$h['allow']['monitor']) ? gv_iplist_id($h['allow']['idx']) : '';
+}
+
+// The addresses recent log rows show for these device ids (bounded by the log scan caps).
+function gp_iplists_device_ips(array $devs, $max = 20) {
+	$want = array_fill_keys($devs, true);
+	$out = array();
+	if (!$want) { return $out; }
+	gp_log_scan(array_slice(gp_log_dates(), 0, 2), function ($row) use ($want, &$out, $max) {
+		$d = isset($row['dev']) && is_string($row['dev']) ? $row['dev'] : '';
+		if ($d === '' || !isset($want[$d]) || !isset($row['ip']) || !is_string($row['ip'])) { return; }
+		if (!isset($out[$d])) { $out[$d] = array(); }
+		if (count($out[$d]) < $max && !in_array($row['ip'], $out[$d], true)) { $out[$d][] = $row['ip']; }
+	});
+	return $out;
+}
+
+// Which of these identities (an address or a device id) a deny override can NOT touch because the address
+// (for a device: an address it was seen on) is inside an enforced allow list. Returns identity => list id.
+function gp_iplists_deny_shadow(array $identities) {
+	$out = array();
+	$devs = array();
+	foreach ($identities as $id) {
+		if (!is_string($id) || $id === '') { continue; }
+		if (filter_var($id, FILTER_VALIDATE_IP) !== false) {
+			$l = gp_iplists_allow_cover($id);
+			if ($l !== '') { $out[$id] = $l; }
+		} else { $devs[] = $id; }
+	}
+	foreach (gp_iplists_device_ips($devs) as $dev => $ips) {
+		foreach ($ips as $ip) {
+			$l = gp_iplists_allow_cover($ip);
+			if ($l !== '') { $out[$dev] = $l; break; }
+		}
+	}
+	return $out;
+}
+
 // ---------------------------------------------------------------- warnings
 
 // ASNs of mobile operators whose addresses are shared by many subscribers (a partial, fixed list:
@@ -862,6 +966,16 @@ function gp_iplists_health($now = null, $jobs = null) {
 			if ($fh) { fclose($fh); }
 			if ($h === null || $h['kind'] !== GV_GEO_IPLIST) { $out[] = array('file_corrupt', $t); }
 		}
+		// Entries the compile dropped for a cap: a warning; an allow list that lost an entry wider than /8
+		// (a would-be hole in the whole guard) is critical.
+		$dn = 0; $dids = array(); $huge = array();
+		foreach ((array)($status['lists'] ?? array()) as $id => $c) {
+			if (!is_array($c)) { continue; }
+			if ((int)($c['dropped_n'] ?? 0) > 0) { $dn += (int)$c['dropped_n']; $dids[] = (string)$id; }
+			if ((int)($c['dropped_huge'] ?? 0) > 0) { $huge[] = (string)$id; }
+		}
+		if ($huge) { $out[] = array('allow_huge', implode(', ', $huge)); }
+		if ($dn > 0) { $out[] = array('dropped', $dn . ' (' . implode(', ', $dids) . ')'); }
 		if (empty($status['ok'])) { $out[] = array('compile_failed', implode('; ', array_slice((array)($status['errors'] ?? array()), 0, 2))); }
 	}
 	if ($jobs === null) { $jobs = $enabled ? gp_job_list(30) : array(); }
