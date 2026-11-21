@@ -1045,14 +1045,21 @@ foreach (array(
 	'broken regex'            => array('ua' => t_cond('regex', array('(unclosed'))),
 	'regex backreference'     => array('ua' => t_cond('regex', array('(a)\1'))),
 	'catastrophic regex'      => array('ua' => t_cond('regex', array('(a+)+$'))),
+	'slow but not failing regex' => array('ua' => t_cond('regex', array('(.{1,50}){3}!x'))),
 ) as $label => $over) {
 	$r = gv_rule_validate(t_rule($over), true);
 	t_ok('rejected: ' . $label, $r[0] === false);
 }
+$r = gv_rule_validate(t_rule(array('ua' => t_cond('regex', array('ok', '(.{1,50}){3}!x')))), true);
+t_ok('a slow regex is refused with code regex_slow and the measured time', $r[0] === false && $r[1]['ua'] === 'regex_slow' && preg_match('/value 2: one match took [\\d.]+ ms/', $r[2]['ua']) === 1);
 $r = gv_rule_validate(t_rule(array('ua' => t_cond('regex', array('ok', '(bad')))), true);
 t_ok('a regex error names the offending value', $r[0] === false && isset($r[2]['ua']) && strpos($r[2]['ua'], 'value 2') === 0);
 t_ok('the guard-side check does not compile (deep off): a bad regex is caught by the panel',
 	gv_rule_validate(t_rule(array('ua' => t_cond('regex', array('(unclosed')))), false)[0] === true);
+foreach (array('^python-(requests|urllib)/\\d', 'headless(chrome)?', '^(?:curl|wget)/', '(libwww|okhttp|java)/\\d', '^$') as $fine) {
+	t_ok('an ordinary regex is accepted by the timing check: ' . $fine, gv_rule_validate(t_rule(array('ua' => t_cond('regex', array($fine)))), true)[0] === true);
+}
+t_ok('the regex timing limit is 1 ms', GV_RULES_MAX_MATCH_US === 1000);
 t_ok('a regex of 301 chars is refused', gv_rule_validate(t_rule(array('ua' => t_cond('regex', array(str_repeat('a', 301))))), true)[0] === false);
 $l = gv_rules_validate_list(array(t_rule(), t_rule()), true);
 t_ok('duplicate ids in one list are refused', $l[0] === false);
@@ -1143,6 +1150,67 @@ foreach ($ua_samples as $ua => $id) {
 $browser_hit = false;
 foreach (gv_rules_starter() as $s) { if (gv_rule_matches($s, t_facts())) { $browser_hit = true; } }
 t_ok('no starter rule matches a current Chrome', !$browser_hit);
+
+// Verified-bot skip, including the degraded-mode policy.
+t_ok('a verified verdict skips a rule that asks for it', gv_rule_bot_skip($blk, 'ok', true) === 'verified');
+t_ok('a verified verdict does not skip a rule with skip_verified_bots off', gv_rule_bot_skip(array_merge($blk, array('skip_verified_bots' => false)), 'ok', true) === '');
+t_ok('an unverified claim (no verdict, Redis alive) is not skipped', gv_rule_bot_skip($blk, '', true) === '');
+t_ok('a refuted claim is not skipped', gv_rule_bot_skip($blk, 'bad', true) === '');
+t_ok('a refuted claim is not skipped even if Redis then dies', gv_rule_bot_skip($blk, 'bad', false) === '');
+t_ok('Redis down and no verdict: the known-bot claim counts as verified (degraded)', gv_rule_bot_skip($blk, '', false) === 'degraded');
+t_ok('Redis down, rule with skip_verified_bots off: not skipped', gv_rule_bot_skip(array_merge($blk, array('skip_verified_bots' => false)), '', false) === '');
+
+// The generated cache: guard/rules.cache.php.
+$cf_json = $GV_TMP_LOGS . '/cache-rules.json';
+$cf_cache = gv_rules_cache_path($cf_json);
+putenv('GV_RULES=' . $cf_json);
+t_ok('the cache path sits next to the JSON', $cf_cache === $GV_TMP_LOGS . '/cache-rules.cache.php');
+@unlink($cf_json); @unlink($cf_cache);
+t_ok('no rules.json means no rules (even if a cache exists)', (function () use ($cf_cache) { file_put_contents($cf_cache, '<?php return array(array("id" => "zzz"));'); return gv_rules_load() === array(); })());
+$c_rules = array(
+	t_rule(array('id' => 'r-c2', 'priority' => 20, 'ua' => t_cond('regex', array('^zz', 'yy$')))),
+	t_rule(array('id' => 'r-c1', 'priority' => 10)),
+	t_rule(array('id' => 'r-off', 'priority' => 5, 'enabled' => false)),
+	t_rule(array('id' => 'r-c3', 'priority' => 30, 'ua' => t_cond('exact', array(GV_RULE_EMPTY, 'x')), 'path' => t_cond('prefix', array('/a')))),
+);
+file_put_contents($cf_json, gv_rules_encode($c_rules));
+$src = gv_rules_cache_source($c_rules);
+file_put_contents($cf_cache, $src);
+$loaded = gv_rules_load();
+t_ok('the cache holds enabled rules only, sorted by priority', array_column($loaded, 'id') === array('r-c1', 'r-c2', 'r-c3'));
+t_ok('the cache carries the compiled pattern and blank flag', isset($loaded[1]['ua']['pat']) && $loaded[1]['ua']['blank'] === false && $loaded[2]['ua']['blank'] === true);
+t_ok('a cached rule matches exactly like the JSON rule', gv_rule_matches($loaded[0], array('ua' => 'x badbot', 'path' => '/')) && gv_rule_matches($loaded[1], array('ua' => 'zzabc', 'path' => '/'))
+	&& gv_rule_matches($loaded[2], array('ua' => '', 'path' => '/a/b')) && !gv_rule_matches($loaded[2], array('ua' => '', 'path' => '/b')));
+$cache_idents = array();
+foreach (token_get_all(substr($src, strpos($src, 'return array'))) as $tk) {
+	if (is_array($tk) && $tk[0] === T_STRING) { $cache_idents[] = strtolower($tk[1]); }
+}
+t_ok('the cache is generated PHP: a pure array literal (no function call, only true/false/null) guarded by GV_BOOT',
+	strpos($src, "if (!defined('GV_BOOT'))") !== false && array_diff($cache_idents, array('true', 'false', 'null')) === array());
+t_ok('the cache source is valid PHP that returns an array', (function () use ($cf_cache) { $r = include $cf_cache; return is_array($r) && count($r) === 3; })());
+t_ok('with no enabled rule the cache is an empty array and the guard has nothing to do',
+	(function () use ($cf_cache) { file_put_contents($cf_cache, gv_rules_cache_source(array(t_rule(array('enabled' => false))))); touch($cf_cache, time() + 5); return gv_rules_load() === array(); })());
+file_put_contents($cf_cache, $src);
+touch($cf_json, time() + 10);
+touch($cf_cache, time() - 10);
+$stale_log = $GV_TMP_LOGS . '/guard-errors.log';
+@unlink($stale_log);
+foreach ((array)glob($GV_TMP_LOGS . '/.err-rules_cache_stale') as $m) { @unlink($m); }
+$from_json = gv_rules_load();
+t_ok('a cache older than rules.json is not used: the JSON is read directly', count($from_json) === 4);
+t_ok('...and the stale cache is reported once in guard-errors.log', is_file($stale_log) && substr_count((string)file_get_contents($stale_log), 'rules_cache_stale') === 1);
+gv_rules_load();
+t_ok('...rate-limited: a second request adds no second line', substr_count((string)file_get_contents($stale_log), 'rules_cache_stale') === 1);
+@unlink($cf_cache);
+t_ok('a missing cache falls back to the JSON too', count(gv_rules_load()) === 4);
+file_put_contents($cf_cache, '<?php return "not an array";');
+touch($cf_cache, time() + 20);
+t_ok('a cache that returns a non-array falls back to the JSON', count(gv_rules_load()) === 4);
+file_put_contents($cf_cache, '<?php this is broken (');
+touch($cf_cache, time() + 20);
+t_ok('a cache file that fails to parse is no rules, never a 500', gv_rules_load() === array());
+@unlink($cf_json); @unlink($cf_cache); @unlink($stale_log);
+putenv('GV_RULES');
 
 // Rules add no Redis round trip: the request-path functions take no connection.
 $no_conn = true;

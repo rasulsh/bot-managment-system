@@ -67,6 +67,11 @@ tp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'test=1' --data-urlencode
 check "the test box names the rule" "$(grep -q "$rid" <<<"$tp" && grep -q 'Winning rule' <<<"$tp" && echo 1 || echo 0)"
 qp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'new=1' --data-urlencode 'qua=curl/8.4.0' "$URL?r=rules")"
 check "quick block pre-fills the form" "$(grep -q 'curl/8.4.0' <<<"$qp" && grep -q 'name="ua_values"' <<<"$qp" && echo 1 || echo 0)"
+check "quick block shows the impact preview before saving" "$(grep -q 'Impact preview' <<<"$qp" && grep -q 'Matching requests' <<<"$qp" && echo 1 || echo 0)"
+tok="$(printf '%s' "$qp" | csrf)"
+pp="$(curl -sk -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=preview' -d 'name=Smoke preview' -d 'mode=monitor' -d 'action=block' -d 'priority=900' \
+	-d 'ua_op=include' -d 'ua_type=exact' --data-urlencode 'ua_values=curl/8.4.0' "$URL?r=rules")"
+check "the Preview button shows the impact and saves nothing" "$(grep -q 'Impact preview' <<<"$pp" && grep -q 'nothing was saved' <<<"$pp" && echo 1 || echo 0)"
 tok="$(printf '%s' "$rp" | csrf)"
 curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=toggle' -d "id=$rid" "$URL?r=rules"
 rp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=rules")"

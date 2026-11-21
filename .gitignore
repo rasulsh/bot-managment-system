@@ -53,3 +53,5 @@ guard/rules.json
 guard/rules.json.tmp*
 guard/rules.json.lock
 analyzer/.rule-hits.json
+guard/rules.cache.php
+guard/rules.cache.php.tmp*

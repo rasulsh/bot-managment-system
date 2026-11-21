@@ -15,6 +15,6 @@ sleep 0.4
 for args in "--rules=0" "--rules=20" "--rules=200" "--rules=200 --values=50" "--rules=200 --regex"; do
 	for _ in $(seq 1 "$RUNS"); do
 		# shellcheck disable=SC2086
-		"$PHP_BIN" "$ROOT/scripts/bench-gv-run.php" --redis-port="$RPORT" $args
+		"$PHP_BIN" ${GV_BENCH_PHPFLAGS:--d opcache.enable_cli=1 -d opcache.file_update_protection=0} "$ROOT/scripts/bench-gv-run.php" --redis-port="$RPORT" $args
 	done
 done

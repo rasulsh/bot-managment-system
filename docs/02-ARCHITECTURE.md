@@ -170,9 +170,30 @@ sooner and does not depend on the score or `enforce.block`. A matched rule adds 
 refused), capped at 300 chars, no back-references. All values of a rule are joined into one
 alternation. At request time a PCRE error = no match (also for `exclude`).
 
-**File stamp.** The panel writes `{"v":1,"crc":...,"rules":[...]}`. A good checksum lets the
-guard skip per-rule validation (which costs more than everything else); a hand-edited or
-unstamped file is validated rule by rule and works the same, slower.
+**The generated cache.** `guard/rules.json` stays the source of truth. On every save the panel
+also writes `guard/rules.cache.php`, generated only with `var_export()` from the validated list:
+enabled rules only, sorted by priority, each UA condition carrying its compiled pattern and blank
+flag. It is a plain array literal (no code), so OPcache keeps it in shared memory and a request
+pays no file read, no JSON decode, no validation and no pattern building. The guard includes the
+cache when it is at least as new as `rules.json` (`filemtime`); if the cache is missing or older
+(for example `rules.json` was edited by hand) it reads `rules.json` directly and writes one
+rate-limited line, `rules cache stale`, to `guard-errors.log`. Saving in the panel rebuilds it. A
+missing `rules.json` means no rules whatever the cache says; with no enabled rule the cache is an
+empty array and the guard does nothing more. After a save the panel calls `opcache_invalidate()`
+on the cache; if the guard runs in another PHP pool, OPcache may serve the previous version for up
+to `opcache.revalidate_freq` seconds (default 2).
+
+The JSON is also stamped (`{"v":1,"crc":...}`): a good checksum lets the fallback path skip
+per-rule validation; a hand-edited file is validated rule by rule.
+
+**Redis down.** With Redis unreachable no bot verdict can be read. The existing degraded-mode
+policy is that a known-bot UA keeps its pass during an outage, so for `skip_verified_bots` the
+claim counts as verified: the rule is skipped, the bot keeps its pass, and the row carries the
+reason `RULE_SKIP_DEGRADED`. This applies only when Redis is down and a UA matches `known_bots`;
+with Redis alive an unverified or refuted claim is never skipped. A rule with
+`skip_verified_bots` off still applies, outage or not. The consequence is the same as for the
+bot pass itself: during an outage a client that merely claims to be Googlebot is not caught by
+rules.
 
 ### Redis contract (request path)
 

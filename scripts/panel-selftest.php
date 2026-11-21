@@ -1321,6 +1321,9 @@ foreach (glob($pl_dir . '/*') as $pl_f) { @unlink($pl_f); }
 putenv($pl_prev === false ? 'GV_CONFIG' : 'GV_CONFIG=' . $pl_prev);
 
 t_section('Access rules page');
+// The guard's error logger falls back to the repository's logs/ when no log dir is known.
+$ar_logs = sys_get_temp_dir() . '/gp-rules-logs-' . getmypid();
+gv_redis_ctx(array('log_dir' => $ar_logs));
 require_once __DIR__ . '/../panel/rules.php';
 $ar_file = sys_get_temp_dir() . '/gp-rules-selftest-' . getmypid() . '.json';
 @unlink($ar_file);
@@ -1348,6 +1351,13 @@ t_ok('no temp file is left behind', glob($ar_file . '.tmp*') === array());
 $ar_aud = gp_audit_read(10);
 t_ok('creating a rule is audited with before (null) and after', count($ar_aud) === 1 && $ar_aud[0]['event'] === 'rule_create'
 	&& $ar_aud[0]['key'] === $ar_id && $ar_aud[0]['old'] === null && $ar_aud[0]['new']['name'] === 'Block curl');
+
+$ar_cache = gv_rules_cache_path($ar_file);
+t_ok('a save also writes the generated cache next to the JSON', is_file($ar_cache) && filemtime($ar_cache) >= filemtime($ar_file));
+$ar_loaded = gv_rules_load();
+t_ok('the guard loads that cache (enabled rules, compiled pattern present)', count($ar_loaded) === 1 && isset($ar_loaded[0]['ua']['pat']));
+t_ok('the cache is not group- or world-writable and leaves no temp file', (fileperms($ar_cache) & 0022) === 0 && glob($ar_cache . '.tmp*') === array());
+t_ok('the cache is valid PHP returning the same ids as the JSON', (include $ar_cache) === $ar_loaded && array_column($ar_loaded, 'id') === array($ar_id));
 
 // Validation failures are reported per field and nothing is written.
 $bad = $ar_post; $bad['ua_type'] = 'regex'; $bad['ua_values'] = '(unclosed'; $bad['name'] = 'bad regex';
@@ -1389,6 +1399,7 @@ t_ok('editing a rule that does not exist is refused', gp_rules_action('save', $e
 $ar_before = gv_rules_read($ar_file)[0]['enabled'];
 gp_rules_action('toggle', array('id' => $ar_id), 'tester', '1.1.1.1', $ar_cfg);
 t_ok('toggle flips enabled', gv_rules_read($ar_file)[0]['enabled'] === !$ar_before);
+t_ok('a disabled rule is dropped from the cache', !in_array($ar_id, array_column(gv_rules_load(), 'id'), true));
 $n0 = count(gv_rules_read($ar_file));
 gp_rules_action('duplicate', array('id' => $ar_id), 'tester', '1.1.1.1', $ar_cfg);
 $ar_all = gv_rules_read($ar_file);
@@ -1459,6 +1470,100 @@ t_ok('filter: fields are AND-ed', $fl(array('action' => 'block', 'mode' => 'moni
 t_ok('filter: text contains / does not contain', $fl(array('q' => 'scraper')) === array('r-f1') && array_values($fl(array('q' => 'scraper', 'q_op' => 'not'))) === array('r-f2'));
 t_ok('filter: no filter shows everything', count($fl(array())) === 2);
 
+// Impact preview.
+$im_dir = sys_get_temp_dir() . '/gp-impact-' . bin2hex(random_bytes(4));
+$im_cfg = sys_get_temp_dir() . '/gp-impact-cfg-' . bin2hex(random_bytes(4)) . '.php';
+file_put_contents($im_cfg, "<?php\nif (!defined('GV_BOOT')) { exit; }\n\$c = require " . var_export(realpath(__DIR__ . '/../scripts/config.dev.php'), true) . ";\n\$c['log_dir'] = " . var_export($im_dir, true) . ";\nreturn \$c;\n");
+$im_prev = getenv('GV_CONFIG');
+putenv('GV_CONFIG=' . $im_cfg);
+mkdir($im_dir, 0775, true);
+$im_now = time();
+$im_row = function ($ts, $ua, $p, $ip, $dev = '', $tok = 'm', $botv = '') {
+	return array('v' => 5, 'ts' => $ts, 'ua' => $ua, 'p' => $p, 'ip' => $ip, 'dev' => $dev, 'tok' => $tok, 'botv' => $botv, 'act' => 'allow');
+};
+$im_rule = array_merge(gp_rule_blank(), array('id' => 'r-im1', 'name' => 'im', 'mode' => 'monitor', 'action' => 'block',
+	'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('scrapy'))));
+$im_rows = array(
+	$im_row(1, 'Scrapy/2.0', '/a', '198.51.100.1'), $im_row(2, 'Scrapy/2.0', '/a', '198.51.100.1'),
+	$im_row(3, 'scrapy x', '/b', '198.51.100.2', 'dev1'), $im_row(4, 'Mozilla/5.0 Chrome', '/a', '198.51.100.3'),
+	$im_row(5, 'Scrapy', '/c', '198.51.100.4', 'dev2', 'v'), $im_row(6, 'Scrapy', '/c', '198.51.100.9', '', 'm', 'ok'),
+);
+$imp = gp_rules_impact_fold($im_rule, $im_rows);
+t_ok('impact: counts matching requests, distinct IPs and distinct devices', $imp['requests'] === 4 && $imp['ips'] === 3 && $imp['devices'] === 2 && $imp['scanned'] === 6);
+t_ok('impact: counts requests that carried a valid token', $imp['tokened'] === 1);
+t_ok('impact: a verified crawler is not counted when the rule skips it', $imp['ips'] === 3);
+$imp2 = gp_rules_impact_fold(array_merge($im_rule, array('skip_verified_bots' => false)), $im_rows);
+t_ok('impact: ...but is counted when the rule does not skip', $imp2['requests'] === 5);
+t_ok('impact: top paths are ordered by count', array_key_first($imp['paths']) === '/a' && $imp['paths']['/a'] === 2);
+t_ok('impact: a valid token makes the warning red', $imp['danger'] === true);
+$many = array();
+for ($k = 0; $k < 51; $k++) { $many[] = $im_row(10 + $k, 'Scrapy', '/x' . $k, '203.0.113.' . ($k % 250), 'devx' . $k); }
+t_ok('impact: more than 50 distinct devices is red', gp_rules_impact_fold($im_rule, $many)['danger'] === true);
+t_ok('impact: 50 devices and no token is not red', gp_rules_impact_fold($im_rule, array_slice($many, 0, 50))['danger'] === false);
+$top = array();
+for ($k = 0; $k < 9; $k++) { $top[] = $im_row($k + 1, 'Scrapy', '/p' . $k, '203.0.113.5'); }
+t_ok('impact: at most five top paths', count(gp_rules_impact_fold($im_rule, $top)['paths']) === 5);
+t_ok('impact: no rows, nothing matched, not red', gp_rules_impact_fold($im_rule, array())['danger'] === false);
+t_ok('impact: a path condition is evaluated on the logged path',
+	gp_rules_impact_fold(array_merge($im_rule, array('ua' => null, 'path' => array('op' => 'include', 'type' => 'prefix', 'values' => array('/c')))), $im_rows)['requests'] === 1);
+
+// The scanner: newest first, two files, outcome lines skipped, range reported.
+gv_log($im_row($im_now - 90000, 'Scrapy', '/old', '198.51.100.50'), $im_dir);
+$f_today = gp_log_file();
+file_put_contents($f_today, json_encode($im_row($im_now - 300, 'Scrapy/2', '/t1', '198.51.100.60', 'd60')) . "\n"
+	. json_encode(array('o' => 1, 'rid' => 'x', 'ts' => $im_now - 299, 'st' => 200)) . "\n"
+	. json_encode($im_row($im_now - 100, 'Mozilla', '/t2', '198.51.100.61')) . "\nnot json\n");
+$f_prev = gp_log_file(date('Ymd', $im_now - 86400));
+file_put_contents($f_prev, json_encode($im_row($im_now - 86400 + 5, 'Scrapy/1', '/y1', '198.51.100.70', 'd70', 'v')) . "\n");
+$live = gp_rules_impact($im_rule);
+t_ok('the scanner reads today and yesterday and skips outcome lines and junk', $live['scanned'] === 3 && $live['requests'] === 2 && $live['meta']['files'] === 2);
+t_ok('the scanner reports the time range it covered', abs($live['meta']['newest'] - ($im_now - 100)) < 1 && abs($live['meta']['oldest'] - ($im_now - 86400 + 5)) < 1);
+t_ok('the scanner reports that no cap was hit on a small log', $live['meta']['capped'] === false);
+t_ok('the live preview carries the token flag through (red)', $live['tokened'] === 1 && $live['danger'] === true);
+$fh = fopen($im_dir . '/guard-20000101.jsonl', 'w');
+$line = json_encode($im_row($im_now, 'Scrapy', '/big', '198.51.100.1')) . "\n";
+for ($k = 0; $k < GP_MAX_SCAN_LINES + 100; $k++) { fwrite($fh, $line); }
+fclose($fh);
+unlink($f_today); unlink($f_prev);
+$cap_dates = array('20000101');
+$cap_n = 0;
+$cap_meta = gp_log_scan($cap_dates, function ($row) use (&$cap_n) { $cap_n++; });
+t_ok('the scanner stops at the existing line cap and says so', $cap_meta['capped'] === true && $cap_n <= GP_MAX_SCAN_LINES);
+
+// Switching a rule to enforce needs the impact and an acknowledgement.
+$en_file = sys_get_temp_dir() . '/gp-rules-enforce-' . getmypid() . '.json';
+putenv('GV_RULES=' . $en_file);
+$en_post = array('do' => 'save', 'id' => '', 'name' => 'Enforce me', 'enabled' => '1', 'skip_verified_bots' => '1', 'mode' => 'monitor',
+	'action' => 'block', 'priority' => '100', 'ua_op' => 'include', 'ua_type' => 'exact', 'ua_values' => 'weird-client/1', 'path_values' => '',
+	'pow_bits' => '0', 'expires_date' => '', 'note' => '');
+t_ok('a new monitor rule is saved without a preview step', gp_rules_action('save', $en_post, 't', '1.1.1.1', $ar_cfg)['ok'] === true);
+$en_id = gv_rules_read($en_file)[0]['id'];
+$en_post['id'] = $en_id; $en_post['mode'] = 'enforce';
+$r = gp_rules_action('save', $en_post, 't', '1.1.1.1', $ar_cfg);
+t_ok('monitor -> enforce is not saved yet: it returns the impact and a warning', $r['ok'] === false && $r['msg'] === 'rule_warnings' && is_array($r['impact'])
+	&& in_array('enforce', array_column($r['warnings'], 0), true));
+t_ok('...and the rule is still in monitor mode', gv_rules_read($en_file)[0]['mode'] === 'monitor');
+$en_post['ack'] = '1';
+t_ok('with the acknowledgement it is switched to enforce', gp_rules_action('save', $en_post, 't', '1.1.1.1', $ar_cfg)['ok'] === true && gv_rules_read($en_file)[0]['mode'] === 'enforce');
+$en_post['name'] = 'Enforce me again'; unset($en_post['ack']);
+t_ok('editing a rule that is already enforcing asks for nothing', gp_rules_action('save', $en_post, 't', '1.1.1.1', $ar_cfg)['ok'] === true);
+$pv = $en_post; $pv['mode'] = 'monitor'; $pv['name'] = 'Preview only';
+$before = file_get_contents($en_file);
+$r = gp_rules_action('preview', $pv, 't', '1.1.1.1', $ar_cfg);
+t_ok('Preview returns the impact and saves nothing', $r['ok'] === false && $r['msg'] === 'rule_preview' && is_array($r['impact']) && file_get_contents($en_file) === $before);
+$pv['ua_type'] = 'regex'; $pv['ua_values'] = '(unclosed';
+t_ok('Preview of an invalid rule reports the errors instead', isset(gp_rules_action('preview', $pv, 't', '1.1.1.1', $ar_cfg)['errors']['ua']));
+$r = gp_rules_action('save', array_merge($en_post, array('id' => '', 'name' => 'new enforcing', 'ua_values' => 'other-client/2')), 't', '1.1.1.1', $ar_cfg);
+t_ok('a NEW rule created in enforce mode also needs the impact review', $r['ok'] === false && is_array($r['impact']) && $r['draft']['id'] === '');
+foreach (array('rules_impact', 'rules_impact_danger', 'rules_impact_range', 'rules_impact_capped', 'rules_impact_note', 'rules_preview', 'rwarn_enforce', 'rwarn_enforce_danger', 'rule_preview') as $k) {
+	t_ok('translation exists: ' . $k, isset($GLOBALS['ar_lang'][$k]) || strpos(file_get_contents(__DIR__ . '/../panel/lang.php'), "'" . $k . "'") !== false);
+}
+@unlink($en_file); @unlink($en_file . '.lock'); @unlink(gv_rules_cache_path($en_file));
+putenv('GV_RULES=' . $ar_file);
+foreach ((array)glob($im_dir . '/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+@rmdir($im_dir); @unlink($im_cfg);
+putenv($im_prev === false ? 'GV_CONFIG' : 'GV_CONFIG=' . $im_prev);
+
 // Every dynamic translation key the page builds exists.
 $ar_lang = require __DIR__ . '/../panel/lang.php';
 $ar_miss = array();
@@ -1468,7 +1573,7 @@ foreach (array_merge(
 	array('rules_mode_enforce', 'rules_mode_monitor', 'rwarn_bots', 'rwarn_browsers', 'rwarn_short', 'rwarn_exempt', 'rwarn_wide',
 		'rerr_bad_id', 'rerr_empty', 'rerr_too_long', 'rerr_not_allowed', 'rerr_out_of_range', 'rerr_bad_condition', 'rerr_bad_op',
 		'rerr_bad_type', 'rerr_not_list', 'rerr_no_values', 'rerr_too_many', 'rerr_no_condition', 'rerr_must_start_slash',
-		'rerr_bad_regex', 'rerr_regex_backref', 'rerr_regex_costly', 'rerr_regex_join', 'rerr_duplicate_id', 'rerr_not_utf8',
+		'rerr_bad_regex', 'rerr_regex_backref', 'rerr_regex_costly', 'rerr_regex_slow', 'rerr_regex_join', 'rerr_duplicate_id', 'rerr_not_utf8',
 		'rerr_control_chars', 'rerr_not_string', 'rule_saved', 'rule_done', 'rule_not_found', 'rule_warnings', 'rules_invalid',
 		'rules_file_invalid', 'rule_starter_done', 'write_failed')) as $k) {
 	if (!isset($ar_lang[$k])) { $ar_miss[] = $k; }
@@ -1478,7 +1583,9 @@ $ar_view = file_get_contents(__DIR__ . '/../panel/views/rules.php');
 t_ok('the rules page posts a CSRF token on every form', substr_count($ar_view, '<form method="post"') <= substr_count($ar_view, 'gp_csrf_token()'));
 t_ok('the rules page escapes through gp_e (no raw echo of a variable)', preg_match('/<\?= \$[a-z_]+\s*\?>/', $ar_view) === 0);
 
-@unlink($ar_file); @unlink($ar_file . '.lock');
+@unlink($ar_file); @unlink($ar_file . '.lock'); @unlink($ar_cache);
+foreach ((array)glob($ar_logs . '/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+@rmdir($ar_logs);
 putenv('GV_RULES');
 if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
 if ($ar_audit_backup !== null) { file_put_contents(gp_audit_path(), $ar_audit_backup); }

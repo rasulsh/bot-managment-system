@@ -275,17 +275,19 @@ switch ($gp_route) {
 		$errors = array();
 		$details = array();
 		$warnings = array();
+		$impact = null;
 		if ($gp_post && isset($_POST['do']) && is_string($_POST['do'])) {
 			$res = gp_rules_action($_POST['do'], $_POST, $gp_user, $gp_ip, $rcfg);
 			if ($res['ok']) {
 				gp_flash('ok', gp_t($res['msg']));
 				gp_redirect('rules');
 			}
-			gp_flash($res['msg'] === 'rule_warnings' ? 'warn' : 'error', gp_t($res['msg']));
+			gp_flash(in_array($res['msg'], array('rule_warnings', 'rule_preview'), true) ? 'warn' : 'error', gp_t($res['msg']));
 			$draft = $res['draft'];
 			$errors = $res['errors'];
 			$details = $res['details'];
 			$warnings = $res['warnings'];
+			$impact = $res['impact'];
 		}
 		$rstate = gp_rules_state();
 		if ($draft === null && isset($_GET['edit']) && is_string($_GET['edit'])) {
@@ -294,6 +296,11 @@ switch ($gp_route) {
 		if ($draft === null && isset($_GET['new'])) {
 			// "Quick block" from a log row passes the UA: a monitor-mode rule pre-filled from it.
 			$draft = isset($_GET['qua']) && is_string($_GET['qua']) ? gp_rule_from_ua(substr($_GET['qua'], 0, 300)) : gp_rule_blank();
+		}
+		// Opening the form (new, edit, quick block) shows what the rule would have matched.
+		if ($impact === null && $draft !== null && !$gp_post) {
+			$pv = gv_rule_validate(array_merge($draft, array('id' => $draft['id'] === '' ? 'r-preview' : $draft['id'], 'name' => $draft['name'] === '' ? 'preview' : $draft['name'])), false);
+			if ($pv[0]) { $impact = gp_rules_impact($pv[1]); }
 		}
 		$rfilter = gp_rules_filter_from_request($_GET);
 		$rnow = time();
@@ -306,7 +313,7 @@ switch ($gp_route) {
 			? gp_rules_test($rstate['rules'], $test_in['ua'], $test_in['path'], $test_in['verified'], $rcfg, $rnow) : null;
 		gp_render('rules', array(
 			'state' => $rstate, 'all' => $rstate['rules'], 'visible' => $rvisible, 'filter' => $rfilter,
-			'draft' => $draft, 'errors' => $errors, 'details' => $details, 'warnings' => $warnings,
+			'draft' => $draft, 'errors' => $errors, 'details' => $details, 'warnings' => $warnings, 'impact' => $impact,
 			'test' => $rtest, 'test_in' => $test_in, 'snapshot' => gp_snapshot(),
 		));
 

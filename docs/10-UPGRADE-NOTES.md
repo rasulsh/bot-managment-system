@@ -10,6 +10,7 @@ What changed in each release and what to do about it. Newest first.
   a client by User-Agent (`exact`, `contains`, `prefix`, `regex`, `<empty>`) and/or path prefix,
   each with `include`/`exclude`, a priority, an expiry, and a `monitor` or `enforce` mode.
   See [02-ARCHITECTURE.md](02-ARCHITECTURE.md#access-rules) and [09-ADMIN-PANEL.md](09-ADMIN-PANEL.md).
+* `guard/rules.cache.php` (generated, see Cost below).
 * New panel page **Rules** (test box, starter set, "Quick block" on log and identity rows).
 * Log reasons `RULE:<id>` / `SH_RULE:<id>`; the snapshot gains `rules` (hits per rule, 24 h / 7 d).
 * Without `guard/rules.json` nothing changes: no file read beyond one `is_file()`.
@@ -27,10 +28,15 @@ What changed in each release and what to do about it. Newest first.
 **Rollback**: disable or delete the rule in the panel, or delete `guard/rules.json`
 (takes effect on the next request). The kill switch (`guard.off`) also bypasses all rules.
 
-**Cost** (`scripts/bench-gv-run.sh`, PHP 8.3, p50 of `gv_run`, allowed request, same machine,
-interleaved runs): no rules = same as before (about 0.24 ms); 20 rules +0.08 ms;
-200 rules of 5 values +0.6 ms; 200 rules of 50 values +1.4 ms. Cost is mostly reading
-the file, so keep the list short.
+**Cost** (`scripts/bench-gv-run.sh`, PHP 8.3 with OPcache, p50 of `gv_run`, allowed request, interleaved
+runs on the same machine): master ~0.18 ms; no rules unchanged; 20 rules +0.015 ms; 200 rules x 5 values
++0.09 ms; 200 rules x 50 values +0.15 ms. This relies on the generated `guard/rules.cache.php`: it is written by
+the panel on every save and included by the guard (OPcache-friendly). If it is missing or older than
+`rules.json` the guard reads the JSON instead (about 1 ms for 200 rules) and logs `rules cache stale`;
+saving in the panel rebuilds it. The file is gitignored and covered by `exposure-check.sh`.
+
+**Also**: with Redis down a known-bot UA skips `skip_verified_bots` rules (row reason `RULE_SKIP_DEGRADED`),
+matching the existing outage policy for the bot pass. Rules can be previewed against recent logs before saving.
 
 ## Log storage limits
 

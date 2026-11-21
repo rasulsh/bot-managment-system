@@ -1337,7 +1337,7 @@ function gv_run($t0) {
 	$rule = null;
 	if ($cfg['secret'] !== 'CHANGE_ME') {
 		try {
-			$rules = gv_rules_read();
+			$rules = gv_rules_load();
 			if ($rules) { $rule = gv_rules_match($f, $rules, time()); }
 		} catch (\Throwable $e) {
 			$rule = null;
@@ -1425,10 +1425,16 @@ function gv_run($t0) {
 		$st['bot'] = $bot;
 		$verdict = gv_bot_verdict_from($rv('botbad'), $rv('botok'));
 		// A VERIFIED crawler skips a rule that asks for it (the default). A claim
-		// that is unverified, or refuted ('bad'), never does.
-		if ($rule !== null && !empty($rule['skip_verified_bots']) && $verdict === 'ok') {
-			$rule = null;
-			$rule_acts = false;
+		// that is unverified, or refuted ('bad'), never does. With Redis down no
+		// verdict can be read, and a known bot keeps its pass during an outage, so
+		// the rule is skipped too and the row says so (RULE_SKIP_DEGRADED).
+		if ($rule !== null) {
+			$skip = gv_rule_bot_skip($rule, $verdict, gv_redis_alive($conn));
+			if ($skip !== '') {
+				if ($skip === 'degraded') { $st['rs'][] = 'RULE_SKIP_DEGRADED'; }
+				$rule = null;
+				$rule_acts = false;
+			}
 		}
 		if ($verdict === 'bad') {
 			// An impersonator must be judged, not trusted. Revoke the pass and

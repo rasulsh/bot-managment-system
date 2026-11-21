@@ -1,7 +1,9 @@
 <?php
 if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 
-// Access rules: reading, writing, form parsing, warnings and the test box.
+require_once __DIR__ . '/data.php';
+
+// Access rules: reading, writing, form parsing, warnings, the test box and the impact preview.
 //
 // The rule model and its validation live in guard/rules.php. The panel never
 // carries a copy: gp_rules_write() calls gv_rules_validate_list(), the same code
@@ -48,7 +50,22 @@ function gp_rules_write(array $rules) {
 	if (@file_put_contents($tmp, $json, LOCK_EX) === false) { return array(false, array(-1 => array('_write' => 'write_failed'))); }
 	@chmod($tmp, 0640);
 	if (!@rename($tmp, $path)) { @unlink($tmp); return array(false, array(-1 => array('_write' => 'write_failed'))); }
+	// The generated cache the guard includes (written AFTER the JSON, so it is
+	// never older than it). If it cannot be written the guard falls back to the
+	// JSON and says so, so the save still counts.
+	gp_rules_cache_write($sorted);
 	return array(true, array());
+}
+
+// Write guard/rules.cache.php (temp + rename, then drop it from OPcache).
+function gp_rules_cache_write(array $sorted) {
+	$cache = gv_rules_cache_path();
+	$tmp = $cache . '.tmp' . getmypid();
+	if (@file_put_contents($tmp, gv_rules_cache_source($sorted), LOCK_EX) === false) { return false; }
+	@chmod($tmp, 0640);
+	if (!@rename($tmp, $cache)) { @unlink($tmp); return false; }
+	if (function_exists('opcache_invalidate')) { @opcache_invalidate($cache, true); }
+	return true;
 }
 
 // Read-modify-write under one lock. $fn receives the current list and returns
@@ -146,22 +163,9 @@ function gp_rule_from_post(array $p, ?array $existing = null) {
 	return $rule;
 }
 
-// Samples of current real browsers: a rule that matches any of these would
-// lock real visitors out. Kept short and current; extend it, do not trust it.
-function gp_rules_browser_samples() {
-	return array(
-		'Chrome (Windows)' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-		'Chrome (macOS)' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-		'Chrome (Linux)' => 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-		'Chrome (Android)' => 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36',
-		'Firefox (Windows)' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0',
-		'Firefox (Android)' => 'Mozilla/5.0 (Android 14; Mobile; rv:132.0) Gecko/132.0 Firefox/132.0',
-		'Safari (macOS)' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15',
-		'Safari (iPhone)' => 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1',
-		'Edge (Windows)' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
-		'Samsung Internet' => 'Mozilla/5.0 (Linux; Android 14; SAMSUNG SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/26.0 Chrome/122.0.0.0 Mobile Safari/537.36',
-	);
-}
+// Samples of current real browsers live in guard/rules.php (the regex timing check on
+// save uses them too).
+function gp_rules_browser_samples() { return gv_rules_browser_samples(); }
 
 // Non-blocking warnings for a rule about to be saved. Returns a list of
 // array(code, detail). Pure: the config is passed in.
@@ -255,13 +259,101 @@ function gp_rules_filter_match(array $rule, array $f, $now) {
 	return true;
 }
 
+// Impact preview: what would this rule have matched in the recent logs?
+//
+// Reuses the log reader's caps (GP_MAX_SCAN_BYTES, GP_MAX_SCAN_LINES): newest
+// rows first, today's file then the day before, stopping at the first cap. The
+// time range actually covered is returned so the page can state it. The log
+// keeps only the first 120 characters of a UA, so an exact or regex rule on a
+// longer UA can under-count; the page says so.
+function gp_log_scan(array $dates, callable $each) {
+	$meta = array('scanned_lines' => 0, 'scanned_bytes' => 0, 'capped' => false, 'files' => 0, 'newest' => 0.0, 'oldest' => 0.0);
+	foreach ($dates as $d) {
+		if ($meta['capped']) { break; }
+		$fh = @fopen(gp_log_file($d), 'rb');
+		if (!$fh) { continue; }
+		$meta['files']++;
+		$pos = (int)filesize(gp_log_file($d));
+		$carry = '';
+		while ($pos > 0 && !$meta['capped']) {
+			$read = (int)min(65536, $pos, GP_MAX_SCAN_BYTES - $meta['scanned_bytes']);
+			if ($read <= 0) { $meta['capped'] = true; break; }
+			$pos -= $read;
+			if (fseek($fh, $pos, SEEK_SET) !== 0) { break; }
+			$data = fread($fh, $read);
+			if ($data === false) { break; }
+			$meta['scanned_bytes'] += strlen($data);
+			$parts = explode("\n", $data . $carry);
+			$carry = ($pos > 0) ? array_shift($parts) : '';
+			for ($i = count($parts) - 1; $i >= 0; $i--) {
+				$line = trim($parts[$i]);
+				if ($line === '') { continue; }
+				if (++$meta['scanned_lines'] > GP_MAX_SCAN_LINES) { $meta['capped'] = true; break; }
+				$row = json_decode($line, true);
+				if (!is_array($row) || (isset($row['o']) && $row['o'] === 1)) { continue; }
+				$ts = isset($row['ts']) ? (float)$row['ts'] : 0.0;
+				if ($ts > $meta['newest']) { $meta['newest'] = $ts; }
+				if ($ts > 0 && ($meta['oldest'] === 0.0 || $ts < $meta['oldest'])) { $meta['oldest'] = $ts; }
+				$each($row);
+			}
+		}
+		fclose($fh);
+	}
+	if ($meta['scanned_bytes'] >= GP_MAX_SCAN_BYTES) { $meta['capped'] = true; }
+	return $meta;
+}
+
+// Fold decision rows into the impact of one rule. Pure over $rows (an iterable of
+// log rows), so it is tested without files. Rows of a verified crawler are not
+// counted when the rule skips them.
+function gp_rules_impact_fold(array $rule, array $rows) {
+	$out = array('requests' => 0, 'ips' => 0, 'devices' => 0, 'tokened' => 0, 'paths' => array(), 'scanned' => 0);
+	$ips = array(); $devs = array(); $paths = array();
+	foreach ($rows as $row) { gp_rules_impact_row($rule, $row, $out, $ips, $devs, $paths); }
+	return gp_rules_impact_finish($out, $ips, $devs, $paths);
+}
+
+function gp_rules_impact_row(array $rule, array $row, array &$out, array &$ips, array &$devs, array &$paths) {
+	$out['scanned']++;
+	if (!empty($rule['skip_verified_bots']) && (string)($row['botv'] ?? '') === 'ok') { return; }
+	$f = array('ua' => (string)($row['ua'] ?? ''), 'path' => (string)($row['p'] ?? '/'));
+	if (!gv_rule_matches($rule, $f)) { return; }
+	$out['requests']++;
+	if (isset($row['ip']) && is_string($row['ip']) && $row['ip'] !== '') { $ips[$row['ip']] = true; }
+	if (isset($row['dev']) && is_string($row['dev']) && $row['dev'] !== '') { $devs[$row['dev']] = true; }
+	if ((string)($row['tok'] ?? '') === 'v') { $out['tokened']++; }
+	$p = $f['path'];
+	if (isset($paths[$p]) || count($paths) < 2000) { $paths[$p] = (isset($paths[$p]) ? $paths[$p] : 0) + 1; }
+}
+
+function gp_rules_impact_finish(array $out, array $ips, array $devs, array $paths) {
+	arsort($paths);
+	$out['paths'] = array_slice($paths, 0, 5, true);
+	$out['ips'] = count($ips);
+	$out['devices'] = count($devs);
+	// Red: more than 50 distinct devices, or any matched request that held a valid token.
+	$out['danger'] = ($out['devices'] > 50 || $out['tokened'] > 0);
+	return $out;
+}
+
+function gp_rules_impact(array $rule) {
+	$out = array('requests' => 0, 'ips' => 0, 'devices' => 0, 'tokened' => 0, 'paths' => array(), 'scanned' => 0);
+	$ips = array(); $devs = array(); $paths = array();
+	$meta = gp_log_scan(gp_log_dates(2), function ($row) use ($rule, &$out, &$ips, &$devs, &$paths) {
+		gp_rules_impact_row($rule, $row, $out, $ips, $devs, $paths);
+	});
+	$out = gp_rules_impact_finish($out, $ips, $devs, $paths);
+	$out['meta'] = $meta;
+	return $out;
+}
+
 // Handle one POST action. Returns array(ok, message_key, errors, details, draft).
 function gp_rules_action($action, array $p, $actor, $client_ip, array $cfg) {
-	$res = array('ok' => false, 'msg' => 'err_generic', 'errors' => array(), 'details' => array(), 'draft' => null, 'warnings' => array());
+	$res = array('ok' => false, 'msg' => 'err_generic', 'errors' => array(), 'details' => array(), 'draft' => null, 'warnings' => array(), 'impact' => null);
 	$now = time();
 	$id = isset($p['id']) && is_string($p['id']) ? $p['id'] : '';
 
-	if ($action === 'save') {
+	if ($action === 'save' || $action === 'preview') {
 		$rule = gp_rule_from_post($p);
 		$res['draft'] = $rule;
 		$new = ($rule['id'] === '');
@@ -280,8 +372,18 @@ function gp_rules_action($action, array $p, $actor, $client_ip, array $cfg) {
 			$res['details'] = isset($deep[2]) ? $deep[2] : array();
 			return $res;
 		}
+		$res['draft'] = $deep[1];
+		$res['draft']['id'] = $new ? '' : $deep[1]['id'];      // a new rule gets its id when it is saved
+		// The impact preview: always on "Preview", and required before a rule goes from
+		// monitor (or from nothing) to enforce, so the operator sees what it would have hit.
+		$to_enforce = ($deep[1]['mode'] === 'enforce' && $deep[1]['action'] !== 'log' && ($old === null || $old['mode'] !== 'enforce'));
+		if ($action === 'preview' || $to_enforce) {
+			$res['impact'] = gp_rules_impact($deep[1]);
+		}
+		if ($action === 'preview') { $res['msg'] = 'rule_preview'; return $res; }
 		// Warnings are shown once; "Save anyway" (ack=1) goes through.
 		$res['warnings'] = gp_rule_warnings($deep[1], $cfg);
+		if ($to_enforce) { array_unshift($res['warnings'], array($res['impact']['danger'] ? 'enforce_danger' : 'enforce', '')); }
 		if ($res['warnings'] && empty($p['ack'])) { $res['msg'] = 'rule_warnings'; return $res; }
 		$r = gp_rules_update(function ($rules) use ($deep, $new) {
 			$out = array();

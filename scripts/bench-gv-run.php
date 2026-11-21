@@ -53,6 +53,8 @@ $cfg = gv_cfg_load();
 if ($nrules > 0) {
 	// Written the way the panel writes it (stamped) when the engine exists.
 	file_put_contents($tmp . '/rules.json', function_exists('gv_rules_encode') ? gv_rules_encode($rules) : json_encode(array('rules' => $rules)));
+	// ...and the generated cache the panel writes next to it.
+	if (function_exists('gv_rules_cache_source')) { file_put_contents($tmp . '/rules.cache.php', gv_rules_cache_source($rules)); }
 }
 
 $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';

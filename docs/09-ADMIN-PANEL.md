@@ -221,7 +221,14 @@ who steals the session.
   aiohttp, httpx, Go-http-client, curl/, Wget, Scrapy, HeadlessChrome, PhantomJS, node-fetch,
   axios/, okhttp, Java/, libwww-perl, empty UA). **Quick block** on a log or identity row opens
   a pre-filled monitor rule (exact UA; a UA cut at 120 chars becomes a prefix rule). Hits come
-  from the snapshot (log-derived), never from Redis counters. If `guard/rules.json` is
+  from the snapshot (log-derived), never from Redis counters. The create/edit/quick-block form
+  shows an **impact preview**: what the rule would have matched in the recent logs (requests,
+  distinct IPs and devices, top 5 paths, requests that carried a valid token) with the scanned
+  time range, using the log explorer's scan caps; red when more than 50 devices or any tokened
+  request match. **Preview impact** re-runs it on the form as typed; switching a rule from
+  monitor to enforce (or creating one in enforce) requires seeing it and ticking the
+  acknowledgement. Regexes are refused on save if they hit the backtrack limit or take more than 1 ms
+  for a single match on the stress and real-browser test strings (`regex_slow`). If `guard/rules.json` is
   invalid the page says so and refuses writes until it is fixed or the invalid part discarded.
 - **Audit** — the append-only trail, searchable.
 

@@ -65,7 +65,12 @@ rule() {
 	printf '{"id":"%s","name":"%s","enabled":true,"mode":"%s","action":"%s","priority":%s,"skip_verified_bots":%s,"ua":{"op":"include","type":"contains","values":%s},"path":null,"expires_at":%s,"pow_bits":%s,"note":"","created_by":"","created_at":0,"updated_at":0}' \
 		"$1" "$2" "$3" "$4" "${PRI:-100}" "${SKIP:-true}" "$5" "${EXP:-0}" "${POW:-0}"
 }
-write_rules() { printf '{"rules":[%s]}' "$(IFS=,; echo "$*")" > "$RULES"; }
+# Writes rules.json AND the generated cache the way the panel does, so the fast path is the one under test.
+write_rules() {
+	printf '{"rules":[%s]}' "$(IFS=,; echo "$*")" > "$RULES"
+	"$PHP_BIN" -r 'define("GV_BOOT", 1); define("GV_NO_AUTORUN", 1); require $argv[1]."/guard/guard.php";
+		file_put_contents($argv[2], gv_rules_cache_source(gv_rules_read($argv[3])));' "$ROOT" "$WORK/rules.cache.php" "$RULES"
+}
 
 redis-server --port "$RPORT" --save "" --appendonly no --dir "$WORK" >"$WORK/redis.log" 2>&1 &
 PIDS+=($!)
@@ -123,7 +128,15 @@ has '"SH_RULE:r-first"'; ok "C2 only the first matching rule is reported" "$([ $
 write_rules "$(EXP=1 rule r-old Old enforce block '["evilbot"]')"
 eq "C3 an expired rule is ignored" "$(get 'x evilbot' /c3)" 200
 printf 'not json' > "$RULES"
-eq "C4 an invalid rules file means no rules" "$(get 'x evilbot' /c4)" 200
+touch -d '+5 seconds' "$RULES"
+eq "C4 an invalid rules file (newer than the cache) means no rules" "$(get 'x evilbot' /c4)" 200
+has 'x'; ok "C5 ...and the stale cache is reported once in guard-errors.log" "$([ "$(grep -c rules_cache_stale "$WORK/logs/guard-errors.log" 2>/dev/null)" = 1 ] && echo 1 || echo 0)"
+rule_stale=$(rule r-hand Hand enforce block '["handbot"]')
+printf '{"rules":[%s]}' "$rule_stale" > "$RULES"
+touch -d '+10 seconds' "$RULES"
+eq "C6 a hand-edited rules.json newer than the cache is used directly" "$(get 'x handbot' /c6)" 403
+write_rules
+touch -d '+20 seconds' "$WORK/rules.cache.php"
 
 echo "== D. challenge: needs a token, solving it ends the loop"
 write_rules "$(rule r-chal Chal enforce challenge '["chalbot"]')"
@@ -180,11 +193,17 @@ has '"hold":1'; ok "F2 ...and the row says it is in the holdout" "$([ $? -eq 0 ]
 eq "F3 a held-out client is still challenged by the rule" "$(get 'x chalbot' /f3)" 503
 
 echo "== G. Redis down: rules still apply (they need no Redis), the request never fails"
+write_rules "$(rule r-evil Evil enforce block '["evilbot"]')" "$(rule r-gbot GBot enforce block '["googlebot"]')" \
+	"$(SKIP=false PRI=50 rule r-gnoskip GNoSkip enforce block '["bingbot"]')"
 redis-cli -p "$RPORT" shutdown nosave >/dev/null 2>&1
 sleep 0.3
 eq "G1 block rule with Redis down -> 403" "$(get 'x evilbot' /g1)" 403
 eq "G2 a clean request with Redis down -> 200" "$(get "$UA" /g2)" 200
 has '"rd":1'; ok "G3 ...logged as degraded" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+eq "G4 Redis down: a known-bot UA keeps its pass and the skipping rule does not fire" "$(get "$GBOT" /g4)" 200
+has '"act":"allow_bot"'; ok "G5 ...as allow_bot, with the reason RULE_SKIP_DEGRADED" "$([ $? -eq 0 ] && has '"RULE_SKIP_DEGRADED"' && echo 1 || echo 0)"
+eq "G6 Redis down: a rule with skip_verified_bots off still blocks a known-bot UA" "$(get 'Mozilla/5.0 (compatible; bingbot/2.0)' /g6)" 403
+eq "G7 Redis down: a UA that is not a known bot is still blocked" "$(get 'x evilbot' /g7)" 403
 
 echo
 echo "PASS $PASS  FAIL $FAIL"

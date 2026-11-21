@@ -168,8 +168,34 @@ $err_text = function ($field) use ($errors, $details) {
 		</div>
 	</div>
 
+	<?php if (is_array($impact ?? null)): $im = $impact; $mt = $im['meta']; ?>
+	<div class="gp-note<?= $im['danger'] ? ' gp-note-strong' : '' ?>" role="status"<?= $im['danger'] ? ' style="border-color:#c0392b"' : '' ?>>
+		<strong><?= gp_e(gp_t('rules_impact')) ?></strong>
+		<?php if ($im['danger']): ?>
+		<div class="gp-text-bad" role="alert"><?= gp_e(gp_t('rules_impact_danger')) ?></div>
+		<?php endif; ?>
+		<div class="gp-help"><?= gp_e(gp_t('rules_impact_range')) ?>:
+			<?= $mt['oldest'] > 0 ? gp_e(gp_num_raw(date('Y-m-d H:i', (int)$mt['oldest'])) . ' - ' . gp_num_raw(date('Y-m-d H:i', (int)$mt['newest']))) : '—' ?>
+			(<?= gp_e(gp_num($im['scanned'])) ?> <?= gp_e(gp_t('rules_impact_rows')) ?>, <?= gp_e(gp_num($mt['files'])) ?> <?= gp_e(gp_t('rules_impact_files')) ?><?= $mt['capped'] ? ', ' . gp_e(gp_t('rules_impact_capped')) : '' ?>)</div>
+		<dl class="gp-dl">
+			<dt><?= gp_e(gp_t('rules_impact_requests')) ?></dt><dd class="gp-mono"><?= gp_e(gp_num($im['requests'])) ?></dd>
+			<dt><?= gp_e(gp_t('rules_impact_ips')) ?></dt><dd class="gp-mono"><?= gp_e(gp_num($im['ips'])) ?></dd>
+			<dt><?= gp_e(gp_t('rules_impact_devices')) ?></dt><dd class="gp-mono"><?= gp_e(gp_num($im['devices'])) ?></dd>
+			<dt><?= gp_e(gp_t('rules_impact_tokened')) ?></dt><dd class="gp-mono"><?= gp_e(gp_num($im['tokened'])) ?></dd>
+		</dl>
+		<?php if ($im['paths']): ?>
+		<div class="gp-help"><?= gp_e(gp_t('rules_impact_paths')) ?>:</div>
+		<ul class="gp-mono gp-ltr">
+			<?php foreach ($im['paths'] as $ip_path => $ip_n): ?><li><?= gp_e($ip_path) ?> &times; <?= gp_e(gp_num($ip_n)) ?></li><?php endforeach; ?>
+		</ul>
+		<?php elseif ($im['requests'] === 0): ?><div class="gp-help"><?= gp_e(gp_t('rules_impact_none')) ?></div><?php endif; ?>
+		<div class="gp-help"><?= gp_e(gp_t('rules_impact_note')) ?></div>
+	</div>
+	<?php endif; ?>
+
 	<div class="gp-row-head">
 		<button class="gp-btn gp-btn-primary" type="submit"><?= gp_e(gp_t(!empty($warnings) ? 'rules_save_anyway' : 'save')) ?></button>
+		<button class="gp-btn gp-btn-ghost" type="submit" name="do" value="preview"><?= gp_e(gp_t('rules_preview')) ?></button>
 		<a class="gp-btn gp-btn-ghost" href="index.php?r=rules"><?= gp_e(gp_t('cancel')) ?></a>
 	</div>
 </form>

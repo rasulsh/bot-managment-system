@@ -19,6 +19,7 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 define('GV_RULES_MAX', 200);
 define('GV_RULES_MAX_VALUES', 50);
 define('GV_RULES_MAX_VALUE_LEN', 300);
+define('GV_RULES_MAX_MATCH_US', 1000);     // a regex that takes longer than this on one match is refused on save
 define('GV_RULES_MAX_BYTES', 2097152);      // a larger file is ignored as a whole
 define('GV_RULE_EMPTY', '<empty>');         // UA value meaning "missing or blank"
 
@@ -69,6 +70,23 @@ function gv_rule_path_validate($cond, $deep) {
 	return $r;
 }
 
+// Samples of current real browsers: a rule that matches any of these would
+// lock real visitors out. Kept short and current; extend it, do not trust it.
+function gv_rules_browser_samples() {
+	return array(
+		'Chrome (Windows)' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+		'Chrome (macOS)' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+		'Chrome (Linux)' => 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+		'Chrome (Android)' => 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36',
+		'Firefox (Windows)' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0',
+		'Firefox (Android)' => 'Mozilla/5.0 (Android 14; Mobile; rv:132.0) Gecko/132.0 Firefox/132.0',
+		'Safari (macOS)' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15',
+		'Safari (iPhone)' => 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1',
+		'Edge (Windows)' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
+		'Samsung Internet' => 'Mozilla/5.0 (Linux; Android 14; SAMSUNG SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/26.0 Chrome/122.0.0.0 Mobile Safari/537.36',
+	);
+}
+
 // A UA condition. $deep adds the checks that cost something (compiling and
 // stress-testing every regex); the panel passes true on save, the guard passes
 // false on every request because the file was already checked when written.
@@ -80,6 +98,8 @@ function gv_rule_ua_validate($cond, $deep) {
 	$sample = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 	// Strings built to expose catastrophic backtracking in a pattern.
 	$stress = array(str_repeat('a', 4000) . '!', str_repeat('a b ', 1000) . '!', str_repeat('(', 500));
+	// What the pattern costs on the strings it will really meet.
+	$timed = array_merge($stress, array_slice(array_values(gv_rules_browser_samples()), 0, 4));
 	foreach ($r[1]['values'] as $i => $v) {
 		if ($v === GV_RULE_EMPTY) { continue; }
 		if (strlen($v) > 300) { return array(false, 'too_long', ''); }
@@ -94,11 +114,25 @@ function gv_rule_ua_validate($cond, $deep) {
 			$msg = $e ? preg_replace('/^preg_match\(\): /', '', (string)$e['message']) : preg_last_error_msg();
 			return array(false, 'bad_regex', 'value ' . ($i + 1) . ': ' . $msg);
 		}
-		foreach ($stress as $s) {
-			@preg_match($pat, $s);
+		$worst = 0.0;
+		foreach ($timed as $s) {
+			@preg_match($pat, $s);                       // first run compiles; time the second and third
 			if (preg_last_error() !== PREG_NO_ERROR) {
 				return array(false, 'regex_costly', 'value ' . ($i + 1) . ': ' . preg_last_error_msg());
 			}
+			$best = null;
+			for ($k = 0; $k < 2; $k++) {
+				$t = hrtime(true);
+				@preg_match($pat, $s);
+				$us = (hrtime(true) - $t) / 1000;
+				if ($best === null || $us < $best) { $best = $us; }
+			}
+			if ($best > $worst) { $worst = $best; }
+		}
+		// One match must stay under 1 ms (the best of two runs, so a hiccup on a busy
+		// machine does not refuse a harmless pattern).
+		if ($worst > GV_RULES_MAX_MATCH_US) {
+			return array(false, 'regex_slow', 'value ' . ($i + 1) . ': one match took ' . sprintf('%.1f', $worst / 1000) . ' ms (limit 1 ms)');
 		}
 	}
 	$joined = gv_rule_ua_compile($r[1]);
@@ -257,10 +291,70 @@ function gv_rules_read($path = null) {
 	}
 }
 
+// --------------------------------------------------------------------------
+// The generated cache: guard/rules.cache.php
+//
+// guard/rules.json stays the source of truth. On every save the panel also
+// writes guard/rules.cache.php, generated ONLY by var_export() from the
+// validated list: enabled rules only, already sorted, each UA condition with its
+// compiled pattern and blank flag. It is a plain PHP array literal, so OPcache
+// keeps it in shared memory and a request pays no file read, no JSON decode, no
+// validation and no pattern building. With no enabled rule it returns an empty
+// array and the guard does nothing more.
+// --------------------------------------------------------------------------
+
+function gv_rules_cache_path($json_path = null) {
+	if ($json_path === null) { $json_path = gv_rules_path(); }
+	return (substr($json_path, -5) === '.json' ? substr($json_path, 0, -5) : $json_path) . '.cache.php';
+}
+
+// The PHP source of the cache for a validated rule list. Pure.
+function gv_rules_cache_source(array $rules) {
+	usort($rules, function ($a, $b) { return $a['priority'] <=> $b['priority']; });
+	$out = array();
+	foreach ($rules as $r) {
+		if (empty($r['enabled'])) { continue; }
+		$slim = array('id' => $r['id'], 'enabled' => true, 'mode' => $r['mode'], 'action' => $r['action'],
+			'priority' => $r['priority'], 'skip_verified_bots' => $r['skip_verified_bots'],
+			'ua' => $r['ua'], 'path' => $r['path'], 'expires_at' => $r['expires_at'], 'pow_bits' => $r['pow_bits']);
+		if (is_array($slim['ua'])) {
+			$c = gv_rule_ua_compile($slim['ua']);
+			$slim['ua']['pat'] = $c[0];
+			$slim['ua']['blank'] = $c[1];
+		}
+		$out[] = $slim;
+	}
+	return "<?php\nif (!defined('GV_BOOT')) { exit; }\n// Generated by the panel from guard/rules.json. Do not edit: it is overwritten on every save.\n"
+		. 'return ' . var_export($out, true) . ";\n";
+}
+
+// The rules the request path uses: the cache when it is at least as new as
+// rules.json, otherwise rules.json itself (one rate-limited note). A missing
+// rules.json means no rules whatever the cache says: the JSON is the truth.
+function gv_rules_load() {
+	try {
+		$json = gv_rules_path();
+		$jm = @filemtime($json);
+		if ($jm === false) { return array(); }
+		$cache = gv_rules_cache_path($json);
+		$cm = @filemtime($cache);
+		if ($cm !== false && $cm >= $jm) {
+			$r = include $cache;
+			if (is_array($r)) { return $r; }
+		}
+		gv_errlog('rules_cache_stale', 'rules cache stale or missing, reading rules.json directly (save the rules in the panel to rebuild it)');
+		return gv_rules_read($json);
+	} catch (\Throwable $e) {
+		return array();
+	}
+}
+
 // One pattern per condition: every value of a rule's UA condition joined into a
 // single alternation. Returns array(pattern, matches_blank). The token <empty>
 // is not a pattern, it is the blank-UA flag. Cached for the request.
 function gv_rule_ua_compile(array $cond) {
+	// A cached rule (guard/rules.cache.php) carries its compiled pattern.
+	if (isset($cond['pat']) && is_string($cond['pat'])) { return array($cond['pat'], !empty($cond['blank'])); }
 	static $cache = array();
 	$key = $cond['type'] . "\n" . implode("\n", $cond['values']);
 	if (isset($cache[$key])) { return $cache[$key]; }
@@ -326,10 +420,15 @@ function gv_rule_live(array $rule, $now) {
 }
 
 // The first live rule (in priority order) that matches, or null. Pure.
+// The hot loop of the request path: the liveness test is inlined on purpose.
 function gv_rules_match(array $f, array $rules, $now) {
+	$ua = isset($f['ua']) ? (string)$f['ua'] : '';
 	foreach ($rules as $rule) {
-		if (!gv_rule_live($rule, $now)) { continue; }
-		if (gv_rule_matches($rule, $f)) { return $rule; }
+		if (empty($rule['enabled'])) { continue; }
+		if ($rule['expires_at'] !== 0 && (int)$rule['expires_at'] <= $now) { continue; }
+		if (isset($rule['ua']) && gv_rule_ua_eval($rule['ua'], $ua) !== true) { continue; }
+		if (isset($rule['path']) && gv_rule_path_eval($rule['path'], isset($f['path']) ? $f['path'] : '') !== true) { continue; }
+		return $rule;
 	}
 	return null;
 }
@@ -346,6 +445,22 @@ function gv_rules_match_all(array $f, array $rules, $now) {
 // The log reason for a matched rule: RULE:<id> when it acts, SH_RULE:<id> in monitor.
 function gv_rule_reason(array $rule) {
 	return (($rule['mode'] === 'enforce') ? 'RULE:' : 'SH_RULE:') . $rule['id'];
+}
+
+// Whether a rule is skipped because the client is a known bot (the caller has
+// already matched known_bots). Returns '' (not skipped), 'verified' (verdict ok)
+// or 'degraded'. Pure.
+//
+// 'degraded': Redis is unreachable, so no verdict could be read at all. The
+// existing degraded-mode policy is that a known-bot UA keeps its pass during an
+// outage (docs/06-KNOWN-LIMITS.md), so the claim counts as verified for this
+// purpose. Only "no verdict because Redis is down" qualifies: a verdict that WAS
+// read as 'bad' or absent while Redis is alive does not skip.
+function gv_rule_bot_skip(array $rule, $verdict, $redis_alive) {
+	if (empty($rule['skip_verified_bots'])) { return ''; }
+	if ($verdict === 'ok') { return 'verified'; }
+	if ($verdict === '' && !$redis_alive) { return 'degraded'; }
+	return '';
 }
 
 // What an ENFORCED rule demands of this request. Pure.
