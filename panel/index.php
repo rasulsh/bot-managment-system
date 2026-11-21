@@ -19,6 +19,8 @@ require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/data.php';
 require_once __DIR__ . '/jobs.php';
 require_once __DIR__ . '/replay.php';
+require_once __DIR__ . '/filters.php';
+require_once __DIR__ . '/ui.php';
 require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/rules.php';
 
@@ -254,10 +256,12 @@ switch ($gp_route) {
 			gp_handle_override_post($gp_user, $gp_ip);
 			gp_redirect('identity', array('id' => $identity));
 		}
+		$idfilter = gp_filter_parse($_GET, array('act' => 'choice', 'path' => 'text'));
 		gp_render('identity', array(
+			'filter'   => $idfilter,
 			'identity' => $identity,
 			'verdicts' => $identity !== '' ? gp_identity_verdicts($identity) : array(),
-			'rows'     => $identity !== '' ? gp_identity_rows($identity) : array(),
+			'rows'     => $identity !== '' ? gp_identity_rows($identity, 60, $idfilter) : array(),
 			'redis_up' => gp_redis_up(),
 		));
 
@@ -266,8 +270,11 @@ switch ($gp_route) {
 			gp_handle_override_post($gp_user, $gp_ip);
 			gp_redirect('overrides');
 		}
+		$ofilter = gp_filter_parse($_GET, array('kind' => 'choice', 'identity' => 'ident'));
 		gp_render('overrides', array(
-			'items'    => gp_overrides_list(),
+			'filter'   => $ofilter,
+			'items_all' => $oall = gp_overrides_list(),
+			'items'    => gp_overrides_filter($oall, $ofilter),
 			'redis_up' => gp_redis_up(),
 		));
 
@@ -344,7 +351,11 @@ switch ($gp_route) {
 			'path' => is_string($_GET['path'] ?? null) ? substr($_GET['path'], 0, 300) : '',
 			'verified' => !empty($_GET['verified']));
 		$gstatus = gp_geo_status();
+		$gfilter = gp_filter_parse($_GET, array('name' => 'text', 'use' => 'choice'));
+		$gstatus['sources_all'] = count($gstatus['sources']);
+		$gstatus['sources'] = gp_geo_filter_sources($gstatus['sources'], $gfilter);
 		gp_render('geo', array(
+			'filter' => $gfilter,
 			'status' => $gstatus, 'cfg' => $gcfg, 'geo_rules' => gp_geo_rules_need($gstate['rules']),
 			'test_in' => $gtest_in,
 			'test' => (($_GET['test'] ?? '') === '1')
@@ -438,7 +449,8 @@ switch ($gp_route) {
 
 	case 'audit':
 		gp_render('audit', array(
-			'entries' => gp_audit_read(200, (string)($_GET['q'] ?? '')),
+			'filter' => $afilter = gp_filter_parse($_GET, array('event' => 'choice', 'actor' => 'ident', 'q' => 'text')),
+			'entries' => gp_audit_read(200, $afilter),
 			'query'   => (string)($_GET['q'] ?? ''),
 		));
 
@@ -466,23 +478,6 @@ exit;
 // --------------------------------------------------------------------------
 // Request helpers
 // --------------------------------------------------------------------------
-
-// Read the log filter set out of the query string, typed and bounded.
-function gp_logs_filter_from_request() {
-	$get = $_GET;
-	$out = array();
-	foreach (array('date', 'act', 'ovr', 'tok', 'dev', 'ip', 'path', 'reason', 'status', 'cc') as $key) {
-		$value = isset($get[$key]) ? trim((string)$get[$key]) : '';
-		if ($value !== '') { $out[$key] = substr($value, 0, 200); }
-	}
-	foreach (array('sh', 'hold') as $key) {
-		if (isset($get[$key]) && $get[$key] !== '') { $out[$key] = (int)$get[$key]; }
-	}
-	foreach (array('sc_min', 'sc_max', 'esc_min', 'esc_max', 'asn') as $key) {
-		if (isset($get[$key]) && $get[$key] !== '') { $out[$key] = (int)$get[$key]; }
-	}
-	return $out;
-}
 
 // Stream the current page as CSV - only the rows the log view is showing, not
 // the whole filter. The export link label and its title say so (logs_export /

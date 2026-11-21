@@ -246,7 +246,31 @@ who steals the session.
   it says so and resolves the logged addresses in the current database, or says it cannot evaluate when there is
   no database - it never shows a bare zero. The Logs page filters by country (`cc`) and ASN (`asn`) and the CSV
   export has both columns.
-- **Audit** — the append-only trail, searchable.
+- **Audit** — the append-only trail, searchable (filters: event, user, text; each include or exclude).
+
+## Layout, tabs, tooltips and filters
+
+* **Width.** The content is up to 1680 px wide (fluid below that); card grids use 1 column on a phone, 2 from
+  1024 px and 3 from 1500 px; tables scroll inside their card, never the page.
+* **Tabs.** Settings has one tab per group (enforcement ... analyzer, GeoIP). The Rules form has Conditions /
+  Action / Advanced, the GeoIP page Databases / Sources and upload / Lookup tester. One form, one Save button:
+  a rejected save opens the tab that holds the first error and puts an error count on every tab with errors.
+  The active tab is kept in the URL hash (`#set-limits`, `#rule-action`). Without JavaScript every section is
+  shown, stacked. Keyboard: arrow keys, Home and End (`role="tablist"`).
+* **Tooltips.** A `?` next to every setting, rule field, GeoIP field and filter. The text (lang.php key
+  `tip_<name>`) says what the field does, a safe value, and the risk of a wrong one. It opens on hover, on keyboard
+  focus and on tap; Esc or a tap elsewhere closes it; it is moved back inside the screen at an edge
+  (`aria-describedby`, `role="tooltip"`). panel-selftest fails if a field has no text.
+* **Include / exclude filters.** Every list with filters (Logs, Rules, Overrides, Identity, Audit, GeoIP sources)
+  has an operator next to each field: choice fields (action, token, status, reason, country, ASN, ...) are
+  **is / is not** and take several values separated by commas (OR inside a field); text fields (path, User-Agent,
+  search) are **contains / does not contain**; identity fields (address, device) are **is / is not** and an
+  address also accepts a CIDR (IPv4 or IPv6); score ranges keep no operator. Fields are AND-ed. The query string
+  keeps the field names and adds `<key>_op=not` (absent = include), so older links keep working, and paging, the
+  CSV export and *Share link* keep the operators. Active filters show as removable chips above the table, an
+  exclude one marked "is not" / "does not contain". An exclude filter can scan more lines before it finds rows; the
+  existing "scan limit reached" notice appears when a cap is hit. Rows that never carried a value (no `cc`, no
+  outcome status) read as empty, so "country is not IR" also lists them.
 
 ## Testing
 

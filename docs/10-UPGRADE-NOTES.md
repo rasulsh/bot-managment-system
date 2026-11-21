@@ -2,6 +2,32 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Panel layout: width, tabs, tooltips, include / exclude filters
+
+**New** (panel only; the guard, the log format and Redis are untouched)
+
+* Content width up to 1680 px, card grids (1 / 2 / 3 columns), tables scroll inside their card.
+* Tabs on Settings (one per group), the Rules form (Conditions / Action / Advanced) and the GeoIP page; a rejected save
+  opens the tab with the first error and badges every tab with errors; the tab is kept in the URL hash.
+* A `?` tooltip with real help text (what it does, a safe value, the risk) on every setting, rule field, GeoIP field and filter.
+* Every filtered list (Logs, Rules, Overrides, Identity, Audit, GeoIP sources) has include / exclude operators
+  (`<key>_op=not`), multi-value choice fields, CIDR on addresses, removable chips, and keeps them across paging, CSV
+  export and a new *Share link*. New Logs filters: User-Agent and the PR 1/2 fields country and ASN; Rules filters by
+  country, ASN and UA; Audit filters by event and user.
+* `panel/assets/app.css` is rebuilt (`npx tailwindcss@3 -c panel/assets/tailwind.config.js -i panel/assets/app.src.css -o panel/assets/app.css --minify`).
+* New test: `scripts/panel-layout-test.sh` (browser, 1600 px / 390 px), also run by `panel-smoke.sh` and in CI.
+
+**Compatibility.** Every existing link keeps working (a bare `act=403` is "is 403"). `gp_log_match()` still accepts the old
+scalar filters. `gp_audit_read()` still accepts a search string.
+
+**Upgrade steps** (`/home/cloud/bot-guard`, monitor mode): deploy the files. Nothing to configure, no cron change, no new
+extension. Hard-reload the browser once so it loads the new `app.css`.
+
+**Rollback**: redeploy the previous release; nothing was written to the data files.
+
+**Cost**: none on the request path (panel only). Exclude filters on Logs scan more lines to find rows, bounded by the existing
+scan caps.
+
 ## GeoIP: country and ASN conditions for access rules
 
 **New**

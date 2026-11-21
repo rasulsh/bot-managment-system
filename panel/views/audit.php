@@ -7,14 +7,11 @@
 	<p class="gp-page-sub"><?= gp_e(gp_t('aud_readonly')) ?></p>
 </div>
 
-<form method="get" action="index.php" class="gp-card gp-form">
-	<input type="hidden" name="r" value="audit">
-	<label class="gp-field">
-		<span class="gp-label"><?= gp_e(gp_t('search')) ?></span>
-		<input class="gp-input" type="text" name="q" value="<?= gp_e($query) ?>">
-	</label>
-	<button class="gp-btn gp-btn-primary" type="submit"><?= gp_e(gp_t('filter')) ?></button>
-</form>
+<?= gp_filter_form_html('audit', array(
+	'event' => array('aud_event', 'is', array('config', 'config_reset', 'killswitch', 'override_allow', 'override_deny', 'override_clear', 'job', 'login_ok', 'login_failed',
+		'rule_create', 'rule_update', 'rule_delete', 'geo_upload', 'geo_rollback'), 'flt_event'),
+	'actor' => array('aud_actor', 'is', array(), 'flt_actor'),
+	'q' => array('search', 'has', array(), 'flt_q')), $filter) ?>
 
 <div class="gp-card">
 	<?php if (!$entries): ?>

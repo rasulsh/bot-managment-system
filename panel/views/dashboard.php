@@ -43,6 +43,7 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 </div>
 <?php endif; ?>
 
+<div class="gp-cardgrid">
 <?php if (!empty($pipeline) && is_array($pipeline)):
 	$pv = (string)$pipeline['verdict']; ?>
 <div class="gp-card">
@@ -107,6 +108,8 @@ $rate = isset($funnel['success_rate']) ? (float)$funnel['success_rate'] : null;
 	<p class="gp-help"><?= gp_e(gp_t('ls_help')) ?></p>
 </div>
 <?php endif; ?>
+
+</div>
 
 <?php if (!empty($ip_open)): ?>
 <div class="gp-note"><?= gp_e(gp_t('dash_ip_open')) ?></div>

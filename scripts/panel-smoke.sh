@@ -120,6 +120,7 @@ check "the country rule is deleted again" "$(grep -q 'Smoke geo rule' <<<"$rp" &
 # ships in Persian) as they are, and those may contain any script.
 for r in dashboard logs identity overrides rules geo replay models settings config_file jobs audit; do
 	page="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=$r")"
+	check "page $r has the viewport meta tag" "$(grep -q 'name="viewport"' <<<"$page" && echo 1 || echo 0)"
 	check "page $r is English and left-to-right" "$(grep -q '<html lang="en" dir="ltr">' <<<"$page" && echo 1 || echo 0)"
 	case "$r" in logs|identity|settings|config_file) continue ;; esac
 	check "page $r shows no Persian or Arabic script or digits" "$(LC_ALL=C.UTF-8 grep -qP '[\x{0600}-\x{06FF}]' <<<"$page" && echo 0 || echo 1)"
@@ -144,6 +145,17 @@ curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'kills
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
 check "kill switch can be released" "$(grep -q 'value="stop"' <<<"$dash" && echo 1 || echo 0)"
 
+# Every page in a real browser at a desktop (1600 px) and a phone (390 px) width: no horizontal page
+# scroll, wide layout, tabs, tooltips, filter chips, no console error or outside request.
+# Needs node + playwright; elsewhere it is skipped (scripts/panel-layout-test.sh runs it standalone).
+if command -v node >/dev/null 2>&1 && node -e "require('playwright')" 2>/dev/null; then
+	layout_out="$(node "$(dirname "${BASH_SOURCE[0]}")/panel-layout-test.js" "$BASE" "$PANEL" "$USER_NAME" "$PASS" 2>&1)"; layout_rc=$?
+	grep -E '^(FAIL|FAILED)' <<<"$layout_out" | head -20
+	check "browser layout test: every page at 1600 px and 390 px ($(grep -c '^PASS' <<<"$layout_out") checks)" "$([ "$layout_rc" = 0 ] && echo 1 || echo 0)"
+else
+	echo "SKIP  browser layout test (node + playwright not available)"
+fi
+dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"; tok="$(printf '%s' "$dash" | csrf)"
 tok="$(printf '%s' "$dash" | csrf)"
 curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" "$URL?r=logout"
 code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" "$URL?r=dashboard")"

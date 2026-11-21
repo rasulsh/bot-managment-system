@@ -664,6 +664,7 @@ if (!function_exists('gp_t')) {
 		return isset($GP_STRINGS[$key]) ? $GP_STRINGS[$key] : $key;
 	}
 }
+require_once __DIR__ . '/../panel/ui.php';
 if (!function_exists('gp_csrf_token_stub')) {
 	// gp_csrf_token() needs an installed panel; the view only echoes it.
 	function gp_csrf_token_stub() { return str_repeat('a', 64); }
@@ -796,6 +797,7 @@ t_ok('an identity link percent-encodes the payload',
 $entries = array(array('ts' => time(), 'event' => $XSS, 'actor' => $XSS,
 	'ip' => $XSS, 'key' => $XSS, 'old' => $XSS, 'new' => array($XSS)));
 $query = $XSS;
+$filter = array('q' => array('v' => array($XSS), 'not' => true), 'event' => array('v' => array($XSS), 'not' => false));
 ob_start();
 require __DIR__ . '/../panel/views/audit.php';
 $rendered_audit = ob_get_clean();
@@ -1788,8 +1790,6 @@ t_ok('impact: the Rules page and the preview scan carry the geo counters through
 t_ok('log filter: cc (any case) and asn', gp_log_match(array('cc' => 'IR'), array('cc' => 'ir')) && !gp_log_match(array('cc' => 'US'), array('cc' => 'IR')) && !gp_log_match(array(), array('cc' => 'IR'))
 	&& gp_log_match(array('asn' => 12880), array('asn' => 12880)) && !gp_log_match(array('asn' => 1), array('asn' => 12880)) && gp_log_match(array(), array()));
 $gx_index = file_get_contents(__DIR__ . '/../panel/index.php');
-t_ok('the log filter reads cc and asn from the query string; the CSV export has cc and asn columns', strpos($gx_index, "'status', 'cc')") !== false && strpos($gx_index, "'esc_max', 'asn')") !== false
-	&& strpos($gx_index, "'botv', 'cc', 'asn', 'st'") !== false);
 
 // Dashboard, settings, strings, views.
 file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin(time() - 60 * 86400));
@@ -1821,6 +1821,203 @@ putenv('GV_GEO_DIR'); putenv('GV_RULES');
 gv_geo_state(true);
 if (is_file(gp_audit_path())) { @unlink(gp_audit_path()); }
 if ($gx_audit_backup !== null) { file_put_contents(gp_audit_path(), $gx_audit_backup); }
+
+t_section('Panel layout: include / exclude filters, tabs, tooltips');
+require_once __DIR__ . '/../panel/filters.php';
+require_once __DIR__ . '/../panel/ui.php';
+if (!function_exists('gp_t')) {
+	$GP_STRINGS = require __DIR__ . '/../panel/lang.php';
+	function gp_t($key) { global $GP_STRINGS; return isset($GP_STRINGS[$key]) ? $GP_STRINGS[$key] : $key; }
+}
+$fx_spec = array('act' => 'choice', 'cc' => array('choice', 'ci' => true), 'ip' => 'ident', 'path' => 'text', 'n' => 'num');
+
+// Parser.
+$fp = gp_filter_parse(array('act' => '403, 429 ,403', 'act_op' => 'not', 'cc' => 'ir,Us', 'path' => '  /admin ', 'ip' => '10.0.0.0/8', 'n' => '7x', 'junk' => 'x'), $fx_spec);
+t_ok('parser: comma list, trimmed, de-duplicated, operator not', $fp['act'] === array('v' => array('403', '429'), 'not' => true));
+t_ok('parser: absent operator means include; ci values are upper-cased', $fp['cc'] === array('v' => array('IR', 'US'), 'not' => false) && $fp['ip']['not'] === false);
+t_ok('parser: text is one value, num is an int, unknown keys are dropped', $fp['path']['v'] === array('/admin') && $fp['n'] === 7 && !isset($fp['junk']));
+t_ok('parser: empty values and array parameters are ignored', gp_filter_parse(array('act' => ' , ,', 'path' => '', 'cc' => array('x')), $fx_spec) === array());
+t_ok('parser: an operator other than "not" is include', gp_filter_parse(array('act' => 'a', 'act_op' => 'NOT'), $fx_spec)['act']['not'] === false && gp_filter_parse(array('act' => 'a', 'act_op' => 'is'), $fx_spec)['act']['not'] === false);
+t_ok('parser: caps on the number and length of values', count(gp_filter_parse(array('act' => implode(',', range(1, 30))), $fx_spec)['act']['v']) === GP_FILTER_MAX_VALUES
+	&& strlen(gp_filter_parse(array('path' => str_repeat('a', 500)), $fx_spec)['path']['v'][0]) === GP_FILTER_MAX_LEN);
+
+// Matcher: every operator.
+$ft = function ($type, $f, $actual, $ci = false) { return gp_filter_test($type, $f, $actual, $ci); };
+$is = array('v' => array('403', '429'), 'not' => false);
+$not = array('v' => array('403', '429'), 'not' => true);
+t_ok('choice: is matches any listed value, is not matches none', $ft('choice', $is, '429') && !$ft('choice', $is, '200') && !$ft('choice', $not, '429') && $ft('choice', $not, '200'));
+t_ok('choice: a list of actual values (row reasons): any hit counts', $ft('choice', array('v' => array('B'), 'not' => false), array('A', 'B')) && !$ft('choice', array('v' => array('B'), 'not' => true), array('A', 'B')) && $ft('choice', array('v' => array('B'), 'not' => true), array()));
+t_ok('choice: case-insensitive only when asked', $ft('choice', array('v' => array('IR'), 'not' => false), 'ir', true) && !$ft('choice', array('v' => array('IR'), 'not' => false), 'ir', false));
+t_ok('text: contains / does not contain, case-insensitive', $ft('text', array('v' => array('ADMIN'), 'not' => false), '/wp-admin/x') && !$ft('text', array('v' => array('ADMIN'), 'not' => true), '/wp-admin/x') && $ft('text', array('v' => array('admin'), 'not' => true), '/shop'));
+t_ok('ident: an address matches a v4 CIDR, an exact address, and a v6 CIDR; "is not" inverts',
+	$ft('ident', array('v' => array('10.0.0.0/8'), 'not' => false), '10.9.8.7') && !$ft('ident', array('v' => array('10.0.0.0/8'), 'not' => false), '11.0.0.1')
+	&& $ft('ident', array('v' => array('192.0.2.5'), 'not' => false), '192.0.2.5') && !$ft('ident', array('v' => array('192.0.2.5'), 'not' => false), '192.0.2.6')
+	&& $ft('ident', array('v' => array('2001:db8::/32'), 'not' => false), '2001:db8:1::5') && !$ft('ident', array('v' => array('2001:db8::/32'), 'not' => false), '2001:db9::1')
+	&& $ft('ident', array('v' => array('10.0.0.0/8'), 'not' => true), '11.0.0.1') && !$ft('ident', array('v' => array('10.0.0.0/8'), 'not' => true), '10.0.0.1'));
+t_ok('CIDR: odd prefix lengths, /0, /32, bad input and mixed families', gp_filter_in_cidr('10.1.2.3', '10.1.2.0/23') && !gp_filter_in_cidr('10.1.4.3', '10.1.2.0/23')
+	&& gp_filter_in_cidr('1.2.3.4', '0.0.0.0/0') && gp_filter_in_cidr('1.2.3.4', '1.2.3.4/32') && !gp_filter_in_cidr('1.2.3.4', '1.2.3.0/33')
+	&& !gp_filter_in_cidr('1.2.3.4', '1.2.3.0/x') && !gp_filter_in_cidr('1.2.3.4', '::/0') && !gp_filter_in_cidr('nope', '1.0.0.0/8') && gp_filter_in_cidr('::1', '::/0'));
+t_ok('legacy scalar filters still mean "is"; empty means nothing to test', gp_filter_def('x') === array('v' => array('x'), 'not' => false) && gp_filter_def('') === null && gp_filter_def(array('v' => array(), 'not' => true)) === null && $ft('choice', '', 'anything'));
+
+// Query string round trip.
+$q = gp_filter_qs($fp + array('date' => '20261121'));
+t_ok('query string: comma values, _op=not only for exclude, scalars pass through', $q['act'] === '403,429' && $q['act_op'] === 'not' && !isset($q['cc_op']) && $q['date'] === '20261121');
+t_ok('query string: parse(qs(parse(x))) is stable', gp_filter_parse($q, $fx_spec) === gp_filter_parse(gp_filter_qs(gp_filter_parse($q, $fx_spec)), $fx_spec));
+t_ok('gp_logs_qs keeps the operators, the cursor and the export flag', (function () use ($fp) {
+	parse_str(substr(gp_logs_qs($fp, array('cursor' => 5, 'export' => 'csv')), strlen('index.php?')), $o);
+	return $o['r'] === 'logs' && $o['act'] === '403,429' && $o['act_op'] === 'not' && $o['cursor'] === '5' && $o['export'] === 'csv';
+})());
+
+// Chips.
+$chips = gp_filter_chips($fp + array('date' => '20261121'), array('act' => 'Action', 'cc' => 'Country', 'path' => 'Path'), array('path' => 'text'), function ($q) { return 'index.php?' . http_build_query(array_merge(array('r' => 'logs'), $q)); });
+t_ok('chips: one per labelled operator filter, the exclude one is marked, the others are not', count($chips) === 3 && $chips[0]['not'] === true && $chips[1]['not'] === false && $chips[2]['kind'] === 'text');
+t_ok('chips: removing one keeps the others and their operators, and the date', (function () use ($chips) {
+	parse_str(substr($chips[1]['href'], strlen('index.php?')), $o);
+	return !isset($o['cc']) && $o['act'] === '403,429' && $o['act_op'] === 'not' && $o['date'] === '20261121' && isset($o['path']);
+})());
+$chip_html = gp_filter_chips_html(gp_filter_chips(array('path' => array('v' => array('<script>alert(1)</script>"x'), 'not' => true)), array('path' => '<b>P</b>'), array('path' => 'text'), function ($q) { return 'index.php?x=' . http_build_query($q); }));
+t_ok('chips: everything is escaped; "does not contain" is spelled out', strpos($chip_html, '<script>') === false && strpos($chip_html, '<b>') === false && strpos($chip_html, 'does not contain') !== false && strpos($chip_html, 'gp-chip-not') !== false);
+t_ok('chips: no chips, no markup', gp_filter_chips_html(array()) === '');
+$opsel = gp_filter_op_select('act', array('v' => array('a'), 'not' => true), 'is') . gp_filter_op_select('path', null, 'has');
+t_ok('operator select: names, selected state and wording', strpos($opsel, 'name="act_op"') !== false && strpos($opsel, '<option value="not" selected>is not</option>') !== false && strpos($opsel, 'contains') !== false && strpos($opsel, 'name="path_op"') !== false);
+
+// Logs: every field, include and exclude, AND.
+$lr = array('ip' => '203.0.113.9', 'dev' => 'd1', 'p' => '/shop/item', 'ua' => 'Mozilla/5.0 Chrome', 'act' => '403', 'tok' => 'm', 'ovr' => '', 'sh' => 0, 'hold' => 1,
+	'cc' => 'IR', 'asn' => 12880, 'rs' => array('UA_SCRIPT', 'RULE:r1'), 'sc' => 40, 'esc' => 55, '_out' => array('st' => 503));
+$lm = function ($f) use ($lr) { return gp_log_match($lr, gp_filter_parse($f, array('act' => 'choice', 'ovr' => 'choice', 'tok' => 'choice', 'reason' => 'choice', 'sh' => 'choice', 'hold' => 'choice',
+	'cc' => array('choice', 'ci' => true), 'asn' => 'choice', 'status' => 'choice', 'dev' => 'ident', 'ip' => 'ident', 'path' => 'text', 'ua' => 'text'))); };
+t_ok('logs: act is / is not, several values', $lm(array('act' => '403,429')) && !$lm(array('act' => '200')) && !$lm(array('act' => '403', 'act_op' => 'not')) && $lm(array('act' => '200,429', 'act_op' => 'not')));
+t_ok('logs: ip is / is not, CIDR', $lm(array('ip' => '203.0.113.0/24')) && !$lm(array('ip' => '203.0.113.0/24', 'ip_op' => 'not')) && $lm(array('ip' => '198.51.100.1', 'ip_op' => 'not')) && !$lm(array('ip' => '198.51.100.1')));
+t_ok('logs: dev is / is not', $lm(array('dev' => 'd1')) && $lm(array('dev' => 'd2', 'dev_op' => 'not')) && !$lm(array('dev' => 'd1', 'dev_op' => 'not')));
+t_ok('logs: path and UA contains / does not contain', $lm(array('path' => 'SHOP')) && !$lm(array('path' => 'shop', 'path_op' => 'not')) && $lm(array('path' => 'admin', 'path_op' => 'not'))
+	&& $lm(array('ua' => 'chrome')) && !$lm(array('ua' => 'chrome', 'ua_op' => 'not')));
+t_ok('logs: country is / is not (any case), ASN is / is not, unlogged rows read as empty', $lm(array('cc' => 'ir,us')) && !$lm(array('cc' => 'IR', 'cc_op' => 'not')) && $lm(array('cc' => 'US', 'cc_op' => 'not'))
+	&& $lm(array('asn' => '12880')) && !$lm(array('asn' => '12880', 'asn_op' => 'not')) && !gp_log_match(array(), gp_filter_parse(array('cc' => 'IR'), array('cc' => 'choice'))) && gp_log_match(array(), gp_filter_parse(array('cc' => 'IR', 'cc_op' => 'not'), array('cc' => 'choice'))));
+t_ok('logs: reason matches any of the row\'s reasons; is not excludes the row', $lm(array('reason' => 'RULE:r1')) && $lm(array('reason' => 'X,UA_SCRIPT')) && !$lm(array('reason' => 'UA_SCRIPT', 'reason_op' => 'not')) && $lm(array('reason' => 'BOT_FAKE', 'reason_op' => 'not')));
+t_ok('logs: tok, ovr, shadow and holdout flags', $lm(array('tok' => 'm')) && !$lm(array('tok' => 'v')) && $lm(array('sh' => '0')) && !$lm(array('sh' => '1')) && $lm(array('hold' => '1')) && $lm(array('hold' => '0', 'hold_op' => 'not')) && $lm(array('ovr' => 'allow', 'ovr_op' => 'not')));
+t_ok('logs: status classes, include and exclude, and a row with no outcome', $lm(array('status' => '5xx')) && !$lm(array('status' => '2xx')) && !$lm(array('status' => '5xx', 'status_op' => 'not')) && $lm(array('status' => '404,4xx', 'status_op' => 'not'))
+	&& !gp_log_match(array(), gp_filter_parse(array('status' => '5xx'), array('status' => 'choice'))) && gp_log_match(array(), gp_filter_parse(array('status' => '5xx', 'status_op' => 'not'), array('status' => 'choice'))));
+t_ok('logs: fields are AND-ed, with score ranges that keep no operator', $lm(array('act' => '403', 'cc' => 'IR', 'path' => 'shop')) && !$lm(array('act' => '403', 'cc' => 'US')) && gp_log_match($lr, array('sc_min' => 30, 'sc_max' => 40))
+	&& !gp_log_match($lr, array('sc_min' => 41)) && !gp_log_match($lr, array('esc_max' => 54)));
+t_ok('logs: the filter form reads every field from the query string', (function () {
+	$_GET = array('act' => '403,429', 'act_op' => 'not', 'cc' => 'ir', 'ua' => 'curl', 'ua_op' => 'not', 'asn' => '13335', 'date' => '20261121', 'sc_min' => '30');
+	$f = gp_logs_filter_from_request();
+	$_GET = array();
+	return $f['act']['not'] === true && $f['cc']['v'] === array('IR') && $f['ua']['not'] === true && $f['asn']['v'] === array('13335') && $f['date'] === '20261121' && $f['sc_min'] === 30;
+})());
+t_ok('logs: filter keys and CSV columns include cc and asn', isset(gp_log_filter_spec()['cc'], gp_log_filter_spec()['asn'], gp_log_filter_spec()['ua'])
+	&& strpos(file_get_contents(__DIR__ . '/../panel/index.php'), "'botv', 'cc', 'asn', 'st'") !== false);
+
+// Other lists.
+$oi = array(array('kind' => 'deny', 'identity' => '203.0.113.5'), array('kind' => 'allow', 'identity' => 'devabc'), array('kind' => 'deny', 'identity' => '198.51.100.7'));
+t_ok('overrides: kind and identity, is / is not, CIDR', count(gp_overrides_filter($oi, gp_filter_parse(array('kind' => 'deny'), array('kind' => 'choice')))) === 2
+	&& count(gp_overrides_filter($oi, gp_filter_parse(array('kind' => 'deny', 'kind_op' => 'not'), array('kind' => 'choice')))) === 1
+	&& count(gp_overrides_filter($oi, gp_filter_parse(array('identity' => '203.0.113.0/24'), array('identity' => 'ident')))) === 1
+	&& count(gp_overrides_filter($oi, gp_filter_parse(array('identity' => '203.0.113.0/24', 'identity_op' => 'not'), array('identity' => 'ident')))) === 2);
+$ar_row = array('event' => 'rule_update', 'actor' => 'admin', 'key' => 'r1');
+t_ok('audit: event, actor, text contains / does not contain', gp_audit_match($ar_row, gp_filter_parse(array('event' => 'rule_update,config'), array('event' => 'choice')))
+	&& !gp_audit_match($ar_row, gp_filter_parse(array('event' => 'rule_update', 'event_op' => 'not'), array('event' => 'choice')))
+	&& gp_audit_match($ar_row, gp_filter_parse(array('actor' => 'bob', 'actor_op' => 'not'), array('actor' => 'ident')))
+	&& gp_audit_match($ar_row, gp_filter_parse(array('q' => 'r1'), array('q' => 'text'))) && !gp_audit_match($ar_row, gp_filter_parse(array('q' => 'r1', 'q_op' => 'not'), array('q' => 'text'))));
+$gs = array(array('name' => 'a.mmdb', 'used' => array('country')), array('name' => 'b.dat', 'used' => array()), array('name' => 'c.mmdb', 'new' => true), array('name' => 'd.mmdb', 'error' => 'x'));
+t_ok('geoip sources: name contains / does not contain and use is / is not', count(gp_geo_filter_sources($gs, gp_filter_parse(array('name' => 'mmdb'), array('name' => 'text')))) === 3
+	&& count(gp_geo_filter_sources($gs, gp_filter_parse(array('name' => 'mmdb', 'name_op' => 'not'), array('name' => 'text')))) === 1
+	&& array_column(gp_geo_filter_sources($gs, gp_filter_parse(array('use' => 'used,unused'), array('use' => 'choice'))), 'name') === array('a.mmdb', 'b.dat')
+	&& array_column(gp_geo_filter_sources($gs, gp_filter_parse(array('use' => 'used,unused', 'use_op' => 'not'), array('use' => 'choice'))), 'name') === array('c.mmdb', 'd.mmdb'));
+$rfr = array(array_merge(gp_rule_blank(), array('id' => 'r-g1', 'name' => 'IR rule', 'country' => array('op' => 'include', 'type' => 'code', 'values' => array('IR')), 'ua' => null,
+	'asn' => array('op' => 'include', 'type' => 'number', 'values' => array('13335')))), array_merge(gp_rule_blank(), array('id' => 'r-g2', 'name' => 'curl rule', 'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('curl')))));
+$rfl = function ($get) use ($rfr) { $f = gp_rules_filter_from_request($get); return array_column(array_filter($rfr, function ($r) use ($f) { return gp_rules_filter_match($r, $f, time()); }), 'id'); };
+t_ok('rules: country (any case) and ASN conditions, is / is not', $rfl(array('cc' => 'ir')) === array('r-g1') && array_values($rfl(array('cc' => 'IR', 'cc_op' => 'not'))) === array('r-g2')
+	&& $rfl(array('asn' => '13335')) === array('r-g1') && array_values($rfl(array('asn' => '13335', 'asn_op' => 'not'))) === array('r-g2'));
+t_ok('rules: UA text contains / does not contain', $rfl(array('ua' => 'CURL')) === array('r-g2') && array_values($rfl(array('ua' => 'curl', 'ua_op' => 'not'))) === array('r-g1'));
+t_ok('identity page: rows are filtered by action and path', (function () {
+	$f = gp_filter_parse(array('act' => '403', 'path' => 'shop', 'path_op' => 'not'), array('act' => 'choice', 'path' => 'text'));
+	return gp_log_match(array('act' => '403', 'p' => '/cart'), $f) && !gp_log_match(array('act' => '403', 'p' => '/shop'), $f) && !gp_log_match(array('act' => '200', 'p' => '/cart'), $f);
+})());
+t_ok('a filter form renders operators, values, chips and keeps the hidden parameters (escaped)', (function () {
+	$f = gp_filter_parse(array('act' => '403', 'act_op' => 'not'), array('act' => 'choice'));
+	$h = gp_filter_form_html('identity', array('act' => array('logs_act', 'is', array('403', '429'), 'flt_act')), $f, array('id' => '"><x'));
+	return strpos($h, 'name="act_op"') !== false && strpos($h, 'value="403"') !== false && strpos($h, 'gp-chip-not') !== false && strpos($h, '"><x') === false && strpos($h, '&quot;&gt;&lt;x') !== false;
+})());
+
+// Tabs.
+ob_start();
+gp_tabs_begin('rule', array('a' => 'Alpha', 'b' => 'Beta <b>', 'c' => 'Gamma'), array('b' => 2, 'c' => 1));
+gp_tab_begin('rule', 'a', 'Alpha'); echo 'A'; gp_tab_end();
+gp_tab_begin('rule', 'b', 'Beta'); echo 'B'; gp_tab_end();
+gp_tabs_end();
+$tabs_html = ob_get_clean();
+t_ok('tabs: role tablist / tab / tabpanel with aria-controls and aria-labelledby', strpos($tabs_html, 'role="tablist"') !== false && substr_count($tabs_html, 'role="tab"') === 3
+	&& strpos($tabs_html, 'aria-controls="panel-rule-b"') !== false && strpos($tabs_html, 'aria-labelledby="tab-rule-b"') !== false && strpos($tabs_html, 'role="tabpanel"') !== false);
+t_ok('tabs: the first tab with an error opens, and every tab with errors has a badge with its count', strpos($tabs_html, 'data-open="b"') !== false
+	&& strpos($tabs_html, '>2</span>') !== false && strpos($tabs_html, '>1</span>') !== false && substr_count($tabs_html, 'gp-tab-badge') === 2);
+t_ok('tabs: no error means no data-open (the hash or the first tab decides); labels are escaped', strpos((function () { ob_start(); gp_tabs_begin('g', array('a' => 'A')); gp_tabs_end(); return ob_get_clean(); })(), 'data-open') === false && strpos($tabs_html, 'Beta <b>') === false);
+t_ok('tabs: every panel is in the markup (without JavaScript they stack)', strpos($tabs_html, '>A<') !== false && strpos($tabs_html, '>B<') !== false && strpos($tabs_html, ' hidden') === false);
+$lay = file_get_contents(__DIR__ . '/../panel/views/layout.php');
+t_ok('tabs script: arrow keys, Home / End, roving tabindex, URL hash, error tab wins over the hash', strpos($lay, "'ArrowRight'") !== false && strpos($lay, "'ArrowLeft'") !== false && strpos($lay, "'Home'") !== false
+	&& strpos($lay, "'End'") !== false && strpos($lay, "'tabindex'") !== false && strpos($lay, 'replaceState') !== false && strpos($lay, "box.getAttribute('data-open') || fromHash()") !== false);
+t_ok('tooltip script: tap toggles, Escape and outside tap close, kept inside the screen', strpos($lay, "'Escape'") !== false && strpos($lay, 'closest(\'.gp-tip\')') !== false && strpos($lay, 'clientWidth') !== false && strpos($lay, 'gp-open') !== false);
+$vset = file_get_contents(__DIR__ . '/../panel/views/settings.php');
+t_ok('settings: one tab per group in one form with one Save button, errors open and badge the tab', strpos($vset, "gp_tabs_begin('set'") !== false && substr_count($vset, 'type="submit"') >= 1 && strpos($vset, '$tab_errors') !== false);
+$vrules = file_get_contents(__DIR__ . '/../panel/views/rules.php');
+$vgeo = file_get_contents(__DIR__ . '/../panel/views/geo.php');
+t_ok('rules form: conditions / action / advanced tabs; the GeoIP page has tabs too', strpos($vrules, "gp_tabs_begin('rule'") !== false && strpos($vrules, "=> 'advanced'") !== false && strpos($vgeo, "gp_tabs_begin('geo'") !== false);
+t_ok('rules form: every validator field maps to a tab', (function () use ($vrules) {
+	foreach (array('ua', 'path', 'country', 'asn', 'action', 'mode', 'skip_verified_bots', 'pow_bits', 'priority', 'expires_at', 'note', 'enabled') as $f) { if (strpos($vrules, "'$f' =>") === false) { return false; } }
+	return true;
+})());
+
+// Tooltips.
+t_ok('tip: a button with aria-describedby pointing at a role=tooltip text, escaped, with a unique id each time', (function () {
+	$a = gp_tip('rule_name'); $b = gp_tip('rule_name');
+	preg_match('/aria-describedby="([^"]+)"/', $a, $m1); preg_match('/aria-describedby="([^"]+)"/', $b, $m2);
+	return strpos($a, 'role="tooltip"') !== false && strpos($a, 'id="' . $m1[1] . '"') !== false && $m1[1] !== $m2[1] && strpos($a, '<button type="button"') !== false;
+})());
+t_ok('tip: an unknown key renders nothing (never a broken page)', gp_tip('no_such_tip_key') === '');
+$tip_miss = array(); $tip_short = array();
+$tip_keys = array();
+foreach (array_keys(gv_overlay_whitelist()) as $k) { $tip_keys[] = 'set_' . str_replace('.', '_', $k); }
+foreach (array('name', 'priority', 'enabled', 'action', 'mode', 'skip', 'ua', 'path', 'country', 'asn', 'expires', 'pow', 'note') as $k) { $tip_keys[] = 'rule_' . $k; }
+foreach (array('compile', 'upload', 'rollback', 'delete', 'ip', 'ua', 'path', 'verified', 'filter', 'sources', 'active') as $k) { $tip_keys[] = 'geo_' . $k; }
+foreach (array('ip', 'path', 'ua', 'cc', 'asn', 'act', 'status', 'reason', 'tok', 'dev', 'sh', 'hold', 'ovr', 'date', 'score', 'q', 'kind', 'event', 'actor', 'use', 'state') as $k) { $tip_keys[] = 'flt_' . $k; }
+$tip_lang = require __DIR__ . '/../panel/lang.php';
+foreach ($tip_keys as $k) {
+	$t = isset($tip_lang['tip_' . $k]) ? $tip_lang['tip_' . $k] : '';
+	if ($t === '') { $tip_miss[] = $k; continue; }
+	if (strlen($t) < 50 || stripos($t, 'safe value') === false || stripos($t, 'risk') === false || stripos($t, 'what it does') === false) { $tip_short[] = $k; }
+}
+t_ok('every setting, rule field, GeoIP field and filter has a tooltip text' . ($tip_miss ? ' (missing: ' . implode(',', $tip_miss) . ')' : ''), !$tip_miss);
+t_ok('every tooltip says what it does, a safe value and the risk' . ($tip_short ? ' (incomplete: ' . implode(',', $tip_short) . ')' : ''), !$tip_short);
+t_ok('every tooltip is more than the label repeated', (function () use ($tip_lang) {
+	foreach ($tip_lang as $k => $v) {
+		if (strpos($k, 'tip_set_') === 0) { $lbl = isset($tip_lang['lbl_' . substr($k, 8)]) ? $tip_lang['lbl_' . substr($k, 8)] : ''; if ($lbl !== '' && strlen($v) < strlen($lbl) + 40) { return false; } }
+	}
+	return true;
+})());
+$tip_used = array();
+foreach (array('settings', 'rules', 'geo', 'logs', 'audit', 'overrides', 'identity') as $vn) {
+	preg_match_all("/gp_tip\\('([a-z_]+)'\\)/", file_get_contents(__DIR__ . '/../panel/views/' . $vn . '.php'), $mm);
+	foreach ($mm[1] as $k) { if (!isset($tip_lang['tip_' . $k])) { $tip_used[] = $vn . ':' . $k; } }
+}
+t_ok('every literal gp_tip() key in the views has a text' . ($tip_used ? ' (missing: ' . implode(',', $tip_used) . ')' : ''), !$tip_used);
+
+// CSS: wide layout, no outside assets.
+$css_src = file_get_contents(__DIR__ . '/../panel/assets/app.src.css');
+$css_out = file_get_contents(__DIR__ . '/../panel/assets/app.css');
+t_ok('layout: the shell and the top bar are 1680 px wide, not 7xl', substr_count($css_src, 'max-w-[1680px]') === 2 && strpos($css_src, 'max-w-7xl') === false && strpos($css_out, 'max-width:1680px') !== false);
+t_ok('the compiled css has every new component', (function () use ($css_out) {
+	foreach (array('.gp-tablist', '.gp-tab-badge', '.gp-tabpanel', '.gp-tip-box', '.gp-tip-btn', '.gp-chip', '.gp-chip-not', '.gp-cardgrid', '.gp-fgroup', '.gp-op') as $c) { if (strpos($css_out, $c) === false) { return false; } }
+	return true;
+})());
+t_ok('the css and the new views load nothing from outside (no url(http...), no @import)', preg_match('#url\(\s*["\']?(https?:)?//#', $css_out) === 0 && strpos($css_out, '@import') === false
+	&& preg_match('#https?://#', file_get_contents(__DIR__ . '/../panel/ui.php') . file_get_contents(__DIR__ . '/../panel/filters.php')) === 0);
+t_ok('tables stay inside their card: every <table> in the views sits in a gp-table-wrap', (function () {
+	foreach (glob(__DIR__ . '/../panel/views/*.php') as $vf) {
+		$s = file_get_contents($vf);
+		if (substr_count($s, '<table class="gp-table') > substr_count($s, 'gp-table-wrap')) { return false; }
+	}
+	return true;
+})());
 
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');

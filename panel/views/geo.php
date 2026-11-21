@@ -15,14 +15,15 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 	<p class="gp-page-sub"><?= gp_e(gp_t('geo_sub')) ?></p>
 </div>
 
+<?php $gt = array('db' => gp_t('geo_tab_db'), 'sources' => gp_t('geo_tab_sources'), 'tester' => gp_t('geo_tab_tester')); ?>
 <?php foreach ($warn as $w): ?>
 <div class="gp-note gp-note-strong" role="alert"><?= gp_e(gp_t('geo_w_' . $w)) ?></div>
 <?php endforeach; ?>
 <div class="gp-note"><?= gp_e(gp_t('geo_unknown_rule')) ?></div>
 
-<?php /* ------------------------------------------------------- active databases */ ?>
+<?php gp_tabs_begin('geo', $gt); gp_tab_begin('geo', 'db', $gt['db']); ?>
 <div class="gp-card">
-	<div class="gp-card-title"><?= gp_e(gp_t('geo_active')) ?></div>
+	<div class="gp-card-title"><?= gp_e(gp_t('geo_active')) ?><?= gp_tip('geo_active') ?></div>
 	<div class="gp-table-wrap">
 	<table class="gp-table">
 		<thead><tr>
@@ -49,7 +50,7 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 				<form method="post" action="index.php?r=geo" data-confirm="<?= gp_e(gp_t('geo_rb_confirm')) ?>" style="display:inline">
 					<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 					<input type="hidden" name="kind" value="<?= gp_e($k) ?>">
-					<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit" name="do" value="rollback"><?= gp_e(gp_t('geo_rollback')) ?></button>
+					<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit" name="do" value="rollback"><?= gp_e(gp_t('geo_rollback')) ?></button><?= gp_tip('geo_rollback') ?>
 				</form>
 				<?php endif; ?>
 			</td>
@@ -68,9 +69,35 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 	<?php endif; ?>
 </div>
 
-<?php /* ------------------------------------------------------- sources, upload, compile */ ?>
+<?php gp_tab_end(); gp_tab_begin('geo', 'sources', $gt['sources']); ?>
 <div class="gp-card gp-form">
-	<div class="gp-card-title"><?= gp_e(gp_t('geo_sources')) ?></div>
+	<div class="gp-card-title"><?= gp_e(gp_t('geo_sources')) ?><?= gp_tip('geo_sources') ?> <span class="gp-card-sub"><?= gp_num(count($st['sources'])) ?> / <?= gp_num((int)$st['sources_all']) ?></span></div>
+	<?php
+	$gflt = array('name' => array('geo_c_file', 'has'), 'use' => array('geo_c_use', 'is'));
+	$gchips = gp_filter_chips($filter, array_map(function ($d) { return gp_t($d[0]); }, $gflt), array('name' => 'text', 'use' => 'choice'),
+		function ($q) { return 'index.php?' . http_build_query(array_merge(array('r' => 'geo'), $q)) . '#geo-sources'; });
+	?>
+	<form method="get" action="index.php#geo-sources" class="gp-form">
+		<input type="hidden" name="r" value="geo">
+		<div class="gp-filters">
+			<?php foreach ($gflt as $fk => $fd): $fv = isset($filter[$fk]) ? $filter[$fk] : null; ?>
+			<div class="gp-field">
+				<label class="gp-label" for="gf-<?= gp_e($fk) ?>"><?= gp_e(gp_t($fd[0])) ?><?= gp_tip($fk === 'name' ? 'geo_filter' : 'flt_use') ?></label>
+				<div class="gp-fgroup">
+					<?= gp_filter_op_select($fk, $fv, $fd[1]) ?>
+					<input class="gp-input gp-ltr" type="text" id="gf-<?= gp_e($fk) ?>" name="<?= gp_e($fk) ?>" value="<?= gp_e(gp_filter_text($fv)) ?>"
+						<?= $fk === 'use' ? 'list="gdl-use" placeholder="used,unused,new,error"' : '' ?> spellcheck="false" autocomplete="off">
+					<?php if ($fk === 'use'): ?><datalist id="gdl-use"><option value="used"><option value="unused"><option value="new"><option value="error"></datalist><?php endif; ?>
+				</div>
+			</div>
+			<?php endforeach; ?>
+		</div>
+		<div class="gp-row-head">
+			<button class="gp-btn gp-btn-ghost" type="submit"><?= gp_e(gp_t('filter')) ?></button>
+			<a class="gp-btn gp-btn-ghost" href="index.php?r=geo#geo-sources"><?= gp_e(gp_t('reset')) ?></a>
+		</div>
+		<?= gp_filter_chips_html($gchips) ?>
+	</form>
 	<p class="gp-help"><?= gp_e(gp_t('geo_sources_help')) ?> <code class="gp-mono gp-ltr"><?= gp_e($st['dir']) ?></code></p>
 	<?php if (!$st['dir_writable']): ?><div class="gp-note gp-note-strong" role="alert"><?= gp_e(gp_t('geo_up_nowrite')) ?>: <?= gp_e($st['dir']) ?></div><?php endif; ?>
 	<?php if ($st['sources']): ?>
@@ -93,7 +120,7 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 				<form method="post" action="index.php?r=geo" data-confirm="<?= gp_e(gp_t('geo_del_confirm')) ?>" style="display:inline">
 					<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 					<input type="hidden" name="name" value="<?= gp_e((string)($s['name'] ?? '')) ?>">
-					<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit" name="do" value="delete"><?= gp_e(gp_t('geo_delete')) ?></button>
+					<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit" name="do" value="delete"><?= gp_e(gp_t('geo_delete')) ?></button><?= gp_tip('geo_delete') ?>
 				</form>
 			</td>
 		</tr>
@@ -106,7 +133,7 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 	<form method="post" action="index.php?r=geo" enctype="multipart/form-data">
 		<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('geo_upload')) ?></span>
+			<span class="gp-label"><?= gp_e(gp_t('geo_upload')) ?><?= gp_tip('geo_upload') ?></span>
 			<input class="gp-input" type="file" name="source" accept=".mmdb,.dat">
 			<span class="gp-help"><?= gp_e(gp_t('geo_upload_help')) ?>
 				<?= $limit > 0 ? gp_e(gp_t('geo_upload_limit')) . ': ' . gp_e($mb($limit)) . '.' : '' ?>
@@ -114,7 +141,7 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 		</label>
 		<div class="gp-row-head">
 			<button class="gp-btn gp-btn-primary" type="submit" name="do" value="upload"><?= gp_e(gp_t('geo_upload_btn')) ?></button>
-			<button class="gp-btn gp-btn-ghost" type="submit" name="do" value="compile"><?= gp_e(gp_t('geo_compile')) ?></button>
+			<button class="gp-btn gp-btn-ghost" type="submit" name="do" value="compile"><?= gp_e(gp_t('geo_compile')) ?></button><?= gp_tip('geo_compile') ?>
 		</div>
 	</form>
 	<p class="gp-help"><?= gp_e(gp_t('geo_compile_help')) ?></p>
@@ -129,27 +156,27 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 	<?php endif; ?>
 </div>
 
-<?php /* ------------------------------------------------------- lookup tester */ ?>
-<form method="get" action="index.php" class="gp-card gp-form">
+<?php gp_tab_end(); gp_tab_begin('geo', 'tester', $gt['tester']); ?>
+<form method="get" action="index.php#geo-tester" class="gp-card gp-form">
 	<input type="hidden" name="r" value="geo">
 	<div class="gp-card-title"><?= gp_e(gp_t('geo_tester')) ?></div>
 	<p class="gp-help"><?= gp_e(gp_t('geo_tester_help')) ?></p>
 	<div class="gp-grid-2">
 		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('rules_test_ip')) ?></span>
+			<span class="gp-label"><?= gp_e(gp_t('rules_test_ip')) ?><?= gp_tip('geo_ip') ?></span>
 			<input class="gp-input gp-ltr" type="text" name="ip" value="<?= gp_e($test_in['ip']) ?>" placeholder="203.0.113.7" spellcheck="false">
 		</label>
 		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('rules_test_ua')) ?></span>
+			<span class="gp-label"><?= gp_e(gp_t('rules_test_ua')) ?><?= gp_tip('geo_ua') ?></span>
 			<input class="gp-input gp-ltr" type="text" name="ua" value="<?= gp_e($test_in['ua']) ?>" spellcheck="false">
 		</label>
 		<label class="gp-field">
-			<span class="gp-label"><?= gp_e(gp_t('rules_test_path')) ?></span>
+			<span class="gp-label"><?= gp_e(gp_t('rules_test_path')) ?><?= gp_tip('geo_path') ?></span>
 			<input class="gp-input gp-ltr" type="text" name="path" value="<?= gp_e($test_in['path']) ?>" placeholder="/">
 		</label>
 	</div>
 	<label class="gp-check"><input type="checkbox" name="verified" value="1"<?= $test_in['verified'] ? ' checked' : '' ?>>
-		<span><?= gp_e(gp_t('rules_test_verified')) ?></span></label>
+		<span><?= gp_e(gp_t('rules_test_verified')) ?></span><?= gp_tip('geo_verified') ?></label>
 	<div class="gp-row-head"><button class="gp-btn gp-btn-primary" type="submit" name="test" value="1"><?= gp_e(gp_t('rules_test_run')) ?></button></div>
 	<?php if ($test_ran && $test === null): ?>
 	<div class="gp-note gp-note-strong" role="alert"><?= gp_e(gp_t('geo_bad_ip')) ?></div>
@@ -171,3 +198,4 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 	</div>
 	<?php endif; ?>
 </form>
+<?php gp_tab_end(); gp_tabs_end(); ?>

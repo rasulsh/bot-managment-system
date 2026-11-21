@@ -100,6 +100,18 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
 - The Rules impact preview reads the country from the log when the row has it; for rows from before
   `geo.log` was on it looks the logged address up in the *current* database, and says so.
 
+## Panel filters, tabs and tooltips
+
+- Filters scan the day's log from the end under the existing scan caps. An *exclude* filter ("is not", "does not
+  contain") matches more rows and so fills a page more slowly; when a cap is reached the "scan limit reached" notice
+  says the list may be incomplete.
+- A row that lacks a value reads as empty: "country is not IR" also lists rows that were never looked up (no `cc`), and
+  "status is not 5xx" lists rows with no recorded outcome.
+- Values containing a comma cannot be used in a multi-value choice field (the comma separates values).
+- Tabs, tooltips and *Share link* are JavaScript enhancements. Without JavaScript the tabs stack, tooltips open on
+  keyboard focus only, and the link is a plain link.
+- The layout test needs a Chromium; without it only the markup and CSS checks of the selftest run.
+
 ## Crawlers
 
 - Only crawlers in `known_bots` pass. Every other crawler, monitor and SEO tool

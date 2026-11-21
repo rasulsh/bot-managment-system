@@ -70,6 +70,21 @@ It needs `php`, `curl`, `python3` and `redis-server`. Expected last line: `PASS 
 
 It cannot test: a real cache or CDN in front of PHP, real browsers, IPv6 on your network, or your server's `auto_prepend_file`. Those need the manual test above.
 
+## Panel layout (tabs, tooltips, include / exclude filters)
+
+```bash
+php scripts/panel-selftest.php        # filter parser / matchers (every operator), chips, tabs markup, tooltip texts for every field, CSS
+bash scripts/panel-layout-test.sh     # real browser (Playwright): every page at 1600 px and 390 px, tabs, tooltips, chips
+bash scripts/panel-smoke.sh <url> <panel-path> <user> <pass>   # also runs the layout test when node + playwright exist
+```
+
+`panel-layout-test.sh` copies the repository to a temp directory, installs a login there, writes sample log and audit
+rows, serves it with PHP's built-in server and runs `scripts/panel-layout-test.js`: no horizontal page scroll at either
+width, the wide layout really uses the screen, no console error, CSP violation or request to another origin, tabs by
+click / arrow keys / hash, a rejected Settings or Rules save opening the tab with the error, tooltips (tap, Esc, outside
+tap, not cut off), filter chips. It needs `node` and `playwright` with Chromium and skips cleanly without them; CI runs it
+in the `http` job. Pass a directory to keep screenshots. Nothing is written into the working tree.
+
 ## Access rules
 
 ```bash

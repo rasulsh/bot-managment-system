@@ -171,6 +171,24 @@ function gp_geo_delete_source($name, $actor, $ip) {
 	return array(true, 'geo_del_done', $clean);
 }
 
+// How the last compile used a source file: error | new | used | unused.
+function gp_geo_source_use(array $s) {
+	if (!empty($s['error'])) { return 'error'; }
+	if (!empty($s['new'])) { return 'new'; }
+	return !empty($s['used']) ? 'used' : 'unused';
+}
+
+// The sources list under the name / use filters (include or exclude). Pure.
+function gp_geo_filter_sources(array $sources, array $f) {
+	$out = array();
+	foreach ($sources as $s) {
+		if (isset($f['name']) && !gp_filter_test('text', $f['name'], (string)($s['name'] ?? ''))) { continue; }
+		if (isset($f['use']) && !gp_filter_test('choice', $f['use'], gp_geo_source_use($s))) { continue; }
+		$out[] = $s;
+	}
+	return $out;
+}
+
 // Queue the compile job. Returns array(ok, lang key, detail).
 function gp_geo_compile($actor) {
 	$r = gp_job_enqueue('geo_compile', array(), $actor);

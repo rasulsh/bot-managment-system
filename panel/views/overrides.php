@@ -53,10 +53,14 @@
 	</form>
 </div>
 
+<?= gp_filter_form_html('overrides', array(
+	'kind' => array('ovr_kind', 'is', array('allow', 'deny'), 'flt_kind'),
+	'identity' => array('ovr_identity', 'is', array(), 'flt_ip')), $filter) ?>
+
 <div class="gp-card">
 	<div class="gp-card-title">
 		<?= gp_e(gp_t('ovr_title')) ?>
-		<span class="gp-card-sub"><?= gp_num(count($items)) ?></span>
+		<span class="gp-card-sub"><?= gp_num(count($items)) ?> / <?= gp_num(count($items_all)) ?></span>
 	</div>
 	<?php if (!$items): ?>
 		<p class="gp-help"><?= gp_e(gp_t('no_results')) ?></p>
