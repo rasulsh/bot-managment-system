@@ -269,8 +269,22 @@ who steals the session.
   keeps the field names and adds `<key>_op=not` (absent = include), so older links keep working, and paging, the
   CSV export and *Share link* keep the operators. Active filters show as removable chips above the table, an
   exclude one marked "is not" / "does not contain". An exclude filter can scan more lines before it finds rows; the
-  existing "scan limit reached" notice appears when a cap is hit. Rows that never carried a value (no `cc`, no
-  outcome status) read as empty, so "country is not IR" also lists them.
+  existing "scan limit reached" notice appears when a cap is hit.
+* **Empty values: unknown versus known.** What an empty value *means* decides how a filter treats it.
+  * **Unknown** (the information does not exist): country and ASN (no lookup ran, or none found; ASN 0), the outcome
+    status (`capture_outcomes` off or no outcome line), the bot verdict (`botv`, no bot claim). Like the rule engine's
+    unknown country, a row **without** the value matches **neither "is" nor "is not"**: "country is not IR" lists
+    only rows whose country is known and is not IR, so counts are not inflated by rows that were never looked up.
+  * **Known empty** (the empty value is a fact): reasons (a row with no reasons has none), the device id (no device =
+    a token-less client), the operator override (none was set), and, on the Rules table, a rule with no country /
+    ASN condition. These are plain include / exclude and an empty value equals no real value, so "reason is not
+    UA_EMPTY", "device is not X" and "override is not deny" **include** those rows.
+  * **`(none)`** (offered in the datalist, explained in the tooltip, valid on all of these fields) means "empty":
+    **is (none)** lists those rows, **is not (none)** lists the rows that have a value, and it can be mixed into the
+    comma list (`cc=IR,(none)` = Iran or unknown; `reason=(none),UA_SCRIPT` = no reason or UA_SCRIPT).
+  * Fields every row always has (action, address, path, User-Agent, token, shadow, holdout) are plain include /
+    exclude and need no `(none)`.
+  `(none)` survives paging, the CSV export link and *Share link*.
 
 ## Testing
 

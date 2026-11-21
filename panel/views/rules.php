@@ -307,8 +307,8 @@ $err_text = function ($field) use ($errors, $details) {
 
 	<?php
 	$rflt = array('action' => array('rules_flt_action', 'is', array('block', 'challenge', 'log')), 'mode' => array('rules_flt_mode', 'is', array('enforce', 'monitor')),
-		'state' => array('rules_flt_state', 'is', array('active', 'disabled', 'expired')), 'cc' => array('geo_cc', 'is', array()),
-		'asn' => array('geo_asn', 'is', array()), 'ua' => array('logs_ua', 'has', array()), 'q' => array('rules_flt_q', 'has', array()));
+		'state' => array('rules_flt_state', 'is', array('active', 'disabled', 'expired')), 'cc' => array('geo_cc', 'is', array(GP_FILTER_NONE)),
+		'asn' => array('geo_asn', 'is', array(GP_FILTER_NONE)), 'ua' => array('logs_ua', 'has', array()), 'q' => array('rules_flt_q', 'has', array()));
 	$rchips = gp_filter_chips($filter, array_map(function ($d) { return gp_t($d[0]); }, $rflt),
 		array_map(function ($d) { return $d[1] === 'has' ? 'text' : 'choice'; }, $rflt),
 		function ($q) { return 'index.php?' . http_build_query(array_merge(array('r' => 'rules'), $q)); });
@@ -318,7 +318,7 @@ $err_text = function ($field) use ($errors, $details) {
 		<div class="gp-filters gp-filters-3">
 			<?php foreach ($rflt as $fk => $fd): $fv = isset($filter[$fk]) ? $filter[$fk] : null; ?>
 			<div class="gp-field">
-				<label class="gp-label" for="rf-<?= gp_e($fk) ?>"><?= gp_e(gp_t($fd[0])) ?><?= gp_tip($fk === 'q' ? 'flt_q' : ($fk === 'action' || $fk === 'mode' ? 'rule_' . $fk : 'flt_' . $fk)) ?></label>
+				<label class="gp-label" for="rf-<?= gp_e($fk) ?>"><?= gp_e(gp_t($fd[0])) ?><?= gp_tip($fk === 'q' ? 'flt_q' : ($fk === 'action' || $fk === 'mode' ? 'rule_' . $fk : ($fk === 'cc' || $fk === 'asn' ? 'flt_rule_' . $fk : 'flt_' . $fk))) ?></label>
 				<div class="gp-fgroup">
 					<?= gp_filter_op_select($fk, $fv, $fd[1]) ?>
 					<input class="gp-input gp-ltr" type="text" id="rf-<?= gp_e($fk) ?>" name="<?= gp_e($fk) ?>" value="<?= gp_e(gp_filter_text($fv)) ?>"

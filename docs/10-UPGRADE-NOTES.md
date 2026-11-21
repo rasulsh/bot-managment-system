@@ -17,6 +17,14 @@ What changed in each release and what to do about it. Newest first.
 * `panel/assets/app.css` is rebuilt (`npx tailwindcss@3 -c panel/assets/tailwind.config.js -i panel/assets/app.src.css -o panel/assets/app.css --minify`).
 * New test: `scripts/panel-layout-test.sh` (browser, 1600 px / 390 px), also run by `panel-smoke.sh` and in CI.
 
+**Empty values.** The panel distinguishes *unknown* from *known empty*. Country, ASN, outcome status and bot verdict are
+**unknown** when empty (no lookup, not captured, no bot claim): a row without the value matches neither "is" nor "is not",
+like an unknown country in a rule. Reasons, device id (a token-less client), operator override and a rule with no country /
+ASN condition are **known empty**: plain include / exclude, so "reason is not UA_EMPTY", "device is not X" and
+"override is not deny" include those rows. The value `(none)` selects empty rows on all of these fields (`is (none)`,
+`is not (none)`, or mixed into a list). A saved "is not" link on country, ASN, status or bot verdict now lists fewer rows
+than before; links on reasons, device and override behave as they always did.
+
 **Compatibility.** Every existing link keeps working (a bare `act=403` is "is 403"). `gp_log_match()` still accepts the old
 scalar filters. `gp_audit_read()` still accepts a search string.
 

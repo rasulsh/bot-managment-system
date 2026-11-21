@@ -1891,12 +1891,12 @@ t_ok('logs: ip is / is not, CIDR', $lm(array('ip' => '203.0.113.0/24')) && !$lm(
 t_ok('logs: dev is / is not', $lm(array('dev' => 'd1')) && $lm(array('dev' => 'd2', 'dev_op' => 'not')) && !$lm(array('dev' => 'd1', 'dev_op' => 'not')));
 t_ok('logs: path and UA contains / does not contain', $lm(array('path' => 'SHOP')) && !$lm(array('path' => 'shop', 'path_op' => 'not')) && $lm(array('path' => 'admin', 'path_op' => 'not'))
 	&& $lm(array('ua' => 'chrome')) && !$lm(array('ua' => 'chrome', 'ua_op' => 'not')));
-t_ok('logs: country is / is not (any case), ASN is / is not, unlogged rows read as empty', $lm(array('cc' => 'ir,us')) && !$lm(array('cc' => 'IR', 'cc_op' => 'not')) && $lm(array('cc' => 'US', 'cc_op' => 'not'))
-	&& $lm(array('asn' => '12880')) && !$lm(array('asn' => '12880', 'asn_op' => 'not')) && !gp_log_match(array(), gp_filter_parse(array('cc' => 'IR'), array('cc' => 'choice'))) && gp_log_match(array(), gp_filter_parse(array('cc' => 'IR', 'cc_op' => 'not'), array('cc' => 'choice'))));
+t_ok('logs: country is / is not (any case) and ASN is / is not on rows that have a value', $lm(array('cc' => 'ir,us')) && !$lm(array('cc' => 'IR', 'cc_op' => 'not')) && $lm(array('cc' => 'US', 'cc_op' => 'not'))
+	&& $lm(array('asn' => '12880')) && !$lm(array('asn' => '12880', 'asn_op' => 'not')) && $lm(array('asn' => '1', 'asn_op' => 'not')));
 t_ok('logs: reason matches any of the row\'s reasons; is not excludes the row', $lm(array('reason' => 'RULE:r1')) && $lm(array('reason' => 'X,UA_SCRIPT')) && !$lm(array('reason' => 'UA_SCRIPT', 'reason_op' => 'not')) && $lm(array('reason' => 'BOT_FAKE', 'reason_op' => 'not')));
-t_ok('logs: tok, ovr, shadow and holdout flags', $lm(array('tok' => 'm')) && !$lm(array('tok' => 'v')) && $lm(array('sh' => '0')) && !$lm(array('sh' => '1')) && $lm(array('hold' => '1')) && $lm(array('hold' => '0', 'hold_op' => 'not')) && $lm(array('ovr' => 'allow', 'ovr_op' => 'not')));
-t_ok('logs: status classes, include and exclude, and a row with no outcome', $lm(array('status' => '5xx')) && !$lm(array('status' => '2xx')) && !$lm(array('status' => '5xx', 'status_op' => 'not')) && $lm(array('status' => '404,4xx', 'status_op' => 'not'))
-	&& !gp_log_match(array(), gp_filter_parse(array('status' => '5xx'), array('status' => 'choice'))) && gp_log_match(array(), gp_filter_parse(array('status' => '5xx', 'status_op' => 'not'), array('status' => 'choice'))));
+t_ok('logs: tok, shadow and holdout flags (always present), ovr on a row with no override', $lm(array('tok' => 'm')) && !$lm(array('tok' => 'v')) && $lm(array('sh' => '0')) && !$lm(array('sh' => '1')) && $lm(array('hold' => '1')) && $lm(array('hold' => '0', 'hold_op' => 'not'))
+	&& $lm(array('ovr' => 'allow', 'ovr_op' => 'not')) && $lm(array('ovr' => '(none)')));
+t_ok('logs: status classes, include and exclude on a row that has an outcome', $lm(array('status' => '5xx')) && !$lm(array('status' => '2xx')) && !$lm(array('status' => '5xx', 'status_op' => 'not')) && $lm(array('status' => '404,4xx', 'status_op' => 'not')));
 t_ok('logs: fields are AND-ed, with score ranges that keep no operator', $lm(array('act' => '403', 'cc' => 'IR', 'path' => 'shop')) && !$lm(array('act' => '403', 'cc' => 'US')) && gp_log_match($lr, array('sc_min' => 30, 'sc_max' => 40))
 	&& !gp_log_match($lr, array('sc_min' => 41)) && !gp_log_match($lr, array('esc_max' => 54)));
 t_ok('logs: the filter form reads every field from the query string', (function () {
@@ -1907,6 +1907,72 @@ t_ok('logs: the filter form reads every field from the query string', (function 
 })());
 t_ok('logs: filter keys and CSV columns include cc and asn', isset(gp_log_filter_spec()['cc'], gp_log_filter_spec()['asn'], gp_log_filter_spec()['ua'])
 	&& strpos(file_get_contents(__DIR__ . '/../panel/index.php'), "'botv', 'cc', 'asn', 'st'") !== false);
+
+// Missing-value semantics. A field a row may lack (country, ASN, status, bot verdict,
+// override, device, reasons) follows the rule engine's "unknown matches neither": a row
+// WITHOUT the value matches neither "is" nor "is not". (none) selects absent rows.
+$opt_fields = array(
+	'cc'     => array(array(), array('cc' => 'IR'), array('cc' => 'US'), 'IR', 'ir'),
+	'asn'    => array(array('asn' => 0), array('asn' => 12880), array('asn' => 15169), '12880', '12880'),
+	'status' => array(array(), array('_out' => array('st' => 503)), array('_out' => array('st' => 200)), '5xx', '5xx'),
+	'botv'   => array(array('botv' => ''), array('botv' => 'ok'), array('botv' => 'bad'), 'ok', 'ok'),
+	'ovr'    => array(array('ovr' => ''), array('ovr' => 'allow'), array('ovr' => 'deny'), 'allow', 'allow'),
+	'dev'    => array(array('dev' => ''), array('dev' => 'd1'), array('dev' => 'd2'), 'd1', 'd1'),
+	'reason' => array(array('rs' => array()), array('rs' => array('UA_SCRIPT')), array('rs' => array('BOT_FAKE')), 'UA_SCRIPT', 'UA_SCRIPT'),
+);
+$ob = array(); $om = array();
+foreach ($opt_fields as $of => $d) {
+	// Absence means NOT KNOWN for cc / asn / status / botv; for ovr / dev / reason it is a KNOWN empty value.
+	$known_empty = in_array($of, array('ovr', 'dev', 'reason'), true);
+	$mk = function ($val, $op) use ($of) { return gp_filter_parse(array($of => $val, $of . '_op' => $op), array($of => $of === 'cc' ? array('choice', 'ci' => true) : ($of === 'dev' ? 'ident' : 'choice'))); };
+	$chk = function ($val, $op, $absent, $has, $other) use ($of, $d, $mk, &$ob) {
+		$f = $mk($val, $op);
+		$got = array(gp_log_match($d[0], $f), gp_log_match($d[1], $f), gp_log_match($d[2], $f));
+		if ($got !== array($absent, $has, $other)) { $ob[] = $of . ' ' . $op . ' ' . $val . ' => ' . json_encode($got); }
+	};
+	$v = $d[3];
+	$chk($v, 'is', false, true, false);                    // is X: absent no
+	$chk($v, 'not', $known_empty, false, true);            // is not X: absent NO for unknown fields, YES for known-empty ones
+	$chk('(none)', 'is', true, false, false);              // is (none): the empty rows only
+	$chk('(none)', 'not', false, true, true);              // is not (none): rows that have a value
+	$chk($v . ',(none)', 'is', true, true, false);         // X or none
+	$chk($v . ',(none)', 'not', false, false, true);       // not X and not none: empty rows are excluded by (none)
+	$chk(strtoupper('(None)'), 'is', true, false, false);  // the token is case-insensitive
+}
+t_ok('every empty-able field (unknown: cc, asn, status, botv; known-empty: ovr, dev, reason): is / is not / (none) / mixed lists behave as specified on a row without, with, and with another value' . ($ob ? ' (' . implode('; ', $ob) . ')' : ''), !$ob);
+t_ok('known-empty fields: "reason is not UA_EMPTY", "dev is not X" and "ovr is not deny" INCLUDE the rows with no reason / no device / no override',
+	gp_log_match(array('rs' => array()), array('reason' => array('v' => array('UA_EMPTY'), 'not' => true))) && gp_log_match(array(), array('reason' => array('v' => array('UA_EMPTY'), 'not' => true)))
+	&& gp_log_match(array('dev' => ''), array('dev' => array('v' => array('d1'), 'not' => true))) && gp_log_match(array(), array('dev' => array('v' => array('d1'), 'not' => true)))
+	&& gp_log_match(array('ovr' => ''), array('ovr' => array('v' => array('deny'), 'not' => true))) && gp_log_match(array(), array('ovr' => array('v' => array('deny'), 'not' => true)))
+	&& !gp_log_match(array('ovr' => ''), array('ovr' => array('v' => array('deny'), 'not' => false))));
+t_ok('unknown-able fields: a row WITHOUT the field matches neither "is" nor "is not" (country, ASN, status, botv)',
+	!gp_log_match(array(), array('cc' => array('v' => array('IR'), 'not' => false))) && !gp_log_match(array(), array('cc' => array('v' => array('IR'), 'not' => true)))
+	&& !gp_log_match(array(), array('status' => array('v' => array('5xx'), 'not' => false))) && !gp_log_match(array(), array('status' => array('v' => array('5xx'), 'not' => true)))
+	&& !gp_log_match(array(), array('botv' => array('v' => array('ok'), 'not' => false))) && !gp_log_match(array(), array('botv' => array('v' => array('ok'), 'not' => true)))
+	&& !gp_log_match(array('asn' => 0), array('asn' => array('v' => array('1'), 'not' => true))) && !gp_log_match(array(), array('asn' => array('v' => array('1'), 'not' => true))));
+t_ok('a row with asn 0 (looked up, none found) counts as having no ASN', gp_log_match(array('asn' => 0), array('asn' => array('v' => array('(none)'), 'not' => false))) && !gp_log_match(array('asn' => 0), array('asn' => array('v' => array('1'), 'not' => true))));
+t_ok('always-present fields keep include / exclude: act, ip, tok, sh, path, ua', gp_log_match(array('ip' => '1.2.3.4'), array('ip' => array('v' => array('5.5.5.5'), 'not' => true)))
+	&& gp_log_match(array(), array('act' => array('v' => array('403'), 'not' => true))) && gp_log_match(array('p' => '/a'), array('path' => array('v' => array('zzz'), 'not' => true)))
+	&& gp_log_match(array('tok' => 'm'), array('tok' => array('v' => array('v'), 'not' => true))) && gp_log_match(array('sh' => 0), array('sh' => array('v' => array('1'), 'not' => true))));
+t_ok('(none) on a field that always has a value (act 403) matches nothing; "is not (none)" matches it', !gp_log_match(array('act' => '403'), array('act' => array('v' => array('(none)'), 'not' => false)))
+	&& gp_log_match(array('act' => '403'), array('act' => array('v' => array('(none)'), 'not' => true))));
+t_ok('parser: (none) in any case is normalised, also in a case-insensitive field, and mixes with values', gp_filter_parse(array('cc' => '(NONE), ir'), array('cc' => array('choice', 'ci' => true)))['cc']['v'] === array('(none)', 'IR'));
+t_ok('Share link, CSV export and paging keep (none): the query string carries it and it parses back unchanged', (function () {
+	$f = gp_filter_parse(array('cc' => 'ir,(none)', 'cc_op' => 'not', 'status' => '(none)'), array('cc' => array('choice', 'ci' => true), 'status' => 'choice'));
+	foreach (array(gp_logs_qs($f), gp_logs_qs($f, array('export' => 'csv')), gp_logs_qs($f, array('cursor' => 9))) as $u) {
+		parse_str(substr($u, strlen('index.php?')), $o);
+		if ($o['cc'] !== 'IR,(none)' || $o['cc_op'] !== 'not' || $o['status'] !== '(none)') { return false; }
+		if (gp_filter_parse($o, array('cc' => array('choice', 'ci' => true), 'status' => 'choice')) !== $f) { return false; }
+	}
+	return strpos(gp_logs_qs($f), '%28none%29') !== false;
+})());
+t_ok('the chip of a (none) filter shows the token and its remove link keeps the others', (function () {
+	$f = gp_filter_parse(array('cc' => '(none)', 'act' => '403'), array('cc' => 'choice', 'act' => 'choice'));
+	$c = gp_filter_chips($f, array('cc' => 'Country', 'act' => 'Action'), array(), function ($q) { return 'index.php?' . http_build_query($q); });
+	return $c[0]['text'] === '(none)' && strpos($c[0]['href'], 'act=403') !== false && strpos($c[0]['href'], 'cc=') === false;
+})());
+$nv = file_get_contents(__DIR__ . '/../panel/views/logs.php') . file_get_contents(__DIR__ . '/../panel/views/rules.php');
+t_ok('the filter forms offer (none) in the datalist of optional fields and the logs form has the botv filter', strpos($nv, 'GP_FILTER_NONE') !== false && strpos($nv, "'botv'") !== false);
 
 // Other lists.
 $oi = array(array('kind' => 'deny', 'identity' => '203.0.113.5'), array('kind' => 'allow', 'identity' => 'devabc'), array('kind' => 'deny', 'identity' => '198.51.100.7'));
@@ -1927,8 +1993,9 @@ t_ok('geoip sources: name contains / does not contain and use is / is not', coun
 $rfr = array(array_merge(gp_rule_blank(), array('id' => 'r-g1', 'name' => 'IR rule', 'country' => array('op' => 'include', 'type' => 'code', 'values' => array('IR')), 'ua' => null,
 	'asn' => array('op' => 'include', 'type' => 'number', 'values' => array('13335')))), array_merge(gp_rule_blank(), array('id' => 'r-g2', 'name' => 'curl rule', 'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('curl')))));
 $rfl = function ($get) use ($rfr) { $f = gp_rules_filter_from_request($get); return array_column(array_filter($rfr, function ($r) use ($f) { return gp_rules_filter_match($r, $f, time()); }), 'id'); };
-t_ok('rules: country (any case) and ASN conditions, is / is not', $rfl(array('cc' => 'ir')) === array('r-g1') && array_values($rfl(array('cc' => 'IR', 'cc_op' => 'not'))) === array('r-g2')
-	&& $rfl(array('asn' => '13335')) === array('r-g1') && array_values($rfl(array('asn' => '13335', 'asn_op' => 'not'))) === array('r-g2'));
+t_ok('rules: a rule with no country / ASN condition has a KNOWN "none": "is not" includes it, (none) lists it', $rfl(array('cc' => 'ir')) === array('r-g1') && array_values($rfl(array('cc' => 'US', 'cc_op' => 'not'))) === array('r-g1', 'r-g2')
+	&& $rfl(array('asn' => '13335')) === array('r-g1') && array_values($rfl(array('asn' => '1', 'asn_op' => 'not'))) === array('r-g1', 'r-g2')
+	&& array_values($rfl(array('cc' => 'IR', 'cc_op' => 'not'))) === array('r-g2') && array_values($rfl(array('cc' => '(none)'))) === array('r-g2') && array_values($rfl(array('cc' => '(none)', 'cc_op' => 'not'))) === array('r-g1'));
 t_ok('rules: UA text contains / does not contain', $rfl(array('ua' => 'CURL')) === array('r-g2') && array_values($rfl(array('ua' => 'curl', 'ua_op' => 'not'))) === array('r-g1'));
 t_ok('identity page: rows are filtered by action and path', (function () {
 	$f = gp_filter_parse(array('act' => '403', 'path' => 'shop', 'path_op' => 'not'), array('act' => 'choice', 'path' => 'text'));
@@ -1979,7 +2046,7 @@ $tip_keys = array();
 foreach (array_keys(gv_overlay_whitelist()) as $k) { $tip_keys[] = 'set_' . str_replace('.', '_', $k); }
 foreach (array('name', 'priority', 'enabled', 'action', 'mode', 'skip', 'ua', 'path', 'country', 'asn', 'expires', 'pow', 'note') as $k) { $tip_keys[] = 'rule_' . $k; }
 foreach (array('compile', 'upload', 'rollback', 'delete', 'ip', 'ua', 'path', 'verified', 'filter', 'sources', 'active') as $k) { $tip_keys[] = 'geo_' . $k; }
-foreach (array('ip', 'path', 'ua', 'cc', 'asn', 'act', 'status', 'reason', 'tok', 'dev', 'sh', 'hold', 'ovr', 'date', 'score', 'q', 'kind', 'event', 'actor', 'use', 'state') as $k) { $tip_keys[] = 'flt_' . $k; }
+foreach (array('rule_cc', 'rule_asn', 'ip', 'path', 'ua', 'cc', 'asn', 'act', 'status', 'reason', 'botv', 'tok', 'dev', 'sh', 'hold', 'ovr', 'date', 'score', 'q', 'kind', 'event', 'actor', 'use', 'state') as $k) { $tip_keys[] = 'flt_' . $k; }
 $tip_lang = require __DIR__ . '/../panel/lang.php';
 foreach ($tip_keys as $k) {
 	$t = isset($tip_lang['tip_' . $k]) ? $tip_lang['tip_' . $k] : '';

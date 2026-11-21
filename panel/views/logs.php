@@ -40,6 +40,7 @@ $flt = array(
 	'cc'     => array('geo_cc', 'is', array()),
 	'asn'    => array('geo_asn', 'is', array()),
 	'reason' => array('logs_reason', 'is', $reason_options),
+	'botv'   => array('id_botv', 'is', array('ok', 'bad')),
 	'dev'    => array('logs_device', 'is', array()),
 	'tok'    => array('logs_token', 'is', array('v', 'm', 'b')),
 	'sh'     => array('logs_shadow', 'is', array('1', '0')),
@@ -49,6 +50,7 @@ $flt_field = function ($key) use ($flt, $f) {
 	$d = $flt[$key];
 	$v = isset($f[$key]) ? $f[$key] : null;
 	$dl = array_values(array_filter($d[2], 'strlen'));
+	if (!empty(gp_log_filter_spec()[$key][4])) { $dl[] = GP_FILTER_NONE; }      // (none) = empty value
 	ob_start(); ?>
 	<div class="gp-field">
 		<label class="gp-label" for="flt-<?= gp_e($key) ?>"><?= gp_e(gp_t($d[0])) ?><?= gp_tip('flt_' . ($key === 'tok' || $key === 'dev' ? $key : $key)) ?></label>
@@ -84,12 +86,12 @@ $chips = gp_filter_chips($f, array_map(function ($d) { return gp_t($d[0]); }, $f
 
 	<?php
 	$adv_open = false;
-	foreach (array('reason', 'dev', 'tok', 'sh', 'hold', 'asn', 'sc_min', 'sc_max') as $k) { if (isset($f[$k]) && $f[$k] !== '') { $adv_open = true; } }
+	foreach (array('reason', 'botv', 'dev', 'tok', 'sh', 'hold', 'asn', 'sc_min', 'sc_max') as $k) { if (isset($f[$k]) && $f[$k] !== '') { $adv_open = true; } }
 	?>
 	<details class="gp-more" <?= $adv_open ? 'open' : '' ?>>
 		<summary><?= gp_e(gp_t('logs_more_filters')) ?></summary>
 		<div class="gp-filters gp-filters-3">
-			<?php foreach (array('reason', 'dev', 'tok', 'sh', 'hold', 'asn') as $k) { echo $flt_field($k); } ?>
+			<?php foreach (array('reason', 'botv', 'dev', 'tok', 'sh', 'hold', 'asn') as $k) { echo $flt_field($k); } ?>
 			<label class="gp-field">
 				<span class="gp-label"><?= gp_e(gp_t('logs_score_min')) ?><?= gp_tip('flt_score') ?></span>
 				<input class="gp-input gp-ltr" type="number" name="sc_min" inputmode="numeric" value="<?= gp_e((string)($f['sc_min'] ?? '')) ?>">

@@ -469,15 +469,21 @@ function gp_log_query(array $filter, $cursor = 0, $limit = 50) {
 	return array($rows, $meta);
 }
 
-// The log filter fields: filter key => array(row key, type, case-insensitive).
-// Types as in panel/filters.php. A row that lacks the value reads as '' (so "cc is
-// not IR" also lists rows that were never looked up).
+// The log filter fields: filter key => array(row key, type, case-insensitive, optional,
+// offers (none)). Types as in panel/filters.php.
+// OPTIONAL = absence means NOT KNOWN: country and ASN (no lookup ran / nothing found),
+// the outcome status (not captured), the bot verdict (no bot claim). A row without the
+// value matches neither "is" nor "is not" (like an unknown country in a rule).
+// reason, dev and ovr are NOT optional: no reasons, no device id (a token-less client)
+// and no override are known values, so "is not X" includes those rows. (none) works on
+// all seven.
 function gp_log_filter_spec() {
 	return array(
-		'act' => array('act', 'choice'), 'ovr' => array('ovr', 'choice'), 'tok' => array('tok', 'choice'),
-		'reason' => array('rs', 'choice'), 'sh' => array('sh', 'choice'), 'hold' => array('hold', 'choice'),
-		'cc' => array('cc', 'choice', true), 'asn' => array('asn', 'choice'), 'status' => array('_status', 'choice'),
-		'dev' => array('dev', 'ident'), 'ip' => array('ip', 'ident'),
+		'act' => array('act', 'choice'), 'ovr' => array('ovr', 'choice', false, false, true), 'tok' => array('tok', 'choice'),
+		'reason' => array('rs', 'choice', false, false, true), 'sh' => array('sh', 'choice'), 'hold' => array('hold', 'choice'),
+		'cc' => array('cc', 'choice', true, true, true), 'asn' => array('asn', 'choice', false, true, true), 'status' => array('_status', 'choice', false, true, true),
+		'botv' => array('botv', 'choice', false, true, true),
+		'dev' => array('dev', 'ident', false, false, true), 'ip' => array('ip', 'ident'),
 		'path' => array('p', 'text'), 'ua' => array('ua', 'text'),
 	);
 }
@@ -504,8 +510,14 @@ function gp_log_match(array $row, array $f) {
 		$fd = gp_filter_def($f[$key]);
 		if ($fd === null) { continue; }
 		if ($key === 'status') {
+			// No joined outcome = no status = absent.
+			$has = isset($row['_out']) && is_array($row['_out']) && isset($row['_out']['st']);
+			if (!$has) {
+				if (!(in_array(GP_FILTER_NONE, $fd['v'], true) && empty($fd['not']))) { return false; }
+				continue;
+			}
 			$hit = false;
-			foreach ($fd['v'] as $want) { if (gp_log_status_is($row, $want)) { $hit = true; break; } }
+			foreach ($fd['v'] as $want) { if ($want !== GP_FILTER_NONE && gp_log_status_is($row, $want)) { $hit = true; break; } }
 			if (!empty($fd['not']) ? $hit : !$hit) { return false; }
 			continue;
 		}
@@ -513,7 +525,8 @@ function gp_log_match(array $row, array $f) {
 		if (is_array($actual) && $def[0] !== 'rs') { $actual = ''; }
 		if ($def[0] === 'rs') { $actual = array_values(array_filter((array)$actual, 'is_string')); }
 		elseif (is_int($actual) || is_float($actual)) { $actual = (string)(int)$actual; }
-		if (!gp_filter_test($def[1], $fd, $actual, !empty($def[2]))) { return false; }
+		if ($key === 'asn' && $actual === '0') { $actual = ''; }          // 0 = looked up, no AS found
+		if (!gp_filter_test($def[1], $fd, $actual, !empty($def[2]), !empty($def[3]))) { return false; }
 	}
 	foreach (array('sc_min' => array('sc', 1), 'sc_max' => array('sc', -1), 'esc_min' => array('esc', 1), 'esc_max' => array('esc', -1)) as $k => $d) {
 		if (!isset($f[$k]) || $f[$k] === '') { continue; }
