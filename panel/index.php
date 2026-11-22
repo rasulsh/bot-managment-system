@@ -161,7 +161,7 @@ function gp_redirect($route, $extra = array()) {
 function gp_render($view, array $vars = array()) {
 	global $gp_user, $gp_flash, $gp_route;
 	$vars['user'] = $gp_user;
-	$vars['flash'] = $gp_flash;
+	$vars['flash'] = ($view === 'login') ? array() : $gp_flash;   // login draws its own message in the card
 	$vars['route'] = $gp_route;
 	$vars['view_file'] = __DIR__ . '/views/' . $view . '.php';
 	gp_send_headers();
@@ -179,9 +179,13 @@ if ($gp_route === 'login') {
 	if ($gp_post) {
 		$result = gp_login_attempt($_POST['username'] ?? '', $_POST['password'] ?? '');
 		if ($result[0]) { gp_redirect('dashboard'); }
-		gp_flash('error', gp_t($result[1]));
+		// The message is drawn inside the login card, not by the layout.
+		$gp_login_msg = $result[1] === 'login_locked'
+			? sprintf(gp_t('login_locked'), max(1, (int)ceil(((int)($result[2] ?? 0)) / 60)))
+			: gp_t($result[1]);
+		$gp_login_user = is_string($_POST['username'] ?? null) ? substr($_POST['username'], 0, 200) : '';
 	}
-	gp_render('login');
+	gp_render('login', array('login_msg' => $gp_login_msg ?? '', 'login_user' => $gp_login_user ?? ''));
 }
 
 if ($gp_route === 'logout') {

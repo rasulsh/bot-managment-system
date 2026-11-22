@@ -2,6 +2,13 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Login page error message
+
+* The "Wrong username or password." message was drawn by the shared layout, outside the centred login card. It is now inside the card, between the brand
+  block and the form, as an alert. The username is kept after a failed login, the password field takes focus, and a rate-limited visitor sees how many
+  minutes to wait (`login_locked` now contains `%d`). The IP-blocked page and the bare 404 are plain pages with no flash, so they needed no change.
+* `panel/assets/app.css` is rebuilt (one new rule, `.gp-login-msg`). No data, config or Redis change. Roll back by deploying the previous files.
+
 ## Image CAPTCHA and headless-browser signals
 
 **New**
