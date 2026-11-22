@@ -676,15 +676,28 @@ exception for `index.php` and static assets) `panel/`.
 - **Nginx** reads no `.htaccess`. Example, **untested**, for an install under the document root (adapt the prefix); then run `exposure-check.sh`:
 
   ```nginx
-  # Deny the guard's internal directories and dotfiles (repository inside the web root).
-  location ~ ^/(guard|geo|lists|logs|analyzer|scripts|docs)(/|$) { return 404; }
-  location ~ ^/(prepend\.php|guard\.off|README\.md|ROLLOUT\.md)$  { return 404; }
-  location ~ /\.(git|venv)                                        { return 404; }
+  # Deny the guard's internal directories, files and dotfiles (repository inside the web root).
+  location ^~ /guard/    { return 404; }
+  location ^~ /geo/      { return 404; }
+  location ^~ /lists/    { return 404; }
+  location ^~ /logs/     { return 404; }
+  location ^~ /analyzer/ { return 404; }
+  location ^~ /scripts/  { return 404; }
+  location ^~ /docs/     { return 404; }
+  location = /prepend.php { return 404; }
+  location = /guard.off   { return 404; }
+  location = /README.md   { return 404; }
+  location = /ROLLOUT.md  { return 404; }
+  location ~ /\.(git|venv) { return 404; }
   # Panel (symlinked or aliased as /gv-admin/): serve only index.php and the assets.
-  location ~ ^/gv-admin/(panel\.config\.php|audit\.jsonl)$ { return 404; }
+  location = /gv-admin/panel.config.php { return 404; }
+  location = /gv-admin/audit.jsonl      { return 404; }
+  location ^~ /gv-admin/views/          { return 404; }
   ```
 
-`scripts/exposure-check.sh <BASE_URL> [panel-path|none]` requests 49 sensitive paths
+  Prefix (`^~`) and exact (`=`) locations are used so that a `location ~ \.php$` block cannot run these files first.
+
+`scripts/exposure-check.sh <BASE_URL> [panel-path|none]` requests the sensitive paths listed in the script
 (logs, config, rules, compiled files, `.git`, the panel's config and views) and fails
 (exit 1) if any answers 200; it also checks that the panel entry point and its stylesheet load.
 It treats a site that answers 200 for unknown paths as inconclusive. Panel exposure by symlink,
