@@ -4,7 +4,7 @@
 # Gzips every finished day, drops archives older than the retention window and,
 # when a size cap is set, the oldest archives until the logs fit under it.
 # Cron example (03:10 every day):
-#   10 3 * * * /full/path/bot-guard/scripts/guard-logrotate.sh >/dev/null 2>&1
+#   10 3 * * * bash /full/path/bot-guard/scripts/guard-logrotate.sh >/dev/null 2>&1
 #
 # Settings come from the guard's effective config (guard/config.php plus the
 # panel overlay), read through scripts/config-dump.php:

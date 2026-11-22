@@ -4,6 +4,7 @@ if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 require_once __DIR__ . '/data.php';
 require_once __DIR__ . '/rules.php';
 require_once __DIR__ . '/iplists.php';
+require_once __DIR__ . '/perms.php';
 
 // Job health and the dashboard's critical alerts.
 //
@@ -355,6 +356,8 @@ function gp_health_inputs($now = null) {
 		'noeviction' => gp_redis_noeviction(), 'cron' => gp_cron_check($now), 'tz_offset' => (int)date('Z', $now),
 		'geo_used' => gp_geo_status($now)['country'] !== null || gp_geo_status($now)['asn'] !== null,
 		'iplist_warn' => gp_iplists_health($now),
+		'update_warn' => function_exists('gp_upd_health') ? gp_upd_health($now) : array(),
+		'perms' => gp_perm_scan(false, $now),
 		'captcha_gd_needed' => gp_captcha_needed($cfg, $rs['rules']),
 		'captcha_gd' => gv_captcha_available(),
 	);
@@ -410,6 +413,13 @@ function gp_health_alerts(array $in) {
 	// GD is missing while a CAPTCHA is configured: every captcha action falls back to the proof-of-work challenge. The panel
 	// runs in the web server's PHP, like the guard (a CLI PHP can differ: check the web server's phpinfo if this looks wrong).
 	if (!empty($in['captcha_gd_needed']) && empty($in['captcha_gd'])) { $add('captcha_gd', 'warning', 'al_captcha_gd', '', 'settings'); }
+	$pm = isset($in['perms']) && is_array($in['perms']) ? $in['perms'] : null;
+	if ($pm !== null) {
+		if (!empty($pm['secret_readable'])) { $add('perm_secret', 'critical', 'al_perm_secret', implode(', ', array_slice($pm['secret_readable'], 0, 4)), 'jobs'); }
+		if (!empty($pm['cron_not_exec'])) { $add('perm_cron_exec', 'warning', 'al_perm_cron_exec', implode(', ', array_slice($pm['cron_not_exec'], 0, 4)), 'jobs'); }
+		if ($pm['writable_dirs'] + $pm['writable_files'] > 0) { $add('perm_writable', 'warning', 'al_perm_writable', $pm['writable_dirs'] . ' dir, ' . $pm['writable_files'] . ' file', 'jobs'); }
+	}
+	foreach ((array)($in['update_warn'] ?? array()) as $w) { $add('update_' . $w[0], $w[2], 'al_update_' . $w[0], $w[1], 'update'); }
 	foreach ((array)($in['iplist_warn'] ?? array()) as $w) {
 		// A list file that is missing or corrupt while its list is enabled, or a failed compile: the guard
 		// silently treats the list as empty (fail-open), so these are critical. A pending compile is a warning.
@@ -424,11 +434,13 @@ function gp_health_alerts(array $in) {
 	$c = isset($in['cron']) ? $in['cron'] : array('mode' => 'none');
 	if ($c['mode'] === 'none') { $add('cron_unknown', 'warning', 'al_cron_unknown', '', 'jobs'); }
 	elseif (is_array($c['report'])) {
-		$miss = array(); $other = array();
+		$miss = array(); $other = array(); $noexec = array();
 		foreach ($c['report']['jobs'] as $j) {
-			if ($j['state'] === 'missing' && $j['severity'] === 'critical') { $miss[] = $j['job']; }
+			if ($j['state'] === 'not_executable') { $noexec[] = $j['job']; }
+			elseif ($j['state'] === 'missing' && $j['severity'] === 'critical') { $miss[] = $j['job']; }
 			elseif (in_array($j['state'], array('disabled', 'wrong_path', 'wrong_schedule'), true) && $j['required']) { $other[] = $j['job'] . ' (' . $j['state'] . ')'; }
 		}
+		if ($noexec) { $add('cron_not_exec', 'critical', 'al_cron_not_exec', implode(', ', $noexec), 'jobs'); }
 		if ($miss) { $add('cron_missing', 'critical', 'al_cron_missing', implode(', ', $miss), 'jobs'); }
 		if ($other) { $add('cron_wrong', 'warning', 'al_cron_wrong', implode(', ', $other), 'jobs'); }
 		$py = $c['report']['gv_python'] ?? array('set' => true, 'ok' => true);
@@ -511,7 +523,8 @@ function gp_cron_setup_lines(array $jobs, array $cron, $root = null) {
 			? (isset($jobs[$job]) && $jobs[$job]['required'] ? true : false)
 			: isset($missing[$job]);
 		if (!$need) { continue; }
-		$lines[] = $d[0] . ' ' . $root . '/scripts/' . $d[1] . ($d[2] !== '' ? ' ' . $d[2] : '') . ' >/dev/null 2>&1';
+		// Through bash: the line then never depends on the execute bit of the script.
+		$lines[] = $d[0] . ' bash ' . $root . '/scripts/' . $d[1] . ($d[2] !== '' ? ' ' . $d[2] : '') . ' >/dev/null 2>&1';
 	}
 	return $lines;
 }

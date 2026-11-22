@@ -50,6 +50,7 @@ SENSITIVE=(
 	"/analyzer/.jobstatus-verify.json"
 	"/analyzer/.cron-check.json"
 	"/analyzer/.cron-check-live.json"
+	"/analyzer/.perm-check.json"
 	"/logs/jobs.log"
 	"/logs/jobs-errors.log"
 	"/scripts/cron-check.sh"
@@ -69,6 +70,13 @@ SENSITIVE=(
 	"/guard/config.php.orig"
 	"/panel/panel.config.php"
 	"/panel/audit.jsonl"
+	"/updates/recovery.json"
+	"/updates/installed.json"
+	"/updates/rollback.php"
+	"/updates/verify.php"
+	"/updates/.htaccess"
+	"/VERSION"
+	"/CHANGELOG.md"
 	"/panel/views/layout.php"
 	"/analyzer/snapshot.json"
 	"/analyzer/model.joblib"
@@ -144,7 +152,7 @@ else
 	failures=$((failures + 1))
 fi
 # Inside the panel directory only index.php and static assets may be served.
-for path in "$PANEL_PATH/panel.config.php" "$PANEL_PATH/audit.jsonl" "$PANEL_PATH/auth.php" "$PANEL_PATH/views/login.php"; do
+for path in "$PANEL_PATH/panel.config.php" "$PANEL_PATH/audit.jsonl" "$PANEL_PATH/auth.php" "$PANEL_PATH/views/login.php" "$PANEL_PATH/update.php" "$PANEL_PATH/update-rollback.tpl" "$PANEL_PATH/recover.php"; do
 	code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$BASE_URL$path" 2>/dev/null)"
 	if [ "$code" = "200" ] && [ "$soft404" = "0" ]; then
 		printf '%-34s | %s\n' "$path" "200  EXPOSED"

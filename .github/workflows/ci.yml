@@ -31,13 +31,24 @@ jobs:
           coverage: none
           # The image CAPTCHA draws with GD (optional at run time: the suites also run the "GD missing" case with GV_CAPTCHA_NO_GD).
           extensions: gd
-      - name: php -l on every PHP file
+      - name: php -l on every PHP file (and the .tpl recovery script templates, which are PHP)
         run: |
           status=0
           while IFS= read -r -d '' f; do
             php -l "$f" >/dev/null || { php -l "$f"; status=1; }
-          done < <(find . -name '*.php' -not -path './.git/*' -print0)
+          done < <(find . \( -name '*.php' -o -name '*.tpl' \) -not -path './.git/*' -print0)
           exit $status
+
+  # A pull request that changes code must bump VERSION and add the CHANGELOG entry (scripts/version-check.sh).
+  version-bump:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+      - name: VERSION is bumped when code changed
+        run: bash scripts/version-check.sh "origin/${{ github.base_ref }}" HEAD
 
   lint-other:
     runs-on: ubuntu-24.04
@@ -214,6 +225,8 @@ jobs:
         run: |
           export NODE_PATH="$RUNNER_TEMP/pw/node_modules"
           bash scripts/panel-layout-test.sh
+      - name: in-panel updater end to end (upload, review, apply, health check, recovery token, automatic rollback)
+        run: bash scripts/update-e2e.sh
 
   # ------------------------------------------------------------ web servers
   webservers:

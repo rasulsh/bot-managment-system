@@ -277,3 +277,22 @@ directory must be writable only by the user the cron jobs run as.
   the system on the same time zone.
 - **PHP 8.0+** is required. Below that `prepend.php` returns at once and the
   guard does nothing; it leaves one line (`php_too_old`) in `logs/guard-errors.log`, at most once an hour.
+
+## The in-panel updater
+
+- **PHP must be able to write the install.** On a host where the web server user cannot write the project files the Update page
+  says so and refuses to start; update over SFTP instead.
+- **The first ZIP update cannot detect files that upstream removed** (there is no earlier file list); they stay in place. After that
+  every update records its file list (`updates/installed.json`) and removals work.
+- **The recovery scripts come from the code that is running when you press Apply.** An install that has never used the updater has
+  none; copy the first release over by hand once.
+- **The health check is one synthetic request through the guard, not a test suite.** It catches broken code, a broken
+  configuration and a broken rules / list / GeoIP load; it cannot tell that a new rule behaves differently from the old one. Watch
+  the dashboard after an update, as after any change.
+- **Allowed top-level folders and file types are a fixed list.** A release that adds a new top-level folder or a new file type needs
+  the updater itself to be updated first (one manual copy).
+- **A web recovery token that is lost is gone** (only its hash is stored); use the shell command `php <install-dir>/updates/rollback.php`.
+- **OPcache with `validate_timestamps=0`** keeps old code until PHP restarts; the updater calls `opcache_invalidate()` for every
+  changed file, but a restart (or `opcache_reset()` from a web request) is the sure way. `scripts/` and `analyzer/` changes take effect
+  at the next cron run.
+

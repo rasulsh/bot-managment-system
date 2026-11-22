@@ -200,26 +200,26 @@ nothing while exiting 0:
 ```cron
 GV_PYTHON=/home/youruser/bot-guard/.venv/bin/python
 ```
- A complete crontab (adjust the absolute path):
+ Call the scripts **through `bash`** (as below): the line then works even when a script has no execute bit, which is easy to lose when files are copied, unzipped or restored. A complete crontab (adjust the absolute path):
 
 ```cron
 # reverse-DNS bot verification, frequent
-*/10 * * * * /home/youruser/bot-guard/scripts/analyzer-cron.sh verify    >/dev/null 2>&1
+*/10 * * * * bash /home/youruser/bot-guard/scripts/analyzer-cron.sh verify    >/dev/null 2>&1
 # nightly behavioural scoring + anomaly levels
-17 4   * * * /home/youruser/bot-guard/scripts/analyzer-cron.sh nightly   >/dev/null 2>&1
+17 4   * * * bash /home/youruser/bot-guard/scripts/analyzer-cron.sh nightly   >/dev/null 2>&1
 # weekly candidate retrain (trains a candidate; promote it explicitly to go live)
-41 5   * * 0 /home/youruser/bot-guard/scripts/analyzer-cron.sh train     >/dev/null 2>&1
-11 6   * * 0 /home/youruser/bot-guard/scripts/analyzer-cron.sh train-clf >/dev/null 2>&1
+41 5   * * 0 bash /home/youruser/bot-guard/scripts/analyzer-cron.sh train     >/dev/null 2>&1
+11 6   * * 0 bash /home/youruser/bot-guard/scripts/analyzer-cron.sh train-clf >/dev/null 2>&1
 # dashboard snapshot for the panel (do NOT forget this one)
-*/15 * * * * /home/youruser/bot-guard/scripts/analyzer-cron.sh snapshot  >/dev/null 2>&1
+*/15 * * * * bash /home/youruser/bot-guard/scripts/analyzer-cron.sh snapshot  >/dev/null 2>&1
 # panel job queue worker (do NOT forget this one either)
-*    * * * * /home/youruser/bot-guard/scripts/analyzer-cron.sh worker    >/dev/null 2>&1
+*    * * * * bash /home/youruser/bot-guard/scripts/analyzer-cron.sh worker    >/dev/null 2>&1
 # daily log rotation (gzip finished days, delete old archives)
-10 3   * * * /home/youruser/bot-guard/scripts/guard-logrotate.sh         >/dev/null 2>&1
+10 3   * * * bash /home/youruser/bot-guard/scripts/guard-logrotate.sh         >/dev/null 2>&1
 # optional weekly report by email
-30 7   * * 1 /home/youruser/bot-guard/scripts/analyzer-cron.sh report | mail -s "Bot Guard weekly" you@example.com
+30 7   * * 1 bash /home/youruser/bot-guard/scripts/analyzer-cron.sh report | mail -s "Bot Guard weekly" you@example.com
 # only when you use country / ASN rules: recompile the GeoIP databases monthly (see docs/09-ADMIN-PANEL.md, GeoIP)
-23 3   1 * * /home/youruser/bot-guard/scripts/analyzer-cron.sh geo       >/dev/null 2>&1
+23 3   1 * * bash /home/youruser/bot-guard/scripts/analyzer-cron.sh geo       >/dev/null 2>&1
 ```
 
 The `geo` line only recompiles what is already in `geo/`: download a fresh database yourself (GeoLite2,
@@ -264,7 +264,7 @@ The expected interval of each job is editable in Settings > Analyzer; a job is *
 * **Crontab check.** `bash scripts/cron-check.sh` (English output; exit 0 = all required entries present and right, 1 =
   something required is missing or wrong, 2 = the crontab could not be read) reads the crontab (`/usr/bin/crontab.cagefs -l`
   on CloudLinux / CageFS, then `crontab -l`) and reports, per job: missing, **disabled** (commented out), **wrong path**
-  (another install directory), **runs too rarely** for its interval, duplicates; and a missing or invalid `GV_PYTHON=` line.
+  (another install directory), **runs too rarely** for its interval, duplicates, and **not executable** (an ERROR, exit 1: a direct entry such as `/path/scripts/analyzer-cron.sh worker` whose script lacks the execute bit fails silently in cron; fix with `chmod 755 <script>` or by writing the line with `bash` in front, which both forms of the check accept); and a missing or invalid `GV_PYTHON=` line.
   `--json` prints the same as JSON. The panel runs it itself (argv array, no shell, 3 s timeout) when `proc_open` is allowed;
   otherwise it shows `analyzer/.cron-check.json`, which every cron run refreshes (at most every 10 minutes); the live result is cached for 5 minutes (Jobs page: Check again); otherwise it falls
   back to the heartbeats above and says "run scripts/cron-check.sh over SSH". It sees the crontab of the user the panel

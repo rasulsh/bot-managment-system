@@ -577,6 +577,20 @@ function gp_login_attempt($username, $password) {
 	return array(false, 'login_failed');
 }
 
+// Ask a logged-in user for their password again before a dangerous action. Returns 'ok', 'bad' or 'locked'.
+// A wrong password counts against the same login limiter, so this cannot be used to guess the password
+// from a stolen session.
+function gp_reauth($user, $password) {
+	$cfg = gp_panel_config();
+	if ($cfg === null || !is_string($password) || $password === '') { return 'bad'; }
+	if (gp_login_locked((string)$user)) { return 'locked'; }
+	$ok = hash_equals($cfg['username'], (string)$user) & password_verify($password, $cfg['password_hash']);
+	if ($ok) { return 'ok'; }
+	gp_login_record_failure();
+	gp_audit_append(array('event' => 'reauth_failed', 'actor' => (string)$user, 'ip' => gp_client_ip()));
+	return 'bad';
+}
+
 function gp_logout($user) {
 	gp_session_clear();
 	gp_audit_append(array('event' => 'logout', 'actor' => (string)$user,

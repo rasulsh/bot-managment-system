@@ -11,6 +11,11 @@ Run through scripts/cron-check.sh (standard library only, no virtualenv needed).
 Order of commands tried for the live crontab: /usr/bin/crontab.cagefs -l (CloudLinux /
 CageFS), then crontab -l. "no crontab for <user>" is an empty crontab, not an error.
 
+Both forms of an entry are accepted: through the shell ("bash /path/scripts/analyzer-cron.sh verify", the
+recommended form, which does not depend on the execute bit) and direct ("/path/scripts/analyzer-cron.sh
+verify"). A DIRECT entry whose script exists but is not executable is an ERROR: cron cannot run it and fails
+silently. Fix: chmod 755 <script>, or use the bash form.
+
 Parsing: blank lines and "#" comments are ignored, EXCEPT a commented-out cron entry for one of
 our scripts, which counts as DISABLED. @hourly/@daily-style schedules are understood. An entry is
 matched by script path + mode and its resolved path is compared with THIS install directory
@@ -42,6 +47,7 @@ MACROS = {'@hourly': 60, '@daily': 1440, '@midnight': 1440, '@weekly': 10080, '@
 SLACK = 1.05          # a period up to 5 % over the expected interval still counts as on schedule
 
 ENTRY_RE = re.compile(r'(?P<path>\S*(?:analyzer-cron|guard-logrotate)\.sh)(?:\s+(?P<mode>train-clf|train|verify|nightly|snapshot|worker|report|geo)\b)?')
+SHELLS = ('bash', 'sh', 'dash', 'ash', 'zsh')
 ENV_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
 
 
@@ -134,8 +140,10 @@ def parse_crontab(text):
         mode = m.group('mode') or ''
         if script == 'analyzer-cron.sh' and not mode:
             continue
+        before = command[:m.start()].split()
+        via_shell = any(os.path.basename(t.strip('"\'')) in SHELLS for t in before)
         entries.append({'schedule': schedule, 'command': command.strip(), 'path': m.group('path').strip('"\''),
-                        'mode': mode, 'script': script, 'disabled': disabled, 'line': raw.strip()})
+                        'mode': mode, 'script': script, 'disabled': disabled, 'line': raw.strip(), 'via_shell': via_shell})
     return env, entries
 
 
@@ -191,6 +199,12 @@ def evaluate(text, root, source='file', now=None, geo_used=None):
                 elif period > expected * SLACK:
                     state = 'wrong_schedule'
                     message = 'runs about every %s min, the job needs every %s min or more often' % (_fmt(period), _fmt(expected))
+                # A direct entry needs the execute bit; "bash <script>" does not. Only a script that exists is judged.
+                direct = [e for e in good if not e['via_shell']]
+                if direct and os.path.isfile(direct[0]['path']) and not os.access(direct[0]['path'], os.X_OK):
+                    state = 'not_executable'
+                    message = ('not executable — cron will fail silently. Fix: chmod 755 %s   (or use the bash form: bash %s)'
+                               % (direct[0]['path'], direct[0]['path']))
         elif off:
             state = 'disabled'
             message = 'the entry is commented out'
@@ -199,7 +213,9 @@ def evaluate(text, root, source='file', now=None, geo_used=None):
             state = 'missing'
             message = 'there is no entry for it'
         severity = 'ok'
-        if state == 'missing':
+        if state == 'not_executable':
+            severity = 'critical'
+        elif state == 'missing':
             severity = 'critical' if required else 'warning'
         elif state in ('disabled', 'wrong_path', 'wrong_schedule'):
             severity = 'warning'
@@ -207,14 +223,15 @@ def evaluate(text, root, source='file', now=None, geo_used=None):
             severity = 'warning'
         if not required and state == 'missing':
             severity = 'info'
-        bad_for_exit = required and state in ('missing', 'disabled', 'wrong_path', 'wrong_schedule')
+        # not_executable is an error for every job, required or not: an enabled entry that cannot start is never what you want.
+        bad_for_exit = state == 'not_executable' or (required and state in ('missing', 'disabled', 'wrong_path', 'wrong_schedule'))
         if bad_for_exit:
             problems += 1
         elif severity in ('warning',):
             warnings += 1
         jobs.append({'job': name, 'required': required, 'state': state, 'severity': severity, 'message': message,
                      'schedule': schedule, 'expected_min': expected, 'period_min': period, 'line': line,
-                     'install_line': install_line(root, name, script, mode, default) if state != 'ok' and state != 'duplicate' else ''})
+                     'install_line': install_line(root, name, script, mode, default) if state not in ('ok', 'duplicate') else ''})
     gp = env.get('GV_PYTHON')
     py = {'set': gp is not None, 'value': gp or '', 'ok': False}
     if gp:
@@ -235,11 +252,12 @@ def _fmt(n):
 
 
 def install_line(root, name, script, mode, default):
+    """The recommended crontab line: through bash, so it never depends on the execute bit."""
     path = os.path.join(root, 'scripts', script)
     tail = (' ' + mode) if mode else ''
     if name == 'report':
-        return '%s %s%s | mail -s "Bot Guard weekly" you@example.com' % (default, path, tail)
-    return '%s %s%s >/dev/null 2>&1' % (default, path, tail)
+        return '%s bash %s%s | mail -s "Bot Guard weekly" you@example.com' % (default, path, tail)
+    return '%s bash %s%s >/dev/null 2>&1' % (default, path, tail)
 
 
 def read_live():
@@ -263,7 +281,7 @@ def render(report):
                   'Run this script over SSH as the user that owns the cron jobs.']
         return '\n'.join(lines) + '\n'
     for j in report['jobs']:
-        tag = {'ok': 'OK      ', 'critical': 'MISSING ', 'warning': 'WARNING ', 'info': 'optional'}[j['severity']]
+        tag = {'ok': 'OK      ', 'critical': 'ERROR   ' if j['state'] == 'not_executable' else 'MISSING ', 'warning': 'WARNING ', 'info': 'optional'}[j['severity']]
         label = j['job'] + ('' if j['required'] else ' (recommended)')
         lines.append('%s %-24s %s' % (tag, label, j['state'] if j['state'] != 'ok' else j['schedule']))
         if j['message']:

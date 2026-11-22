@@ -107,6 +107,7 @@ dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
 check "the dashboard shows the protection state and the details section" "$(grep -q 'Protection state' <<<"$dash" && grep -q 'gp-details' <<<"$dash" && echo 1 || echo 0)"
 check "the dashboard raises an alert for a fresh install with no snapshot or job status" "$(grep -q 'gp-alerts' <<<"$dash" && echo 1 || echo 0)"
 jp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=jobs")"
+check "the Jobs page shows the file permission check" "$(grep -q 'id="perms"' <<<"$jp" && echo 1 || echo 0)"
 check "the Jobs page shows job health and the crontab check" "$(grep -q 'Job health' <<<"$jp" && grep -q 'id="cron-check"' <<<"$jp" && grep -q 'job=verify' <<<"$jp" && echo 1 || echo 0)"
 jd="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=jobs&job=verify")"
 check "a job's detail page renders" "$(grep -q 'id="job-detail"' <<<"$jd" && echo 1 || echo 0)"
@@ -180,7 +181,7 @@ check "delete removes the list" "$(grep -q 'Smoke list' <<<"$ip" && echo 0 || ec
 # identity, settings and config file pages are checked for direction only: they
 # show request data or operator-written values (the challenge page text, which
 # ships in Persian) as they are, and those may contain any script.
-for r in dashboard logs identity overrides rules geo iplists replay models settings config_file jobs audit; do
+for r in dashboard logs identity overrides rules geo iplists replay models settings config_file jobs audit update; do
 	page="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=$r")"
 	check "page $r has the viewport meta tag" "$(grep -q 'name="viewport"' <<<"$page" && echo 1 || echo 0)"
 	check "page $r is English and left-to-right" "$(grep -q '<html lang="en" dir="ltr">' <<<"$page" && echo 1 || echo 0)"

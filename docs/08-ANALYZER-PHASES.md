@@ -75,9 +75,9 @@ price is `challenge.pow_bits`.
 ### Cron
 
 ```
-*/10 * * * * /full/path/bot-guard/scripts/analyzer-cron.sh verify  >/dev/null 2>&1
-17 4   * * * /full/path/bot-guard/scripts/analyzer-cron.sh nightly >/dev/null 2>&1
-41 5   * * 0 /full/path/bot-guard/scripts/analyzer-cron.sh train   >/dev/null 2>&1
+*/10 * * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh verify  >/dev/null 2>&1
+17 4   * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh nightly >/dev/null 2>&1
+41 5   * * 0 bash /full/path/bot-guard/scripts/analyzer-cron.sh train   >/dev/null 2>&1
 ```
 
 Each mode takes its own `flock`, so overlapping firings skip cleanly rather than

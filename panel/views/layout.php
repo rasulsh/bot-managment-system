@@ -58,6 +58,7 @@
 			'config_file' => array('nav_config_file', '&#123;&#125;'),
 			'jobs'      => array('nav_jobs', '&#8635;'),
 			'audit'     => array('nav_audit', '&#9998;'),
+			'update'    => array('nav_update', '&#8679;'),
 		);
 		foreach ($gp_nav as $gp_key => $gp_item):
 			$gp_active = ($route === $gp_key) ? ' gp-nav-active' : '';
@@ -82,6 +83,10 @@
 		<?php endforeach; ?>
 
 		<?php require $view_file; ?>
+
+		<?php if (!empty($user)): $gp_ver = function_exists('gp_upd_version') ? gp_upd_version() : ''; ?>
+		<p class="gp-help gp-footer" style="margin-top:2rem"><?= gp_e(gp_t('footer_version')) ?>: <span class="gp-mono"><?= gp_e($gp_ver !== '' ? $gp_ver : gp_t('unknown')) ?></span></p>
+		<?php endif; ?>
 
 	</main>
 </div>
