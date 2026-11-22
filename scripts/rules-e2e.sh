@@ -661,7 +661,8 @@ eq "M76 ...the pages load with the token" "$(get2 'x escbot' /m76 -b "$WORK/e7.j
 # the cookie as the second signal: an escalated client whose flag is NOT in Redis (written by a handshake while Redis was down, or evicted) still gets the CAPTCHA
 code8=$(hpost "$PORT2" "$NE8" "$CE8" 'w1.h1.t900' "$WORK/e8.jar"); R flushall
 eq "M77 e8 escalates (202) and its Redis flag is removed again (flushall)" "$code8.$(nkeys)" "202.0"
-ok "M78 ...the cookie alone still sends it to the CAPTCHA (Redis has no flag)" "$(body2 'x escbot' /m78 -b "$WORK/e8.jar" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
+page=$(body2 'x escbot' /m78 -b "$WORK/e8.jar")
+ok "M78 ...the cookie alone still sends it to the CAPTCHA (Redis has no flag)" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
 # the device budget: a PoW-level token over device_hour (3) gets a CAPTCHA instead of a 429
 page=$(body2 'x devbot' /m70 -b "$WORK/d1.jar" -c "$WORK/d1.jar"); ND=$(printf '%s' "$page" | nonce_of); CD=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$ND")
 curl -s -o /dev/null -X POST -H 'User-Agent: x devbot' -H "X-GV: $ND" -H "X-GV-P: $CD" -b "$WORK/d1.jar" -c "$WORK/d1.jar" "http://127.0.0.1:$PORT2/"
@@ -730,7 +731,8 @@ eq "K21 Redis down: a proof solved for ONE answer does not carry over to another
 eq "K21b Redis down: each wrong guess WITH its own proof is a plain 422 (no counter: the number of guesses is bounded only by the CPU they cost and the time limit, see docs/06)" "$(cpost "$NK" 1111x "$P1" "$WORK/k2.jar")$(cpost "$NK" 2222x "$P2" "$WORK/k2.jar")" 422422
 eq "K22 Redis down: the right answer with its own proof still gives a CAPTCHA-level token" "$(cpost "$NK" "$AK" "$PK" "$WORK/k2.jar")" 204
 eq "K23 Redis down: a bad proof of work is refused" "$(cpost "$NK" "$AK" 1 "$WORK/k2.jar")" 403
-ok "K23b Redis down: an escalated client whose cookie is the only signal still gets the CAPTCHA (and the degraded proof)" "$(body2 'x escbot' /k23 -b "$WORK/e8.jar" | grep -q "B = 20," && echo 1 || echo 0)"
+page=$(body2 'x escbot' /k23 -b "$WORK/e8.jar")
+ok "K23b Redis down: an escalated client whose cookie is the only signal still gets the CAPTCHA (and the degraded proof)" "$(printf '%s' "$page" | grep -q "B = 20," && echo 1 || echo 0)"
 eq "K24 Redis down: a known-bot UA keeps its pass; a captcha rule never asks a crawler (RULE_SKIP_DEGRADED)" "$(get "$GBOT" /k24)" 200
 has '"RULE_SKIP_DEGRADED"'; ok "K25 ...with the reason on the row" "$([ $? -eq 0 ] && echo 1 || echo 0)"
 write_rules
