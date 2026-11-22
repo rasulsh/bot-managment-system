@@ -4,6 +4,11 @@ Newest first. Each entry is one version, written as `## <version>` (the same str
 The Update page of the panel shows the entries between the installed version and the one in the ZIP.
 Older history and upgrade steps: [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md).
 
+## 2026.11.27
+
+- **Login lockout resistance, completed:** a known device (valid `gp_kd` cookie for the submitted user name) is now also exempt from the **panel-wide** sign-in limit, so 20 wrong passwords from a few addresses can no longer lock every administrator out of their own browser. The per-IP limit still applies to it, and its own failures still count against its address and the panel-wide counter.
+- The Users page shows the current panel-wide, per-user-name and per-address lockouts next to the unlock form; the dashboard raises a warning while the panel-wide limit is reached.
+
 ## 2026.11.26
 
 - **Messages in context:** the result of every panel action (save settings, Check again, rule / list save, override, kill switch, users, update ...) is drawn in its own section next to the button, the redirect ends in `#msg-<section>`, and the page scrolls to it and focuses it; a message with no section on the page falls back to the top. The kill switch reports what it did.
