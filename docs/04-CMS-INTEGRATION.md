@@ -164,6 +164,45 @@ admin directory (renamed admin folders are common — use your actual one).
 ),
 ```
 
+### Laravel and other PHP frameworks
+
+> **Not tested.** This section applies the generic checklist below; no CI job runs a Laravel
+> application. Check every route of your own application.
+
+Laravel's front controller is `public/index.php`, served by the same PHP pool, so
+`auto_prepend_file` needs nothing from the framework. Exempt what machines call: your API
+prefix, webhook and payment-callback routes, and the health-check route (Laravel 11 and later
+register `/up` by default). Exempting by path works because Laravel uses path routing (the
+`exempt_params` form is for front controllers that select a handler with a query parameter, as
+OpenCart does).
+
+```php
+'exempt_paths' => array(
+    '/api/',        // your API prefix (adjust)
+    '/webhooks/',   // payment and service callbacks (adjust)
+    '/up',          // the health-check route
+),
+```
+
+If you cannot set `auto_prepend_file`, put `require '<install-dir>/prepend.php';` on the first
+line of `public/index.php` (Method 2 above). A queue worker or `artisan` command runs on the
+CLI, which the guard skips.
+
+### A plain PHP site
+
+> **Not tested** beyond the generic mechanism (the repository's own dev router prepends the
+> guard in front of a plain PHP script).
+
+Use `auto_prepend_file`, or `require` `prepend.php` at the top of every entry point. Exempt each
+script a machine calls (a cron URL, a payment callback, a feed) and your own back office:
+
+```php
+'exempt_paths' => array('/cron.php', '/callback/', '/feed.xml', '/admin/'),
+```
+
+Applications that are **not written in PHP** (Node, Python, Ruby, static hosting) cannot use the
+guard directly: it only sees requests that reach PHP.
+
 ### A generic checklist for any CMS
 
 Exempt, at minimum:

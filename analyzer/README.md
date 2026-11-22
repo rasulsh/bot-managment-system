@@ -14,7 +14,9 @@ python3 analyzer/selftest.py                          # expect exit 0
 
 Python 3.8+. Redis must be reachable by both the PHP guard and this analyzer.
 Without Redis the jobs still run, report what they computed, and write nothing.
-Without scikit-learn everything except the anomaly model works.
+Without scikit-learn everything except the anomaly model works when you run the programs by hand. The cron wrapper's preflight
+(`scripts/lib-jobstatus.sh`) is stricter: `nightly`, `train` and `train-clf` need `numpy` and `scikit-learn` and are recorded as failed
+(exit 3, with the fix in the message) without them.
 
 ## Modules
 

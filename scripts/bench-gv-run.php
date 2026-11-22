@@ -11,7 +11,7 @@
 // Redis (scripts/bench-gv-run.sh starts a throw-away one).
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
-$opt = getopt('', array('n::', 'rules::', 'values::', 'redis-port::', 'regex::', 'geo-rules::', 'geo-ranges::', 'geo-log::', 'geo-ua::', 'lookup::', 'match::', 'lists::', 'list-lookup::', 'list-types::', 'cap-gen::', 'cap-match::', 'cap-rules::'));
+$opt = getopt('', array('n::', 'rules::', 'values::', 'redis-port::', 'regex::', 'geo-rules::', 'geo-ranges::', 'geo-log::', 'geo-ua::', 'lookup::', 'match::', 'lists::', 'list-lookup::', 'list-types::', 'cap-gen::', 'cap-match::', 'cap-rules::', 'esc::'));
 $n      = isset($opt['n']) ? (int)$opt['n'] : 3000;
 $nrules = isset($opt['rules']) ? (int)$opt['rules'] : 0;
 $nvals  = isset($opt['values']) ? (int)$opt['values'] : 5;

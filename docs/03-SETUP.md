@@ -21,9 +21,14 @@ step at a time.** Do not skip the monitor period.
   it, but in a degraded mode that can only ever allow — Redis is what makes rate
   limiting and offline verdicts function.
 - **Python 3.9+** for the analyzer, with `redis`, `scikit-learn`, and `numpy`
-  (see `analyzer/requirements.txt`). The analyzer degrades gracefully if
-  scikit-learn is missing (it just does no ML that run), but you want it for the
-  full system.
+  (see `analyzer/requirements.txt`; `maxminddb` is only needed to read `.mmdb` GeoIP files).
+  The `verify`, `snapshot` and `worker` modes need only `redis`, `report` and `geo` need no package
+  at the wrapper's check (`geo` needs `maxminddb` to read `.mmdb` files); `nightly`, `train` and `train-clf` need `numpy` and `scikit-learn` too, and the cron wrapper
+  records a failure (exit 3, with the fix in the message) when they cannot be imported.
+- **PHP command line (`php`)** on the same server: the analyzer reads the guard's Redis settings
+  and key prefix through `scripts/config-dump.php` (set `php_bin` in the analyzer config, or
+  `GV_PHP` for the wrappers, when `php` is not on cron's `PATH`). Without it the analyzer's
+  writing commands refuse to run.
 - **Cron** (or any scheduler) to run the analyzer jobs.
 - Shell access for the one-time install steps. After install, everything is driven
   from the panel and cron.
@@ -426,7 +431,7 @@ panel) — it takes effect on their next request.
 | `known_bots` | lowercase UA substrings given the fast pass | Google and Bing crawler families |
 | `cdn_ranges` | IPv4 CIDRs whose XFF is trusted | empty unless behind a CDN |
 | `redis` | host, port, socket, username, password, db, prefix, timeout, breaker_ttl | `127.0.0.1:6379`, no auth, db 0, no prefix, 0.05s, 5s |
-| `limits.mint` / `challenge.pow_bits` / `challenge.bind_ip` | token minting cap, proof-of-work bits, nonce IP binding | 60 / 16 / true |
+| `limits.mint` / `challenge.pow_bits` / `challenge.bind_ip` | token minting cap per address and window, proof-of-work bits, nonce IP binding | 300 / 16 / true |
 | `log_dir` | where JSONL is written | `../logs` |
 | `strings` | interstitial language and text | Persian/RTL by default |
 
