@@ -34,11 +34,25 @@ JS_NOTE=""            # a reason set by the wrapper itself (preflight failure ..
 JS_EXTRA_RESULT=""    # a result JSON object the wrapper itself produced (logrotate)
 JS_WARN_EXTRA=""      # wrapper-level warning text
 
+# js_php_check [php]: a php that is not the command-line build (cPanel cron's default PATH finds php-cgi first: it prints HTTP
+# headers and used to make every config read fail) gets ONE job warning naming the binary and the fix.
+js_php_check() {
+	local bin="${1:-${GV_PHP:-php}}" t sapi
+	command -v "$bin" >/dev/null 2>&1 || return 0
+	t="$(mktemp 2>/dev/null)" || return 0
+	printf '<?php echo PHP_SAPI;' > "$t"
+	sapi="$("$bin" -q "$t" 2>/dev/null | tail -n 1)"
+	rm -f "$t"
+	case "$sapi" in cli|'') return 0 ;; esac
+	JS_WARN_EXTRA="${JS_WARN_EXTRA:+$JS_WARN_EXTRA
+}php binary $(command -v "$bin") is the $sapi SAPI, not the command line one: add PATH=/usr/local/bin:/usr/bin:/bin to the crontab or set GV_PHP=/full/path/to/the/php-cli"
+}
+
 js_log_dir() {
 	if [ -n "${GV_JOBLOG_DIR:-}" ]; then echo "$GV_JOBLOG_DIR"; return; fi
 	local d=""
 	if command -v "${GV_PHP:-php}" >/dev/null 2>&1; then
-		d="$("${GV_PHP:-php}" "$JS_ROOT/scripts/config-dump.php" --get log_dir 2>/dev/null | head -1)"
+		d="$("${GV_PHP:-php}" -q "$JS_ROOT/scripts/config-dump.php" --get log_dir 2>/dev/null | head -1)"
 	fi
 	[ -n "$d" ] && [ -d "$d" ] && { echo "$d"; return; }
 	echo "$JS_ROOT/logs"
@@ -57,7 +71,7 @@ js_redact() {
 	rules="$(mktemp 2>/dev/null)" || { cat; return; }
 	{
 		if command -v "${GV_PHP:-php}" >/dev/null 2>&1; then
-			"${GV_PHP:-php}" "$JS_ROOT/scripts/secret-values.php" 2>/dev/null | while IFS= read -r v; do
+			"${GV_PHP:-php}" -q "$JS_ROOT/scripts/secret-values.php" 2>/dev/null | while IFS= read -r v; do
 				[ "${#v}" -ge 6 ] || continue
 				printf 's/%s/[REDACTED]/g\n' "$(printf '%s' "$v" | sed -e 's/[][\.*^$/&]/\\&/g')"
 			done

@@ -3,7 +3,7 @@
 // from job error text before it is written to logs/jobs-errors.log or the job status.
 // Values only (secret, holdout_salt, Redis password, the panel's password hash and session
 // secret). Never run it by hand into a terminal log; it is read through a pipe by the wrapper.
-if (PHP_SAPI !== 'cli') { exit; }
+if (!(PHP_SAPI === 'cli' || (strncmp(PHP_SAPI, 'cgi', 3) === 0 && !isset($_SERVER['REQUEST_METHOD']) && !isset($_SERVER['REMOTE_ADDR'])))) { exit; }   // the CLI, or a CGI php run from a shell
 define('GV_BOOT', 1);
 define('GV_NO_AUTORUN', 1);
 $out = array();

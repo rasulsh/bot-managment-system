@@ -15,8 +15,11 @@ from __future__ import print_function
 
 import json
 import os
+import re
 import subprocess
 import sys
+
+from analyzer import jobreport
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DUMP_SCRIPT = os.path.join(REPO_ROOT, 'scripts', 'config-dump.php')
@@ -46,7 +49,50 @@ FALLBACK = {
 }
 
 _warned = False
+_php_warned = set()
 last_error = ''          # why the most recent dump_config() failed ('' = it did not)
+last_php = {}            # what the PHP binary said about itself in the last dump: sapi, version, binary
+
+PHP_FIX = ('add the line PATH=/usr/local/bin:/usr/bin:/bin at the top of the crontab, or set GV_PHP=/full/path/to/the/php-cli '
+           '(or php_bin in the analyzer config)')
+
+
+def php_binary(cfg=None):
+    """Which PHP to run. Order: php_bin in the analyzer config (when set to something other than the default 'php'),
+    else GV_PHP from the environment (scripts/analyzer-cron.sh exports it), else 'php'."""
+    configured = (cfg or {}).get('php_bin')
+    if configured and configured != 'php':
+        return configured
+    return os.environ.get('GV_PHP') or 'php'
+
+
+_HEADER_LINE = re.compile(r'^[A-Za-z][A-Za-z0-9-]*:\s?.*$')
+
+
+def strip_cgi_headers(text):
+    """Drop a leading HTTP header block ("X-Powered-By: PHP/8.3", "Content-type: text/html", blank line) that the CGI SAPI
+    prints before the script's own output; anything else is returned unchanged. Pure."""
+    if text.lstrip().startswith(('{', '[')) or not text.strip():
+        return text
+    head, sep, rest = text.replace('\r\n', '\n').partition('\n\n')
+    lines = [l for l in head.split('\n') if l.strip()]
+    if sep and lines and all(_HEADER_LINE.match(l) for l in lines):
+        return rest
+    i = text.find('{')
+    return text[i:] if i >= 0 else text
+
+
+def _note_php(php, info):
+    """Remember what the binary is; a SAPI other than cli gets ONE job warning per binary naming it and the fix."""
+    if not isinstance(info, dict):
+        return
+    last_php.clear()
+    last_php.update(info)
+    sapi = str(info.get('sapi') or '')
+    if sapi and sapi != 'cli' and php not in _php_warned:
+        _php_warned.add(php)
+        jobreport.warn('php binary %s is the %s SAPI, not the command line one (it prints HTTP headers first): %s'
+                       % (info.get('binary') or php, sapi, PHP_FIX))
 
 
 def _warn_once(message):
@@ -73,7 +119,8 @@ def dump_config(php='php', script=None, config_path=None, timeout=15, extra=None
     if not os.path.isfile(script):
         warn('config dump script not found: %s' % script)
         return None
-    cmd = [php, script] + list(extra or [])
+    # -q: no HTTP headers from a CGI build of php (harmless for the CLI). A cPanel cron PATH often finds php-cgi first.
+    cmd = [php, '-q', script] + list(extra or [])
     if config_path:
         cmd += ['--config', config_path]
     try:
@@ -97,13 +144,15 @@ def dump_config(php='php', script=None, config_path=None, timeout=15, extra=None
         warn('config dump exited %d: %s' % (proc.returncode, detail))
         return None
     try:
-        data = json.loads((out or b'').decode('utf-8', 'replace'))
+        data = json.loads(strip_cgi_headers((out or b'').decode('utf-8', 'replace')))
     except Exception as exc:
         warn('config dump did not produce valid JSON: %s' % exc)
         return None
     if not isinstance(data, dict):
         warn('config dump did not produce a JSON object')
         return None
+    if isinstance(data, dict):
+        _note_php(php, data.pop('_php', None))
     # Defence in depth: the dump strips these, and we refuse to carry them even
     # if a future edit forgets to.
     data.pop('secret', None)
@@ -171,7 +220,7 @@ def guard_config(cfg=None, php=None, config_path=None):
     dump provided, over the fallback defaults.
     """
     cfg = cfg or {}
-    php = php or cfg.get('php_bin') or 'php'
+    php = php or php_binary(cfg)
     config_path = config_path or cfg.get('guard_config_path') or None
 
     merged = dict(FALLBACK)

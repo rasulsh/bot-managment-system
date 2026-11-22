@@ -76,6 +76,7 @@ $install_dir = dirname(__DIR__, 2);
 		<button class="gp-btn gp-btn-primary gp-btn-sm" type="submit" name="do" value="verify"><?= gp_e(gp_t('upd_verify_now')) ?></button>
 	</form>
 	<?php if ($h['verify_key'] !== ''): ?><a class="gp-btn gp-btn-ghost gp-btn-sm" href="recover.php?a=verify&amp;ts=<?= gp_e(rawurlencode($h['stamp'])) ?>&amp;k=<?= gp_e(rawurlencode($h['verify_key'])) ?>"><?= gp_e(gp_t('upd_verify_web')) ?></a><?php endif; ?>
+	<?= gp_msg('update-verify') ?>
 	<?php if ($overdue): ?><p class="gp-help"><?= gp_e(gp_t('upd_shell_hint')) ?> <code class="gp-mono gp-ltr"><?= gp_e(gp_upd_verify_command($h['stamp'])) ?></code></p><?php endif; ?>
 </div>
 <?php endif; break; endforeach; ?>
@@ -132,6 +133,7 @@ $install_dir = dirname(__DIR__, 2);
 			<button class="gp-btn gp-btn-ghost" type="submit" name="do" value="discard" formnovalidate><?= gp_e(gp_t('upd_discard')) ?></button>
 		</div>
 	</form>
+	<?= gp_msg('update-apply') ?>
 </section>
 <?php endif; ?>
 
@@ -148,10 +150,12 @@ $install_dir = dirname(__DIR__, 2);
 		<?php if ($env['backend'] === ''): ?><div class="gp-note gp-note-strong" role="alert"><?= gp_e(gp_t('upd_err_nozip')) ?></div><?php endif; ?>
 		<button class="gp-btn gp-btn-primary" type="submit" name="do" value="upload"><?= gp_e(gp_t('upd_upload_btn')) ?></button>
 	</form>
+	<?= gp_msg('update-upload') ?>
 </section>
 
 <section class="gp-card" id="update-history">
 	<h2 class="gp-card-title"><?= gp_e(gp_t('upd_history')) ?></h2>
+	<?= gp_msg('update-history') ?>
 	<?php if (!$history): ?><p class="gp-help"><?= gp_e(gp_t('upd_history_none')) ?></p><?php else: ?>
 	<div class="gp-table-wrap"><table class="gp-table">
 		<thead><tr><th><?= gp_e(gp_t('upd_h_when')) ?></th><th><?= gp_e(gp_t('upd_h_change')) ?></th><th><?= gp_e(gp_t('upd_h_status')) ?></th><th><?= gp_e(gp_t('upd_h_by')) ?></th><th></th></tr></thead>

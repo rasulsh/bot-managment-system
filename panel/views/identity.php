@@ -113,6 +113,7 @@ $v = is_array($verdicts) ? $verdicts : array();
 					name="override" value="clear"><?= gp_e(gp_t('ovr_clear')) ?></button>
 			</div>
 		</form>
+		<?= gp_msg('identity-override') ?>
 		<p class="gp-note" style="margin-top:.5rem"><?= gp_e(gp_t('ovr_rule_allow')) ?></p>
 	</div>
 </div>
@@ -146,7 +147,7 @@ $v = is_array($verdicts) ? $verdicts : array();
 				<span><?= gp_e(gp_t('logs_sc')) ?>: <?= gp_num((int)($row['sc'] ?? 0)) ?></span>
 				<span><?= gp_e(gp_t('logs_esc')) ?>: <?= gp_num((int)($row['esc'] ?? 0)) ?></span>
 				<?php foreach ((array)($row['rs'] ?? array()) as $reason): ?>
-					<span class="gp-badge gp-badge-off"><?= gp_e($reason) ?></span>
+					<span class="gp-badge <?= gp_e(gp_reason_badge_class($reason)) ?>"><?= gp_e($reason) ?></span>
 				<?php endforeach; ?>
 				<?php if (isset($row['ua'])): ?>
 				<a class="gp-btn gp-btn-ghost gp-btn-sm"

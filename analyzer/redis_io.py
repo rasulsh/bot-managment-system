@@ -44,6 +44,15 @@ def gp_key(name):
     return _PREFIX + 'gp:' + str(name)
 
 
+def unavailable_reason(cfg, what='verdicts were computed but not stored'):
+    """The job warning for "no Redis client": a PHP bridge that failed (the guard's Redis settings could not be read, so
+    nothing was even tried) is a different problem from a Redis that refused the connection. Pure."""
+    if (cfg or {}).get('redis_confirmed') is False:
+        return ('Redis settings not confirmed (the PHP bridge failed: %s): %s. Fix the php binary: add PATH=/usr/local/bin:/usr/bin:/bin to the crontab or set GV_PHP'
+                % ((cfg or {}).get('redis_bridge_error') or 'unknown error', what))
+    return 'Redis unavailable: %s' % what
+
+
 def warn(message):
     text = str(message)
     for secret in _SECRETS:

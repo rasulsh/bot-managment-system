@@ -87,6 +87,9 @@
 	--gp-info-bg: 226 238 251;
 	--gp-info-fg: 12 90 143;
 	--gp-info-line: 163 200 234;
+	--gp-info: 12 90 143;
+	--gp-info-hover: 9 70 112;
+	--gp-on-info: 255 255 255;
 	--gp-chart-ok: 11 138 100;
 	--gp-chart-info: 2 132 199;
 	--gp-chart-warn: 202 111 6;
@@ -124,6 +127,9 @@
 		--gp-info-bg: 17 47 74;
 		--gp-info-fg: 140 198 242;
 		--gp-info-line: 37 85 125;
+		--gp-info: 29 111 176;
+		--gp-info-hover: 22 90 145;
+		--gp-on-info: 255 255 255;
 		--gp-chart-ok: 52 211 153;
 		--gp-chart-info: 56 189 248;
 		--gp-chart-warn: 251 191 36;
@@ -161,6 +167,9 @@
 	--gp-info-bg: 17 47 74;
 	--gp-info-fg: 140 198 242;
 	--gp-info-line: 37 85 125;
+	--gp-info: 29 111 176;
+	--gp-info-hover: 22 90 145;
+	--gp-on-info: 255 255 255;
 	--gp-chart-ok: 52 211 153;
 	--gp-chart-info: 56 189 248;
 	--gp-chart-warn: 251 191 36;
@@ -296,6 +305,9 @@
 .gp-badge-warn { @apply border-warn-line bg-warn-bg text-warn-fg; }
 .gp-badge-bad { @apply border-bad-line bg-bad-bg text-bad-fg; }
 .gp-badge-info { @apply border-info-line bg-info-bg text-info-fg; }
+/* IP list type: allow = blue, block = red, everywhere a list type is shown (never colour alone: the word is always printed). */
+.gp-badge-ipl-allow { @apply border-info-line bg-info-bg text-info-fg; }
+.gp-badge-ipl-block { @apply border-bad-line bg-bad-bg text-bad-fg; }
 
 /* --- buttons ------------------------------------------------------- */
 .gp-btn { @apply inline-flex min-h-[44px] cursor-pointer items-center justify-center
@@ -305,6 +317,8 @@
 .gp-btn-primary { @apply bg-brand text-on-brand hover:bg-brand-hover active:bg-brand-hover; }
 .gp-btn-ghost { @apply border-field bg-surface text-ink hover:bg-sunken active:bg-sunken; }
 .gp-btn-danger { @apply bg-danger text-on-danger hover:bg-danger-hover active:bg-danger-hover; }
+.gp-btn-info { background-color: rgb(var(--gp-info)); color: rgb(var(--gp-on-info)); }
+.gp-btn-info:hover, .gp-btn-info:active { background-color: rgb(var(--gp-info-hover)); }
 .gp-btn-block { @apply w-full; }
 .gp-btn-sm { @apply min-h-[36px] px-3 py-1.5 text-xs; }
 
@@ -549,3 +563,16 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
 .gp-grid-kpi { @apply grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-9; }
 .gp-pre { @apply overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-sunken p-3 text-xs; }
 .gp-details > summary { @apply text-base; }
+
+/* --- messages in context --- */
+.gp-msg { scroll-margin-top: 5rem; }
+.gp-msg:focus { outline: 2px solid rgb(var(--gp-brand)); outline-offset: 2px; }
+.gp-msg .gp-flash { @apply mt-3; }
+
+/* --- multi-select (replaces <datalist>; the text input stays and is what the form submits) --- */
+.gp-ms { @apply relative min-w-0; }
+.gp-ms-toggle { @apply mt-1 inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-field bg-surface px-3 text-xs font-bold text-ink hover:bg-sunken; }
+.gp-ms-panel { @apply absolute start-0 z-30 mt-1 max-h-64 w-full min-w-[12rem] overflow-auto rounded-lg border border-field bg-surface p-1 shadow-lg; }
+.gp-ms-panel[hidden], .gp-ms-toggle[hidden] { display: none; }
+.gp-ms-opt { @apply flex min-h-[40px] cursor-pointer items-center gap-2 rounded-md px-2 text-sm text-ink hover:bg-sunken; }
+.gp-ms-opt input { @apply h-4 w-4; }

@@ -19,7 +19,8 @@
 # Each mode takes its own flock, so overlapping cron firings queue-and-skip
 # instead of writing partial verdicts on top of each other.
 #
-# Cron example:
+# Cron example (the PATH line first: cron's own PATH can find a php that is not the command line build, e.g. cPanel's php-cgi):
+#   PATH=/usr/local/bin:/usr/bin:/bin
 #   */10 * * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh verify    >/dev/null 2>&1
 #   17 4   * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh nightly   >/dev/null 2>&1
 #   41 5   * * 0 bash /full/path/bot-guard/scripts/analyzer-cron.sh train     >/dev/null 2>&1
@@ -74,6 +75,9 @@ JS_ROOT="$ROOT"
 # shellcheck source=lib-jobstatus.sh
 . "$ROOT/scripts/lib-jobstatus.sh"
 js_begin "$MODE"
+# The php the Python side runs to read the guard's settings: GV_PHP (exported, so analyzer/bridge.py sees it) or the first php on PATH.
+[ -n "${GV_PHP:-}" ] && export GV_PHP
+js_php_check "${GV_PHP:-php}"
 [ "$MODE" = report ] && JS_PASS_STDOUT=1
 
 # Preflight: a Python that cannot import the packages used to make every job "succeed" while storing

@@ -203,6 +203,8 @@ GV_PYTHON=/home/youruser/bot-guard/.venv/bin/python
  Call the scripts **through `bash`** (as below): the line then works even when a script has no execute bit, which is easy to lose when files are copied, unzipped or restored. A complete crontab (adjust the absolute path):
 
 ```cron
+# cron's own PATH can find a php that is not the command line build (cPanel: php -v says "(cgi-fcgi)"); the CLI is usually /usr/local/bin/php.
+PATH=/usr/local/bin:/usr/bin:/bin
 # reverse-DNS bot verification, frequent
 */10 * * * * bash /home/youruser/bot-guard/scripts/analyzer-cron.sh verify    >/dev/null 2>&1
 # nightly behavioural scoring + anomaly levels

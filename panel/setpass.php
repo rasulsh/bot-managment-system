@@ -2,6 +2,7 @@
 // Credential setup and admin recovery for the admin panel (shell only).
 //
 //   php panel/setpass.php
+//   php panel/setpass.php --unlock-user NAME | --unlock-ip ADDRESS | --unlock-all     (clear a sign-in lockout)
 //
 // First run: creates panel/panel.config.php (install settings: session secret, IP allowlist, trusted proxies) and the first
 // ADMINISTRATOR account in panel/users.json.
@@ -12,7 +13,8 @@
 //
 // There is no web-based setup wizard on purpose: a first-run screen reachable by whoever finds the URL first is how admin
 // panels get taken over. Until panel.config.php exists, every panel route returns a bare 404.
-if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+// The CLI, or a CGI build of php run from a shell (some hosts put php-cgi first on the PATH; run it with -q).
+if (!(PHP_SAPI === 'cli' || (strncmp(PHP_SAPI, 'cgi', 3) === 0 && !isset($_SERVER['REQUEST_METHOD']) && !isset($_SERVER['REMOTE_ADDR'])))) { http_response_code(404); exit; }
 if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n"); exit(1); }
 
 define('GP_BOOT', 1);
@@ -64,6 +66,23 @@ function gp_prompt_hidden($label) {
 		. "      below will be visible. Clear your shell history afterwards.\n");
 	fwrite(STDOUT, $label);
 	return trim((string)fgets(STDIN));
+}
+
+// php panel/setpass.php --unlock-user NAME | --unlock-ip ADDRESS | --unlock-all : clear a sign-in lockout (no prompts).
+$gp_args = isset($argv) && is_array($argv) ? array_slice($argv, 1) : array();
+if ($gp_args && strncmp($gp_args[0], '--unlock', 8) === 0) {
+	$flag = $gp_args[0];
+	$val = isset($gp_args[1]) ? (string)$gp_args[1] : '';
+	if ($flag === '--unlock-all') { $cleared = gp_login_unlock('', '', true); $what = 'all'; }
+	elseif ($flag === '--unlock-user' && $val !== '') { $cleared = gp_login_unlock(gp_users_norm($val), '', false); $what = gp_users_norm($val); }
+	elseif ($flag === '--unlock-ip' && filter_var($val, FILTER_VALIDATE_IP) !== false) { $cleared = gp_login_unlock('', gv_ip_canon($val), false); $what = $val; }
+	else {
+		fwrite(STDERR, "Usage: php panel/setpass.php --unlock-user NAME | --unlock-ip ADDRESS | --unlock-all\n");
+		exit(2);
+	}
+	gp_audit_append(array('event' => 'login_unlock', 'actor' => 'setpass', 'ip' => '', 'key' => $what, 'old' => null, 'new' => array('cleared' => $cleared)));
+	fwrite(STDOUT, "Sign-in lockout cleared for: " . $what . ".\n");
+	exit(0);
 }
 
 fwrite(STDOUT, "Bot Guard admin panel - administrator setup and recovery\n");

@@ -26,6 +26,8 @@ define('GP_LOGIN_MAX_ATTEMPTS', 5);
 define('GP_LOGIN_WINDOW', 900);          // 15 minutes
 define('GP_LOGIN_LOCKOUT', 900);         // 15 minutes
 define('GP_SESSION_COOKIE', 'gp_sess');
+define('GP_KNOWN_COOKIE', 'gp_kd');         // the "known device" cookie (see below)
+define('GP_KNOWN_TTL', 90 * 86400);
 define('GP_FLASH_COOKIE', 'gp_flash');
 define('GP_FLASH_MAX', 1024);            // cap on the stored flash JSON, in bytes
 
@@ -360,6 +362,65 @@ function gp_current_role() {
 }
 
 // --------------------------------------------------------------------------
+// Known device: a signed cookie that keeps the per-USERNAME sign-in limit from locking a person out
+// --------------------------------------------------------------------------
+//
+// The per-username limit (10 wrong passwords per 15 minutes, from any address) lets anybody who knows a name keep that person out.
+// A successful sign-in therefore sets a cookie, HMAC-signed with the panel's session secret, bound to the username and to the
+// user's CURRENT session_version, valid 90 days (HttpOnly, SameSite=Strict, Secure on https). A sign-in attempt that presents a
+// valid cookie for THAT username is neither blocked nor counted by the per-username limit. The per-address limit and the global
+// limit still apply to it, and a wrong password from that device still counts against the address. Disabling the user, a role
+// change and a password reset bump session_version, so every known-device cookie of that user stops working with them.
+// A cookie made for another user, a forged or expired one, or one for a user that does not exist, is simply ignored.
+
+function gp_known_sign($user, $issued, $ver, $secret) {
+	return hash_hmac('sha256', 'kd.' . $user . '.' . (int)$issued . '.v' . (int)$ver, $secret);
+}
+
+// The cookie value for a user record (array with username and session_version).
+function gp_known_make(array $rec, $secret, $issued = null) {
+	$issued = $issued === null ? time() : (int)$issued;
+	return $rec['username'] . '.' . $issued . '.' . gp_known_sign($rec['username'], $issued, (int)$rec['session_version'], $secret);
+}
+
+// Is $cookie a valid known-device cookie for $rec (the CURRENT record of an enabled user)? Pure.
+function gp_known_check($cookie, $rec, $secret, $now = null) {
+	$now = $now === null ? time() : (int)$now;
+	if (!is_string($cookie) || !is_array($rec) || empty($rec['enabled']) || !isset($rec['username'], $rec['session_version'])) { return false; }
+	$last = strrpos($cookie, '.');
+	if ($last === false) { return false; }
+	$mac = substr($cookie, $last + 1);
+	$head = substr($cookie, 0, $last);
+	$mid = strrpos($head, '.');
+	if ($mid === false) { return false; }
+	$user = substr($head, 0, $mid);
+	$issued = substr($head, $mid + 1);
+	if ($user !== $rec['username'] || !ctype_digit($issued)) { return false; }       // another user's cookie
+	$issued = (int)$issued;
+	if ($issued > $now + 60 || ($now - $issued) >= GP_KNOWN_TTL) { return false; }
+	return hash_equals(gp_known_sign($user, $issued, (int)$rec['session_version'], $secret), $mac);
+}
+
+function gp_known_set_cookie(array $rec, $secret) {
+	if (headers_sent()) { return; }
+	setcookie(GP_KNOWN_COOKIE, gp_known_make($rec, $secret), array(
+		'expires'  => time() + GP_KNOWN_TTL,
+		'path'     => gp_cookie_path(),
+		'secure'   => gp_is_https(),
+		'httponly' => true,
+		'samesite' => 'Strict',
+	));
+}
+
+// Does this request carry a valid known-device cookie for $username (an existing, enabled user)?
+function gp_known_device($username) {
+	$cfg = gp_panel_config();
+	$rec = gp_users_find($username);
+	if ($cfg === null || $rec === null) { return false; }
+	return gp_known_check(isset($_COOKIE[GP_KNOWN_COOKIE]) ? (string)$_COOKIE[GP_KNOWN_COOKIE] : '', $rec, $cfg['session_secret']);
+}
+
+// --------------------------------------------------------------------------
 // CSRF
 // --------------------------------------------------------------------------
 
@@ -428,7 +489,9 @@ function gp_flash_decode($raw, $secret) {
 	foreach ($data as $entry) {
 		if (!is_array($entry) || !isset($entry['kind'], $entry['message'])) { continue; }
 		if (!is_string($entry['kind']) || !is_string($entry['message'])) { continue; }
-		$out[] = array('kind' => $entry['kind'], 'message' => $entry['message']);
+		$e = array('kind' => $entry['kind'], 'message' => $entry['message']);
+		if (isset($entry['section']) && is_string($entry['section']) && preg_match('/^[a-z0-9-]{1,40}$/', $entry['section'])) { $e['section'] = $entry['section']; }
+		$out[] = $e;
 	}
 	return $out;
 }
@@ -533,11 +596,12 @@ function gp_login_user_bucket($username) {
 // Locked when: this address has failed too often, this USERNAME has (any address, so a guess spread over many addresses against
 // one account still stops), or the whole panel has (the global counter, four times the per-address limit). The bucket of a
 // username that does not exist counts the same, so the lock reveals nothing about which accounts exist.
-function gp_login_locked($username) {
+function gp_login_locked($username, $known = false) {
 	$ip = gp_client_ip();
 	if (gp_attempts_get($ip, GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS) { return true; }
 	if ($username !== '') {
-		if (gp_attempts_get(gp_login_user_bucket($username), GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 2) { return true; }
+		// A known device (a valid cookie for this user) is not subject to the per-username limit: see "Known device" above.
+		if (!$known && gp_attempts_get(gp_login_user_bucket($username), GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 2) { return true; }
 		// A distributed attempt spread over many addresses and names still hits this.
 		if (gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) { return true; }
 	}
@@ -563,23 +627,23 @@ function gp_attempts_ttl($bucket, $window) {
 // How long a locked-out visitor should wait: the longest of the counters that
 // are over their limit. The same buckets as gp_login_locked(), and the answer
 // does not depend on whether the username exists.
-function gp_login_retry_after($username) {
+function gp_login_retry_after($username, $known = false) {
 	$wait = 0;
 	if (gp_attempts_get(gp_client_ip(), GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS) {
 		$wait = max($wait, gp_attempts_ttl(gp_client_ip(), GP_LOGIN_WINDOW));
 	}
 	if ($username !== '') {
 		$ub = gp_login_user_bucket($username);
-		if (gp_attempts_get($ub, GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 2) { $wait = max($wait, gp_attempts_ttl($ub, GP_LOGIN_WINDOW)); }
+		if (!$known && gp_attempts_get($ub, GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 2) { $wait = max($wait, gp_attempts_ttl($ub, GP_LOGIN_WINDOW)); }
 		if (gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) { $wait = max($wait, gp_attempts_ttl('user', GP_LOGIN_WINDOW)); }
 	}
 	return $wait > 0 ? $wait : GP_LOGIN_LOCKOUT;
 }
 
-function gp_login_record_failure($username = '') {
+function gp_login_record_failure($username = '', $known = false) {
 	gp_attempts_bump(gp_client_ip(), GP_LOGIN_WINDOW);
 	gp_attempts_bump('user', GP_LOGIN_WINDOW);
-	if ($username !== '') { gp_attempts_bump(gp_login_user_bucket($username), GP_LOGIN_WINDOW); }
+	if ($username !== '' && !$known) { gp_attempts_bump(gp_login_user_bucket($username), GP_LOGIN_WINDOW); }
 }
 
 // --------------------------------------------------------------------------
@@ -597,10 +661,11 @@ function gp_login_attempt($username, $password) {
 	$username = is_string($username) ? gp_users_norm(substr($username, 0, 200)) : '';
 	$password = is_string($password) ? $password : '';
 
-	if (gp_login_locked($username)) {
+	$known = gp_known_device($username);
+	if (gp_login_locked($username, $known)) {
 		gp_audit_append(array('event' => 'login_locked', 'actor' => $username,
 			'ip' => gp_client_ip()));
-		return array(false, 'login_locked', gp_login_retry_after($username));
+		return array(false, 'login_locked', gp_login_retry_after($username, $known));
 	}
 
 	$st = gp_users_state();
@@ -616,15 +681,58 @@ function gp_login_attempt($username, $password) {
 		gp_session_set_cookie(gp_session_make($u['username'], $cfg['session_secret'], null, (int)$u['session_version']),
 			$cfg['session_ttl']);
 		gp_users_record_login($u['username'], gp_client_ip());
+		gp_known_set_cookie($u, $cfg['session_secret']);                 // this browser is now a known device of this user
 		gp_audit_append(array('event' => 'login_ok', 'actor' => $u['username'], 'key' => $u['role'],
 			'ip' => gp_client_ip()));
 		return array(true, 'login_ok');
 	}
 
-	gp_login_record_failure($username);
+	gp_login_record_failure($username, $known);
 	gp_audit_append(array('event' => 'login_failed', 'actor' => $username,
 		'ip' => gp_client_ip()));
 	return array(false, 'login_failed');
+}
+
+
+// --------------------------------------------------------------------------
+// Clearing a lockout (admin only in the panel, and `php panel/setpass.php --unlock ...` from the shell)
+// --------------------------------------------------------------------------
+
+function gp_attempts_clear($bucket) {
+	$cfg = gv_cfg_load();
+	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
+	if ($conn) {
+		gv_redis_cmd($conn, array('DEL', gp_key('login:' . $bucket)));
+		gv_redis_close($conn);
+	}
+	@unlink(gp_attempts_file($bucket));
+}
+
+// Clear the sign-in counters of a user name and / or an address; with $all every counter (all names, all addresses, the global
+// one). A name or address also clears the global counter when that is what holds the lock. Returns what was cleared.
+function gp_login_unlock($username = '', $ip = '', $all = false) {
+	$cleared = array();
+	if ($all) {
+		$cfg = gv_cfg_load();
+		$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
+		if ($conn) {
+			$cursor = '0'; $guard = 0;
+			do {
+				$reply = gv_redis_cmd($conn, array('SCAN', $cursor, 'MATCH', gp_key('login:*'), 'COUNT', '200'));
+				if (!is_array($reply) || count($reply) < 2) { break; }
+				$cursor = (string)$reply[0];
+				foreach ((array)$reply[1] as $k) { gv_redis_cmd($conn, array('DEL', $k)); }
+				$guard++;
+			} while ($cursor !== '0' && $guard < 200);
+			gv_redis_close($conn);
+		}
+		foreach ((array)glob(gp_ratelimit_file_dir() . '/*') as $f) { if (is_file($f)) { @unlink($f); } }
+		return array('all');
+	}
+	if ($username !== '') { gp_attempts_clear(gp_login_user_bucket($username)); $cleared[] = 'user'; }
+	if ($ip !== '') { gp_attempts_clear($ip); $cleared[] = 'ip'; }
+	if (($username !== '' || $ip !== '') && gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) { gp_attempts_clear('user'); $cleared[] = 'global'; }
+	return $cleared;
 }
 
 // Ask a logged-in user for their password again before a dangerous action. Returns 'ok', 'bad' or 'locked'.

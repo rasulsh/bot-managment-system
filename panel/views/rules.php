@@ -31,6 +31,7 @@ $err_text = function ($field) use ($errors, $details) {
 			<?= gp_e(gp_t('rules_discard')) ?></button>
 	</form>
 	<?php endif; ?>
+	<?= gp_msg('rules-file') ?>
 </div>
 <?php endif; ?>
 <div class="gp-note"><?= gp_e(gp_t('rules_precedence')) ?></div>
@@ -254,6 +255,7 @@ $err_text = function ($field) use ($errors, $details) {
 		<button class="gp-btn gp-btn-ghost" type="submit" name="do" value="preview"><?= gp_e(gp_t('rules_preview')) ?></button>
 		<a class="gp-btn gp-btn-ghost" href="index.php?r=rules"><?= gp_e(gp_t('cancel')) ?></a>
 	</div>
+	<?= gp_msg('rule-editor') ?>
 </form>
 <?php endif; ?>
 
@@ -325,9 +327,7 @@ $err_text = function ($field) use ($errors, $details) {
 				<label class="gp-label" for="rf-<?= gp_e($fk) ?>"><?= gp_e(gp_t($fd[0])) ?><?= gp_tip($fk === 'q' ? 'flt_q' : ($fk === 'action' || $fk === 'mode' ? 'rule_' . $fk : ($fk === 'cc' || $fk === 'asn' ? 'flt_rule_' . $fk : 'flt_' . $fk))) ?></label>
 				<div class="gp-fgroup">
 					<?= gp_filter_op_select($fk, $fv, $fd[1]) ?>
-					<input class="gp-input gp-ltr" type="text" id="rf-<?= gp_e($fk) ?>" name="<?= gp_e($fk) ?>" value="<?= gp_e(gp_filter_text($fv)) ?>"
-						<?= $fd[2] ? 'list="rdl-' . gp_e($fk) . '"' : '' ?> spellcheck="false" autocomplete="off">
-					<?php if ($fd[2]): ?><datalist id="rdl-<?= gp_e($fk) ?>"><?php foreach ($fd[2] as $o): ?><option value="<?= gp_e($o) ?>"><?php endforeach; ?></datalist><?php endif; ?>
+					<?= gp_multi_input('rf-' . $fk, $fk, gp_filter_text($fv), (array)$fd[2]) ?>
 				</div>
 			</div>
 			<?php endforeach; ?>
@@ -344,6 +344,7 @@ $err_text = function ($field) use ($errors, $details) {
 		<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit" name="do" value="starter"><?= gp_e(gp_t('rules_starter')) ?></button>
 		<span class="gp-help"><?= gp_e(gp_t('rules_starter_help')) ?></span>
 	</form>
+	<?= gp_msg('rules-list') ?>
 
 	<?php if (!$visible): ?>
 		<p class="gp-help"><?= gp_e(gp_t($all ? 'no_results' : 'rules_empty')) ?></p>

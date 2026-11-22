@@ -59,6 +59,7 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 		</tbody>
 	</table>
 	</div>
+	<?= gp_msg('geo-status') ?>
 	<?php if ($st['compile']): ?>
 	<p class="gp-help"><?= gp_e(gp_t('geo_last_compile')) ?>: <?= gp_e(gp_age($st['compile']['time'])) ?> <?= gp_e(gp_t('ago')) ?>
 		<span class="gp-badge <?= $st['compile']['ok'] ? 'gp-badge-on' : 'gp-badge-bad' ?>"><?= gp_e(gp_t($st['compile']['ok'] ? 'geo_ok' : 'geo_failed')) ?></span></p>
@@ -72,6 +73,7 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 <?php gp_tab_end(); gp_tab_begin('geo', 'sources', $gt['sources']); ?>
 <div class="gp-card gp-form">
 	<div class="gp-card-title"><?= gp_e(gp_t('geo_sources')) ?><?= gp_tip('geo_sources') ?> <span class="gp-card-sub"><?= gp_num(count($st['sources'])) ?> / <?= gp_num((int)$st['sources_all']) ?></span></div>
+	<?= gp_msg('geo-sources') ?>
 	<?php
 	$gflt = array('name' => array('geo_c_file', 'has'), 'use' => array('geo_c_use', 'is'));
 	$gchips = gp_filter_chips($filter, array_map(function ($d) { return gp_t($d[0]); }, $gflt), array('name' => 'text', 'use' => 'choice'),
@@ -85,9 +87,7 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 				<label class="gp-label" for="gf-<?= gp_e($fk) ?>"><?= gp_e(gp_t($fd[0])) ?><?= gp_tip($fk === 'name' ? 'geo_filter' : 'flt_use') ?></label>
 				<div class="gp-fgroup">
 					<?= gp_filter_op_select($fk, $fv, $fd[1]) ?>
-					<input class="gp-input gp-ltr" type="text" id="gf-<?= gp_e($fk) ?>" name="<?= gp_e($fk) ?>" value="<?= gp_e(gp_filter_text($fv)) ?>"
-						<?= $fk === 'use' ? 'list="gdl-use" placeholder="used,unused,new,error"' : '' ?> spellcheck="false" autocomplete="off">
-					<?php if ($fk === 'use'): ?><datalist id="gdl-use"><option value="used"><option value="unused"><option value="new"><option value="error"></datalist><?php endif; ?>
+					<?= gp_multi_input('gf-' . $fk, $fk, gp_filter_text($fv), $fk === 'use' ? array('used', 'unused', 'new', 'error') : array(), $fk === 'use' ? 'placeholder="used,unused,new,error"' : '') ?>
 				</div>
 			</div>
 			<?php endforeach; ?>
@@ -144,6 +144,7 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 			<button class="gp-btn gp-btn-ghost" type="submit" name="do" value="compile"><?= gp_e(gp_t('geo_compile')) ?></button><?= gp_tip('geo_compile') ?>
 		</div>
 	</form>
+	<?= gp_msg('geo-upload') ?>
 	<p class="gp-help"><?= gp_e(gp_t('geo_compile_help')) ?></p>
 	<?php if ($jobs): ?>
 	<div class="gp-help"><?= gp_e(gp_t('geo_jobs')) ?>:

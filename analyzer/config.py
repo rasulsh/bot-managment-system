@@ -216,7 +216,7 @@ def resolve_redis(cfg, explicit):
     # The operator states the namespace explicitly (even as ''): that is a decision,
     # not a guess, so the bridge is not needed to know it.
     confirmed = 'prefix' in (explicit or {})
-    php = cfg.get('php_bin') or 'php'
+    php = bridge.php_binary(cfg)
     guard, err = bridge.redis_block_status(php=php, config_path=cfg.get('guard_config_path') or None)
     if not err:
         confirmed = True
@@ -225,9 +225,9 @@ def resolve_redis(cfg, explicit):
         # un-prefixed keys into the wrong namespace.
         print('WARN: could not read the guard\'s Redis settings via PHP (%s): %s\n'
               'WARN: connecting with analyzer defaults / explicit overrides; settings are NOT confirmed, so '
-              'commands that write will refuse. Fix php_bin (full path, cron has a minimal PATH) '
-              'or set redis.prefix explicitly in the analyzer config.' % (php, err), file=sys.stderr)
+              'commands that write will refuse. Fix: %s, or set redis.prefix explicitly in the analyzer config.' % (php, err, bridge.PHP_FIX), file=sys.stderr)
     cfg['redis_confirmed'] = confirmed
+    cfg['redis_bridge_error'] = err if (err and not confirmed) else ''
     for key in REDIS_GUARD_KEYS:
         if key in guard:
             out[key] = guard[key]
@@ -283,7 +283,7 @@ def apply_panel(cfg, settings=None):
     (config.php < config.local.json). A value of the wrong type is skipped,
     and a regex Python cannot compile is dropped with a warning."""
     if settings is None:
-        settings = bridge.panel_analyzer_settings(php=cfg.get('php_bin') or 'php',
+        settings = bridge.panel_analyzer_settings(php=bridge.php_binary(cfg),
                                                   config_path=cfg.get('guard_config_path') or None)
     for key, value in (settings or {}).items():
         kind = PANEL_KEYS.get(key)

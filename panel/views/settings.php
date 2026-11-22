@@ -189,6 +189,7 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 		</div>
 	<?php gp_tab_end(); endforeach; gp_tabs_end(); ?>
 
+	<?= gp_msg('settings-save') ?>
 	<div class="gp-savebar">
 		<button class="gp-btn gp-btn-primary" type="submit"><?= gp_e(gp_t('save')) ?></button>
 		<span class="gp-help"><?= gp_e(gp_t('set_applies_guard')) ?></span>
@@ -227,6 +228,7 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 <?php if ($overlay): ?>
 <section class="gp-card">
 	<div class="gp-card-title"><?= gp_e(gp_t('set_overridden')) ?></div>
+	<?= gp_msg('settings-reset') ?>
 	<div class="gp-rows">
 		<?php foreach ($overlay as $key => $value): ?>
 		<div class="gp-row">

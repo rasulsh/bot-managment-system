@@ -33,4 +33,5 @@ $when = $me['last_login_at'] > 0 ? date('Y-m-d H:i', (int)$me['last_login_at']) 
 		<p class="gp-help"><?= gp_e(gp_t('acc_help')) ?></p>
 		<button class="gp-btn gp-btn-primary" type="submit" name="do" value="password"><?= gp_e(gp_t('acc_change')) ?></button>
 	</form>
+	<?= gp_msg('account-password') ?>
 </section>

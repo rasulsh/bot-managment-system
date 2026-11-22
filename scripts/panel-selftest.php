@@ -1971,6 +1971,61 @@ t_ok('unknown-able fields: a row WITHOUT the field matches neither "is" nor "is 
 	&& !gp_log_match(array(), array('status' => array('v' => array('5xx'), 'not' => false))) && !gp_log_match(array(), array('status' => array('v' => array('5xx'), 'not' => true)))
 	&& !gp_log_match(array(), array('botv' => array('v' => array('ok'), 'not' => false))) && !gp_log_match(array(), array('botv' => array('v' => array('ok'), 'not' => true)))
 	&& !gp_log_match(array('asn' => 0), array('asn' => array('v' => array('1'), 'not' => true))) && !gp_log_match(array(), array('asn' => array('v' => array('1'), 'not' => true))));
+
+// --- D.4 Method and IP list membership filters -------------------------------------------------------------------
+t_section('Logs filters: Method and IP list membership');
+$mf = function ($k, $v, $not = false) { return array($k => array('v' => $v, 'not' => $not)); };
+$rM = array('m' => 'POST', 'rs' => array('IPL_BLOCK:bad', 'UA_EMPTY'));
+t_ok('method: is / is not, several values, any case, free text', gp_log_match(array('m' => 'POST'), $mf('method', array('POST', 'PUT')))
+	&& !gp_log_match(array('m' => 'GET'), $mf('method', array('POST', 'PUT'))) && gp_log_match(array('m' => 'GET'), $mf('method', array('POST'), true))
+	&& !gp_log_match(array('m' => 'POST'), $mf('method', array('POST'), true)) && gp_log_match(array('m' => 'PROPFIND'), $mf('method', array('PROPFIND')))
+	&& gp_log_match(array('m' => 'post'), $mf('method', array('POST'))));
+$mp = gp_filter_parse(array('method' => 'post, put', 'method_op' => 'not'), array('method' => array('choice', 'ci' => true)));
+t_ok('method: parsed from the query string, upper-cased', $mp['method']['v'] === array('POST', 'PUT') && $mp['method']['not'] === true);
+t_ok('ipl: allow / block / (none) read from the reasons', gp_log_match($rM, $mf('ipl', array('block'))) && !gp_log_match($rM, $mf('ipl', array('allow')))
+	&& gp_log_match(array('rs' => array('IPL_ALLOW:x')), $mf('ipl', array('allow'))) && gp_log_match(array('rs' => array('UA_EMPTY')), $mf('ipl', array('(none)')))
+	&& !gp_log_match($rM, $mf('ipl', array('(none)'))) && gp_log_match(array('rs' => array()), $mf('ipl', array('(none)'))));
+t_ok('ipl: monitor lists (SH_ prefix) count as membership at request time', gp_log_match(array('rs' => array('SH_IPL_BLOCK:bad')), $mf('ipl', array('block')))
+	&& gp_log_match(array('rs' => array('SH_IPL_ALLOW:a')), $mf('ipl', array('allow'))));
+t_ok('ipl: is not includes unlisted rows, several values are OR-ed, is not (a,b) excludes both', gp_log_match(array('rs' => array()), $mf('ipl', array('block'), true))
+	&& !gp_log_match($rM, $mf('ipl', array('block'), true)) && gp_log_match($rM, $mf('ipl', array('allow', 'block')))
+	&& !gp_log_match($rM, $mf('ipl', array('allow', 'block'), true)) && gp_log_match(array('rs' => array()), $mf('ipl', array('allow', 'block'), true))
+	&& gp_log_match($rM, $mf('ipl', array('(none)', 'block'))));
+t_ok('ipln: the list name narrows it; AND with the kind', gp_log_match($rM, $mf('ipln', array('bad'))) && !gp_log_match($rM, $mf('ipln', array('other')))
+	&& gp_log_match($rM, array_merge($mf('ipl', array('block')), $mf('ipln', array('bad')))) && !gp_log_match($rM, array_merge($mf('ipl', array('allow')), $mf('ipln', array('bad'))))
+	&& gp_log_match($rM, $mf('ipln', array('other'), true)) && !gp_log_match($rM, $mf('ipln', array('bad'), true)));
+t_ok('ipl: a row in an allow and a block list matches both kinds', gp_log_match(array('rs' => array('IPL_ALLOW:a', 'IPL_BLOCK:b')), $mf('ipl', array('allow')))
+	&& gp_log_match(array('rs' => array('IPL_ALLOW:a', 'IPL_BLOCK:b')), $mf('ipl', array('block'))));
+$qsf = gp_filter_parse(array('ipl' => 'allow,block', 'ipl_op' => 'not', 'method' => 'POST', 'ipln' => 'bad'),
+	array('ipl' => array('choice', 'ci' => true), 'method' => array('choice', 'ci' => true), 'ipln' => 'choice'));
+$qs = gp_filter_qs($qsf);
+t_ok('ipl / method / ipln survive paging, CSV and a shared link (query string round trip)', $qs['ipl'] === 'ALLOW,BLOCK' && $qs['ipl_op'] === 'not' && $qs['method'] === 'POST' && $qs['ipln'] === 'bad'
+	&& strpos(gp_logs_qs($qsf, array('cursor' => 5)), 'ipl_op=not') !== false && strpos(gp_logs_qs($qsf, array('export' => 'csv')), 'method=POST') !== false);
+t_ok('log filter spec lists method, ipl and ipln', isset(gp_log_filter_spec()['method'], gp_log_filter_spec()['ipl'], gp_log_filter_spec()['ipln']));
+t_ok('reason badges: list reasons take the list colours, others stay neutral', gp_reason_badge_class('IPL_ALLOW:x') === 'gp-badge-ipl-allow' && gp_reason_badge_class('SH_IPL_BLOCK:y') === 'gp-badge-ipl-block'
+	&& gp_reason_badge_class('UA_EMPTY') === 'gp-badge-off' && gp_ipl_badge_class('allow') === 'gp-badge-ipl-allow' && gp_ipl_badge_class('block') === 'gp-badge-ipl-block');
+// --- D.3 multi-select ---------------------------------------------------------------------------------------------
+$msh = gp_multi_input('x-a', 'a', 'GET,foo', array('GET', 'POST', GP_FILTER_NONE), 'placeholder="p"');
+t_ok('multi-select: text input keeps name and value (works without JS), no datalist, checkboxes carry no name', strpos($msh, 'name="a" value="GET,foo"') !== false
+	&& strpos($msh, '<datalist') === false && strpos($msh, 'list="') === false && substr_count($msh, 'type="checkbox"') === 3 && strpos($msh, 'type="checkbox" name') === false
+	&& strpos($msh, 'value="(none)"') !== false && strpos($msh, 'data-gp-ms-toggle hidden') !== false && strpos($msh, 'data-gp-ms-panel hidden') !== false);
+t_ok('multi-select: no options = a plain text input only', strpos(gp_multi_input('x-b', 'b', '', array()), 'data-gp-ms-toggle') === false);
+$bad_dl = array();
+foreach (array_merge(glob(__DIR__ . '/../panel/views/*.php'), array(__DIR__ . '/../panel/filters.php')) as $vf) { if (strpos((string)file_get_contents($vf), '<datalist') !== false) { $bad_dl[] = basename($vf); } }
+t_ok('no <datalist> is left in the panel', !$bad_dl, implode(',', $bad_dl));
+// AA contrast of the solid info button and the list badges, both themes, from the committed tokens.
+$css = (string)file_get_contents(__DIR__ . '/../panel/assets/app.src.css');
+$lum = function ($rgb) { $c = array_map(function ($v) { $v = $v / 255; return $v <= 0.03928 ? $v / 12.92 : pow(($v + 0.055) / 1.055, 2.4); }, $rgb); return 0.2126 * $c[0] + 0.7152 * $c[1] + 0.0722 * $c[2]; };
+$ratio = function ($a, $b) use ($lum) { $x = $lum($a); $y = $lum($b); return (max($x, $y) + 0.05) / (min($x, $y) + 0.05); };
+$tok = function ($name, $nth) use ($css) { preg_match_all('/--gp-' . preg_quote($name, '/') . ': (\d+) (\d+) (\d+);/', $css, $m, PREG_SET_ORDER); return isset($m[$nth]) ? array((int)$m[$nth][1], (int)$m[$nth][2], (int)$m[$nth][3]) : null; };
+$aa = true; $why = '';
+foreach (array(0 => 'light', 1 => 'dark (system)', 2 => 'dark (forced)') as $i => $theme) {
+	foreach (array(array('info', 'on-info'), array('info-hover', 'on-info'), array('info-bg', 'info-fg'), array('bad-bg', 'bad-fg'), array('danger', 'on-danger'), array('danger-hover', 'on-danger')) as $pair) {
+		$a = $tok($pair[0], $i); $b = $tok($pair[1], $i);
+		if ($a === null || $b === null || $ratio($a, $b) < 4.5) { $aa = false; $why .= ' ' . $theme . ':' . $pair[0] . '/' . $pair[1] . '=' . ($a && $b ? round($ratio($a, $b), 2) : 'missing'); }
+	}
+}
+t_ok('contrast: info button, allow badge, block badge and danger button are AA (>= 4.5) in light and dark', $aa, $why);
 t_ok('a row with asn 0 (looked up, none found) counts as having no ASN', gp_log_match(array('asn' => 0), array('asn' => array('v' => array('(none)'), 'not' => false))) && !gp_log_match(array('asn' => 0), array('asn' => array('v' => array('1'), 'not' => true))));
 t_ok('always-present fields keep include / exclude: act, ip, tok, sh, path, ua', gp_log_match(array('ip' => '1.2.3.4'), array('ip' => array('v' => array('5.5.5.5'), 'not' => true)))
 	&& gp_log_match(array(), array('act' => array('v' => array('403'), 'not' => true))) && gp_log_match(array('p' => '/a'), array('path' => array('v' => array('zzz'), 'not' => true)))
@@ -2043,8 +2098,64 @@ t_ok('tabs: no error means no data-open (the hash or the first tab decides); lab
 t_ok('tabs: every panel is in the markup (without JavaScript they stack)', strpos($tabs_html, '>A<') !== false && strpos($tabs_html, '>B<') !== false && strpos($tabs_html, ' hidden') === false);
 $lay = file_get_contents(__DIR__ . '/../panel/views/layout.php');
 t_ok('tabs script: arrow keys, Home / End, roving tabindex, URL hash, error tab wins over the hash', strpos($lay, "'ArrowRight'") !== false && strpos($lay, "'ArrowLeft'") !== false && strpos($lay, "'Home'") !== false
-	&& strpos($lay, "'End'") !== false && strpos($lay, "'tabindex'") !== false && strpos($lay, 'replaceState') !== false && strpos($lay, "box.getAttribute('data-open') || fromHash()") !== false);
+	&& strpos($lay, "'End'") !== false && strpos($lay, "'tabindex'") !== false && strpos($lay, 'replaceState') !== false && strpos($lay, "box.getAttribute('data-open') ||") !== false && strpos($lay, "|| fromHash() ||") !== false);
 t_ok('tooltip script: tap toggles, Escape and outside tap close, kept inside the screen', strpos($lay, "'Escape'") !== false && strpos($lay, 'closest(\'.gp-tip\')') !== false && strpos($lay, 'clientWidth') !== false && strpos($lay, 'gp-open') !== false);
+
+// --- D.1 Messages in context -------------------------------------------------------------------------------------
+t_section('Messages in context: every POST action has a section, drawn where the action is');
+$posts = array(   // route => list of POST bodies, one per action the views can send
+	'dashboard' => array(array('killswitch' => 'stop')), 'identity' => array(array('override' => 'allow')),
+	'overrides' => array(array('override' => 'allow'), array('override' => 'deny'), array('override' => 'clear', 'identity' => '1.2.3.4'), array('override' => 'allow', 'from' => 'list', 'identity' => '1.2.3.4')),
+	'rules' => array(array('do' => 'save'), array('do' => 'preview'), array('do' => 'discard_invalid'), array('do' => 'starter'), array('do' => 'set'), array('do' => 'move'), array('do' => 'delete')),
+	'geo' => array(array('do' => 'upload'), array('do' => 'compile'), array('do' => 'delete'), array('do' => 'rollback')),
+	'iplists' => array(array('do' => 'save'), array('do' => 'delete'), array('do' => 'set'), array('do' => 'compile'), array('do' => 'rollback')),
+	'replay' => array(array('action' => 'apply'), array('action' => 'full')), 'models' => array(array('job' => 'train'), array('job' => 'promote_clf')),
+	'settings' => array(array('action' => 'save'), array('action' => 'reset')), 'config_file' => array(array('action' => 'save_file')),
+	'users' => array(array('do' => 'create'), array('do' => 'unlock'), array('do' => 'role', 'username' => 'bob'), array('do' => 'delete', 'username' => 'bob'), array('do' => 'reset', 'username' => 'bob')),
+	'account' => array(array('do' => 'password')),
+	'update' => array(array('do' => 'upload'), array('do' => 'discard'), array('do' => 'apply'), array('do' => 'verify'), array('do' => 'rollback')),
+	'jobs' => array(array('cron_refresh' => '1'), array('perm_refresh' => '1'), array('seen' => 'verify'), array('job' => 'verify')),
+);
+$sec_bad = array(); $sec_n = 0; $sec_seen = array();
+foreach ($posts as $route => $list) {
+	$src = (string)file_get_contents(__DIR__ . '/../panel/views/' . $route . '.php');
+	foreach ($list as $body) {
+		$sec = gp_post_section($route, $body);
+		$sec_n++;
+		if (!gp_section_valid($sec)) { $sec_bad[] = $route . ':' . json_encode($body) . ' -> invalid ' . $sec; continue; }
+		$sec_seen[$sec] = true;
+		// The view must draw it: a literal gp_msg('<id>') or a per-row gp_msg('<prefix>-' . ...).
+		$lit = strpos($src, "gp_msg('" . $sec . "')") !== false;
+		$row = preg_match('/^(usr|ovr|models)-/', $sec) && strpos($src, "gp_msg('" . explode('-', $sec)[0] . "-'") !== false;
+		// top-fallback sections (the success page of the action has no such box): allowed only when listed here.
+		if (!$lit && !$row) { $sec_bad[] = $route . ':' . json_encode($body) . ' -> ' . $sec . ' is not drawn by the view'; }
+	}
+}
+t_ok('every POST action (' . $sec_n . ') maps to a valid section id that its view draws with gp_msg()', !$sec_bad, implode(' | ', $sec_bad));
+t_ok('POST actions of one form share one section; logout and login have none', gp_post_section('logout', array()) === '' && gp_post_section('login', array()) === ''
+	&& gp_post_section('jobs', array('cron_refresh' => '1')) === 'jobs-cron' && gp_post_section('settings', array('action' => 'save')) === 'settings-save'
+	&& gp_post_section('overrides', array('override' => 'clear')) === 'override-list' && gp_post_section('nope', array()) === '');
+t_ok('row sections are stable and distinct per row', gp_row_key('a') === gp_row_key('a') && gp_row_key('a') !== gp_row_key('b')
+	&& gp_post_section('users', array('do' => 'role', 'username' => 'bob')) === 'usr-' . gp_row_key('bob'));
+// gp_msg: drawn once, role by kind, escaped; nothing for another section.
+$GLOBALS['gp_msg_drawn'] = array();
+$gp_flash = array(array('kind' => 'error', 'message' => 'Bad <b>', 'section' => 'jobs-cron'), array('kind' => 'ok', 'message' => 'Fine', 'section' => 'jobs-cron'), array('kind' => 'warn', 'message' => 'Top'));
+$mh = gp_msg('jobs-cron');
+t_ok('gp_msg: a wrapper with id msg-<section>, tabindex=-1 and data-gp-msg; error = role alert, ok = role status; escaped', strpos($mh, 'id="msg-jobs-cron"') !== false
+	&& strpos($mh, 'tabindex="-1"') !== false && strpos($mh, 'data-gp-msg') !== false && strpos($mh, 'role="alert">Bad &lt;b&gt;') !== false && strpos($mh, 'role="status">Fine') !== false && strpos($mh, 'Top') === false);
+t_ok('gp_msg: drawn once (a second call for the same section is empty) and empty for a section without messages', gp_msg('jobs-cron') === '' && gp_msg('users-list') === '' && gp_msg('Bad Id!') === '');
+$lay2 = (string)file_get_contents(__DIR__ . '/../panel/views/layout.php');
+t_ok('layout: draws the view first, then the messages nobody drew at the top (#msg-top); the focus script is there', strpos($lay2, 'ob_start();') !== false && strpos($lay2, 'id="msg-top"') !== false
+	&& strpos($lay2, 'gp_msg_drawn') !== false && strpos($lay2, 'data-gp-msg') !== false && strpos($lay2, 'scrollIntoView') !== false && strpos($lay2, 'focus({ preventScroll: true })') !== false);
+$gp_flash = array();
+// The signed flash cookie keeps the section (and drops a forged one).
+$fc = gp_flash_encode(array(array('kind' => 'ok', 'message' => 'Done', 'section' => 'jobs-cron'), array('kind' => 'ok', 'message' => 'X', 'section' => '../evil')), 'secret');
+$fd = gp_flash_decode($fc, 'secret');
+t_ok('flash cookie: the section survives the redirect; an invalid section is dropped; old cookies without one still decode', $fd[0]['section'] === 'jobs-cron' && !isset($fd[1]['section'])
+	&& gp_flash_decode(gp_flash_encode(array(array('kind' => 'ok', 'message' => 'Old')), 'secret'), 'secret') === array(array('kind' => 'ok', 'message' => 'Old')));
+$idx = (string)file_get_contents(__DIR__ . '/../panel/index.php');
+t_ok('index.php: gp_flash takes the POST section by default, gp_redirect ends in #msg-<section> on the same page', strpos($idx, '$gp_section') !== false && strpos($idx, "'#msg-' . \$m['section']") !== false
+	&& strpos($lay2, "closest('[role=tabpanel]')") !== false);
 $vset = file_get_contents(__DIR__ . '/../panel/views/settings.php');
 t_ok('settings: one tab per group in one form with one Save button, errors open and badge the tab', strpos($vset, "gp_tabs_begin('set'") !== false && substr_count($vset, 'type="submit"') >= 1 && strpos($vset, '$tab_errors') !== false);
 $vrules = file_get_contents(__DIR__ . '/../panel/views/rules.php');
@@ -2262,12 +2373,19 @@ t_ok('protection mode: placeholder secret = forced monitor; no toggle and no enf
 t_ok('rules summary: enabled rules by mode and action', gp_rules_summary($pm_rules) === array('total' => 4, 'enabled' => 3, 'by' => array('enforce/block' => 1, 'monitor/block' => 1, 'enforce/log' => 1)));
 $jn_all = array(); foreach (gp_job_defs() as $jn => $jd) { $jn_all[$jn] = gp_job_health_one($jn, $jd, null, 0, 600, $jh_now); }
 $lines_none = gp_cron_setup_lines($jn_all, array('mode' => 'none', 'report' => null), '/home/u/bot-guard');
-t_ok('cron setup lines with an unreadable crontab: the GV_PYTHON line and every required entry, built from the real install directory', $lines_none[0] === 'GV_PYTHON=/path/to/virtualenv/bin/python'
+t_ok('cron setup lines with an unreadable crontab: the PATH line, the GV_PYTHON line and every required entry, built from the real install directory', $lines_none[0] === 'PATH=/usr/local/bin:/usr/bin:/bin' && $lines_none[1] === 'GV_PYTHON=/path/to/virtualenv/bin/python'
 	&& in_array('* * * * * bash /home/u/bot-guard/scripts/analyzer-cron.sh worker >/dev/null 2>&1', $lines_none, true) && in_array('10 3 * * * bash /home/u/bot-guard/scripts/guard-logrotate.sh >/dev/null 2>&1', $lines_none, true)
-	&& count($lines_none) === 6 && !in_array('41 5 * * 0 bash /home/u/bot-guard/scripts/analyzer-cron.sh train >/dev/null 2>&1', $lines_none, true));
+	&& count($lines_none) === 7 && !in_array('41 5 * * 0 bash /home/u/bot-guard/scripts/analyzer-cron.sh train >/dev/null 2>&1', $lines_none, true));
 $cr = array('mode' => 'live', 'age' => 0, 'report' => array('jobs' => array(array('job' => 'worker', 'state' => 'missing', 'required' => true, 'severity' => 'critical', 'schedule' => '', 'message' => 'there is no entry for it'), array('job' => 'verify', 'state' => 'ok', 'required' => true, 'severity' => 'ok', 'schedule' => '*/10 * * * *', 'message' => ''), array('job' => 'geo', 'state' => 'missing', 'required' => false, 'severity' => 'info', 'schedule' => '', 'message' => '')),
 	'gv_python' => array('set' => true, 'ok' => true, 'value' => '/x')));
 t_ok('cron setup lines with a readable crontab: only what is missing or wrong, no GV_PYTHON line when it is fine, recommended entries only when asked', gp_cron_setup_lines($jn_all, $cr, '/home/u/bot-guard') === array('* * * * * bash /home/u/bot-guard/scripts/analyzer-cron.sh worker >/dev/null 2>&1'));
+$cr_phpbad = $cr; $cr_phpbad['report']['php'] = array('binary' => '/usr/bin/php', 'sapi' => 'cgi-fcgi', 'version' => '8.3.0', 'ok' => false, 'message' => 'cgi', 'path_set' => false);
+$cr_phpok = $cr; $cr_phpok['report']['php'] = array('binary' => '/usr/local/bin/php', 'sapi' => 'cli', 'version' => '8.3.0', 'ok' => true, 'message' => '', 'path_set' => true);
+t_ok('cron setup lines: a PATH line comes first when the php that cron runs is not usable, and not when it is', gp_cron_setup_lines($jn_all, $cr_phpbad, '/home/u/bot-guard')[0] === 'PATH=/usr/local/bin:/usr/bin:/bin'
+	&& gp_cron_setup_lines($jn_all, $cr_phpok, '/home/u/bot-guard')[0] !== 'PATH=/usr/local/bin:/usr/bin:/bin');
+$al_php = gp_health_alerts(array('now' => time(), 'redis_up' => true, 'cron' => $cr_phpbad));
+t_ok('crontab alert: a php that cron would run and that is not the command line build is a warning of its own', count(array_filter($al_php, function ($a) { return $a['id'] === 'cron_php' && $a['level'] === 'warning'; })) === 1
+	&& count(array_filter(gp_health_alerts(array('now' => time(), 'redis_up' => true, 'cron' => $cr_phpok)), function ($a) { return $a['id'] === 'cron_php'; })) === 0);
 t_ok('the cron setup card shows when a required job never ran or an entry is missing, and not when all is well', gp_cron_card_needed($jn_all, array('report' => null)) === true && gp_cron_card_needed($ok_jobs, array('report' => null)) === false
 	&& gp_cron_card_needed($ok_jobs, $cr) === true && gp_cron_card_needed($ok_jobs, array('report' => array('jobs' => array(array('job' => 'verify', 'state' => 'ok', 'required' => true))))) === false);
 
@@ -2849,7 +2967,7 @@ $sv(array('name' => 'Evil <script>alert(1)</script>', 'note' => '"><img src=x>',
 $gp_post_bak = $_POST;
 list($h1, $e1) = $il_render(array('filter' => gp_filter_parse(array('type' => 'block', 'type_op' => 'not', 'name' => 'ev'), gp_iplists_filter_spec())));
 t_ok('page, with lists: names and notes are escaped, nothing breaks out', !$e1 && strpos($h1, '<script>alert') === false && strpos($h1, '<img src=x>') === false && strpos($h1, 'Evil &lt;script&gt;') !== false);
-t_ok('page: the lists table sits in a gp-table-wrap and shows enabled / mode / counts', strpos($h1, 'gp-table-wrap') !== false && strpos($h1, 'gp-badge-bad') !== false);
+t_ok('page: the lists table sits in a gp-table-wrap and shows enabled / mode / counts', strpos($h1, 'gp-table-wrap') !== false && strpos($h1, 'gp-badge-ipl-block') !== false);
 t_ok('page: active filters are chips and "is not" is visibly marked', strpos($h1, 'gp-chip-not') !== false && strpos($h1, 'flt_is_not') === false);
 list($h2, $e2) = $il_render(array('edit' => array('id' => '', 'name' => 'N', 'type' => 'block', 'mode' => 'monitor', 'enabled' => true, 'force' => false, 'note' => '', 'text' => ''),
 	'save' => array('ok' => false, 'msg' => 'ipl_confirm', 'detail' => '', 'errors' => array('name' => 'bad_name'), 'pending' => 'abcdef0123456789', 'draft' => null,
@@ -3981,6 +4099,140 @@ t_ok('Users page renders the filters (with an exclude chip), the create form, pe
 $a_html = $uview(__DIR__ . '/../panel/views/account.php', array('me' => array('username' => 'olivia', 'role' => 'operator', 'last_login_at' => 0)));
 t_ok('My account page: the form needs the current password, has tooltips, CSRF and is allowed for read-only roles (data-allow)', strpos($a_html, 'name="current"') !== false && strpos($a_html, 'data-allow') !== false && substr_count($a_html, 'gp-tip-btn') >= 2 && strpos($a_html, 'name="csrf"') !== false);
 putenv('GV_AUDIT'); putenv('GV_USERS');
+
+
+// ==========================================================================
+t_section('Web PHP and OPcache status');
+$pe_base = array('version' => '8.3.0', 'sapi' => 'fpm-fcgi', 'opcache_loaded' => true, 'opcache_enable' => '1', 'validate_timestamps' => '1', 'revalidate_freq' => '2', 'gd' => true, 'zip' => true, 'zlib' => true);
+t_ok('opcache: validate_timestamps on (or OPcache off or not loaded) raises nothing', gp_php_env_warnings($pe_base) === array()
+	&& gp_php_env_warnings(array_merge($pe_base, array('validate_timestamps' => '0', 'opcache_enable' => '0'))) === array() && gp_php_env_warnings(array_merge($pe_base, array('opcache_loaded' => false, 'validate_timestamps' => null, 'opcache_enable' => null))) === array());
+t_ok('opcache: enabled with validate_timestamps 0 (or Off) is a warning', gp_php_env_warnings(array_merge($pe_base, array('validate_timestamps' => '0'))) === array('opcache_no_validate')
+	&& gp_php_env_warnings(array_merge($pe_base, array('validate_timestamps' => 'Off'))) === array('opcache_no_validate') && gp_php_env_warnings(array_merge($pe_base, array('validate_timestamps' => ''))) === array('opcache_no_validate'));
+$pe_al = gp_health_alerts(array('now' => time(), 'redis_up' => true, 'php_env' => array_merge($pe_base, array('validate_timestamps' => '0'))));
+t_ok('opcache: the dashboard shows it as a warning that points at the Jobs page, and nothing when it is fine', count(array_filter($pe_al, function ($a) { return $a['id'] === 'opcache_no_validate' && $a['level'] === 'warning' && $a['link'] === 'jobs'; })) === 1
+	&& count(array_filter(gp_health_alerts(array('now' => time(), 'redis_up' => true, 'php_env' => $pe_base)), function ($a) { return $a['id'] === 'opcache_no_validate'; })) === 0);
+$pe_live = gp_php_env();
+t_ok('web php: the live read has the version, the SAPI and every extension flag', $pe_live['version'] === PHP_VERSION && $pe_live['sapi'] === PHP_SAPI && is_bool($pe_live['gd']) && is_bool($pe_live['zip']) && is_bool($pe_live['zlib']) && array_key_exists('validate_timestamps', $pe_live));
+$pe_view = (function () use ($pe_base) { $php_env = array_merge($pe_base, array('validate_timestamps' => '0')); $perms = null; $cron_lines = array(); $health = array(); $jobs = array(); $queue = array('length' => 0, 'oldest_age' => null, 'stuck' => false, 'redis' => false); return $php_env; })();
+
+// ==========================================================================
+t_section('Admin lockout resistance: known device cookie, clearing a lockout');
+putenv('GV_AUDIT=' . $UT . '/audit-d6.jsonl');
+putenv('GV_USERS=' . $UT . '/users-d6.json');
+$d6_secret = bin2hex(random_bytes(32));
+$GLOBALS['gp_test_panel_cfg'] = array('username' => 'known.admin', 'password_hash' => password_hash('known-admin-password-1', PASSWORD_DEFAULT), 'session_secret' => $d6_secret, 'session_ttl' => 43200);
+gp_users_state(true);                                           // migrates known.admin
+gp_users_create('known.admin', 'bob.ops', 'operator', 'bob-ops-password-12');
+$d6_ips = array();
+$d6_ip = function ($n) use (&$d6_ips) { $ip = '198.51.100.' . $n; $d6_ips[$ip] = true; $_SERVER['REMOTE_ADDR'] = $ip; };
+$d6_clean = function () use (&$d6_ips) { gp_login_unlock('', '', true); $d6_ips = array(); unset($_COOKIE[GP_KNOWN_COOKIE]); };
+$d6_clean();
+$ka = gp_users_find('known.admin'); $bo = gp_users_find('bob.ops');
+$kd = gp_known_make($ka, $d6_secret);
+t_ok('known device: a cookie made for the user at the current session_version is valid', gp_known_check($kd, $ka, $d6_secret) === true);
+t_ok('known device: another user\'s cookie, a forged signature, a tampered name and garbage are ignored',
+	gp_known_check(gp_known_make($bo, $d6_secret), $ka, $d6_secret) === false && gp_known_check(substr($kd, 0, -3) . 'abc', $ka, $d6_secret) === false
+	&& gp_known_check(str_replace('known.admin', 'bob.ops', $kd), $ka, $d6_secret) === false && gp_known_check('garbage', $ka, $d6_secret) === false && gp_known_check('', $ka, $d6_secret) === false
+	&& gp_known_check(gp_known_make($ka, 'x' . $d6_secret), $ka, $d6_secret) === false && gp_known_check(array('a'), $ka, $d6_secret) === false && gp_known_check($kd, null, $d6_secret) === false);
+t_ok('known device: valid for 90 days, not 91; a cookie from the future is refused', gp_known_check(gp_known_make($ka, $d6_secret, time() - 89 * 86400), $ka, $d6_secret) === true
+	&& gp_known_check(gp_known_make($ka, $d6_secret, time() - 91 * 86400), $ka, $d6_secret) === false && gp_known_check(gp_known_make($ka, $d6_secret, time() + 5000), $ka, $d6_secret) === false);
+t_ok('known device: the cookie is HttpOnly, SameSite=Strict, Secure on https, 90 days, and a successful sign-in sets it', (function () {
+	$src = file_get_contents(__DIR__ . '/../panel/auth.php');
+	$fn = substr($src, strpos($src, 'function gp_known_set_cookie'), 600);
+	return strpos($fn, "'httponly' => true") !== false && strpos($fn, "'samesite' => 'Strict'") !== false && strpos($fn, "'secure'   => gp_is_https()") !== false && strpos($fn, 'GP_KNOWN_TTL') !== false && GP_KNOWN_TTL === 90 * 86400
+		&& strpos($src, 'gp_known_set_cookie($u, $cfg[\'session_secret\'])') !== false;
+})());
+// the username is locked from other addresses ...
+for ($i = 1; $i <= 10; $i++) { $d6_ip(10 + $i); gp_login_attempt('known.admin', 'wrong-guess-' . $i); }
+$d6_ip(40);
+t_ok('lockout: ten wrong passwords for one name from ten addresses lock that name for a fresh address without the cookie', gp_login_attempt('known.admin', 'known-admin-password-1')[1] === 'login_locked');
+$ub = gp_login_user_bucket('known.admin');
+$ub_before = gp_attempts_get($ub, GP_LOGIN_WINDOW);
+$_COOKIE[GP_KNOWN_COOKIE] = $kd;
+$r_ok = gp_login_attempt('known.admin', 'known-admin-password-1');
+t_ok('known device: the same device with its cookie is NOT blocked by the per-username limit and signs in', $r_ok[0] === true);
+$d6_ip(41);
+$r_bad = gp_login_attempt('known.admin', 'wrong-password-x');
+t_ok('known device: a wrong password from the known device is a plain failure (not "locked") and is NOT counted against the username',
+	$r_bad[1] === 'login_failed' && gp_attempts_get($ub, GP_LOGIN_WINDOW) === $ub_before);
+t_ok('known device: ...but it IS counted against the address and the global counter', gp_attempts_get('198.51.100.41', GP_LOGIN_WINDOW) === 1 && gp_attempts_get('user', GP_LOGIN_WINDOW) >= 11);
+t_ok('known device: a cookie for ANOTHER user does not help (still locked)', (function () use ($bo, $d6_secret, $d6_ip) { $_COOKIE[GP_KNOWN_COOKIE] = gp_known_make($bo, $d6_secret); $d6_ip(42); return gp_login_attempt('known.admin', 'known-admin-password-1')[1] === 'login_locked'; })());
+t_ok('known device: a forged cookie does not help (still locked)', (function () use ($d6_ip) { $_COOKIE[GP_KNOWN_COOKIE] = 'known.admin.' . time() . '.' . str_repeat('a', 64); $d6_ip(43); return gp_login_attempt('known.admin', 'known-admin-password-1')[1] === 'login_locked'; })());
+$d6_clean();
+// ... the per-address limit still applies to a known device
+$_COOKIE[GP_KNOWN_COOKIE] = $kd;
+$d6_ip(60);
+for ($i = 0; $i < 5; $i++) { gp_login_attempt('known.admin', 'wrong-guess-' . $i); }
+t_ok('known device: the per-address limit still applies (five wrong passwords lock the address, even for the right password)', gp_login_attempt('known.admin', 'known-admin-password-1')[1] === 'login_locked');
+$d6_clean();
+// ... and the global limit
+$_COOKIE[GP_KNOWN_COOKIE] = $kd;
+for ($i = 0; $i < GP_LOGIN_MAX_ATTEMPTS * 4; $i++) { gp_attempts_bump('user', GP_LOGIN_WINDOW); }
+$d6_ip(61);
+t_ok('known device: the panel-wide limit still applies', gp_login_attempt('known.admin', 'known-admin-password-1')[1] === 'login_locked');
+$d6_clean();
+// bound to session_version: password reset, disable, role change
+$_COOKIE[GP_KNOWN_COOKIE] = $kd;
+gp_users_reset_password('bob.ops', 'known.admin', 'reset-by-someone-1');           // actor can be anything here: no self rule for a reset
+$ka2 = gp_users_find('known.admin');
+t_ok('known device: a password reset invalidates the cookie (session_version moved)', $ka2['session_version'] === $ka['session_version'] + 1 && gp_known_check($kd, $ka2, $d6_secret) === false && gp_known_check(gp_known_make($ka2, $d6_secret), $ka2, $d6_secret) === true);
+gp_users_create('known.admin', 'carol.demo', 'demo', 'carol-demo-password1');
+$ca = gp_users_find('carol.demo'); $ckd = gp_known_make($ca, $d6_secret);
+gp_users_set_role('known.admin', 'carol.demo', 'operator');
+t_ok('known device: a role change invalidates the cookie', gp_known_check($ckd, gp_users_find('carol.demo'), $d6_secret) === false);
+$ca = gp_users_find('carol.demo'); $ckd = gp_known_make($ca, $d6_secret);
+gp_users_set_enabled('known.admin', 'carol.demo', false);
+t_ok('known device: disabling the user invalidates the cookie (and a disabled user never counts as a known device)', gp_known_check($ckd, gp_users_find('carol.demo'), $d6_secret) === false && gp_known_device('carol.demo') === false);
+gp_users_set_enabled('known.admin', 'carol.demo', true);
+t_ok('known device: enabling again does not revive the old cookie', gp_known_check($ckd, gp_users_find('carol.demo'), $d6_secret) === false);
+t_ok('known device: a name that does not exist is never a known device', (function () use ($kd) { $_COOKIE[GP_KNOWN_COOKIE] = $kd; return gp_known_device('nobody.here') === false; })());
+$d6_clean();
+
+// ---- clearing a lockout
+$d6_lock_user = function ($u) use ($d6_ip) { for ($i = 1; $i <= 10; $i++) { $d6_ip(100 + $i); gp_login_attempt($u, 'wrong-guess-' . $i); } $d6_ip(150); };
+$d6_lock_user('bob.ops');
+t_ok('unlock: a locked username is blocked', gp_login_attempt('bob.ops', 'bob-ops-password-12')[1] === 'login_locked');
+$cl = gp_login_unlock('bob.ops');
+t_ok('unlock: clearing the username lets the person in at once', $cl === array('user') && gp_login_attempt('bob.ops', 'bob-ops-password-12')[0] === true);
+$d6_clean();
+$d6_ip(170);
+for ($i = 0; $i < 5; $i++) { gp_login_attempt('bob.ops', 'wrong-guess-' . $i); }
+t_ok('unlock: a locked address is blocked', gp_login_attempt('bob.ops', 'bob-ops-password-12')[1] === 'login_locked');
+t_ok('unlock: clearing the address lets it in again', in_array('ip', gp_login_unlock('', '198.51.100.170'), true) && gp_login_attempt('bob.ops', 'bob-ops-password-12')[0] === true);
+$d6_clean();
+for ($i = 0; $i < GP_LOGIN_MAX_ATTEMPTS * 4; $i++) { gp_attempts_bump('user', GP_LOGIN_WINDOW); }
+$d6_ip(171);
+t_ok('unlock: the panel-wide counter locks everybody ...', gp_login_attempt('bob.ops', 'bob-ops-password-12')[1] === 'login_locked');
+t_ok('unlock: ... clearing a name also clears the panel-wide counter when that is what holds the lock', in_array('global', gp_login_unlock('bob.ops'), true) && gp_login_attempt('bob.ops', 'bob-ops-password-12')[0] === true);
+$d6_clean();
+$d6_lock_user('bob.ops');
+gp_login_unlock('', '', true);
+t_ok('unlock: "clear everything" removes every counter', gp_login_attempt('bob.ops', 'bob-ops-password-12')[0] === true);
+$d6_clean();
+// from the shell: php panel/setpass.php --unlock-user / --unlock-ip / --unlock-all (the same counters; Redis or the files of this panel directory)
+$sh = function (array $args) use ($UT_PHP, $UT) {
+	$p = proc_open(array_merge(array($UT_PHP, __DIR__ . '/../panel/setpass.php'), $args), array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $pipes, null,
+		array('PATH' => getenv('PATH'), 'GV_AUDIT' => $UT . '/audit-d6.jsonl', 'GV_USERS' => $UT . '/users-d6.json'));
+	$o = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
+	fclose($pipes[1]); fclose($pipes[2]);
+	return array(proc_close($p), $o);
+};
+$d6_lock_user('bob.ops');
+t_ok('unlock from the shell: --unlock-user clears the name and says so', $sh(array('--unlock-user', 'Bob.Ops'))[0] === 0 && gp_attempts_get(gp_login_user_bucket('bob.ops'), GP_LOGIN_WINDOW) === 0);
+$d6_ip(180); for ($i = 0; $i < 5; $i++) { gp_login_attempt('bob.ops', 'wrong-guess-' . $i); }
+t_ok('unlock from the shell: --unlock-ip clears the address', gp_attempts_get('198.51.100.180', GP_LOGIN_WINDOW) >= 5 && $sh(array('--unlock-ip', '198.51.100.180'))[0] === 0 && gp_attempts_get('198.51.100.180', GP_LOGIN_WINDOW) === 0);
+$d6_lock_user('bob.ops');
+t_ok('unlock from the shell: --unlock-all clears everything; bad arguments exit 2 and change nothing', $sh(array('--unlock-all'))[0] === 0 && gp_attempts_get('user', GP_LOGIN_WINDOW) === 0
+	&& $sh(array('--unlock-ip', 'not-an-ip'))[0] === 2 && $sh(array('--unlock-user'))[0] === 2);
+$aud = (string)@file_get_contents($UT . '/audit-d6.jsonl');
+t_ok('unlock is audited (event login_unlock, actor, target, what was cleared)', substr_count($aud, '"event":"login_unlock"') >= 3 && strpos($aud, '"actor":"setpass"') !== false && strpos($aud, '"key":"bob.ops"') !== false);
+$ixs = file_get_contents(__DIR__ . '/../panel/index.php');
+t_ok('unlock in the panel: an admin-only POST of the Users page (ACL), audited, validating the address', strpos($ixs, "\$do === 'unlock'") !== false && strpos($ixs, "'login_unlock'") !== false && gp_acl_required('users', 'POST') === 'admin'
+	&& !gp_acl_allows('operator', 'users', 'POST') && !gp_acl_allows('demo', 'users', 'POST') && strpos($ixs, 'FILTER_VALIDATE_IP') !== false);
+$d6_clean();
+unset($GLOBALS['gp_test_panel_cfg']);
+putenv('GV_AUDIT'); putenv('GV_USERS');
+$_SERVER['REMOTE_ADDR'] = '127.0.0.1';
 
 echo "\n";
 // Say so out loud. A green run on a host missing the extension must never be

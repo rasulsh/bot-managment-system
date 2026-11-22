@@ -91,6 +91,8 @@ ignores `.htaccess`, put `panel/` outside the document root and alias only
 | **Roles** | Administrator, Monitoring operator, Demo. One permission map (`panel/acl.php`), checked in the router for GET and POST before any handler, deny by default, HTTP 403 plus an `acl_denied` audit line. See [Users and roles](#users-and-roles). |
 | **CSRF** | Per-session token in a hidden field on every state-changing POST, verified with `hash_equals`. GET routes never change state. |
 | **Login rate limit** | 5 attempts per 15 minutes per IP (`gp:login:{ip}`), 10 per **username** (`gp:login:u:<hash>`, counted the same for names that do not exist), plus a global counter across all addresses (`gp:login:user`) at four times that, so an attempt spread over many IPs is caught too. Wrong user and wrong password give an identical message and an identical response time. Messages are drawn inside the login card (`role="alert"`); after a failed login the typed username is kept (never the password) and the password field takes focus. A locked-out visitor sees a separate message with the minutes left to wait, which is the same whether or not the username exists. |
+| **Known-device cookie** | After a successful sign-in the browser gets `gp_kd` = `user.issued.hmac` (HMAC over the username, the issue time and the user's `session_version`, keyed by the panel session secret; 90 days, `HttpOnly`, `SameSite=Strict`, `Secure` on HTTPS). A request that carries a valid one for the username it tries is **exempt from the per-username counter only**, so someone attacking an administrator's name from elsewhere cannot lock the administrator out of their own browser. The **per-IP and the panel-wide counters still apply**. Disabling the user, a password reset, a role change and a password change change `session_version` and so make every old cookie worthless; a cookie for another name, a forged or expired one is simply ignored. It is not a session: it grants nothing. |
+| **Clearing a lockout** | Admin only, audited (`login_unlock`): the **Users** page card *Clear a login lockout* (a username, an address, or everything), or from the shell `php panel/setpass.php --unlock-user NAME`, `--unlock-ip ADDRESS`, `--unlock-all` (works when nobody can sign in; reads and writes the same Redis keys and file counters). |
 | **Redis down** | The limiter falls back to a **file counter**, not to no limit. This is the one place in the whole system that deliberately does **not** fail open. |
 | **IP allowlist** | Optional `ip_allowlist` in `panel/panel.config.php`: IPv4 and IPv6 addresses or CIDR ranges. Empty means no restriction (default, so upgrades lock nobody out); a non-empty list with no valid entry refuses everyone (fail closed). It is checked before any route, login included. `X-Forwarded-For` is read only when the connection comes from an address in `trusted_proxies`, walking from the right past trusted hops. The same address feeds the login rate limit and the audit trail. |
 | **Search engines** | `X-Robots-Tag: noindex, nofollow, noarchive, nosnippet` on every response (PHP, and `.htaccess` for assets and server errors) plus a robots meta tag. No `robots.txt`, on purpose. |
@@ -313,6 +315,11 @@ A **Cron setup** card shows when a required job has never run or the crontab che
 what is missing, built from this install's real directory and starting with the `GV_PYTHON=` line, and the command to open the
 editor (`crontab -e`).
 
+**The web server's PHP (Jobs page, card *The web server's PHP*).** PHP version, `opcache.enable`, `opcache.validate_timestamps`, `opcache.revalidate_freq`, GD, ZipArchive and zlib,
+read **inside the panel request**, so they describe the PHP that serves the site (`php -i` over SSH shows the command-line PHP, which can differ). With
+`opcache.validate_timestamps = 0` the dashboard raises a warning: PHP keeps the old code after an update and after a change of rules, lists or settings
+until OPcache is reset or PHP restarts (the updater and the panel do call `opcache_invalidate`, which only reaches the pool that serves the panel).
+
 **Jobs page.** The crontab check runs `scripts/cron-check.sh` through `proc_open` (argv array, stderr to `/dev/null`, 3 s read limit,
 SIGTERM then SIGKILL after 1 s for a child that hangs); the result is cached in `analyzer/.cron-check-live.json` for 5 minutes, so the dashboard
 and the Jobs page never start a process per view, and **Check again** (CSRF, audit-logged, once per 30 s for everyone) refreshes it. If the live check cannot run,
@@ -345,6 +352,28 @@ one place, with an argv array, to run `scripts/cron-check.sh`.
   CSV export and *Share link* keep the operators. Active filters show as removable chips above the table, an
   exclude one marked "is not" / "does not contain". An exclude filter can scan more lines before it finds rows; the
   existing "scan limit reached" notice appears when a cap is hit.
+* **Pick lists.** A choice field has the plain text box (comma list, any value can be typed) and, with JavaScript, a *Pick values* button that opens a
+  checkbox list of the usual values (and `(none)` where the field offers it). Ticking a box writes the value into the text box; typing updates the
+  boxes; Esc or a click elsewhere closes it and Esc returns focus to the button; boxes are 40 px tall for touch; it follows the light and dark themes.
+  It replaces the browser `<datalist>`, which is not a multi-select. Without JavaScript the button stays hidden and the text box works as before.
+* **Logs filters added.** *Method* (`GET`, `POST`, `HEAD`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, or any typed value; always present, so "is not POST"
+  includes every other row). *IP list at request time* (`ipl`: `allow`, `block`, `(none)` = on no list) and *IP list name* (`ipln`): read from the row's
+  reason codes `IPL_ALLOW:<id>` / `IPL_BLOCK:<id>` (a monitor list logs `SH_IPL_*` and counts too), so they describe the request **when it was made**, not
+  today's list contents. A row in an allow and a block list matches both kinds. Several values are OR-ed; "is not" excludes rows that match any of them and
+  keeps unlisted rows. All three keep their operator through paging, the CSV export and *Share link*, and show as chips.
+* **IP list colours.** *Allow* is blue and *Block* is red wherever a list type shows: the new-list buttons and the Save button of the editor
+  (`gp-btn-info` / `gp-btn-danger`), the type badge in the lists table, the compile table, the lookup tester, the dashboard summary, and the
+  `IPL_ALLOW` / `IPL_BLOCK` (and `SH_`) reason badges on Logs, Identity and the dashboard top reasons. The word is always printed too, never colour alone;
+  panel-selftest computes the contrast of every pair from the tokens (at least 4.5:1, light and dark).
+* **Messages in context.** The result of an action is shown **in the section where the button is**, not at the top of the page. Every POST action maps to a
+  section id (`gp_post_section()` in `panel/ui.php`); the view draws the result with `gp_msg('<section>')` (`role="status"` for ok / warning, `role="alert"`
+  for an error); the redirect after the action ends in `#msg-<section>`; a small script scrolls the message into view (if it is not already) and focuses it,
+  and a message inside a hidden tab opens that tab. A message whose section the page does not draw falls back to the top of the page (`#msg-top`), so
+  none is lost. Without JavaScript the fragment still scrolls. Sections: killswitch; identity-override; override-add / override-list / one per row (extend);
+  rule-editor, rules-list, rules-file; geo-upload (upload, compile), geo-sources (delete), geo-status (rollback); ipl-editor, ipl-lists, ipl-compile,
+  ipl-status (rollback); replay-actions; models-ml / models-clf; settings-save, settings-reset; config-file; users-create, users-unlock, users-list,
+  one per user row; account-password; update-upload (upload, discard), update-apply, update-verify, update-history (rollback); jobs-cron (*Check
+  again*), jobs-perms, jobs-detail (mark seen), jobs-start. Login and logout keep their own message in the login card.
 * **Empty values: unknown versus known.** What an empty value *means* decides how a filter treats it.
   * **Unknown** (the information does not exist): country and ASN (no lookup ran, or none found; ASN 0), the outcome
     status (`capture_outcomes` off or no outcome line), the bot verdict (`botv`, no bot claim). Like the rule engine's
@@ -354,7 +383,7 @@ one place, with an argv array, to run `scripts/cron-check.sh`.
     a token-less client), the operator override (none was set), and, on the Rules table, a rule with no country /
     ASN condition. These are plain include / exclude and an empty value equals no real value, so "reason is not
     UA_EMPTY", "device is not X" and "override is not deny" **include** those rows.
-  * **`(none)`** (offered in the datalist, explained in the tooltip, valid on all of these fields) means "empty":
+  * **`(none)`** (offered in the pick list, explained in the tooltip, valid on all of these fields) means "empty":
     **is (none)** lists those rows, **is not (none)** lists the rows that have a value, and it can be mixed into the
     comma list (`cc=IR,(none)` = Iran or unknown; `reason=(none),UA_SCRIPT` = no reason or UA_SCRIPT).
   * Fields every row always has (action, address, path, User-Agent, token, shadow, holdout) are plain include /
@@ -376,6 +405,10 @@ tooltip on every field. Per row: set role, disable / enable, reset password, del
 unique case-insensitively), role, first password (at least 12 characters, not the username). Rules: you cannot disable, demote or delete yourself; the last enabled
 administrator cannot be disabled, demoted or deleted; disabling, a role change and a password reset end the user's sessions at once (`session_version`); a disabled user
 gets the generic login failure. Every action is audited (`user_*`: actor, target, before / after, never a hash).
+
+**Clear a login lockout** (card on the Users page, admin only): a username, an address, or *everything* (all per-username, per-address and panel-wide counters).
+The result is audited (`login_unlock`: actor, what was cleared). The same from the shell when nobody can sign in: `php panel/setpass.php --unlock-user NAME |
+--unlock-ip ADDRESS | --unlock-all`. A browser that already signed in as that user once is also covered by the known-device cookie (see the security table).
 
 **My account.** Role, last sign-in, and *Change password* (current password required; 12 characters minimum; your other sessions end, this one stays signed in).
 Read-only roles can use this form.

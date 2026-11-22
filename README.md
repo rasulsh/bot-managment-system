@@ -116,7 +116,7 @@ enforcement is forced off, so a half-finished install cannot affect your site.
 | **Scheduled tasks (cron)** | Runs the analyzer jobs and the daily log rotation | Your panel's "Cron Jobs" page, or `crontab -l` over SSH | Jobs never run; the dashboard says so with alerts. |
 | **SSH (command-line) access** | One-time install steps | Ask your host | Ask a developer or the host to do the install ([1.3](#13-installation-paths)). |
 | **Writable folders** for the PHP account | `logs/` for the log; with the panel also `guard/`, `geo/`, `lists/`, `panel/` and the top folder | After the first request, files appear in `logs/` | Nothing is logged; the guard still works. See [docs/13-PANEL-WEB-ACCESS.md](docs/13-PANEL-WEB-ACCESS.md#3-permissions-and-ownership). |
-| **PHP command line (`php`)** on the same server | The analyzer and the log-rotation script read the guard's settings through it | `<php-binary> -v` over SSH | Analyzer jobs refuse to write ("Redis settings are not confirmed"). |
+| **PHP command line (`php`)** on the same server | The analyzer and the log-rotation script read the guard's settings through it | `<php-binary> -v` over SSH: it must say `(cli)` and 8.0 or newer (not `cgi-fcgi`) | Analyzer jobs refuse to write ("Redis settings are not confirmed"). On cPanel / CloudLinux cron's default `PATH` can find a CGI build first: start the crontab with `PATH=/usr/local/bin:/usr/bin:/bin`. |
 | *Optional:* **PHP GD with FreeType** | Draws the image CAPTCHA | `php -m` should list `gd`; cPanel: EasyApache → PHP Extensions | CAPTCHA rules fall back to the short check page; the dashboard warns while a CAPTCHA is configured. |
 | *Optional:* the **PHP `opcache`** extension | Keeps the compiled rules in memory (speed) | `php -m` lists `Zend OPcache` | Works, a little slower with many rules. |
 
@@ -477,12 +477,13 @@ The first time you use this feature on an install that was set up by copying fil
 | **Google stopped crawling** | The `verify` job is not running; a block or country rule without *Skip verified crawlers*; a block list that contains crawler addresses (it is checked before the crawler pass) | Check **Jobs** for `verify`; in **Logs** search the User-Agent `Googlebot` and read `act` and the reasons; fix the rule or list; use the kill switch if urgent |
 | **Dashboard says jobs never ran** | No cron entries; wrong path; wrong `GV_PYTHON`; cron runs as another user | Open **Jobs** (the crontab check) or run `bash <install-dir>/scripts/cron-check.sh` over SSH; add the lines the **Cron setup** card shows |
 | **Dashboard numbers look frozen** | The `snapshot` cron job stopped | Check **Jobs → snapshot**; the snapshot is rewritten every 15 minutes |
-| **Panel not reachable** | No login created yet (bare 404); wrong web path; `.htaccess` not honoured; your address is not in `ip_allowlist`; five wrong passwords lock the login for 15 minutes | [docs/13-PANEL-WEB-ACCESS.md, section 7](docs/13-PANEL-WEB-ACCESS.md#7-troubleshooting); wait 15 minutes after a lock-out |
+| **Panel not reachable** | No login created yet (bare 404); wrong web path; `.htaccess` not honoured; your address is not in `ip_allowlist`; five wrong passwords lock the login for 15 minutes | [docs/13-PANEL-WEB-ACCESS.md, section 7](docs/13-PANEL-WEB-ACCESS.md#7-troubleshooting); a browser you already signed in from is not locked out by someone else guessing your username; clear a lock-out now with another administrator (*Users* → *Clear a login lockout*) or `php <install-dir>/panel/setpass.php --unlock-user NAME` (`--unlock-ip ADDRESS`, `--unlock-all`) |
 | **Nothing appears in the log** | `auto_prepend_file` path wrong or not reloaded yet (`.user.ini` takes up to ~5 minutes); the page came from a cache without running PHP; `logs/` not writable; disk below the floor | [docs/11-TESTING-PIPELINE.md](docs/11-TESTING-PIPELINE.md); read `logs/guard-errors.log` |
 | **CAPTCHA image missing, visitors get the check page instead** | PHP GD (with FreeType) not installed in the **web server's** PHP | Install `gd`; the dashboard shows a warning while a CAPTCHA is configured |
 | **Everything shows "unknown" country** | No GeoIP database compiled, or *log country* is off | **GeoIP** page: upload, **Compile now**; Settings → GeoIP |
 | **The site feels slower** | Redis slow or on another host; rules read without OPcache; disk full | Typical cost is a fraction of a millisecond ([2.4](#24-performance-budgets)); check `ms` in Logs; keep Redis local; save rules from the panel to rebuild the cache |
 | **Job fails with "cannot import"** | `GV_PYTHON` not set or wrong | Install `analyzer/requirements.txt` in a virtual environment and put `GV_PYTHON=<python-binary>` at the top of the crontab |
+| **Job warning "verify: Redis unavailable" / "Redis settings not confirmed (the PHP bridge failed)", jobs exit 0 but store nothing** | The `php` that cron runs is not the command line build (cron's minimal `PATH` finds `php-cgi` / `cgi-fcgi`, which prints HTTP headers first, so the settings cannot be read). *Redis unavailable* without "not confirmed" is a real connection problem | Run `bash scripts/cron-check.sh` (it names the php cron would run), add `PATH=/usr/local/bin:/usr/bin:/bin` (or `GV_PHP=/usr/local/bin/php`) at the top of the crontab. The analyzer now passes `-q` and ignores a header block, and warns once naming the binary |
 | **Redis alert: "can silently delete"** | Redis eviction policy is not `noeviction` | Set `maxmemory-policy noeviction` or use a dedicated Redis |
 
 ## 1.10 Glossary
@@ -826,6 +827,8 @@ packages it needs.
 A generic crontab (use full paths; cron's `PATH` is minimal):
 
 ```cron
+# cron's own PATH can find a php that is not the command line build (cPanel: php -v says "(cgi-fcgi)"); the CLI is usually /usr/local/bin/php.
+PATH=/usr/local/bin:/usr/bin:/bin
 # Interpreter that has the analyzer packages (a virtual environment is recommended).
 GV_PYTHON=<python-binary>
 */10 * * * * bash <install-dir>/scripts/analyzer-cron.sh verify    >/dev/null 2>&1
@@ -1025,6 +1028,7 @@ first, with a self-test. Tests must not write into the repository tree.
 2. `panel/views/<route>.php` (start with the `GP_BOOT` guard); add the route to `$gp_nav` in `panel/views/layout.php` and `nav_<route>` to `panel/lang.php`.
 3. Tabs: `gp_tabs_begin($group, $labels, $errors)`, `gp_tab_begin()`, `gp_tab_end()`, `gp_tabs_end()` (`panel/ui.php`). Tooltips: `gp_tip('<key>')` with `tip_<key>` in `lang.php`.
 4. Filters: declare a spec for `gp_filter_parse($_GET, $spec)` (`panel/filters.php`: types `choice`, `ident`, `text`, `num`) and test rows with `gp_filter_test()`; empty values on optional fields use `(none)`.
+4b. Pick lists on a choice field: `gp_multi_input($id, $name, $value, $options, $attr)` (never a `<datalist>`). Messages: every POST action needs a section id in `gp_post_section()` (`panel/ui.php`) and a `gp_msg('<section>')` next to its button in the view (the self-test fails when a POST form has none); `gp_flash()` then lands in that section and `gp_redirect()` ends in `#msg-<section>`. IP list colours: `gp_ipl_badge_class()` / `gp_reason_badge_class()`.
 5. Data readers must be bounded (`GP_MAX_ROWS`, scan caps in `panel/data.php`). Test in `scripts/panel-selftest.php` and `scripts/panel-layout-test.sh` (390 px, no horizontal scroll).
 
 ### Add a setting (whitelist, validator, tooltip, docs)

@@ -142,8 +142,9 @@ def main(argv=None, resolver=None):
         time.sleep(DNS_SLEEP_S)
 
     if client is None:
-        print('Redis unavailable: verdicts were computed but not stored.')
-        jobreport.warn('Redis unavailable: verdicts were computed but not stored')
+        reason = redis_io.unavailable_reason(cfg)
+        print(reason + '.')
+        jobreport.warn(reason)
     if not claims:
         jobreport.warn('no known-bot claims in the last %s day(s) of logs: nothing to verify' % cfg['window_days'])
     print('Bot verification: verified %d, flagged %d, unknown %d, skipped %d, candidates %d.'

@@ -85,13 +85,20 @@
 		<div class="gp-note" role="status"><?= gp_e(gp_t('operator_banner')) ?></div>
 		<?php endif; ?>
 
-		<?php foreach (($flash ?? array()) as $gp_msg): ?>
-		<div class="gp-flash gp-flash-<?= gp_e($gp_msg['kind']) ?>" role="status">
-			<?= gp_e($gp_msg['message']) ?>
-		</div>
-		<?php endforeach; ?>
-
-		<?php require $view_file; ?>
+		<?php
+		// The view first: it draws the messages of its own sections (gp_msg). What is left (no section, or a section this page
+		// does not show) is drawn here at the top, so a message is never lost.
+		ob_start();
+		require $view_file;
+		$gp_view_html = ob_get_clean();
+		$gp_top = '';
+		foreach (($flash ?? array()) as $gp_m) {
+			if (!empty($gp_m['section']) && !empty($GLOBALS['gp_msg_drawn'][$gp_m['section']])) { continue; }
+			$gp_top .= '<div class="gp-flash gp-flash-' . gp_e($gp_m['kind']) . '" role="' . ($gp_m['kind'] === 'error' ? 'alert' : 'status') . '">' . gp_e($gp_m['message']) . '</div>';
+		}
+		if ($gp_top !== '') { echo '<div class="gp-msg" id="msg-top" tabindex="-1" data-gp-msg>' . $gp_top . '</div>'; }
+		echo $gp_view_html;
+		?>
 
 		<?php if (!empty($user)): $gp_ver = function_exists('gp_upd_version') ? gp_upd_version() : ''; ?>
 		<p class="gp-help gp-footer" style="margin-top:2rem"><?= gp_e(gp_t('footer_version')) ?>: <span class="gp-mono"><?= gp_e($gp_ver !== '' ? $gp_ver : gp_t('unknown')) ?></span></p>
@@ -218,7 +225,8 @@
 			var h = window.location.hash.replace(/^#/, '');
 			return h.indexOf(group + '-') === 0 ? h.slice(group.length + 1) : '';
 		};
-		select(box.getAttribute('data-open') || fromHash() || tabs[0].getAttribute('data-tab'), false, false);
+		var msg = box.querySelector(':scope > [role=tabpanel] [data-gp-msg]');       // a message in context: show its tab
+		select(box.getAttribute('data-open') || (msg ? msg.closest('[role=tabpanel]').getAttribute('data-panel') : '') || fromHash() || tabs[0].getAttribute('data-tab'), false, false);
 		tabs.forEach(function (t, i) {
 			t.addEventListener('click', function () { select(t.getAttribute('data-tab'), false, true); });
 			t.addEventListener('keydown', function (e) {
@@ -288,6 +296,64 @@
 			}, function () { window.location.href = a.href; });
 		});
 	});
+	// A message in context: bring the first one into view and move focus to it (also when the page was not reached through the
+	// #msg-... fragment, e.g. a form re-drawn with its errors after a refused save). Without JS the fragment still scrolls.
+	(function () {
+		var m = document.querySelector('[data-gp-msg]');
+		if (!m) { return; }
+		var r = m.getBoundingClientRect();
+		if (r.top < 0 || r.bottom > (window.innerHeight || document.documentElement.clientHeight)) { m.scrollIntoView({ block: 'center' }); }
+		try { m.focus({ preventScroll: true }); } catch (e) { m.focus(); }
+	})();
+	// Multi-select pick lists (data-gp-ms): the text input stays the source of truth (it is what the form submits and what works
+	// without JavaScript); the checkboxes mirror its comma list and write back to it. Esc or a click outside closes the list.
+	(function () {
+		var boxes = document.querySelectorAll('[data-gp-ms]');
+		var split = function (t) { return t.split(',').map(function (x) { return x.trim(); }).filter(function (x) { return x !== ''; }); };
+		var closeAll = function (except) {
+			boxes.forEach(function (b) {
+				if (b === except) { return; }
+				var p = b.querySelector('[data-gp-ms-panel]'), t = b.querySelector('[data-gp-ms-toggle]');
+				if (p && !p.hidden) { p.hidden = true; if (t) { t.setAttribute('aria-expanded', 'false'); } }
+			});
+		};
+		boxes.forEach(function (box) {
+			var input = box.querySelector('input[type=text]');
+			var toggle = box.querySelector('[data-gp-ms-toggle]');
+			var panel = box.querySelector('[data-gp-ms-panel]');
+			if (!input || !toggle || !panel) { return; }
+			var checks = panel.querySelectorAll('input[type=checkbox]');
+			var fromInput = function () {
+				var have = split(input.value).map(function (x) { return x.toLowerCase(); });
+				checks.forEach(function (c) { c.checked = have.indexOf(c.value.toLowerCase()) !== -1; });
+			};
+			var toInput = function () {
+				var keep = split(input.value).filter(function (x) {
+					return !Array.prototype.some.call(checks, function (c) { return c.value.toLowerCase() === x.toLowerCase(); });
+				});
+				var picked = [];
+				checks.forEach(function (c) { if (c.checked) { picked.push(c.value); } });
+				input.value = picked.concat(keep).join(',');
+			};
+			var setOpen = function (open) {
+				panel.hidden = !open;
+				toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+				if (open) { closeAll(box); fromInput(); }
+			};
+			toggle.hidden = false;
+			toggle.addEventListener('click', function () { setOpen(panel.hidden); });
+			checks.forEach(function (c) { c.addEventListener('change', toInput); });
+			input.addEventListener('input', fromInput);
+			box.addEventListener('keydown', function (e) {
+				if (e.key === 'Escape' && !panel.hidden) { e.preventDefault(); setOpen(false); toggle.focus(); }
+			});
+			fromInput();
+		});
+		document.addEventListener('click', function (e) {
+			var own = e.target && e.target.closest ? e.target.closest('[data-gp-ms]') : null;
+			closeAll(own);                                   // every list except the one that was clicked in
+		});
+	})();
 	// Live slider read-outs on the replay page.
 	document.querySelectorAll('input[type=range][data-output]').forEach(function (input) {
 		var out = document.getElementById(input.getAttribute('data-output'));

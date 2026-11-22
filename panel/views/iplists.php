@@ -51,9 +51,7 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 				<label class="gp-label" for="lf-<?= gp_e($fk) ?>"><?= gp_e(gp_t($fd[0])) ?><?= gp_tip($fd[3]) ?></label>
 				<div class="gp-fgroup">
 					<?= gp_filter_op_select($fk, $fv, $fd[1]) ?>
-					<input class="gp-input gp-ltr" type="text" id="lf-<?= gp_e($fk) ?>" name="<?= gp_e($fk) ?>" value="<?= gp_e(gp_filter_text($fv)) ?>"
-						<?= $fd[2] ? 'list="ldl-' . gp_e($fk) . '"' : '' ?> spellcheck="false" autocomplete="off">
-					<?php if ($fd[2]): ?><datalist id="ldl-<?= gp_e($fk) ?>"><?php foreach ($fd[2] as $o): ?><option value="<?= gp_e($o) ?>"><?php endforeach; ?></datalist><?php endif; ?>
+					<?= gp_multi_input('lf-' . $fk, $fk, gp_filter_text($fv), (array)$fd[2]) ?>
 				</div>
 			</div>
 			<?php endforeach; ?>
@@ -61,11 +59,12 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 		<div class="gp-row-head">
 			<button class="gp-btn gp-btn-ghost" type="submit"><?= gp_e(gp_t('filter')) ?></button>
 			<a class="gp-btn gp-btn-ghost" href="index.php?r=iplists"><?= gp_e(gp_t('reset')) ?></a>
-			<a class="gp-btn gp-btn-primary" href="index.php?r=iplists&amp;new=1&amp;type=block#ipl-editor"><?= gp_e(gp_t('ipl_new_block')) ?></a>
-			<a class="gp-btn gp-btn-primary" href="index.php?r=iplists&amp;new=1&amp;type=allow#ipl-editor"><?= gp_e(gp_t('ipl_new_allow')) ?></a>
+			<a class="gp-btn gp-btn-danger" href="index.php?r=iplists&amp;new=1&amp;type=block#ipl-editor"><?= gp_e(gp_t('ipl_new_block')) ?></a>
+			<a class="gp-btn gp-btn-info" href="index.php?r=iplists&amp;new=1&amp;type=allow#ipl-editor"><?= gp_e(gp_t('ipl_new_allow')) ?></a>
 		</div>
 		<?= gp_filter_chips_html($lchips) ?>
 	</form>
+	<?= gp_msg('ipl-lists') ?>
 	<?php if ($pending): ?><div class="gp-note"><?= gp_e(gp_t('ipl_pending')) ?></div><?php endif; ?>
 	<?php if (!$visible): ?>
 		<p class="gp-help"><?= gp_e(gp_t($all ? 'no_results' : 'ipl_empty')) ?></p>
@@ -88,7 +87,7 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 		?>
 		<tr>
 			<td><strong><?= gp_e($r['name']) ?></strong><br><code class="gp-mono"><?= gp_e($r['id']) ?></code><?= $r['note'] !== '' ? '<br><span class="gp-help">' . gp_e($r['note']) . '</span>' : '' ?></td>
-			<td><span class="gp-badge <?= $r['type'] === 'block' ? 'gp-badge-bad' : 'gp-badge-on' ?>"><?= gp_e(gp_t('ipl_type_' . $r['type'])) ?></span></td>
+			<td><span class="gp-badge <?= gp_e(gp_ipl_badge_class($r['type'])) ?>"><?= gp_e(gp_t('ipl_type_' . $r['type'])) ?></span></td>
 			<td><span class="gp-badge <?= $r['mode'] === 'enforce' ? 'gp-badge-on' : 'gp-badge-off' ?>"><?= gp_e(gp_t('rules_mode_' . $r['mode'])) ?></span></td>
 			<td><span class="gp-badge <?= $r['enabled'] ? 'gp-badge-on' : 'gp-badge-off' ?>"><?= gp_e(gp_t($r['enabled'] ? 'on' : 'off')) ?></span></td>
 			<td class="gp-mono"><?= $c ? gp_e(gp_num((int)$c['entries'])) . ($c['invalid'] ? ' <span class="gp-badge gp-badge-warn">' . gp_e(gp_num((int)$c['invalid'])) . ' ' . gp_e(gp_t('ipl_invalid_short')) . '</span>' : '') : '—' ?></td>
@@ -114,8 +113,8 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 <?php gp_tab_end(); gp_tab_begin('ipl', 'editor', $it['editor']); ?>
 <?php if ($form === null): ?>
 <div class="gp-card"><p class="gp-help"><?= gp_e(gp_t('ipl_editor_none')) ?></p>
-	<a class="gp-btn gp-btn-primary" href="index.php?r=iplists&amp;new=1&amp;type=block#ipl-editor"><?= gp_e(gp_t('ipl_new_block')) ?></a>
-	<a class="gp-btn gp-btn-primary" href="index.php?r=iplists&amp;new=1&amp;type=allow#ipl-editor"><?= gp_e(gp_t('ipl_new_allow')) ?></a></div>
+	<a class="gp-btn gp-btn-danger" href="index.php?r=iplists&amp;new=1&amp;type=block#ipl-editor"><?= gp_e(gp_t('ipl_new_block')) ?></a>
+	<a class="gp-btn gp-btn-info" href="index.php?r=iplists&amp;new=1&amp;type=allow#ipl-editor"><?= gp_e(gp_t('ipl_new_allow')) ?></a></div>
 <?php else: ?>
 <form method="post" action="index.php?r=iplists" enctype="multipart/form-data" class="gp-card gp-form">
 	<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
@@ -198,9 +197,10 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 		</div>
 	</fieldset>
 	<div class="gp-row-head">
-		<button class="gp-btn gp-btn-primary" type="submit" name="do" value="save"><?= gp_e(gp_t('save')) ?></button>
+		<button class="gp-btn <?= $form['type'] === 'block' ? 'gp-btn-danger' : 'gp-btn-info' ?>" type="submit" name="do" value="save"><?= gp_e(gp_t('save')) ?></button>
 		<a class="gp-btn gp-btn-ghost" href="index.php?r=iplists"><?= gp_e(gp_t('cancel')) ?></a>
 	</div>
+	<?= gp_msg('ipl-editor') ?>
 </form>
 <?php endif; ?>
 
@@ -270,11 +270,11 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 	<div class="gp-note" role="status">
 		<div><strong><?= gp_e(gp_t('ipl_effective')) ?>:</strong> <?= gp_e(gp_t('ipl_eff_' . ($test['effective'] === '' ? 'none' : $test['effective']))) ?></div>
 		<?php foreach ($test['live'] as $t => $l): ?>
-		<div><?= gp_e(gp_t('ipl_live')) ?>: <?= gp_e(gp_t('ipl_type_' . $t)) ?> &rarr; <code class="gp-mono"><?= gp_e($l['id']) ?></code> (<?= gp_e(gp_t($l['monitor'] ? 'rules_mode_monitor' : 'rules_mode_enforce')) ?>)</div>
+		<div><?= gp_e(gp_t('ipl_live')) ?>: <span class="gp-badge <?= gp_e(gp_ipl_badge_class($t)) ?>"><?= gp_e(gp_t('ipl_type_' . $t)) ?></span> &rarr; <code class="gp-mono"><?= gp_e($l['id']) ?></code> (<?= gp_e(gp_t($l['monitor'] ? 'rules_mode_monitor' : 'rules_mode_enforce')) ?>)</div>
 		<?php endforeach; ?>
 		<?php if ($test['matches']): ?>
 		<div class="gp-table-wrap"><table class="gp-table"><thead><tr><th><?= gp_e(gp_t('ipl_f_name')) ?></th><th><?= gp_e(gp_t('ipl_f_type')) ?></th><th><?= gp_e(gp_t('ipl_f_status')) ?></th><th><?= gp_e(gp_t('ipl_c_entry')) ?></th></tr></thead><tbody>
-			<?php foreach ($test['matches'] as $m): ?><tr><td><?= gp_e($m['name']) ?> (<code class="gp-mono"><?= gp_e($m['id']) ?></code>)</td><td><?= gp_e(gp_t('ipl_type_' . $m['type'])) ?></td>
+			<?php foreach ($test['matches'] as $m): ?><tr><td><?= gp_e($m['name']) ?> (<code class="gp-mono"><?= gp_e($m['id']) ?></code>)</td><td><span class="gp-badge <?= gp_e(gp_ipl_badge_class($m['type'])) ?>"><?= gp_e(gp_t('ipl_type_' . $m['type'])) ?></span></td>
 				<td><?= gp_e(gp_t($m['enabled'] ? 'on' : 'off')) ?> · <?= gp_e(gp_t('rules_mode_' . $m['mode'])) ?></td><td class="gp-mono gp-ltr"><?= gp_e($m['entry']) ?> (<?= gp_e(gp_t('ipl_c_line')) ?> <?= gp_e((string)$m['line']) ?>)</td></tr><?php endforeach; ?>
 		</tbody></table></div>
 		<?php else: ?><div><?= gp_e(gp_t('ipl_no_match')) ?></div><?php endif; ?>
@@ -285,9 +285,10 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 <?php gp_tab_end(); gp_tab_begin('ipl', 'compile', $it['compile']); ?>
 <div class="gp-card gp-form">
 	<div class="gp-card-title"><?= gp_e(gp_t('ipl_compile_title')) ?></div>
+	<?= gp_msg('ipl-status') ?>
 	<div class="gp-table-wrap"><table class="gp-table"><thead><tr><th><?= gp_e(gp_t('ipl_f_type')) ?></th><th><?= gp_e(gp_t('geo_c_built')) ?></th><th><?= gp_e(gp_t('geo_c_v4')) ?></th><th><?= gp_e(gp_t('geo_c_v6')) ?></th><th><?= gp_e(gp_t('ipl_c_lists')) ?></th><th></th></tr></thead><tbody>
 		<?php foreach (array('allow', 'block') as $t): $ti = ($status && is_array($status['types'][$t] ?? null)) ? $status['types'][$t] : null; ?>
-		<tr><td><strong><?= gp_e(gp_t('ipl_type_' . $t)) ?></strong><br><code class="gp-mono"><?= gp_e($t) ?>.bin</code></td>
+		<tr><td><span class="gp-badge <?= gp_e(gp_ipl_badge_class($t)) ?>"><?= gp_e(gp_t('ipl_type_' . $t)) ?></span><br><code class="gp-mono"><?= gp_e($t) ?>.bin</code></td>
 			<?php if ($ti): ?><td class="gp-mono"><?= gp_e(gmdate('Y-m-d H:i', (int)$ti['built'])) ?> UTC</td><td class="gp-mono"><?= gp_e(gp_num((int)$ti['v4'])) ?></td><td class="gp-mono"><?= gp_e(gp_num((int)$ti['v6'])) ?></td>
 			<td class="gp-mono gp-ltr"><?= gp_e(implode(', ', array_map('strval', (array)$ti['lists']))) ?></td>
 			<?php else: ?><td colspan="4"><?= gp_e(gp_t('ipl_no_file')) ?></td><?php endif; ?>
@@ -321,6 +322,7 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 		<?php endforeach; ?>
 	</tbody></table></div>
 	<?php endif; ?>
+	<?= gp_msg('ipl-compile') ?>
 	<form method="post" action="index.php?r=iplists">
 		<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 		<div class="gp-row-head">

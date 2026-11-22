@@ -257,6 +257,12 @@ check "operator: flipping the kill switch is refused with 403 and the switch did
 check "operator: creating a user, an override, a rule, a job and an update are all refused with 403" "$([ "$(opost -d do=create -d username=smoke-hack -d role=admin -d password=hacked-password-1 "$URL?r=users")" = 403 ] && [ "$(opost -d action=add -d ip=203.0.113.9 "$URL?r=overrides")" = 403 ] && [ "$(opost -d do=save "$URL?r=rules")" = 403 ] && [ "$(opost -d job=verify "$URL?r=jobs")" = 403 ] && [ "$(opost -d do=upload "$URL?r=update")" = 403 ] && echo 1 || echo 0)"
 ul="$(uform)"
 check "...and no such user exists" "$(! grep -q 'smoke-hack' <<<"$ul" && echo 1 || echo 0)"
+check "operator: clearing a login lockout is refused with 403 (admin only)" "$([ "$(opost -d do=unlock -d unlock_all=1 "$URL?r=users")" = 403 ] && echo 1 || echo 0)"
+check "the admin clears a login lockout from the Users page (303, back to the section, with a message)" "$([ "$(upost -d do=unlock -d unlock_all=1)" = 303 ] && echo 1 || echo 0)"
+uloc="$(t="$(uform | csrf)"; curl -sk -o /dev/null -D - -c "$JAR" -b "$JAR" --data-urlencode "csrf=$t" -d do=unlock -d unlock_all=1 "$URL?r=users" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
+check "the redirect after an action ends in #msg-<section> (users-unlock)" "$(grep -q '#msg-users-unlock$' <<<"$uloc" && echo 1 || echo 0)"
+uafter="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=users")"
+check "the Users page draws the result inside its own section, not at the top of the page" "$(grep -q 'id="msg-users-unlock"' <<<"$uafter" && ! grep -q 'id="msg-top"' <<<"$uafter" && echo 1 || echo 0)"
 check "the demo user cannot POST either (settings and users: 403)" "$([ "$(curl -sk -o /dev/null -w '%{http_code}' -c "$DMJ" -b "$DMJ" --data-urlencode "csrf=$(curl -sk -c "$DMJ" -b "$DMJ" "$URL?r=account" | csrf)" -d action=save "$URL?r=settings")" = 403 ] && echo 1 || echo 0)"
 check "a POST to a read-only role without the CSRF token is no use either" "$([ "$(curl -sk -o /dev/null -w '%{http_code}' -c "$OPJ" -b "$OPJ" -d action=save "$URL?r=settings")" = 403 ] && echo 1 || echo 0)"
 # (A wrong current password and wrong sign-ins are covered by panel-selftest; here each one would count against the sign-in limit of 127.0.0.1,

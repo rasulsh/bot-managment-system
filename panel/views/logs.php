@@ -8,6 +8,7 @@ $f = is_array($filter) ? $filter : array();
 $act_options = array('', 'allow', 'challenge', '403', '429', 'exempt', 'allow_bot',
 	'allow_preview', 'allow_override', '404_hp', 'token_issued', 'nonce_bad', 'nonce_replay', 'pow_bad',
 	'mint_limited');
+$ipl_names = array_map(function ($l) { return (string)$l['id']; }, function_exists('gp_iplists_state') ? gp_iplists_state()['lists'] : array());
 $reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR',
 	'HP_HIST', 'BOT_FAKE');
 ?>
@@ -45,6 +46,9 @@ $flt = array(
 	'tok'    => array('logs_token', 'is', array('v', 'm', 'b')),
 	'sh'     => array('logs_shadow', 'is', array('1', '0')),
 	'hold'   => array('logs_holdout', 'is', array('1', '0')),
+	'method' => array('logs_method', 'is', array('GET', 'POST', 'HEAD', 'PUT', 'PATCH', 'DELETE', 'OPTIONS')),
+	'ipl'    => array('logs_ipl', 'is', array('allow', 'block')),
+	'ipln'   => array('logs_ipln', 'is', $ipl_names),
 );
 $flt_field = function ($key) use ($flt, $f) {
 	$d = $flt[$key];
@@ -53,13 +57,10 @@ $flt_field = function ($key) use ($flt, $f) {
 	if (!empty(gp_log_filter_spec()[$key][4])) { $dl[] = GP_FILTER_NONE; }      // (none) = empty value
 	ob_start(); ?>
 	<div class="gp-field">
-		<label class="gp-label" for="flt-<?= gp_e($key) ?>"><?= gp_e(gp_t($d[0])) ?><?= gp_tip('flt_' . ($key === 'tok' || $key === 'dev' ? $key : $key)) ?></label>
+		<label class="gp-label" for="flt-<?= gp_e($key) ?>"><?= gp_e(gp_t($d[0])) ?><?= gp_tip('flt_' . $key) ?></label>
 		<div class="gp-fgroup">
 			<?= gp_filter_op_select($key, $v, $d[1]) ?>
-			<input class="gp-input gp-ltr" type="text" id="flt-<?= gp_e($key) ?>" name="<?= gp_e($key) ?>" value="<?= gp_e(gp_filter_text($v)) ?>"
-				<?= $dl ? 'list="dl-' . gp_e($key) . '"' : '' ?> spellcheck="false" autocomplete="off"
-				<?= $d[1] === 'is' ? 'placeholder="' . gp_e(gp_t('flt_hint_list')) . '"' : '' ?>>
-			<?php if ($dl): ?><datalist id="dl-<?= gp_e($key) ?>"><?php foreach ($dl as $o): ?><option value="<?= gp_e($o) ?>"><?php endforeach; ?></datalist><?php endif; ?>
+			<?= gp_multi_input('flt-' . $key, $key, gp_filter_text($v), $dl, $d[1] === 'is' ? 'placeholder="' . gp_e(gp_t('flt_hint_list')) . '"' : '') ?>
 		</div>
 	</div>
 	<?php return ob_get_clean();
@@ -81,17 +82,17 @@ $chips = gp_filter_chips($f, array_map(function ($d) { return gp_t($d[0]); }, $f
 				<?php endforeach; ?>
 			</select>
 		</label>
-		<?php foreach (array('act', 'ip', 'path', 'ua', 'status', 'cc') as $k) { echo $flt_field($k); } ?>
+		<?php foreach (array('act', 'method', 'ip', 'path', 'ua', 'status', 'cc') as $k) { echo $flt_field($k); } ?>
 	</div>
 
 	<?php
 	$adv_open = false;
-	foreach (array('reason', 'botv', 'dev', 'tok', 'sh', 'hold', 'asn', 'sc_min', 'sc_max') as $k) { if (isset($f[$k]) && $f[$k] !== '') { $adv_open = true; } }
+	foreach (array('reason', 'botv', 'dev', 'tok', 'sh', 'hold', 'asn', 'ipl', 'ipln', 'sc_min', 'sc_max') as $k) { if (isset($f[$k]) && $f[$k] !== '') { $adv_open = true; } }
 	?>
 	<details class="gp-more" <?= $adv_open ? 'open' : '' ?>>
 		<summary><?= gp_e(gp_t('logs_more_filters')) ?></summary>
 		<div class="gp-filters gp-filters-3">
-			<?php foreach (array('reason', 'botv', 'dev', 'tok', 'sh', 'hold', 'asn') as $k) { echo $flt_field($k); } ?>
+			<?php foreach (array('reason', 'botv', 'dev', 'tok', 'sh', 'hold', 'asn', 'ipl', 'ipln') as $k) { echo $flt_field($k); } ?>
 			<label class="gp-field">
 				<span class="gp-label"><?= gp_e(gp_t('logs_score_min')) ?><?= gp_tip('flt_score') ?></span>
 				<input class="gp-input gp-ltr" type="number" name="sc_min" inputmode="numeric" value="<?= gp_e((string)($f['sc_min'] ?? '')) ?>">
@@ -201,7 +202,7 @@ $chips = gp_filter_chips($f, array_map(function ($d) { return gp_t($d[0]); }, $f
 		<?php if ($reasons): ?>
 		<div class="gp-log-reasons gp-ltr">
 			<?php foreach ($reasons as $reason): ?>
-				<span class="gp-badge gp-badge-off"><?= gp_e($reason) ?></span>
+				<span class="gp-badge <?= gp_e(gp_reason_badge_class($reason)) ?>"><?= gp_e($reason) ?></span>
 			<?php endforeach; ?>
 		</div>
 		<?php endif; ?>
