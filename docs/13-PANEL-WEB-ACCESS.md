@@ -42,7 +42,9 @@ How it fits together:
   the pointer and runs `bot-guard/panel/index.php`.
 - Nothing else of `bot-guard/` (configuration, logs, secrets) has a URL.
 - `panel/.htaccess` still applies after the symlink is followed. It allows only
-  `index.php`, `*.css` and `*.woff2`, and answers 403 for every other file.
+  `index.php`, `recover.php`, `*.css` and `*.woff2`, and answers 403 for every other file.
+  `recover.php` is the web entry of the update recovery: it answers an empty 404 unless a valid one-time
+  token is given (see [09-ADMIN-PANEL.md](09-ADMIN-PANEL.md#update-from-a-zip)).
 
 Replace `USER` with your account name and `gv-admin` with a name of your choice in
 every command below. Pick a name that is not obvious (not `admin`, not `panel`)
@@ -116,6 +118,8 @@ enough):
 | `geo/` | panel | uploaded GeoIP databases, compiled `country.bin` / `asn.bin` and their status files |
 | `lists/` | panel | IP list sources, compiled `allow.bin` / `block.bin`, `lists.json`, `lists-status.json` |
 | `bot-guard/` (top) | panel | `guard.off` (the kill switch on the dashboard) |
+| `updates/` | panel (Update page) | staged ZIPs, update manifests and backups, the recovery scripts, the hashed recovery token. **Not web-reachable**: `updates/.htaccess` denies everything; the only web path is `panel/recover.php` with a token |
+| every code folder, for **Update** | panel (Update page) | an update rewrites the project files, so the PHP user must own and be able to write `guard/`, `panel/`, `analyzer/`, `scripts/`, `docs/` and the top directory. The Update page says **No** under *Install directory writable* when it cannot; then update over SFTP |
 
 **PHP runs as a different user** (a VPS with plain Apache and `mod_php`, where PHP
 runs as `www-data` or `apache`): give the repository to that user instead.
@@ -245,6 +249,8 @@ It ends with `OK: no sensitive path answered 200 ...` and exit code 0.
 **4. Sign in.** Open `https://example.com/gv-admin/` in a browser and log in with
 the user from `setpass.php`. The **Data pipeline** card on the dashboard should
 say that requests are being logged.
+
+**3b. The updater workspace is refused too** (the exposure check covers `updates/recovery.json`, `updates/installed.json`, `updates/rollback.php`, `updates/verify.php`, `VERSION`, `CHANGELOG.md`, and `panel/recover.php` without a token, which must not answer 200).
 
 Optional, on a **test install only** (it changes a setting and toggles the kill
 switch): `bash scripts/panel-smoke.sh https://example.com /gv-admin USER PASSWORD`.

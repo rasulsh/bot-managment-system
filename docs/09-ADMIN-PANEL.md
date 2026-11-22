@@ -278,6 +278,7 @@ who steals the session.
   effect, because the allow list is checked first: the page shows a warning with a link to the list, and so does the flash right after the deny
   is created.
 - **Audit** — the append-only trail, searchable (filters: event, user, text; each include or exclude).
+- **Update** — install a newer version from the GitHub ZIP, review it, apply it with your password, roll it back. See [Update from a ZIP](#update-from-a-zip).
 
 ## Dashboard, job health and alerts
 
@@ -356,6 +357,87 @@ one place, with an argv array, to run `scripts/cron-check.sh`.
   * Fields every row always has (action, address, path, User-Agent, token, shadow, holdout) are plain include /
     exclude and need no `(none)`.
   `(none)` survives paging, the CSV export link and *Share link*.
+
+## Update from a ZIP
+
+Admin page **Update** (`?r=update`). It applies the GitHub ZIP of this repository (Code, Download ZIP, or a release ZIP) and
+can undo it. The installed version is the `VERSION` file at the repository root (shown in the footer of every page and on this
+page); `CHANGELOG.md` lists what changed, newest first.
+
+| Step | What happens | Changes the install? |
+|---|---|---|
+| Upload (POST, CSRF) | The ZIP is read, every entry validated, every PHP file parse-checked (`token_get_all` with `TOKEN_PARSE`), the plan computed. Audit: `update_upload` or `update_refused`. | No (staged in `updates/pending/`, discarded after an hour) |
+| Review | From and to version, added / changed / removed / protected files, the changelog between the two versions, warnings (downgrade, same version, `.git`, `requirements.txt`, cron scripts, first ZIP update). | No |
+| Apply (POST, CSRF, **password again**) | Manifest + backups, recovery scripts, `guard.off`, atomic file swap, OPcache invalidation, then the health check in a fresh request. Audit: `update_apply`, `update_verified` or `update_failed`. | Yes |
+| Roll back (POST, CSRF, browser confirm) | Restores the backup of that update and of every newer one. Audit: `update_rollback`. | Yes |
+
+A wrong password counts as a failed login (the same limiter) and writes `reauth_failed`. A downgrade, the same version and a `.git`
+directory each need an explicit tick before **Apply**.
+
+**Never overwritten, never deleted.** The list lives in one file, `panel/update-protected.txt` (the updater reads it; the copy
+inside the ZIP is read too and a file protected by either is skipped). On top of it, every pattern of the installed and the shipped
+`.gitignore` protects a file. `.htaccess` and `.gitkeep` files inside the data directories stay updatable.
+
+```
+guard/config.php
+guard/config.local.json*
+guard/config-backups/
+guard/rules.json*
+guard/rules.cache.php*
+panel/panel.config.php
+panel/users.json*
+panel/audit.jsonl
+panel/jobs-seen.json*
+panel/.ratelimit/
+panel/*.log
+guard.off
+lists/*
+geo/*
+logs/*
+analyzer/model.joblib*
+analyzer/clf.joblib*
+analyzer/*.candidate
+analyzer/*.csv
+analyzer/snapshot.json*
+analyzer/ground-truth.txt
+analyzer/reports/
+analyzer/.jobstatus-*
+analyzer/.jobstate-*
+analyzer/.cron-check*
+analyzer/.lastrun-*
+analyzer/.laststats-*
+analyzer/.rule-hits.json
+analyzer/.venv/
+analyzer/venv/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+updates/
+```
+
+**Limits.** ZIP up to 30 MB (and what PHP allows: the smaller of `upload_max_filesize` and `post_max_size`, shown on the page), at most
+3000 files, 10 MB per file, 100 MB unpacked. Allowed top-level folders: `guard`, `panel`, `analyzer`, `scripts`, `docs`, `geo`, `lists`,
+`logs`, `updates`; allowed types: `php py sh md txt json css js woff2 ttf png tpl` and the names `.htaccess .gitkeep .gitignore VERSION LICENSE`.
+Refused: `..`, absolute paths, backslashes, drive letters, symbolic links, encrypted or ZIP64 entries, duplicate paths, `.git/`.
+
+**The health check.** `updates/verify.php` (written from the *old* code before the files change) loads the new guard and panel in a fresh
+request and runs one synthetic request in dry-run mode (no log row). Failure, including a fatal error that kills the request, rolls the
+update back automatically; the result page says so. If the browser closes before the check finishes, the page shows a red banner with
+**Run the check now** and the dashboard raises a critical alert (the guard may still be off).
+
+**Recovery when the panel is broken.** After a good check the result page shows a **recovery token once**: valid 24 hours, single use,
+stored only as a hash in `updates/recovery.json`. Web: `<panel-address>/recover.php?token=<token>` (an empty 404 without a valid token).
+Shell: `php <install-dir>/updates/rollback.php` (`--list` shows the updates, a stamp rolls back that update and all newer ones).
+Both use the same script, `updates/rollback.php`, written from the old code before the update, with no dependency on the new code.
+
+**After the update.** When `analyzer/requirements.txt` changed the panel queues the worker job `pip_sync`
+(`<python> -m pip install -r analyzer/requirements.txt`, 10 minute limit, output in the job log; a failure raises a dashboard warning).
+The page prints the exact SSH command as well. The crontab check runs and any missing line is listed.
+
+**Web access.** `updates/` is denied like `guard/` (`updates/.htaccess`, listed in `scripts/exposure-check.sh`); the only web path into it is
+`panel/recover.php`, which needs a token. See [13-PANEL-WEB-ACCESS.md](13-PANEL-WEB-ACCESS.md).
 
 ## Testing
 

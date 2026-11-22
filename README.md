@@ -270,7 +270,13 @@ that is **late**, **failing** or **never** ran. *Safe to change:* buttons start 
 
 ### Audit
 *What it is for:* an append-only record of who changed what, when and from which address
-(settings, rules, lists, overrides, kill switch, logins). *Safe to change:* it is read-only.
+(settings, rules, lists, overrides, kill switch, logins, updates). *Safe to change:* it is read-only.
+
+### Update
+*What it is for:* installing a newer version of Bot Guard from the GitHub ZIP, without SSH or git, and
+rolling it back. *Look at first:* the installed version and the green "writable" badge. *Safe to change:*
+nothing changes until you review the list of files and enter your password
+([Updating Bot Guard](#updating-bot-guard)).
 
 ## 1.5 Reading the dashboard
 
@@ -391,6 +397,21 @@ While it exists the guard logs nothing and decides nothing. It is the only insta
 1. **Logs:** set your filter and press **Export CSV (this page)**. It contains the rows on the page only (at most 200), not all filtered results.
 2. For a whole day, copy the daily files `<install-dir>/logs/guard-YYYYMMDD.jsonl` (finished days are compressed to `.gz`). One JSON object per line.
 3. **Privacy:** logs hold visitor addresses, paths and the first 100 characters of query strings (which may include tokens from e-mail links). Share them only with people who may see that data.
+
+### Updating Bot Guard
+
+You need the ZIP of the version you want: on GitHub open the repository, **Code, Download ZIP** (the `master` branch)
+or download a release ZIP. Nothing else.
+
+1. Open the panel, page **Update**. Check that **Install directory writable** says **Yes**. If it says **No**, the web server user cannot write the project: update over SFTP instead, or fix the ownership.
+2. Under **Upload a ZIP** choose the file and press **Upload and check**. Nothing is changed yet. A ZIP that is damaged, is not this project, contains unsafe paths or has a PHP syntax error is refused with the reason.
+3. Read the **review**: old version to new version, how many files are added, changed and removed, what changed (the changelog) and any warnings (a downgrade, the same version, a `.git` folder, a changed `requirements.txt` or cron script). Your configuration, rules, lists, logs and models are listed as **protected** and are never touched.
+4. Enter your panel password and press **Apply update**. The guard is switched off for a few seconds, the files are swapped, then the new code is checked in a fresh request. If the check fails the update rolls itself back. **Write down the recovery token** shown on the result page: it works once, for 24 hours.
+5. Look at the result page: it tells you whether a `pip_sync` job was queued (Python packages) and whether the crontab needs a new line. Open **Jobs** and **Dashboard** and make sure nothing turned red.
+
+**Undo an update:** page **Update**, history, **Roll back**. If the panel itself no longer opens, use the recovery token at `<panel-address>/recover.php?token=<token>` or, with a shell, `php <install-dir>/updates/rollback.php`.
+
+The first time you use this feature on an install that was set up by copying files, copy the new release over the install once by hand (it contains the Update page itself); from then on use the panel. A git checkout can be updated this way too, but the working tree then differs from git: to go back to git updates run `git stash && git pull` (or `git checkout -- . && git pull`) after a rollback or after restoring the files from the ZIP.
 
 ## 1.8 Good practices and common mistakes
 
@@ -668,8 +689,8 @@ only). "**Expected, untested**" means nothing in CI exercises it.
 
 The supported layout keeps the repository outside the document root. As a safety net for an
 install that ended up inside it, the repository ships deny-all `.htaccess` files in the root,
-`guard/`, `geo/`, `lists/`, `logs/`, `analyzer/`, `scripts/`, `docs/`, and (with a narrow
-exception for `index.php` and static assets) `panel/`.
+`guard/`, `geo/`, `lists/`, `logs/`, `updates/`, `analyzer/`, `scripts/`, `docs/`, and (with a narrow
+exception for `index.php`, `recover.php` and static assets) `panel/`.
 
 - **Apache / LiteSpeed Enterprise**: needs `AllowOverride All` (or `AuthConfig Limit FileInfo`); a partial set gives a 500, which fails closed. Both a `Require` and a rewrite rule are used.
 - **OpenLiteSpeed** ignores `Require`/`Order` in `.htaccess` and relies on the rewrite rule (CI-verified).
@@ -682,6 +703,7 @@ exception for `index.php` and static assets) `panel/`.
   location ^~ /lists/    { return 404; }
   location ^~ /logs/     { return 404; }
   location ^~ /analyzer/ { return 404; }
+  location ^~ /updates/  { return 404; }     # updater workspace: manifests, backups, recovery scripts
   location ^~ /scripts/  { return 404; }
   location ^~ /docs/     { return 404; }
   location = /prepend.php { return 404; }
@@ -692,6 +714,7 @@ exception for `index.php` and static assets) `panel/`.
   # Panel (symlinked or aliased as /gv-admin/): serve only index.php and the assets.
   location = /gv-admin/panel.config.php { return 404; }
   location = /gv-admin/audit.jsonl      { return 404; }
+  # recover.php (the update recovery entry) must stay reachable: it answers an empty 404 unless a one-time token is given.
   location ^~ /gv-admin/views/          { return 404; }
   ```
 
@@ -959,18 +982,33 @@ ignored files.
 | `bash scripts/identity-check.sh <url>`, `bash scripts/monitor-check.sh` | dev router | Allowed paths are byte-identical with the guard on and off; monitor mode is inert |
 | `node scripts/browser-test.js chromium` (or `firefox`) | Node, Playwright, browsers | Real-browser challenge over http/https |
 | `bash scripts/panel-layout-test.sh` | Node, Playwright, Chromium | Panel layout at 1600 and 390 px |
+| `bash scripts/update-e2e.sh` | PHP, Python 3, `curl` | The in-panel updater over HTTP: upload, review, apply, health check, token, rollback, automatic rollback |
+| `bash scripts/version-check.sh origin/master` | `git` | A change to code must bump `VERSION` and `CHANGELOG.md` (CI, pull requests) |
 | `sudo bash .github/ci/webserver-test.sh apache|ols` | Debian/Ubuntu, root | Exposure check and panel smoke test on a real server, three layouts |
 | `bash scripts/e2e-challenge.sh` | PHP, `curl`, `redis-server` | The challenge through the `test_key` switch (**not** run in CI) |
 
 `.github/workflows/ci.yml` (runs on pull requests and on pushes to `master`; no deployment):
 `lint-php` (PHP 8.0/8.3/8.5), `lint-other` (Python compile, `bash -n`, shellcheck),
 `php-tests` (8.0/8.3/8.5, with Redis), `python-tests` (Python 3.9/3.13), `redis-matrix`
-(5.0.14/6.2.14/7.4.1), `http` (dev router, browsers, panel layout) and `webservers`
+(5.0.14/6.2.14/7.4.1), `version-bump` (pull requests), `http` (dev router, browsers, panel layout, updater end to end) and `webservers`
 (Apache, OpenLiteSpeed). GD is installed in every PHP job.
 
 ## 2.15 Upgrade and rollback
 
-Generic procedure: (1) read the newest entry of [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md); (2) copy the new files over the install (never overwrite `guard/config.php`, `guard/config.local.json`, `guard/rules.json`, `lists/`, `geo/`, `panel/panel.config.php`); (3) `chmod +x scripts/*.sh`; (4) `bash scripts/exposure-check.sh <url> <panel>`; (5) reload PHP (OPcache) and watch `logs/guard-errors.log` and the dashboard; (6) install any new cron entry; `scripts/cron-check.sh` lists what is missing. **Rollback:** the kill switch (`guard.off`) first, then restore the previous files; compiled files keep a `.prev` copy (panel **Roll back**); a level-`c` CAPTCHA cookie is simply invalid for older code.
+**Preferred: the panel's Update page** (see [Updating Bot Guard](#updating-bot-guard) and [the in-panel updater](#the-in-panel-updater)). Manual procedure: (1) read the newest entry of [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md); (2) copy the new files over the install (never overwrite `guard/config.php`, `guard/config.local.json`, `guard/rules.json`, `lists/`, `geo/`, `panel/panel.config.php`); (3) `chmod +x scripts/*.sh`; (4) `bash scripts/exposure-check.sh <url> <panel>`; (5) reload PHP (OPcache) and watch `logs/guard-errors.log` and the dashboard; (6) install any new cron entry; `scripts/cron-check.sh` lists what is missing. **Rollback:** the kill switch (`guard.off`) first, then restore the previous files; compiled files keep a `.prev` copy (panel **Roll back**); a level-`c` CAPTCHA cookie is simply invalid for older code.
+
+### The in-panel updater
+
+Code: `panel/update.php` (library), `panel/views/update.php`, the two recovery script templates `panel/update-rollback.tpl` and `panel/update-verify.tpl`, `panel/recover.php` (the only web entry the recovery needs), the single list of protected files `panel/update-protected.txt`, and the data directory `updates/`. Tests: `scripts/panel-selftest.php` (section *Updater*), `scripts/update-e2e.sh` (real HTTP flow), `scripts/version-check.sh` (CI: a pull request that changes code must bump `VERSION` and add the `CHANGELOG.md` entry).
+
+- **Stage.** `gp_upd_stage()` reads the ZIP with `ZipArchive` or, when that extension is missing, a pure-PHP reader (stored and deflated entries, zlib `gzinflate`, CRC-checked; ZIP64 and encryption are refused). It refuses traversal (`..`, absolute, backslash, drive letter), symbolic links, entries outside the project folders, unexpected file types, more than 3000 files / 10 MB per file / 100 MB unpacked, a ZIP without `VERSION`, `prepend.php`, `guard/guard.php` or `panel/index.php`, and any PHP file that does not pass `token_get_all($code, TOKEN_PARSE)`. The single GitHub wrapper folder is stripped; `.github/` is ignored. Files land in `updates/pending/<id>/` (discarded after an hour) with a `plan.json`.
+- **Protected files.** `panel/update-protected.txt` plus every pattern of the installed and the shipped `.gitignore`. A file protected by either is never written and never deleted; `.htaccess` / `.gitkeep` inside data directories stay updatable. Files removed upstream are deleted only when the previous update's `updates/installed.json` lists them (so the first ZIP update never deletes anything).
+- **Apply.** Under a lock: manifest `updates/<stamp>/manifest.json` (every path, action, sha256 before / after, mode), byte-checked backups in `updates/<stamp>/backup/`, the recovery scripts copied from the running (old) code to `updates/rollback.php` and `updates/verify.php`, a hashed recovery token in `updates/recovery.json`, `guard.off` (only when absent), then write-to-temp-and-`rename()` per file with `opcache_invalidate()`. Any write failure rolls back at once. The disk-space check needs about twice the new bytes plus the old bytes.
+- **Health check.** The browser is redirected to `panel/recover.php?a=verify&ts=<stamp>&k=<key>`, which hands the request to `updates/verify.php` (old code judging new code): syntax of the entry points, `guard/guard.php`, `gv_cfg_load()`, every panel library, `lang.php`, rules, IP lists, GeoIP, then one synthetic `gv_run()` with `GV_DRY_RUN` defined (no log row, no outcome capture). An exception, a parse error or a fatal error (caught in a shutdown function) calls `gprb_run()`. On success it removes `guard.off` only if the updater created it and prunes to the newest 3 updates.
+- **Rollback.** One implementation: `updates/rollback.php` (shell, panel button, `recover.php`, the failed-check path). It verifies every backup's sha256 first (nothing is changed when one is damaged), restores, deletes files the update added, verifies after, and rolls back every newer update first.
+- **After the update.** `pip_sync` (worker job, `pip install -r analyzer/requirements.txt` with the worker's interpreter, 10 minute limit, output in the job log, a dashboard warning on failure), the crontab check, the changelog entries between the two versions.
+
+Known limits: the allowed top-level folders and file types are fixed in `gp_upd_tree()` / `gp_upd_exts()` (a release that adds a new top-level folder needs one manual copy first); the update cannot run on a host where PHP cannot write the install; the recovery scripts are written from the code that is running when you press **Apply**; `updates/` and `panel/recover.php` must follow the web-access rules in [docs/13-PANEL-WEB-ACCESS.md](docs/13-PANEL-WEB-ACCESS.md).
 
 ## 2.16 Known limits
 

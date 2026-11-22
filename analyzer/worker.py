@@ -23,6 +23,7 @@ from __future__ import print_function
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -127,6 +128,32 @@ def job_iplist_compile(cfg, params):
     return iplist_mod.main([])
 
 
+PIP_TIMEOUT = 600
+
+
+def job_pip_sync(cfg, params):
+    # After an in-panel update changed analyzer/requirements.txt: install it with the worker's own
+    # interpreter (the one GV_PYTHON points at). Bounded in time; pip's output goes to the job log.
+    req = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'requirements.txt')
+    if not os.path.isfile(req):
+        print('requirements.txt not found: %s' % req)
+        return 1
+    cmd = [sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '-r', req]
+    print('running: ' + ' '.join(cmd))
+    try:
+        done = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=PIP_TIMEOUT,
+                              universal_newlines=True)
+    except subprocess.TimeoutExpired as exc:
+        print((exc.stdout or '')[-4000:] if isinstance(exc.stdout, str) else '')
+        print('pip timed out after %d seconds' % PIP_TIMEOUT)
+        return 1
+    except OSError as exc:
+        print('could not run pip: %s' % exc)
+        return 1
+    print((done.stdout or '')[-8000:])
+    return 0 if done.returncode == 0 else 1
+
+
 HANDLERS = {
     'verify': job_verify,
     'nightly': job_nightly,
@@ -138,6 +165,7 @@ HANDLERS = {
     'snapshot': job_snapshot,
     'geo_compile': job_geo_compile,
     'iplist_compile': job_iplist_compile,
+    'pip_sync': job_pip_sync,
 }
 
 

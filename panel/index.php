@@ -18,6 +18,7 @@ require_once __DIR__ . '/config_io.php';
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/data.php';
 require_once __DIR__ . '/jobs.php';
+require_once __DIR__ . '/update.php';
 require_once __DIR__ . '/replay.php';
 require_once __DIR__ . '/filters.php';
 require_once __DIR__ . '/ui.php';
@@ -540,6 +541,69 @@ switch ($gp_route) {
 			'backups'     => gp_overlay_backups(),
 			'path'        => gv_overlay_path(),
 		));
+
+	case 'update':
+		// Admin page: upload a GitHub ZIP, review, apply with the password, roll back. Every POST needs the CSRF token (checked above).
+		if ($gp_post) {
+			$do = (string)($_POST['do'] ?? '');
+			if ($do === 'upload') {
+				$r = gp_upd_upload(isset($_FILES['zip']) && is_array($_FILES['zip']) ? $_FILES['zip'] : array(), $gp_user);
+				if ($r[0]) { gp_redirect('update', array('plan' => $r[1])); }
+				gp_flash('error', gp_t($r[2]) . ($r[3] !== '' ? ': ' . $r[3] : ''));
+				gp_redirect('update');
+			}
+			if ($do === 'discard') {
+				gp_upd_plan_discard((string)($_POST['plan'] ?? ''));
+				gp_flash('ok', gp_t('upd_discarded'));
+				gp_redirect('update');
+			}
+			if ($do === 'apply') {
+				$pid = (string)($_POST['plan'] ?? '');
+				$auth = gp_reauth($gp_user, $_POST['password'] ?? '');
+				if ($auth !== 'ok') {
+					gp_flash('error', gp_t($auth === 'locked' ? 'login_locked_short' : 'upd_err_password'));
+					gp_redirect('update', array('plan' => $pid));
+				}
+				$confirm = isset($_POST['confirm']) && is_array($_POST['confirm']) ? array_map('strval', array_keys(array_filter($_POST['confirm']))) : array();
+				$r = gp_upd_apply($pid, $gp_user, array('confirm' => $confirm));
+				if (!$r['ok']) {
+					gp_upd_audit('update_failed', $gp_user, $r['error'], null, array('detail' => substr((string)$r['detail'], 0, 200)));
+					gp_flash('error', gp_t($r['error']) . ($r['detail'] !== '' ? ': ' . $r['detail'] : ''));
+					gp_redirect('update', array('plan' => $pid));
+				}
+				gp_upd_audit('update_apply', $gp_user, $r['stamp'], null, array('stamp' => $r['stamp']));
+				// The health check is a fresh request served by the NEW code, judged by the OLD updates/verify.php.
+				if (!headers_sent()) { header('Location: recover.php?a=verify&ts=' . rawurlencode($r['stamp']) . '&k=' . rawurlencode($r['verify_key']), true, 303); }
+				exit;
+			}
+			if ($do === 'rollback') {
+				$stamp = (string)($_POST['stamp'] ?? '');
+				$rb = gp_upd_rollback($stamp);
+				gp_upd_audit('update_rollback', $gp_user, $stamp, null, array('ok' => $rb[0], 'log' => array_slice($rb[1], 0, 5)));
+				gp_flash($rb[0] ? 'ok' : 'error', gp_t($rb[0] ? 'upd_rolled_back' : 'upd_err_rollback') . ($rb[0] ? '' : ': ' . implode('; ', array_slice($rb[1], 0, 3))));
+				gp_redirect('update');
+			}
+			gp_redirect('update');
+		}
+		// A body larger than post_max_size arrives with no POST data at all: say why.
+		if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && empty($_POST) && empty($_FILES) && (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+			gp_flash('error', gp_t('upd_err_phplimit') . ': ' . gp_bytes(gp_upd_upload_limit()));
+		}
+		$upd_ts = (isset($_GET['ts']) && is_string($_GET['ts']) && preg_match('/^\d{8}-\d{6}(-\d+)?$/', $_GET['ts'])) ? $_GET['ts'] : '';
+		$upd_res = (isset($_GET['res']) && is_string($_GET['res']) && in_array($_GET['res'], array('ok', 'rolled', 'rollback_failed'), true)) ? $_GET['res'] : '';
+		$upd_m = null; $upd_token = ''; $upd_lines = array();
+		if ($upd_ts !== '' && $upd_res === 'ok') {
+			$upd_m = gp_upd_post_verify($upd_ts, $gp_user);
+			$upd_token = gp_upd_token_take($upd_ts);
+			$uj = gp_job_health(); $uc = gp_cron_check(null, true, true);
+			$upd_lines = gp_cron_setup_lines($uj, $uc);
+		} elseif ($upd_ts !== '') {
+			foreach (gp_upd_history(10) as $hh) { if ($hh['stamp'] === $upd_ts) { $upd_m = $hh; } }
+		}
+		$upd_plan = isset($_GET['plan']) ? gp_upd_plan_load((string)$_GET['plan']) : null;
+		gp_render('update', array('env' => gp_upd_environment(), 'version' => gp_upd_version(), 'plan' => $upd_plan, 'history' => gp_upd_history(10),
+			'res' => $upd_res, 'ts' => $upd_ts, 'm' => $upd_m, 'token' => $upd_token, 'cron_lines' => $upd_lines,
+			'web_url' => 'recover.php'));
 
 	case 'audit':
 		gp_render('audit', array(

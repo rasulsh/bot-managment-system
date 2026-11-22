@@ -355,6 +355,7 @@ function gp_health_inputs($now = null) {
 		'noeviction' => gp_redis_noeviction(), 'cron' => gp_cron_check($now), 'tz_offset' => (int)date('Z', $now),
 		'geo_used' => gp_geo_status($now)['country'] !== null || gp_geo_status($now)['asn'] !== null,
 		'iplist_warn' => gp_iplists_health($now),
+		'update_warn' => function_exists('gp_upd_health') ? gp_upd_health($now) : array(),
 		'captcha_gd_needed' => gp_captcha_needed($cfg, $rs['rules']),
 		'captcha_gd' => gv_captcha_available(),
 	);
@@ -410,6 +411,7 @@ function gp_health_alerts(array $in) {
 	// GD is missing while a CAPTCHA is configured: every captcha action falls back to the proof-of-work challenge. The panel
 	// runs in the web server's PHP, like the guard (a CLI PHP can differ: check the web server's phpinfo if this looks wrong).
 	if (!empty($in['captcha_gd_needed']) && empty($in['captcha_gd'])) { $add('captcha_gd', 'warning', 'al_captcha_gd', '', 'settings'); }
+	foreach ((array)($in['update_warn'] ?? array()) as $w) { $add('update_' . $w[0], $w[2], 'al_update_' . $w[0], $w[1], 'update'); }
 	foreach ((array)($in['iplist_warn'] ?? array()) as $w) {
 		// A list file that is missing or corrupt while its list is enabled, or a failed compile: the guard
 		// silently treats the list as empty (fail-open), so these are critical. A pending compile is a warning.

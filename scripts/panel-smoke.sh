@@ -180,7 +180,7 @@ check "delete removes the list" "$(grep -q 'Smoke list' <<<"$ip" && echo 0 || ec
 # identity, settings and config file pages are checked for direction only: they
 # show request data or operator-written values (the challenge page text, which
 # ships in Persian) as they are, and those may contain any script.
-for r in dashboard logs identity overrides rules geo iplists replay models settings config_file jobs audit; do
+for r in dashboard logs identity overrides rules geo iplists replay models settings config_file jobs audit update; do
 	page="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=$r")"
 	check "page $r has the viewport meta tag" "$(grep -q 'name="viewport"' <<<"$page" && echo 1 || echo 0)"
 	check "page $r is English and left-to-right" "$(grep -q '<html lang="en" dir="ltr">' <<<"$page" && echo 1 || echo 0)"

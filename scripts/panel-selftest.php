@@ -3041,6 +3041,455 @@ t_ok('login: an unknown bucket has no wait', gp_attempts_ttl('selftest-none-' . 
 $lg_c = gv_redis_connect(gv_cfg_load()['redis'], $GP_TMP_LOGS, false);
 if ($lg_c) { gv_redis_cmd($lg_c, array('DEL', gp_key('login:' . $lg_bucket))); gv_redis_close($lg_c); }
 
+// ==========================================================================
+t_section('Updater: ZIP validation, protected files, apply, health check, rollback');
+// Everything happens in scratch copies under the system temp directory; nothing is written into the repository tree.
+require_once __DIR__ . '/../panel/update.php';
+$UT = sys_get_temp_dir() . '/gp-upd-' . bin2hex(random_bytes(4));
+@mkdir($UT, 0775, true);
+putenv('GV_AUDIT=' . $UT . '/audit.jsonl');
+register_shutdown_function(function () use ($UT) { gp_upd_rmtree($UT); });
+$UT_REPO = realpath(__DIR__ . '/..');
+$UT_PHP = PHP_BINARY;
+
+// Copy the repository (code only) into $dst. Local data files are created by the callers.
+function ut_copy_tree($src, $dst) {
+	@mkdir($dst, 0775, true);
+	foreach ((array)scandir($src) as $n) {
+		if ($n === '.' || $n === '..' || $n === '.git' || $n === '__pycache__' || $n === 'node_modules' || $n === '.ratelimit' || $n === '.github') { continue; }
+		$s = $src . '/' . $n;
+		if (is_dir($s)) { ut_copy_tree($s, $dst . '/' . $n); continue; }
+		if (preg_match('/\.(pyc|jsonl|log|joblib|candidate|csv)$/', $n) || $n === 'panel.config.php' || $n === 'guard.off' || $n === '.err-redis_connect') { continue; }
+		copy($s, $dst . '/' . $n);
+		chmod($dst . '/' . $n, fileperms($s) & 0777);
+	}
+}
+// Every file below $dir as relpath => sha256.
+function ut_hashes($dir, $base = null) {
+	$base = $base === null ? $dir : $base;
+	$out = array();
+	foreach ((array)scandir($dir) as $n) {
+		if ($n === '.' || $n === '..') { continue; }
+		$p = $dir . '/' . $n;
+		$rel = substr($p, strlen($base) + 1);
+		if (strpos($rel, 'updates/') === 0 && $n !== '.htaccess' && $n !== '.gitkeep') { continue; }   // the updater's own workspace is not part of the install state
+		if (is_dir($p)) { $out += ut_hashes($p, $base); } else { $out[$rel] = hash_file('sha256', $p); }
+	}
+	ksort($out);
+	return $out;
+}
+// The install state without what a health-check run legitimately leaves behind (error logs).
+function ut_nologs(array $h) { foreach (array_keys($h) as $k) { if (strpos($k, 'logs/') === 0 && $k !== 'logs/.htaccess' && $k !== 'logs/.gitkeep') { unset($h[$k]); } } return $h; }
+// A minimal ZIP writer, so the test can make entries ZipArchive would refuse to create (traversal names, symlinks).
+// $entries: list of array(name, data, mode, method).
+function ut_zip($path, array $entries) {
+	$out = ''; $cd = ''; $n = 0;
+	foreach ($entries as $e) {
+		$name = $e[0]; $data = (string)$e[1]; $mode = isset($e[2]) ? $e[2] : 0100644; $method = isset($e[3]) ? $e[3] : 8;
+		$isdir = substr($name, -1) === '/';
+		$comp = $method === 8 ? gzdeflate($data) : $data;
+		$crc = crc32($data) & 0xFFFFFFFF;
+		$off = strlen($out);
+		$out .= "PK\x03\x04" . pack('vvvvvVVVvv', 20, 0, $method, 0, 0x21, $crc, strlen($comp), strlen($data), strlen($name), 0) . $name . $comp;
+		$cd .= "PK\x01\x02" . pack('vvvvvvVVVvvvvvVV', (3 << 8) | 20, 20, 0, $method, 0, 0x21, $crc, strlen($comp), strlen($data), strlen($name), 0, 0, 0, 0, ($isdir ? 0040755 : $mode) << 16, $off) . $name;
+		$n++;
+	}
+	file_put_contents($path, $out . $cd . "PK\x05\x06" . pack('vvvvVVv', 0, 0, $n, $n, strlen($cd), strlen($out), 0));
+}
+// The code files of a tree as ZIP entries under a wrapper folder, with changes: $over rel => new contents (null = leave out).
+function ut_entries($dir, $top, array $over = array(), array $extra = array()) {
+	$all = ut_hashes($dir);
+	$ent = array();
+	$local = array('guard/config.local.json', 'guard/rules.json', 'panel/panel.config.php', 'panel/audit.jsonl', 'analyzer/snapshot.json', 'guard.off', 'guard/local-notes.txt');
+	if ($top !== '') { $ent[] = array($top, '', 0040755, 0); }
+	foreach ($all as $rel => $sha) {
+		if (in_array($rel, $local, true) || preg_match('#^(logs|lists|geo)/(?!\.htaccess|\.gitkeep)#', $rel)) { continue; }
+		if (array_key_exists($rel, $over)) { if ($over[$rel] === null) { unset($over[$rel]); continue; } $data = $over[$rel]; unset($over[$rel]); }
+		else { $data = file_get_contents($dir . '/' . $rel); }
+		$ent[] = array($top . $rel, $data, is_executable($dir . '/' . $rel) ? 0100755 : 0100644);
+	}
+	foreach ($over as $rel => $data) { if ($data !== null) { $ent[] = array($top . $rel, $data); } }
+	return array_merge($ent, $extra);
+}
+// A fresh scratch install with local data, version 2026.01.01.
+$ut_n = 0;
+function ut_install() {
+	global $UT, $UT_REPO, $ut_n, $gp_upd_root;
+	$root = $UT . '/inst' . (++$ut_n);
+	ut_copy_tree($UT_REPO, $root);
+	foreach (glob($root . '/updates/*') as $f) { if (!in_array(basename($f), array('.htaccess', '.gitkeep'), true)) { is_dir($f) ? gp_upd_rmtree($f) : unlink($f); } }
+	file_put_contents($root . '/VERSION', "2026.01.01\n");
+	file_put_contents($root . '/guard/config.local.json', '{"mode":"monitor","secret":"LOCAL-SECRET"}');
+	file_put_contents($root . '/guard/rules.json', '[{"id":"r1"}]');
+	file_put_contents($root . '/panel/panel.config.php', "<?php return array('username'=>'admin');");
+	file_put_contents($root . '/panel/audit.jsonl', "{\"event\":\"x\"}\n");
+	@mkdir($root . '/lists', 0775, true);
+	file_put_contents($root . '/lists/allow.txt', "198.51.100.0/24\n");
+	@mkdir($root . '/logs', 0775, true);
+	file_put_contents($root . '/logs/guard-20260101.jsonl', "{}\n");
+	@mkdir($root . '/analyzer', 0775, true);
+	file_put_contents($root . '/analyzer/snapshot.json', '{"k":1}');
+	$gp_upd_root = $root;
+	return $root;
+}
+// The next version as a ZIP: the install tree with changes. Returns the zip path.
+function ut_make_zip($root, $version, array $over = array(), $top = 'bot-managment-system-master/', array $extra = array(), $name = '') {
+	global $UT;
+	$over = array_merge(array('VERSION' => $version . "\n"), $over);
+	$zip = $UT . '/' . ($name !== '' ? $name : 'v' . $version . '-' . bin2hex(random_bytes(3))) . '.zip';
+	ut_zip($zip, ut_entries($root, $top, $over, $extra));
+	return $zip;
+}
+$ut_log_note = "<?php\n// updated\n";
+$ut_changelog = "# Changelog\n\n## 2026.03.03\n\n- third\n\n## 2026.02.02\n\n- second\n\n## 2025.12.01\n\n- ancient\n";
+$ut_run = function ($script, array $args = array()) use ($UT_PHP) {
+	$cmd = escapeshellarg($UT_PHP) . ' ' . escapeshellarg($script);
+	foreach ($args as $a) { $cmd .= ' ' . escapeshellarg($a); }
+	exec($cmd . ' 2>&1', $o, $rc);
+	return array($rc, implode("\n", $o));
+};
+
+// ---- name and pattern units
+t_ok('names: traversal, absolute, backslash and drive-letter paths are all refused',
+	gp_upd_bad_name('../x.php') !== '' && gp_upd_bad_name('a/../../x.php') !== '' && gp_upd_bad_name('/etc/x.php') !== '' && gp_upd_bad_name("a\\b.php") !== ''
+	&& gp_upd_bad_name('C:/x.php') !== '' && gp_upd_bad_name("a\x00b") !== '' && gp_upd_bad_name('a//b') !== '' && gp_upd_bad_name('./a') !== '' && gp_upd_bad_name('guard/guard.php') === '');
+$ut_pat = gp_upd_parse_patterns(file_get_contents(__DIR__ . '/../panel/update-protected.txt'));
+t_ok('protected: the install-local files named in the brief are all protected',
+	count(array_filter(array('guard/config.php', 'guard/config.local.json', 'guard/config.local.json.bak', 'guard/rules.json', 'guard/rules.cache.php', 'panel/panel.config.php', 'panel/users.json', 'panel/audit.jsonl',
+		'panel/jobs-seen.json', 'lists/allow.txt', 'lists/allow.bin', 'geo/country.bin', 'logs/guard-20260101.jsonl', 'analyzer/model.joblib', 'analyzer/snapshot.json', 'analyzer/reports/r.txt',
+		'analyzer/.jobstatus-verify.json', '.venv/bin/python', 'analyzer/.venv/x.py', 'guard.off', '.git/config', 'updates/20260101-000000/manifest.json'), function ($f) use ($ut_pat) { return !gp_upd_is_protected($f, $ut_pat); })) === 0);
+t_ok('protected: code is not protected (guard.php, panel/index.php, scripts, docs, requirements)',
+	!gp_upd_is_protected('guard/guard.php', $ut_pat) && !gp_upd_is_protected('panel/index.php', $ut_pat) && !gp_upd_is_protected('scripts/analyzer-cron.sh', $ut_pat)
+	&& !gp_upd_is_protected('docs/09-ADMIN-PANEL.md', $ut_pat) && !gp_upd_is_protected('analyzer/requirements.txt', $ut_pat) && !gp_upd_is_protected('analyzer/worker.py', $ut_pat) && !gp_upd_is_protected('VERSION', $ut_pat));
+t_ok('protected: .htaccess and .gitkeep inside data directories stay updatable',
+	!gp_upd_is_protected('lists/.htaccess', $ut_pat) && !gp_upd_is_protected('logs/.gitkeep', $ut_pat) && !gp_upd_is_protected('updates/.htaccess', $ut_pat));
+t_ok('protected: a .gitignore pattern protects too (and a name pattern matches in any directory)',
+	gp_upd_is_protected('analyzer/foo.csv', gp_upd_parse_patterns("analyzer/*.csv\n")) && gp_upd_is_protected('a/b/x.pyc', gp_upd_parse_patterns("*.pyc\n")) && gp_upd_is_protected('a/__pycache__/x.py', gp_upd_parse_patterns("__pycache__/\n")));
+t_ok('protected: the single list is the one the docs quote (every pattern is in docs/09-ADMIN-PANEL.md)', (function () use ($ut_pat) {
+	$doc = file_get_contents(__DIR__ . '/../docs/09-ADMIN-PANEL.md');
+	foreach ($ut_pat as $p) { if (strpos($doc, $p) === false) { return false; } }
+	return true;
+})());
+t_ok('the recovery script templates parse (token_get_all with TOKEN_PARSE)', (function () {
+	try { foreach (array('update-rollback.tpl', 'update-verify.tpl') as $t) { token_get_all(file_get_contents(__DIR__ . '/../panel/' . $t), TOKEN_PARSE); } return true; }
+	catch (\Throwable $e) { return false; }
+})());
+$ut_ver = trim(file_get_contents(__DIR__ . '/../VERSION'));
+t_ok('VERSION is a date-style version and the newest CHANGELOG entry carries it', preg_match('/^\d{4}\.\d{2}\.\d{2}(\.\d+)?$/', $ut_ver) === 1 && preg_match('/^## ' . preg_quote($ut_ver, '/') . '\s*$/m', file_get_contents(__DIR__ . '/../CHANGELOG.md')) === 1);
+t_ok('changelog: only the entries after the installed version up to the new one, newest first', (function () use ($ut_changelog) {
+	$c = gp_upd_changelog($ut_changelog, '2026.01.01', '2026.03.03');
+	return count($c) === 2 && $c[0]['version'] === '2026.03.03' && $c[1]['version'] === '2026.02.02';
+})());
+
+// ---- refusals (nothing is staged)
+$root = ut_install();
+$refuse = function ($entries_extra, $expect, $over = array(), $top = 'bot-managment-system-master/') use ($root, $UT) {
+	$z = ut_make_zip($root, '2026.02.02', $over, $top, $entries_extra);
+	$r = gp_upd_stage($z, 'x.zip', 'admin');
+	return !$r['ok'] && $r['error'] === $expect && count(glob(gp_upd_dir() . '/pending/*')) === 0;
+};
+t_ok('zip-slip: ../ in an entry name is refused and nothing is staged', $refuse(array(array('bot-managment-system-master/../../evil.php', '<?php')), 'upd_err_path'));
+t_ok('zip-slip: a name with ../ in the middle, an absolute name, a backslash and a drive letter are refused',
+	$refuse(array(array('bot-managment-system-master/guard/../../evil.php', '<?php')), 'upd_err_path') && $refuse(array(array('/etc/evil.php', '<?php')), 'upd_err_path')
+	&& $refuse(array(array("bot-managment-system-master/guard\\evil.php", '<?php')), 'upd_err_path') && $refuse(array(array('C:/evil.php', '<?php')), 'upd_err_path'));
+t_ok('a symbolic link entry is refused', $refuse(array(array('bot-managment-system-master/guard/link.php', '/etc/passwd', 0120777)), 'upd_err_symlink'));
+t_ok('an entry outside the project folders, and .git, are refused', $refuse(array(array('bot-managment-system-master/evil/x.php', '<?php')), 'upd_err_tree') && $refuse(array(array('bot-managment-system-master/.git/config', 'x')), 'upd_err_tree'));
+t_ok('unexpected file types are refused (.exe, .phtml, .phar, no extension)',
+	$refuse(array(array('bot-managment-system-master/guard/x.exe', 'MZ')), 'upd_err_ext') && $refuse(array(array('bot-managment-system-master/guard/x.phtml', '<?php')), 'upd_err_ext')
+	&& $refuse(array(array('bot-managment-system-master/guard/x.phar', 'x')), 'upd_err_ext') && $refuse(array(array('bot-managment-system-master/guard/Makefile', 'x')), 'upd_err_ext'));
+t_ok('a ZIP without VERSION, prepend.php, guard/guard.php or panel/index.php is refused',
+	$refuse(array(), 'upd_err_required', array('VERSION' => null)) && $refuse(array(), 'upd_err_required', array('prepend.php' => null))
+	&& $refuse(array(), 'upd_err_required', array('guard/guard.php' => null)) && $refuse(array(), 'upd_err_required', array('panel/index.php' => null)));
+t_ok('a PHP parse error anywhere in the staged copy refuses the whole update', (function () use ($root, $UT) {
+	$z = ut_make_zip($root, '2026.02.02', array('guard/log.php' => "<?php\nfunction (\n"));
+	$r = gp_upd_stage($z, 'x.zip', 'admin');
+	return !$r['ok'] && $r['error'] === 'upd_err_parse' && strpos($r['detail'], 'guard/log.php') !== false && count(glob(gp_upd_dir() . '/pending/*')) === 0;
+})());
+t_ok('a duplicate path, a bad VERSION and a file that is not a ZIP are refused',
+	$refuse(array(array('bot-managment-system-master/guard/log.php', '<?php')), 'upd_err_dup') && $refuse(array(), 'upd_err_version', array('VERSION' => "not a version!\n"))
+	&& (function () use ($UT) { file_put_contents($UT . '/x.zip', 'hello'); $r = gp_upd_stage($UT . '/x.zip', 'x.zip', 'a'); return !$r['ok'] && $r['error'] === 'upd_err_notzip'; })());
+t_ok('a damaged entry (wrong CRC) is refused', (function () use ($root, $UT) {
+	$z = ut_make_zip($root, '2026.02.02', array('guard/log.php' => str_repeat('<?php // x' . "\n", 50)), 'bot-managment-system-master/', array(), 'crc');
+	$b = file_get_contents($z);
+	$at = strrpos($b, 'bot-managment-system-master/guard/log.php');                    // the central directory copy of the name comes last
+	file_put_contents($z, substr($b, 0, $at - 46 + 16) . "\x00\x00\x00\x00" . substr($b, $at - 46 + 20));
+	$r = gp_upd_stage($z, 'x.zip', 'a', 'pure');
+	return !$r['ok'] && $r['error'] === 'upd_err_damaged';
+})());
+
+// ---- plan, top folder, parity of the two readers
+$z_a = ut_make_zip($root, '2026.02.02', array('guard/log.php' => file_get_contents($root . '/guard/log.php') . "\n// changed\n", 'docs/NEW-DOC.md' => "# new\n",
+	'guard/config.php' => "<?php return array('secret'=>'FROM-ZIP');", 'CHANGELOG.md' => $ut_changelog, 'lists/allow.txt' => "0.0.0.0/0\n"),
+	'bot-managment-system-master/', array(array('bot-managment-system-master/.github/workflows/ci.yml', 'x')), 'va');
+$p_pure = gp_upd_stage($z_a, 'bot-managment-system-master.zip', 'admin', 'pure');
+t_ok('the pure-PHP reader stages a GitHub-style ZIP (top folder stripped, .github ignored)', $p_pure['ok'] && $p_pure['plan']['ignored'] === 1 && in_array('docs/NEW-DOC.md', $p_pure['plan']['add'], true) && in_array('guard/log.php', $p_pure['plan']['change'], true));
+t_ok('the plan names versions, counts, the changelog and skips protected files that are in the ZIP',
+	$p_pure['ok'] && $p_pure['plan']['from'] === '2026.01.01' && $p_pure['plan']['to'] === '2026.02.02' && in_array('guard/config.php', $p_pure['plan']['protected_skipped'], true)
+	&& in_array('lists/allow.txt', $p_pure['plan']['protected_skipped'], true) && count($p_pure['plan']['changelog']) === 1 && in_array('first_update', $p_pure['plan']['warnings'], true));
+if (class_exists('ZipArchive')) {
+	$p_za = gp_upd_stage($z_a, 'bot-managment-system-master.zip', 'admin', 'ziparchive');
+	$sig = function ($p) { $f = $p['files']; usort($f, function ($a, $b) { return strcmp($a['path'], $b['path']); }); return json_encode(array($f, $p['add'], $p['change'], $p['remove'], $p['protected_skipped'], $p['warnings'], $p['ignored'])); };
+	t_ok('parity: ZipArchive and the pure reader produce the same plan (same files, same sha256)', $p_za['ok'] && $sig($p_za['plan']) === $sig($p_pure['plan']) && $p_za['plan']['backend'] === 'ziparchive' && $p_pure['plan']['backend'] === 'pure');
+	$o1 = gp_upd_zip_open($z_a, 'ziparchive'); $o2 = gp_upd_zip_open($z_a, 'pure');
+	$same = $o1['ok'] && $o2['ok'] && count($o1['zip']['entries']) === count($o2['zip']['entries']);
+	if ($same) { foreach ($o1['zip']['entries'] as $i => $e1) { $e2 = $o2['zip']['entries'][$i]; if ($e1['name'] !== $e2['name'] || $e1['size'] !== $e2['size'] || $e1['mode'] !== $e2['mode'] || (!$e1['dir'] && gp_upd_zip_read($o1['zip'], $e1) !== gp_upd_zip_read($o2['zip'], $e2))) { $same = false; break; } } }
+	t_ok('parity: entry names, sizes, modes and contents are identical in both readers', $same);
+	if ($o1['ok']) { gp_upd_zip_close($o1['zip']); } if ($o2['ok']) { gp_upd_zip_close($o2['zip']); }
+	$z_sl = $UT . '/symlink-real.zip';
+	$zaw = new ZipArchive(); $zaw->open($z_sl, ZipArchive::CREATE);
+	$zaw->addFromString('top/VERSION', "1\n"); $zaw->addFromString('top/ln', '/etc/passwd'); $zaw->setExternalAttributesName('top/ln', ZipArchive::OPSYS_UNIX, 0120777 << 16); $zaw->close();
+	$zs = gp_upd_zip_open($z_sl, 'ziparchive'); $zp = gp_upd_zip_open($z_sl, 'pure');
+	t_ok('a symlink made by a real zip tool is seen by both readers', $zs['ok'] && $zp['ok'] && array_sum(array_map(function ($e) { return $e['symlink'] ? 1 : 0; }, $zs['zip']['entries'])) === 1 && array_sum(array_map(function ($e) { return $e['symlink'] ? 1 : 0; }, $zp['zip']['entries'])) === 1);
+	if ($zs['ok']) { gp_upd_zip_close($zs['zip']); } if ($zp['ok']) { gp_upd_zip_close($zp['zip']); }
+} else {
+	t_skip('parity of ZipArchive and the pure-PHP reader', 'ZipArchive is not installed here');
+}
+t_ok('a ZIP without the wrapper folder works too', gp_upd_stage(ut_make_zip($root, '2026.02.02', array(), '', array(), 'notop'), 'x.zip', 'a')['ok']);
+gp_upd_plan_discard($p_pure['plan']['id']);
+foreach (glob(gp_upd_dir() . '/pending/*') as $d) { gp_upd_rmtree($d); }
+
+// ---- apply, protected files untouched, manifest, backup, guard.off, OPcache, then the health check
+$before = ut_hashes($root);
+$ops = array();
+$gp_upd_opcache_hook = function ($f) use (&$ops) { $ops[] = $f; };
+$st = gp_upd_stage($z_a, 'bot-managment-system-master.zip', 'admin');
+t_ok('staging changes nothing in the install', $st['ok'] && ut_hashes($root) === $before && is_dir(gp_upd_dir() . '/pending/' . $st['plan']['id']));
+$ap = gp_upd_apply($st['plan']['id'], 'admin');
+$after = ut_hashes($root);
+$prot = array('guard/config.local.json', 'guard/rules.json', 'panel/panel.config.php', 'panel/audit.jsonl', 'lists/allow.txt', 'logs/guard-20260101.jsonl', 'analyzer/snapshot.json', 'guard/config.php');
+t_ok('apply succeeds and returns the stamp and the verify key', $ap['ok'] && preg_match('/^\d{8}-\d{6}/', $ap['stamp']) === 1 && strlen($ap['verify_key']) === 32);
+t_ok('protected files are byte-identical after the update, also the ones that exist in the ZIP', (function () use ($before, $after, $prot) { foreach ($prot as $f) { if (!isset($after[$f]) || $after[$f] !== $before[$f]) { return false; } } return true; })());
+t_ok('new and changed files carry the new bytes; VERSION is bumped',
+	trim(file_get_contents($root . '/VERSION')) === '2026.02.02' && is_file($root . '/docs/NEW-DOC.md') && strpos(file_get_contents($root . '/guard/log.php'), '// changed') !== false);
+$man = gp_upd_json_read(gp_upd_dir() . '/' . $ap['stamp'] . '/manifest.json');
+$man_ok = is_array($man) && $man['status'] === 'applied' && $man['from'] === '2026.01.01' && $man['to'] === '2026.02.02';
+$byp = array(); foreach ((array)$man['files'] as $f) { $byp[$f['path']] = $f; }
+t_ok('manifest lists every changed or added file with sha256 before and after', $man_ok && isset($byp['guard/log.php'], $byp['docs/NEW-DOC.md'], $byp['VERSION'])
+	&& $byp['guard/log.php']['before'] === $before['guard/log.php'] && $byp['guard/log.php']['after'] === $after['guard/log.php'] && $byp['docs/NEW-DOC.md']['before'] === null);
+t_ok('every file that changes is backed up byte-for-byte, a new file has no backup', (function () use ($root, $ap, $before, $byp) {
+	foreach ($byp as $p => $f) {
+		$b = gp_upd_dir() . '/' . $ap['stamp'] . '/backup/' . $p;
+		if ($f['before'] === null ? is_file($b) : (!is_file($b) || hash_file('sha256', $b) !== $before[$p])) { return false; }
+	}
+	return true;
+})());
+t_ok('guard.off exists during the window and the manifest says the updater created it', is_file($root . '/guard.off') && $man['guard_off_created'] === true);
+t_ok('OPcache is invalidated for every changed PHP file', in_array($root . '/guard/log.php', $ops, true) && in_array($root . '/updates/rollback.php', $ops, true));
+t_ok('updates/rollback.php and updates/verify.php are written from the old code', is_file($root . '/updates/rollback.php') && is_file($root . '/updates/verify.php')
+	&& file_get_contents($root . '/updates/rollback.php') === file_get_contents(__DIR__ . '/../panel/update-rollback.tpl'));
+$rec = gp_upd_json_read(gp_upd_dir() . '/recovery.json');
+$tok = trim((string)@file_get_contents(gp_upd_dir() . '/' . $ap['stamp'] . '/token.once'));
+t_ok('the recovery token is stored hashed, valid 24 hours', is_array($rec) && $rec['hash'] === hash('sha256', $tok) && strpos(json_encode($rec), $tok) === false && $rec['expires'] - time() > 86300 && $rec['expires'] - time() <= GP_UPD_TOKEN_TTL);
+t_ok('the installed.json base holds the new file list (for "removed upstream" next time)', (function () use ($root) { $i = gp_upd_json_read(gp_upd_dir() . '/installed.json'); return is_array($i) && $i['version'] === '2026.02.02' && isset($i['files']['guard/log.php']); })());
+$st2 = gp_upd_stage(ut_make_zip($root, '2026.03.03'), 'x.zip', 'admin');
+t_ok('a new update is refused while the previous one has not passed its health check', $st2['ok'] && gp_upd_apply($st2['plan']['id'], 'admin')['error'] === 'upd_err_unverified');
+gp_upd_plan_discard($st2['plan']['id']);
+
+// the health check, in a fresh PHP process
+$vr = $ut_run($root . '/updates/verify.php', array($ap['stamp']));
+$man = gp_upd_json_read(gp_upd_dir() . '/' . $ap['stamp'] . '/manifest.json');
+t_ok('the health check passes on good code (fresh process: guard, panel, config, rules, lists, one synthetic request)', $vr[0] === 0 && strpos($vr[1], 'OK') === 0 && $man['status'] === 'ok');
+t_ok('...the guard.off the updater created is removed', !is_file($root . '/guard.off'));
+t_ok('...and the synthetic request left no log row behind', count(glob($root . '/logs/guard-*.jsonl')) === 1 && trim(file_get_contents($root . '/logs/guard-20260101.jsonl')) === '{}');
+t_ok('the VERSION shown by the panel is the new one', gp_upd_version() === '2026.02.02');
+
+// an operator's own guard.off is never removed
+$root_k = ut_install();
+file_put_contents($root_k . '/guard.off', "operator\n");
+$sk = gp_upd_stage(ut_make_zip($root_k, '2026.02.02', array('docs/K.md' => "k\n")), 'k.zip', 'a');
+$ak = gp_upd_apply($sk['plan']['id'], 'admin');
+$vk = $ut_run($root_k . '/updates/verify.php', array($ak['stamp']));
+t_ok('a guard.off created by the operator survives the update and the check', $ak['ok'] && $vk[0] === 0 && is_file($root_k . '/guard.off') && file_get_contents($root_k . '/guard.off') === "operator\n");
+
+// ---- automatic rollback when the health check fails
+$bad_cases = array(
+	'an exception while loading' => array('guard/redis.php' => file_get_contents($root . '/guard/redis.php') . "\nthrow new RuntimeException('boom');\n"),
+	'a fatal error (redeclared function)' => array('guard/log.php' => file_get_contents($root . '/guard/log.php') . "\nfunction gv_log_policy() {}\n"),
+	'an error inside the synthetic request' => array('guard/guard.php' => preg_replace('/function gv_run\(\$t0\) \{/', 'function gv_run($t0) { throw new RuntimeException("synthetic failure");', file_get_contents($root . '/guard/guard.php'), 1)),
+);
+foreach ($bad_cases as $label => $over) {
+	$rb_root = ut_install();
+	$h0 = ut_hashes($rb_root);
+	$s = gp_upd_stage(ut_make_zip($rb_root, '2026.04.04', $over), 'bad.zip', 'a');
+	$a = $s['ok'] ? gp_upd_apply($s['plan']['id'], 'admin') : array('ok' => false);
+	$v = $a['ok'] ? $ut_run($rb_root . '/updates/verify.php', array($a['stamp'])) : array(9, 'not applied');
+	$h1 = ut_hashes($rb_root);
+	unset($h0['updates/rollback.php'], $h1['updates/rollback.php']);
+	$strip = function ($h) { foreach (array_keys($h) as $k) { if (strpos($k, 'updates/') === 0 && $k !== 'updates/.htaccess' && $k !== 'updates/.gitkeep') { unset($h[$k]); } } return $h; };
+	$mm = $a['ok'] ? gp_upd_json_read(gp_upd_dir() . '/' . $a['stamp'] . '/manifest.json') : array();
+	t_ok('health check failure (' . $label . '): rolled back automatically, every file byte-identical, guard.off gone, reported',
+		$s['ok'] && $a['ok'] && $v[0] === 1 && strpos($v[1], 'FAILED:') !== false && strpos($v[1], 'rolled back') !== false && ut_nologs($strip($h1)) === ut_nologs($strip($h0)) && !is_file($rb_root . '/guard.off')
+		&& $mm['status'] === 'rolled_back' && !empty($mm['auto_rollback']) && $mm['verify_failed'] !== '' && !is_file(gp_upd_dir() . '/recovery.json'));
+}
+// a web request without the key does not run the check
+$wk = $ut_run($root_k . '/updates/verify.php', array('20260101-000000'));
+t_ok('verify.php refuses an unknown update stamp', $wk[0] === 2);
+
+// ---- rollback.php with the panel code broken
+$root_b = ut_install();
+$hb = ut_hashes($root_b);
+$sb = gp_upd_stage(ut_make_zip($root_b, '2026.05.05', array('docs/B.md' => "b\n", 'guard/log.php' => file_get_contents($root_b . '/guard/log.php') . "\n// b\n",
+	'panel/index.php' => file_get_contents($root_b . '/panel/index.php') . "\n// b\n", 'panel/update.php' => file_get_contents($root_b . '/panel/update.php') . "\n// b\n", 'guard/guard.php' => file_get_contents($root_b . '/guard/guard.php') . "\n// b\n")), 'b.zip', 'a');
+$ab = gp_upd_apply($sb['plan']['id'], 'admin');
+$ut_run($root_b . '/updates/verify.php', array($ab['stamp']));
+file_put_contents($root_b . '/panel/index.php', "<?php this is broken (");
+file_put_contents($root_b . '/panel/update.php', "<?php also broken {");
+file_put_contents($root_b . '/guard/guard.php', "<?php broken");
+$ls = $ut_run($root_b . '/updates/rollback.php', array('--list'));
+$rbk = $ut_run($root_b . '/updates/rollback.php');
+$hb2 = ut_hashes($root_b);
+foreach (array_keys($hb2) as $k) { if (strpos($k, 'updates/') === 0 && $k !== 'updates/.htaccess' && $k !== 'updates/.gitkeep') { unset($hb2[$k]); } }
+t_ok('rollback.php --list works from the shell with the new code broken', $ls[0] === 0 && strpos($ls[1], $ab['stamp']) !== false);
+t_ok('rollback.php restores byte-identical files from the shell although panel and guard code are broken, and removes added files', $rbk[0] === 0 && ut_nologs($hb2) === ut_nologs($hb) && !is_file($root_b . '/docs/B.md'));
+t_ok('a second rollback has nothing left to roll back', $ut_run($root_b . '/updates/rollback.php')[0] === 1);
+$gp_upd_root = $root_b;
+// a damaged backup is detected and nothing is changed
+$root_d = ut_install();
+$sd = gp_upd_stage(ut_make_zip($root_d, '2026.06.06', array('guard/log.php' => file_get_contents($root_d . '/guard/log.php') . "\n// d\n")), 'd.zip', 'a');
+$ad = gp_upd_apply($sd['plan']['id'], 'admin');
+file_put_contents(gp_upd_dir() . '/' . $ad['stamp'] . '/backup/guard/log.php', 'tampered');
+$cur = ut_hashes($root_d);
+$rd = $ut_run($root_d . '/updates/rollback.php', array($ad['stamp']));
+t_ok('a damaged backup makes the rollback refuse and change nothing', $rd[0] === 1 && ut_hashes($root_d) === $cur);
+
+// ---- recovery token (web path): single use, expiry, wrong token
+$root_t = ut_install();
+$stt = gp_upd_stage(ut_make_zip($root_t, '2026.07.07', array('docs/T.md' => "t\n")), 't.zip', 'a');
+$att = gp_upd_apply($stt['plan']['id'], 'admin');
+$ttok = gp_upd_token_take($att['stamp']);
+t_ok('the token is shown once: the second read finds nothing', strlen($ttok) === 32 && gp_upd_token_take($att['stamp']) === '');
+gp_upd_load_rollback();
+t_ok('the web recovery refuses a wrong token and an empty one', !gprb_token_ok('0123456789abcdef0123456789abcdef') && !gprb_token_ok('') && gprb_token_ok($ttok));
+$rj = gp_upd_json_read(gp_upd_dir() . '/recovery.json'); $rj['expires'] = time() - 5; gp_upd_json_write(gp_upd_dir() . '/recovery.json', $rj);
+t_ok('an expired token is refused', !gprb_token_ok($ttok));
+$rj['expires'] = time() + 3600; gp_upd_json_write(gp_upd_dir() . '/recovery.json', $rj);
+$_SERVER['REQUEST_METHOD'] = 'POST'; $_POST = array('token' => 'wrong-token');
+ob_start(); gprb_main_web(); $wb = ob_get_clean();
+t_ok('a wrong token in the web form changes nothing and shows nothing', $wb === '' && is_file($root_t . '/docs/T.md'));
+$_POST = array('token' => $ttok);
+ob_start(); gprb_main_web(); $wb = ob_get_clean();
+t_ok('the right token rolls the update back from the web', strpos($wb, 'Rolled back.') !== false && !is_file($root_t . '/docs/T.md') && trim(file_get_contents($root_t . '/VERSION')) === '2026.01.01');
+t_ok('...and is single use: the recovery file is gone and the token no longer works', !is_file(gp_upd_dir() . '/recovery.json') && !gprb_token_ok($ttok));
+$_SERVER['REQUEST_METHOD'] = 'GET'; $_POST = array();
+t_ok('panel/recover.php answers a bare 404 when no recovery script exists and never loads the panel', (function () {
+	$src = file_get_contents(__DIR__ . '/../panel/recover.php');
+	return strpos($src, "http_response_code(404)") !== false && strpos($src, 'GP_BOOT') === false && strpos($src, 'require') !== false && substr_count($src, 'require') === 1;
+})());
+
+// ---- warnings and confirmation
+$root_w = ut_install();
+$sw = gp_upd_stage(ut_make_zip($root_w, '2025.01.01'), 'old.zip', 'a');
+t_ok('a downgrade is warned about and needs an explicit confirmation', $sw['ok'] && in_array('downgrade', $sw['plan']['warnings'], true)
+	&& gp_upd_apply($sw['plan']['id'], 'a')['error'] === 'upd_err_confirm' && is_dir(gp_upd_dir() . '/pending/' . $sw['plan']['id']));
+$ss = gp_upd_stage(ut_make_zip($root_w, '2026.01.01'), 'same.zip', 'a');
+t_ok('the same version is warned about and needs confirmation', in_array('same_version', $ss['plan']['warnings'], true) && gp_upd_apply($ss['plan']['id'], 'a')['error'] === 'upd_err_confirm');
+mkdir($root_w . '/.git', 0775);
+$sg = gp_upd_stage(ut_make_zip($root_w, '2026.02.02', array('analyzer/requirements.txt' => "redis>=4.0\nnewpkg>=1\n", 'scripts/cron-check.sh' => file_get_contents($root_w . '/scripts/cron-check.sh') . "\n# x\n")), 'g.zip', 'a');
+t_ok('a .git directory, a changed requirements.txt and a changed cron script are all warned about',
+	$sg['ok'] && array_diff(array('git_present', 'requirements_changed', 'cron_scripts_changed'), $sg['plan']['warnings']) === array() && gp_upd_apply($sg['plan']['id'], 'a')['error'] === 'upd_err_confirm');
+$ag = gp_upd_apply($sg['plan']['id'], 'a', array('confirm' => array('git_present')));
+t_ok('...and goes through once the .git warning is confirmed', $ag['ok'] === true);
+$ut_run($root_w . '/updates/verify.php', array($ag['stamp']));
+$ph = gp_upd_post_verify($ag['stamp'], 'admin');
+t_ok('after a good check a changed requirements.txt asks for the pip_sync job exactly once', $ph !== null && $ph['status'] === 'ok' && !empty($ph['pip_enqueued']) && !empty(gp_upd_json_read(gp_upd_dir() . '/' . $ag['stamp'] . '/manifest.json')['audited']));
+if (!empty($ph['pip_job'])) {                                   // a Redis that was reachable took the job: remove it again
+	$ut_c = gv_redis_connect(gv_cfg_load()['redis'], $GP_TMP_LOGS, false);
+	if ($ut_c) { gv_redis_cmd($ut_c, array('DEL', gp_key('job:' . $ph['pip_job'])));
+		foreach ((array)gv_redis_cmd($ut_c, array('LRANGE', gp_key('jobs'), '0', '-1')) as $ut_j) { if (is_string($ut_j) && strpos($ut_j, $ph['pip_job']) !== false) { gv_redis_cmd($ut_c, array('LREM', gp_key('jobs'), '0', $ut_j)); } }
+		gv_redis_close($ut_c); }
+}
+t_ok('pip_sync is an allowed job type', in_array('pip_sync', gp_job_types(), true) && gp_job_params('pip_sync', array())[0] === true);
+
+// ---- removed upstream, unverified chain, history rollback chain, prune
+$root_r = ut_install();
+$s1 = gp_upd_stage(ut_make_zip($root_r, '2026.02.02', array('docs/ONLY-IN-V2.md' => "x\n", 'scripts/only-in-v2.sh' => "#!/bin/sh\n")), 'r1.zip', 'a');
+$a1 = gp_upd_apply($s1['plan']['id'], 'a');
+$ut_run($root_r . '/updates/verify.php', array($a1['stamp']));
+$h_before = ut_hashes($root_r);
+$s2 = gp_upd_stage(ut_make_zip($root_r, '2026.03.03', array('docs/ONLY-IN-V2.md' => null, 'scripts/only-in-v2.sh' => null, 'docs/V3.md' => "v3\n")), 'r2.zip', 'a');
+t_ok('a tracked file missing from the new ZIP is planned for removal (from the previous manifest)', $s2['ok'] && $s2['plan']['remove'] === array('docs/ONLY-IN-V2.md', 'scripts/only-in-v2.sh') && !in_array('first_update', $s2['plan']['warnings'], true));
+file_put_contents($root_r . '/guard/local-notes.txt', 'mine');
+$a2 = gp_upd_apply($s2['plan']['id'], 'a');
+t_ok('removed files are deleted, files the ZIP never had are left alone, the removed file is in the backup',
+	$a2['ok'] && !is_file($root_r . '/docs/ONLY-IN-V2.md') && is_file($root_r . '/guard/local-notes.txt') && is_file(gp_upd_dir() . '/' . $a2['stamp'] . '/backup/docs/ONLY-IN-V2.md'));
+$ut_run($root_r . '/updates/verify.php', array($a2['stamp']));
+$hist = gp_upd_history(10);
+t_ok('history lists both updates newest first with their status', count($hist) === 2 && $hist[0]['stamp'] === $a2['stamp'] && $hist[0]['status'] === 'ok' && $hist[1]['status'] === 'ok');
+$rbr = gp_upd_rollback($a1['stamp']);
+$h_end = ut_hashes($root_r);
+t_ok('rolling back the older update also rolls back every newer one, newest first', $rbr[0] && trim(file_get_contents($root_r . '/VERSION')) === '2026.01.01' && !is_file($root_r . '/docs/V3.md') && !is_file($root_r . '/docs/ONLY-IN-V2.md') && is_file($root_r . '/guard/local-notes.txt'));
+t_ok('...both are marked rolled back and the install is back to the original files', array_column(gp_upd_history(10), 'status') === array('rolled_back', 'rolled_back') && ($h_end['VERSION'] ?? '') === hash('sha256', "2026.01.01\n"));
+// prune
+$root_p = ut_install();
+foreach (array('20200101-000001', '20200101-000002', '20200101-000003', '20200101-000004') as $old) {
+	mkdir(gp_upd_dir() . '/' . $old . '/backup', 0775, true);
+	file_put_contents(gp_upd_dir() . '/' . $old . '/manifest.json', json_encode(array('status' => 'ok', 'files' => array())));
+}
+$sp = gp_upd_stage(ut_make_zip($root_p, '2026.08.08', array('docs/P.md' => "p\n")), 'p.zip', 'a');
+$ap2 = gp_upd_apply($sp['plan']['id'], 'a');
+$ut_run($root_p . '/updates/verify.php', array($ap2['stamp']));
+t_ok('only the newest ' . GP_UPD_KEEP . ' updates (and their backups) are kept', count(gp_upd_history(50)) === GP_UPD_KEEP && is_dir(gp_upd_dir() . '/' . $ap2['stamp'] . '/backup') && !is_dir(gp_upd_dir() . '/20200101-000001'));
+// lock
+$root_l = ut_install();
+$sl = gp_upd_stage(ut_make_zip($root_l, '2026.09.09'), 'l.zip', 'a');
+$lk = fopen(gp_upd_dir() . '/.lock', 'c'); flock($lk, LOCK_EX);
+t_ok('two updates cannot run at the same time (lock)', gp_upd_apply($sl['plan']['id'], 'a')['error'] === 'upd_err_busy');
+flock($lk, LOCK_UN); fclose($lk);
+t_ok('an expired or tampered staged ZIP is not applied', (function () use ($sl) {
+	$pf = gp_upd_dir() . '/pending/' . $sl['plan']['id'] . '/files/VERSION';
+	file_put_contents($pf, "9.9.9\n");
+	return gp_upd_plan_load($sl['plan']['id']) === null && gp_upd_apply($sl['plan']['id'], 'a')['error'] === 'upd_err_nopending' && gp_upd_apply('../../etc', 'a')['error'] === 'upd_err_nopending';
+})());
+
+// ---- upload handler, re-entering the password, routes, view, alerts
+$tmpz = ut_make_zip(ut_install(), '2026.10.10');
+t_ok('upload: a .txt name, a PHP error code and a missing file are refused with their own message',
+	gp_upd_upload(array('error' => 0, 'tmp_name' => $tmpz, 'name' => 'x.txt'), 'a')[2] === 'upd_err_notzip_name' && gp_upd_upload(array('error' => 1, 'tmp_name' => '', 'name' => 'x.zip'), 'a')[2] === 'upd_err_phplimit'
+	&& gp_upd_upload(array('error' => 4), 'a')[2] === 'upd_err_upload' && gp_upd_upload(array('error' => 0, 'tmp_name' => $UT . '/nope.zip', 'name' => 'x.zip'), 'a')[2] === 'upd_err_upload');
+$up = gp_upd_upload(array('error' => 0, 'tmp_name' => $tmpz, 'name' => 'bot-managment-system-master.zip'), 'admin');
+t_ok('upload: a good ZIP is staged and audited', $up[0] === true && strlen($up[1]) === 16 && strpos((string)@file_get_contents($UT . '/audit.jsonl'), 'update_upload') !== false);
+gp_upd_upload(array('error' => 0, 'tmp_name' => $UT . '/x.zip', 'name' => 'x.zip'), 'admin');
+t_ok('upload: a refused ZIP is audited as update_refused', strpos((string)@file_get_contents($UT . '/audit.jsonl'), 'update_refused') !== false);
+$ut_ip = $_SERVER['REMOTE_ADDR']; $_SERVER['REMOTE_ADDR'] = '203.0.113.201';
+$GLOBALS['gp_test_panel_cfg'] = array('session_secret' => str_repeat('s', 32), 'username' => 'admin', 'password_hash' => password_hash('correct horse battery', PASSWORD_DEFAULT));
+t_ok('the password is asked again: the right one passes, a wrong one and an empty one do not', gp_reauth('admin', 'correct horse battery') === 'ok' && gp_reauth('admin', 'nope') === 'bad' && gp_reauth('admin', '') === 'bad' && gp_reauth('other', 'correct horse battery') === 'bad');
+foreach (array('203.0.113.201', 'user') as $ut_b) {          // leave no login counters behind (file fallback and Redis)
+	@unlink(gp_attempts_file($ut_b));
+	$ut_c = gv_redis_connect(gv_cfg_load()['redis'], $GP_TMP_LOGS, false);
+	if ($ut_c) { gv_redis_cmd($ut_c, array('DEL', gp_key('login:' . $ut_b))); gv_redis_close($ut_c); }
+}
+$_SERVER['REMOTE_ADDR'] = $ut_ip;
+unset($GLOBALS['gp_test_panel_cfg']);
+$ut_src = file_get_contents(__DIR__ . '/../panel/index.php');
+$ut_case = substr($ut_src, strpos($ut_src, "case 'update':"), 5200);
+t_ok('the update route is POST-only for every action, behind the session and the CSRF check, and the apply step asks for the password',
+	strpos($ut_case, 'if ($gp_post)') !== false && strpos($ut_case, "gp_reauth(") !== false && strpos($ut_src, "if (\$gp_post && !gp_csrf_check(") !== false && strpos($ut_src, "case 'update':") > strpos($ut_src, 'if ($gp_user === null)'));
+t_ok('apply, upload, refuse, verify and rollback are all audit-logged', strpos($ut_src, "'update_apply'") !== false && strpos($ut_src, "'update_rollback'") !== false && strpos($ut_src, "'update_failed'") !== false
+	&& strpos(file_get_contents(__DIR__ . '/../panel/update.php'), "'update_upload'") !== false && strpos(file_get_contents(__DIR__ . '/../panel/update.php'), "'update_verified'") !== false);
+t_ok('the layout links the Update page and shows the installed version', strpos(file_get_contents(__DIR__ . '/../panel/views/layout.php'), "'update'") !== false && strpos(file_get_contents(__DIR__ . '/../panel/views/layout.php'), 'footer_version') !== false);
+// the page renders (plan + history + result)
+$gp_upd_root = $root_w;
+$view_plan = gp_upd_stage(ut_make_zip($root_w, '2026.11.11', array('docs/V.md' => "v\n", 'CHANGELOG.md' => $ut_changelog)), 'v.zip', 'a')['plan'];
+ob_start();
+$env = gp_upd_environment(); $version = gp_upd_version(); $plan = $view_plan; $history = gp_upd_history(10); $res = ''; $ts = ''; $m = null; $token = ''; $cron_lines = array(); $web_url = 'recover.php';
+require __DIR__ . '/../panel/views/update.php';
+$view_html = ob_get_clean();
+t_ok('the Update page shows version, the review, the password field with a tooltip, the upload form and the history',
+	strpos($view_html, '2026.02.02') !== false && strpos($view_html, 'id="update-apply"') !== false && strpos($view_html, 'type="password"') !== false && strpos($view_html, 'gp-tip-btn') !== false
+	&& strpos($view_html, 'enctype="multipart/form-data"') !== false && strpos($view_html, 'name="do" value="rollback"') !== false && strpos($view_html, 'name="csrf"') !== false);
+$res = 'ok'; $m = array('to' => '2026.11.11', 'requirements_changed' => true, 'pip_error' => '', 'cron_scripts_changed' => true, 'changelog' => array(array('version' => '2026.11.11', 'text' => 'x<script>')));
+$token = str_repeat('ab', 16); $cron_lines = array('* * * * * /x/y');
+ob_start(); $plan = null; require __DIR__ . '/../panel/views/update.php'; $view_html = ob_get_clean();
+t_ok('the result page shows the recovery token once, the pip_sync note, the cron lines, and escapes the changelog',
+	strpos($view_html, $token) !== false && strpos($view_html, 'pip_sync') !== false && strpos($view_html, '* * * * * /x/y') !== false && strpos($view_html, 'x<script>') === false && strpos($view_html, 'role="status"') !== false);
+$al = gp_health_alerts(array('now' => time(), 'redis_up' => true, 'update_warn' => array(array('unverified', '20260101-000000', 'critical'), array('pip_failed', 'job abc', 'warning'))));
+t_ok('the dashboard raises an alert for an unverified update and for a failed pip_sync', count(array_filter($al, function ($a) { return $a['id'] === 'update_unverified' && $a['level'] === 'critical'; })) === 1
+	&& count(array_filter($al, function ($a) { return $a['id'] === 'update_pip_failed' && $a['level'] === 'warning'; })) === 1);
+t_ok('the exposure check knows the updates/ files and panel/recover.php', (function () { $s = file_get_contents(__DIR__ . '/exposure-check.sh'); return strpos($s, '/updates/recovery.json') !== false && strpos($s, '/updates/rollback.php') !== false && strpos($s, 'recover.php') !== false; })());
+unset($gp_upd_opcache_hook);
+putenv('GV_AUDIT');
+$gp_upd_root = '';
+
 echo "\n";
 // Say so out loud. A green run on a host missing the extension must never be
 // mistakable for full coverage.

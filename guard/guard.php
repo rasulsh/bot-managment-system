@@ -995,7 +995,7 @@ function gv_emit(array $f, array $st, $act, $sh, $t0, $log_dir) {
 // the guard produced the response itself, and gv_log_row already recorded what
 // it was in act - a second line describing our own 403 would be noise.
 function gv_arm_outcome(array $cfg, array $f, $log_dir) {
-	if (empty($cfg['capture_outcomes'])) { return; }
+	if (empty($cfg['capture_outcomes']) || defined('GV_DRY_RUN')) { return; }
 	gv_capture_outcome(isset($f['rid']) ? $f['rid'] : '', $log_dir);
 }
 
@@ -1261,7 +1261,8 @@ function gv_run($t0) {
 	$f   = gv_facts($_SERVER, $_GET, $_COOKIE, $cfg);
 	$log = (string)$cfg['log_dir'];
 	gv_log_policy(array(
-		'skip'     => gv_path_has_prefix($f['path'], (array)$cfg['log_skip_paths']),
+		// GV_DRY_RUN: the updater's health check (updates/verify.php) runs one synthetic request and must leave no log row.
+		'skip'     => defined('GV_DRY_RUN') || gv_path_has_prefix($f['path'], (array)$cfg['log_skip_paths']),
 		'min_free' => max(0, (int)$cfg['log_min_free_mb']),
 	));
 	$st  = gv_state_new();

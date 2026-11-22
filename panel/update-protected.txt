@@ -1,0 +1,57 @@
+# Bot Guard updater: install-local files and data that an update NEVER overwrites or deletes.
+#
+# This is the single list. The updater reads it (the installed copy and the one inside the ZIP;
+# a file protected by either is skipped), docs/09-ADMIN-PANEL.md quotes it, and panel-selftest checks
+# that the two agree. On top of it, every pattern of the installed .gitignore is protected too.
+#
+# Syntax: one pattern per line, paths relative to the install directory, "#" starts a comment.
+#   dir/        everything below that directory
+#   a/b*.c      fnmatch pattern against the whole path ("*" also matches "/")
+#   name        a pattern with no "/" matches the file name in any directory
+# Directory patterns never protect .htaccess or .gitkeep files (those are code, not data).
+
+# Configuration and secrets
+guard/config.php
+guard/config.local.json*
+guard/config-backups/
+guard/rules.json*
+guard/rules.cache.php*
+panel/panel.config.php
+panel/users.json*
+panel/audit.jsonl
+panel/jobs-seen.json*
+panel/.ratelimit/
+panel/*.log
+
+# Kill switch
+guard.off
+
+# IP lists, GeoIP databases, logs
+lists/*
+geo/*
+logs/*
+
+# Analyzer: models, snapshots, status, candidates, reports, virtualenvs
+analyzer/model.joblib*
+analyzer/clf.joblib*
+analyzer/*.candidate
+analyzer/*.csv
+analyzer/snapshot.json*
+analyzer/ground-truth.txt
+analyzer/reports/
+analyzer/.jobstatus-*
+analyzer/.jobstate-*
+analyzer/.cron-check*
+analyzer/.lastrun-*
+analyzer/.laststats-*
+analyzer/.rule-hits.json
+analyzer/.venv/
+analyzer/venv/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Version control and the updater's own workspace
+.git/
+updates/

@@ -2,6 +2,36 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## In-panel updater (ZIP), VERSION and CHANGELOG
+
+**New**
+
+* **Update page** (admin): upload the GitHub ZIP, review the plan, apply with your password, roll back with one click. Files:
+  `panel/update.php`, `panel/views/update.php`, `panel/update-protected.txt`, `panel/update-rollback.tpl`, `panel/update-verify.tpl`,
+  `panel/recover.php`, `updates/` (workspace, web-denied). Full description in [09-ADMIN-PANEL.md](09-ADMIN-PANEL.md#update-from-a-zip).
+* **`VERSION`** (repository root, date style, e.g. `2026.11.22`) and **`CHANGELOG.md`**. The panel footer and the Update page show the version.
+  CI fails a pull request that changes code without bumping `VERSION` and adding the changelog entry (`scripts/version-check.sh`).
+* Worker job **`pip_sync`**: `pip install -r analyzer/requirements.txt` with the worker's interpreter, after an update that changed it.
+* `guard/guard.php`: the constant `GV_DRY_RUN` (never defined by the guard itself) makes `gv_run()` skip the log row and the outcome capture;
+  only the updater's health check uses it.
+* Panel: `gp_reauth()` (password asked again before an update; a wrong one counts as a failed login), dashboard alerts `update_unverified`,
+  `update_rollback_failed`, `update_pip_failed`, new audit events `update_upload`, `update_refused`, `update_apply`, `update_verified`,
+  `update_failed`, `update_rollback`, `reauth_failed`.
+* `panel/.htaccess` also serves `recover.php`; `scripts/exposure-check.sh` checks `updates/*`, `VERSION`, `CHANGELOG.md` and `panel/recover.php`.
+
+**Upgrade**
+
+1. Copy this release over the install **by hand once** (the Update page is part of it). Keep `guard/config.php`, `guard/config.local.json`,
+   `guard/rules.json`, `lists/`, `geo/`, `panel/panel.config.php` as always. Make sure PHP can write the project (see
+   [13-PANEL-WEB-ACCESS.md](13-PANEL-WEB-ACCESS.md), the permissions table).
+2. Web server: `updates/` must not be reachable. Apache / LiteSpeed / OpenLiteSpeed read the shipped `updates/.htaccess`; **nginx** needs
+   `location ^~ /updates/ { return 404; }` (README §2.6). `panel/recover.php` must stay reachable inside the panel directory.
+3. `bash scripts/exposure-check.sh <url> <panel>`; reload PHP (OPcache).
+4. From now on update from the panel. The first update has no file list from the previous one, so files removed upstream stay in place (once).
+
+**Rollback of this release.** Restore the previous files (the updater is new code: no data format changes, nothing to migrate). `updates/`
+can be deleted; `VERSION` and `CHANGELOG.md` are harmless to keep.
+
 ## Login page error message
 
 * The "Wrong username or password." message was drawn by the shared layout, outside the centred login card. It is now inside the card, between the brand

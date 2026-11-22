@@ -2622,6 +2622,31 @@ if mm_geo is not None:
 # -- worker, cron wrapper
 ok('worker: geo_compile is a known job type with a handler', 'geo_compile' in worker_geo.HANDLERS and worker_geo.validate({'id': 'a1', 'type': 'geo_compile', 'params': {}})[0])
 ok('worker: an unknown type is still refused', not worker_geo.validate({'id': 'a1', 'type': 'geo_compilex', 'params': {}})[0])
+# -- pip_sync: installs analyzer/requirements.txt after an in-panel update (bounded, output captured)
+import subprocess as _subprocess
+ok('worker: pip_sync is a known job type with a handler', 'pip_sync' in worker_geo.HANDLERS and worker_geo.validate({'id': 'p1', 'type': 'pip_sync', 'params': {}})[0])
+_pip_real = worker_geo.subprocess.run
+_pip_calls = []
+class _Done(object):
+    def __init__(self, rc, out):
+        self.returncode, self.stdout = rc, out
+def _pip_fake(rc, out):
+    def run(cmd, **kw):
+        _pip_calls.append((cmd, kw))
+        return _Done(rc, out)
+    return run
+worker_geo.subprocess.run = _pip_fake(0, 'Requirement already satisfied')
+ok('worker: pip_sync exits 0 when pip succeeds', worker_geo.HANDLERS['pip_sync']({}, {}) == 0)
+ok('worker: pip_sync runs this interpreter with -m pip install -r requirements.txt and a timeout',
+   _pip_calls and _pip_calls[0][0][:4] == [sys.executable, '-m', 'pip', 'install'] and _pip_calls[0][0][-2] == '-r'
+   and _pip_calls[0][0][-1].endswith('requirements.txt') and _pip_calls[0][1].get('timeout') == worker_geo.PIP_TIMEOUT)
+worker_geo.subprocess.run = _pip_fake(1, 'ERROR: no matching distribution')
+ok('worker: pip_sync exits 1 when pip fails', worker_geo.HANDLERS['pip_sync']({}, {}) == 1)
+def _pip_timeout(cmd, **kw):
+    raise _subprocess.TimeoutExpired(cmd, kw.get('timeout'))
+worker_geo.subprocess.run = _pip_timeout
+ok('worker: pip_sync exits 1 on a timeout instead of hanging', worker_geo.HANDLERS['pip_sync']({}, {}) == 1)
+worker_geo.subprocess.run = _pip_real
 cron_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts', 'analyzer-cron.sh')).read()
 ok('cron wrapper: a geo mode that runs analyzer/geo.py', re.search(r'geo\)\s+SCRIPT="analyzer/geo\.py"', cron_src) is not None)
 jobs_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'panel', 'jobs.php')).read()

@@ -95,3 +95,8 @@ lists/*.rb*
 lists/.pending-*
 lists/.*.lock
 lists/.compile.lock
+
+# In-panel updater: manifests, backups, staged ZIPs, recovery scripts and the token store stay local.
+updates/*
+!updates/.htaccess
+!updates/.gitkeep
