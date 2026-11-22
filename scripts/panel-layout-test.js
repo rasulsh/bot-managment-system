@@ -37,6 +37,8 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		await page.fill('input[name=username]', USER);
 		await page.fill('input[name=password]', 'definitely-wrong-' + PASS);
 		await Promise.all([page.waitForNavigation(), page.click('form button[type=submit]')]);
+		// autofocus is applied on a rendering tick, so wait for it instead of reading the focus at once
+		await page.waitForFunction(() => document.activeElement && document.activeElement.name === 'password', null, { timeout: 3000 }).catch(() => {});
 		const lbox = async () => page.evaluate(() => {
 			const c = document.querySelector('.gp-login-card').getBoundingClientRect();
 			const m = document.querySelector('.gp-login-card [role=alert]');
