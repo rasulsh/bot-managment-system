@@ -20,7 +20,7 @@
 <link rel="stylesheet" href="assets/app.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#128737;</text></svg>">
 </head>
-<body class="gp-body">
+<body class="gp-body"<?= (!empty($user) && ($role ?? '') !== 'admin') ? ' data-readonly="1"' : '' ?>>
 
 <?php if (!empty($user)): ?>
 <header class="gp-topbar">
@@ -35,7 +35,7 @@
 		<form method="post" action="index.php?r=logout" class="gp-topbar-actions">
 			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 			<?php require __DIR__ . '/theme_switch.php'; ?>
-			<span class="gp-user"><?= gp_e($user) ?></span>
+			<a class="gp-user" href="index.php?r=account" title="<?= gp_e(gp_t('nav_account')) ?>"><?= gp_e($user) ?> <span class="gp-user-role">(<?= gp_e(gp_users_role_label($role ?? '')) ?>)</span></a>
 			<button type="submit" class="gp-btn gp-btn-ghost"><?= gp_e(gp_t('logout')) ?></button>
 		</form>
 	</div>
@@ -59,8 +59,11 @@
 			'jobs'      => array('nav_jobs', '&#8635;'),
 			'audit'     => array('nav_audit', '&#9998;'),
 			'update'    => array('nav_update', '&#8679;'),
+			'users'     => array('nav_users', '&#9786;'),
+			'account'   => array('nav_account', '&#9881;'),
 		);
 		foreach ($gp_nav as $gp_key => $gp_item):
+			if (!gp_acl_allows($role ?? '', $gp_key, 'GET')) { continue; }
 			$gp_active = ($route === $gp_key) ? ' gp-nav-active' : '';
 		?>
 		<a class="gp-nav-item<?= $gp_active ?>" href="index.php?r=<?= gp_e($gp_key) ?>">
@@ -75,6 +78,12 @@
 <div class="gp-shell gp-shell-bare">
 	<main class="gp-main gp-main-bare">
 <?php endif; ?>
+
+		<?php if (!empty($user) && ($role ?? '') === 'demo'): ?>
+		<div class="gp-note gp-note-strong" role="status" data-demo-banner><?= gp_e(gp_t('demo_banner')) ?></div>
+		<?php elseif (!empty($user) && ($role ?? '') === 'operator'): ?>
+		<div class="gp-note" role="status"><?= gp_e(gp_t('operator_banner')) ?></div>
+		<?php endif; ?>
 
 		<?php foreach (($flash ?? array()) as $gp_msg): ?>
 		<div class="gp-flash gp-flash-<?= gp_e($gp_msg['kind']) ?>" role="status">
@@ -93,7 +102,8 @@
 
 <?php if (!empty($user)): ?>
 <nav class="gp-bottomnav" aria-label="<?= gp_e(gp_t('app_sub')) ?>">
-	<?php foreach (array('dashboard', 'logs', 'overrides', 'replay', 'settings') as $gp_key):
+	<?php foreach (array('dashboard', 'logs', 'overrides', 'replay', 'settings', 'account') as $gp_key):
+		if (!gp_acl_allows($role ?? '', $gp_key, 'GET')) { continue; }
 		$gp_active = ($route === $gp_key) ? ' gp-nav-active' : ''; ?>
 	<a class="gp-bottom-item<?= $gp_active ?>" href="index.php?r=<?= gp_e($gp_key) ?>">
 		<span class="gp-nav-icon" aria-hidden="true"><?= $gp_nav[$gp_key][1] ?></span>
@@ -137,6 +147,15 @@
 			});
 		});
 	})();
+	// Read-only roles: a form that the server would answer with 403 gets its buttons disabled. This is only courtesy:
+	// the permission map in panel/acl.php is what protects, and it is checked on the server for every request.
+	if (document.body.hasAttribute('data-readonly')) {
+		document.querySelectorAll('main form[method=post], main form[method=POST]').forEach(function (form) {
+			if (form.hasAttribute('data-allow')) { return; }
+			form.querySelectorAll('button, input[type=submit], input[type=file]').forEach(function (b) { b.disabled = true; });
+			form.setAttribute('aria-disabled', 'true');
+		});
+	}
 	// Confirm dialogs for anything destructive or site-wide.
 	// Settings > CAPTCHA: redraw the sample image with the values typed in the form (nothing is saved).
 	(function () {

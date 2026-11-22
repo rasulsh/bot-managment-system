@@ -9,7 +9,8 @@
 
 <?= gp_filter_form_html('audit', array(
 	'event' => array('aud_event', 'is', array('config', 'config_reset', 'killswitch', 'override_allow', 'override_deny', 'override_clear', 'job', 'login_ok', 'login_failed',
-		'rule_create', 'rule_update', 'rule_delete', 'geo_upload', 'geo_rollback'), 'flt_event'),
+		'rule_create', 'rule_update', 'rule_delete', 'geo_upload', 'geo_rollback', 'acl_denied', 'user_create', 'user_role', 'user_enable', 'user_disable',
+		'user_password_reset', 'user_password_change', 'user_delete', 'update_apply', 'update_rollback'), 'flt_event'),
 	'actor' => array('aud_actor', 'is', array(), 'flt_actor'),
 	'q' => array('search', 'has', array(), 'flt_q')), $filter) ?>
 

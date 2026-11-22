@@ -39,7 +39,7 @@ def files():
         for n in names:
             p = os.path.join(base, n)
             rel = os.path.relpath(p, inst).replace(os.sep, '/')
-            if rel in SKIP or rel.startswith(('updates/', 'logs/', 'lists/', 'geo/')) and not rel.endswith(('.htaccess', '.gitkeep')):
+            if rel in SKIP or rel.startswith(('panel/users.json', 'updates/', 'logs/', 'lists/', 'geo/')) and not rel.endswith(('.htaccess', '.gitkeep')):
                 continue
             if n.endswith(('.pyc', '.jsonl', '.log')):
                 continue

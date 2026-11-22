@@ -23,6 +23,10 @@ trap cleanup EXIT
 mkdir "$WORK/bg"
 (cd "$ROOT" && tar --exclude=.git --exclude=node_modules -cf - .) | tar -xf - -C "$WORK/bg"
 (cd "$WORK/bg" && printf 'admin\nlayout-pass-12345\nlayout-pass-12345\n' | "$PHP_BIN" panel/setpass.php >/dev/null 2>&1)
+# A Monitoring operator and a Demo user (the page checks per role run at both widths).
+(cd "$WORK/bg" && "$PHP_BIN" -r 'define("GP_BOOT",1);define("GV_BOOT",1);define("GV_NO_AUTORUN",1);require "panel/config_io.php";require "panel/auth.php";
+	$a=gp_users_create("admin","layout-op","operator","op-layout-pass-12345");$b=gp_users_create("admin","layout-demo","demo","demo-layout-pass-12345");exit(($a[0]&&$b[0])?0:1);') \
+	|| { echo "ERROR: could not create the role users"; exit 2; }
 # Sample traffic so the log, identity and dashboard pages have something to show.
 mkdir -p "$WORK/bg/logs"
 python3 - "$WORK/bg/logs/guard-$(date +%Y%m%d).jsonl" <<'PY'
@@ -74,7 +78,7 @@ PY
 PID=$!
 for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/panel/index.php" 2>/dev/null && break; sleep 0.1; done
 [ -n "$SHOTS" ] && mkdir -p "$SHOTS"
-node "$ROOT/scripts/panel-layout-test.js" "http://127.0.0.1:$PORT" /panel admin layout-pass-12345 "$SHOTS"
+node "$ROOT/scripts/panel-layout-test.js" "http://127.0.0.1:$PORT" /panel admin layout-pass-12345 "$SHOTS" layout-op op-layout-pass-12345 layout-demo demo-layout-pass-12345
 rc=$?
 # A PHP warning, notice, deprecation or fatal error on any page is a failure too.
 if grep -E 'Warning|Notice|Deprecated|Fatal error|Parse error' "$WORK/php.log" >/dev/null 2>&1; then

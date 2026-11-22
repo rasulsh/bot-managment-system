@@ -296,3 +296,14 @@ directory must be writable only by the user the cron jobs run as.
   changed file, but a restart (or `opcache_reset()` from a web request) is the sure way. `scripts/` and `analyzer/` changes take effect
   at the next cron run.
 
+## Panel users and roles
+
+- **Per-username lockout can be used against a person.** Ten wrong passwords for one name, from any address, lock that name for the window (15 minutes); the same count
+  applies to names that do not exist, so it reveals nothing, but someone who knows a name can keep that person out. The per-address and global limits stay as before.
+- **Roles are three fixed ones.** There are no custom permissions. The operator role cannot run anything that is a POST, so *Replay* and the other test forms that submit
+  data are administrator tools; the pure-read lookup boxes (GET) work for the operator.
+- **A rollback to the previous panel version uses `panel/panel.config.php`'s password for the first account** (the panel never rewrites that file); accounts created in
+  `users.json` do not exist for the old code.
+- **Group-readable backups are not flagged**; `users.json` is mode 0600 and checked by the permission scan like the other secret files.
+- **Read-only banners and disabled buttons are courtesy only.** The server refuses with 403; a script that posts directly gets 403 too.
+

@@ -27,6 +27,18 @@ try {
 	}
 } catch (\Throwable $e) {
 }
+try {
+	// The panel's user store: every account's password hash is a secret too.
+	$up = getenv('GV_USERS');
+	$up = (is_string($up) && $up !== '') ? $up : __DIR__ . '/../panel/users.json';
+	if (is_file($up)) {
+		$ud = json_decode((string)file_get_contents($up), true);
+		foreach ((is_array($ud) && isset($ud['users']) && is_array($ud['users'])) ? $ud['users'] : array() as $uu) {
+			if (is_array($uu) && isset($uu['password_hash']) && is_string($uu['password_hash'])) { $out[] = $uu['password_hash']; }
+		}
+	}
+} catch (\Throwable $e) {
+}
 foreach (array_unique($out) as $v) {
 	if (strlen($v) >= 6 && $v !== 'CHANGE_ME' && $v !== 'CHANGE_ME_TOO' && strpos($v, "\n") === false) { echo $v, "\n"; }
 }
