@@ -460,6 +460,7 @@
 .gp-login-card { @apply w-full max-w-sm rounded-2xl border border-line bg-surface
 	p-6 shadow-lg; }
 .gp-login-brand { @apply mb-6 flex flex-col items-center gap-1 text-center; }
+.gp-login-msg { @apply mb-4 w-full; }
 .gp-login-brand strong { @apply text-base font-bold text-ink; }
 .gp-login-brand small { @apply text-xs text-subtle; }
 

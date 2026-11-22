@@ -503,6 +503,36 @@ function gp_login_locked($username) {
 	return false;
 }
 
+// Seconds until the counter of one bucket expires (0 when it is not running).
+function gp_attempts_ttl($bucket, $window) {
+	$cfg = gv_cfg_load();
+	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
+	if ($conn) {
+		$ttl = gv_redis_cmd($conn, array('TTL', gp_key('login:' . $bucket)));
+		gv_redis_close($conn);
+		if (is_int($ttl) && $ttl > 0) { return $ttl; }
+		if ($ttl === -2) { return 0; }
+	}
+	$raw = @file_get_contents(gp_attempts_file($bucket));
+	$decoded = $raw === false ? null : json_decode($raw, true);
+	if (!is_array($decoded) || !isset($decoded['start'])) { return 0; }
+	return max(0, (int)$window - (time() - (int)$decoded['start']));
+}
+
+// How long a locked-out visitor should wait: the longest of the counters that
+// are over their limit. The same buckets as gp_login_locked(), and the answer
+// does not depend on whether the username exists.
+function gp_login_retry_after($username) {
+	$wait = 0;
+	if (gp_attempts_get(gp_client_ip(), GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS) {
+		$wait = max($wait, gp_attempts_ttl(gp_client_ip(), GP_LOGIN_WINDOW));
+	}
+	if ($username !== '' && gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) {
+		$wait = max($wait, gp_attempts_ttl('user', GP_LOGIN_WINDOW));
+	}
+	return $wait > 0 ? $wait : GP_LOGIN_LOCKOUT;
+}
+
 function gp_login_record_failure() {
 	gp_attempts_bump(gp_client_ip(), GP_LOGIN_WINDOW);
 	gp_attempts_bump('user', GP_LOGIN_WINDOW);
@@ -512,7 +542,7 @@ function gp_login_record_failure() {
 // Login
 // --------------------------------------------------------------------------
 
-// Attempt a login. Returns array(ok, message_key).
+// Attempt a login. Returns array(ok, message_key[, wait_seconds]).
 // Wrong user and wrong password are indistinguishable by message, status and
 // - because password_verify runs either way - by timing.
 function gp_login_attempt($username, $password) {
@@ -525,7 +555,7 @@ function gp_login_attempt($username, $password) {
 	if (gp_login_locked($username)) {
 		gp_audit_append(array('event' => 'login_locked', 'actor' => $username,
 			'ip' => gp_client_ip()));
-		return array(false, 'login_locked');
+		return array(false, 'login_locked', gp_login_retry_after($username));
 	}
 
 	$user_ok = hash_equals($cfg['username'], $username);

@@ -32,6 +32,40 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		page.on('console', (m) => { if (m.type() === 'error') { problems.push('console: ' + m.text()); } });
 		page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
 		page.on('request', (r) => { const u = r.url(); if (!u.startsWith('data:') && !u.startsWith(ORIGIN)) { problems.push('external request: ' + u); } });
+		// ---- failed login: the message is inside the card (one wrong attempt per width keeps clear of the lockout)
+		await page.goto(ROOT + '?r=login');
+		await page.fill('input[name=username]', USER);
+		await page.fill('input[name=password]', 'definitely-wrong-' + PASS);
+		await Promise.all([page.waitForNavigation(), page.click('form button[type=submit]')]);
+		// autofocus is applied on a rendering tick, so wait for it instead of reading the focus at once
+		await page.waitForFunction(() => document.activeElement && document.activeElement.name === 'password', null, { timeout: 3000 }).catch(() => {});
+		const lbox = async () => page.evaluate(() => {
+			const c = document.querySelector('.gp-login-card').getBoundingClientRect();
+			const m = document.querySelector('.gp-login-card [role=alert]');
+			if (!m) { return null; }
+			const b = m.getBoundingClientRect();
+			return { cx: c.x, cy: c.y, cw: c.width, ch: c.height, mx: b.x, my: b.y, mw: b.width, mh: b.height,
+				over: document.documentElement.scrollWidth - window.innerWidth,
+				outside: document.querySelectorAll('main > .gp-flash').length,
+				user: document.querySelector('input[name=username]').value,
+				pass: document.querySelector('input[name=password]').value,
+				focus: document.activeElement && document.activeElement.name };
+		});
+		for (const theme of ['light', 'dark', 'auto']) {
+			await page.evaluate((t) => { if (t === 'auto') { document.documentElement.removeAttribute('data-theme'); } else { document.documentElement.setAttribute('data-theme', t); } }, theme);
+			const lb = await lbox();
+			const inside = !!lb && lb.mx >= lb.cx - 0.5 && lb.my >= lb.cy - 0.5 && lb.mx + lb.mw <= lb.cx + lb.cw + 0.5 && lb.my + lb.mh <= lb.cy + lb.ch + 0.5;
+			check(v.name + ' login (' + theme + '): the error box is inside the card', inside, JSON.stringify(lb));
+			check(v.name + ' login (' + theme + '): no horizontal scroll', !!lb && lb.over <= 1, lb && String(lb.over));
+			if (theme === 'light') {
+				check(v.name + ' login: no message box outside the card', !!lb && lb.outside === 0);
+				check(v.name + ' login: the box spans the card width', !!lb && lb.mw >= lb.cw - 60, lb && (lb.mw + ' of ' + lb.cw));
+				check(v.name + ' login: the typed username is kept, the password is empty, focus is on the password',
+					!!lb && lb.user === USER && lb.pass === '' && lb.focus === 'password', JSON.stringify(lb && { u: lb.user, p: lb.pass, f: lb.focus }));
+				if (SHOTS) { await page.screenshot({ path: SHOTS + '/' + v.name + '-login-error.png', fullPage: false }); }
+			}
+		}
+		await page.evaluate(() => document.documentElement.removeAttribute('data-theme'));
 		await page.goto(ROOT + '?r=login');
 		await page.fill('input[name=username]', USER);
 		await page.fill('input[name=password]', PASS);

@@ -3006,6 +3006,41 @@ foreach (array_merge(glob(__DIR__ . '/../panel/*.php'), glob(__DIR__ . '/../pane
 }
 t_ok('every gp_t() key used in the panel exists in lang.php' . ($tr_missing ? ' (missing: ' . implode(',', array_keys($tr_missing)) . ')' : ''), !$tr_missing);
 
+t_section('Login page: message inside the card, username kept, lockout text');
+$lg_render = function ($msg, $user) {
+	ob_start();
+	$login_msg = $msg; $login_user = $user;
+	require __DIR__ . '/../panel/views/login.php';
+	return ob_get_clean();
+};
+$lg_ok = $lg_render('', '');
+$lg_bad = $lg_render(gp_t('login_failed'), 'open"cart<x>');
+$lg_card = (preg_match('~<div class="gp-login-card">(.*)</div>\s*</div>\s*$~s', $lg_bad, $lg_m) === 1) ? $lg_m[1] : '';
+t_ok('login: a clean page has no message box', strpos($lg_ok, 'role="alert"') === false && strpos($lg_ok, 'gp-flash') === false);
+t_ok('login: the message sits inside the card, between the brand block and the form',
+	$lg_card !== '' && ($a = strpos($lg_card, 'gp-login-brand')) !== false && ($b = strpos($lg_card, 'role="alert"')) !== false && ($c = strpos($lg_card, '<form')) !== false && $a < $b && $b < $c);
+t_ok('login: the message box is an alert carrying the text', strpos($lg_bad, 'role="alert"') !== false && strpos($lg_bad, gp_t('login_failed')) !== false);
+t_ok('login: the typed username is kept and escaped', strpos($lg_bad, 'value="open&quot;cart&lt;x&gt;"') !== false && strpos($lg_bad, 'cart<x>') === false);
+t_ok('login: the password field never has a value', preg_match('~type="password"[^>]*\svalue=~', $lg_bad) !== 1);
+t_ok('login: after a failure the password field takes focus, not the username', preg_match('~type="password"[^>]*autofocus~', $lg_bad) === 1 && preg_match('~name="username"[^>]*autofocus~', $lg_bad) !== 1);
+t_ok('login: on a fresh page the username takes focus', preg_match('~name="username"[^>]*autofocus~', $lg_ok) === 1);
+t_ok('login: the layout draws no flash container for the login view', (function () {
+	$src = file_get_contents(__DIR__ . '/../panel/index.php');
+	return strpos($src, "(\$view === 'login') ? array() : \$gp_flash") !== false;
+})());
+t_ok('login: the lockout text names a wait time and is different from the wrong-password text',
+	strpos(gp_t('login_locked'), '%d') !== false && gp_t('login_locked') !== gp_t('login_failed')
+	&& strpos(sprintf(gp_t('login_locked'), 15), '15') !== false);
+t_ok('login: the lockout text does not say whether the username exists', stripos(gp_t('login_locked'), 'username') === false && stripos(gp_t('login_locked'), 'password') === false);
+$lg_bucket = 'selftest-ttl-' . bin2hex(random_bytes(4));
+gp_attempts_bump($lg_bucket, GP_LOGIN_WINDOW);
+$lg_ttl = gp_attempts_ttl($lg_bucket, GP_LOGIN_WINDOW);
+t_ok('login: the remaining lockout time is between 1 and the window', $lg_ttl >= 1 && $lg_ttl <= GP_LOGIN_WINDOW);
+t_ok('login: an unknown bucket has no wait', gp_attempts_ttl('selftest-none-' . bin2hex(random_bytes(4)), GP_LOGIN_WINDOW) === 0);
+@unlink(gp_attempts_file($lg_bucket));
+$lg_c = gv_redis_connect(gv_cfg_load()['redis'], $GP_TMP_LOGS, false);
+if ($lg_c) { gv_redis_cmd($lg_c, array('DEL', gp_key('login:' . $lg_bucket))); gv_redis_close($lg_c); }
+
 echo "\n";
 // Say so out loud. A green run on a host missing the extension must never be
 // mistakable for full coverage.

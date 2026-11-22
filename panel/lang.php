@@ -65,7 +65,7 @@ return array(
 	'login_pass'        => 'Password',
 	'login_submit'      => 'Sign in',
 	'login_failed'      => 'Wrong username or password.',
-	'login_locked'      => 'Too many failed attempts. Sign-in is blocked for 15 minutes.',
+	'login_locked'      => 'Too many failed attempts from this connection. Sign-in is paused; try again in about %d minute(s).',
 	'login_csrf'        => 'Your session expired. Please try again.',
 	'login_ip_blocked'  => 'Access from this IP address is not allowed.',
 	'login_ok'          => 'Welcome.',
