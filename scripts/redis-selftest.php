@@ -637,10 +637,14 @@ $conns = array();
 foreach (array('guard', 'panel') as $dir) {
 	foreach (glob(__DIR__ . "/../$dir/*.php") as $path) {
 		if (basename($path) === 'redis.php') { continue; }
+		// panel/feeds.php fetches provider IP ranges over HTTPS: its one socket is checked on its own below (ssl:// only, never Redis).
+		if ($dir === 'panel' && basename($path) === 'feeds.php') { continue; }
 		if (preg_match('/stream_socket_client|pfsockopen|fsockopen|new Redis\b/', file_get_contents($path))) { $conns[] = basename($path); }
 	}
 }
 t_ok('nothing opens Redis except the shared connect function' . ($conns ? ' (' . implode(', ', $conns) . ')' : ''), !$conns);
+$fsrc = (string)file_get_contents(__DIR__ . '/../panel/feeds.php');
+t_ok('the IP feed fetcher opens exactly one socket, TLS only (ssl://), and never speaks to Redis', preg_match_all('/stream_socket_client|pfsockopen|fsockopen|new Redis\b/', $fsrc) === 1 && strpos($fsrc, "stream_socket_client('ssl://'") !== false && stripos($fsrc, 'gv_redis') === false);
 
 
 // ==========================================================================

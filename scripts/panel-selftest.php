@@ -14,6 +14,15 @@ require __DIR__ . '/../panel/acl.php';          // the views ask it which links 
 
 // Nothing this suite does may write into the repository tree, also when no Redis is running (a refused connect logs a line):
 // every error log the guard's helpers fall back to goes to a temp directory, removed at exit.
+// The login limiter's file counters (used when Redis is down, as here) are private to this process: a shared panel/.ratelimit made
+// parallel runs fail each other's "password asked again" checks, and wrote into the working tree.
+$GP_RL_DIR = sys_get_temp_dir() . '/gp-selftest-rl-' . getmypid();
+$GP_RL_REPO_BEFORE = is_dir(__DIR__ . '/../panel/.ratelimit') ? count(glob(__DIR__ . '/../panel/.ratelimit/*')) : 0;
+putenv('GV_RATELIMIT_DIR=' . $GP_RL_DIR);
+register_shutdown_function(function () use ($GP_RL_DIR) {
+	foreach ((array)glob($GP_RL_DIR . '/*') as $f) { if (is_file($f)) { @unlink($f); } }
+	@rmdir($GP_RL_DIR);
+});
 $GP_TMP_LOGS = sys_get_temp_dir() . '/gp-selftest-logs-' . getmypid();
 @mkdir($GP_TMP_LOGS, 0775, true);
 gv_redis_ctx(array('log_dir' => $GP_TMP_LOGS));
@@ -3678,10 +3687,11 @@ t_ok('a damaged backup makes the rollback refuse and change nothing', $rd[0] ===
 $root_t = ut_install();
 $stt = gp_upd_stage(ut_make_zip($root_t, '2026.07.07', array('docs/T.md' => "t\n")), 't.zip', 'a');
 $att = gp_upd_apply($stt['plan']['id'], 'admin');
-$ttok = gp_upd_token_take($att['stamp']);
+t_ok('the update for the recovery-token tests applied' . ($att['ok'] ? '' : ' (refused: ' . ($att['error'] ?? '?') . ' ' . ($att['detail'] ?? '') . ')'), !empty($att['ok']));
+$ttok = gp_upd_token_take((string)($att['stamp'] ?? ''));
 t_ok('the token is shown once: the second read finds nothing', strlen($ttok) === 32 && gp_upd_token_take($att['stamp']) === '');
 gp_upd_load_rollback();
-t_ok('the web recovery refuses a wrong token and an empty one', !gprb_token_ok('0123456789abcdef0123456789abcdef') && !gprb_token_ok('') && gprb_token_ok($ttok));
+t_ok('the web recovery refuses a wrong token and an empty one', function_exists('gprb_token_ok') && !gprb_token_ok('0123456789abcdef0123456789abcdef') && !gprb_token_ok('') && gprb_token_ok($ttok));
 $rj = gp_upd_json_read(gp_upd_dir() . '/recovery.json'); $rj['expires'] = time() - 5; gp_upd_json_write(gp_upd_dir() . '/recovery.json', $rj);
 t_ok('an expired token is refused', !gprb_token_ok($ttok));
 $rj['expires'] = time() + 3600; gp_upd_json_write(gp_upd_dir() . '/recovery.json', $rj);
@@ -4438,7 +4448,7 @@ $d6_clean();
 // from the shell: php panel/setpass.php --unlock-user / --unlock-ip / --unlock-all (the same counters; Redis or the files of this panel directory)
 $sh = function (array $args) use ($UT_PHP, $UT) {
 	$p = proc_open(array_merge(array($UT_PHP, __DIR__ . '/../panel/setpass.php'), $args), array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $pipes, null,
-		array('PATH' => getenv('PATH'), 'GV_AUDIT' => $UT . '/audit-d6.jsonl', 'GV_USERS' => $UT . '/users-d6.json'));
+		array('PATH' => getenv('PATH'), 'GV_AUDIT' => $UT . '/audit-d6.jsonl', 'GV_USERS' => $UT . '/users-d6.json', 'GV_RATELIMIT_DIR' => (string)getenv('GV_RATELIMIT_DIR')));
 	$o = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
 	fclose($pipes[1]); fclose($pipes[2]);
 	return array(proc_close($p), $o);
@@ -4463,6 +4473,8 @@ $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
 echo "\n";
 // Say so out loud. A green run on a host missing the extension must never be
 // mistakable for full coverage.
+t_ok('the suite wrote no sign-in counters into the repository (panel/.ratelimit): they are private to this process',
+	getenv('GV_RATELIMIT_DIR') === $GP_RL_DIR && (is_dir(__DIR__ . '/../panel/.ratelimit') ? count(glob(__DIR__ . '/../panel/.ratelimit/*')) : 0) === $GP_RL_REPO_BEFORE);
 if (!$GP_HAS_DOM) {
 	echo "NOTE: ext-dom was unavailable; the DOM-level XSS assertions did not run.\n";
 }
