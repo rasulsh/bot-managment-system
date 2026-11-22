@@ -43,7 +43,7 @@ What changed in each release and what to do about it. Newest first.
 **Compatibility.** Nothing changes until a captcha rule is enabled, `captcha.escalate_score` is above 0 or `captcha.device_budget` is on (all off by default).
 Existing tokens, rules, lists and logs are untouched. Rolling back: a level c cookie is invalid for the old code (the visitor gets the challenge once).
 
-**Upgrade steps (existing install `/home/cloud/bot-guard`, monitor mode)**
+**Upgrade steps (existing install `<install-dir>`, monitor mode)**
 
 1. Deploy. Check GD: `php -m | grep -i gd` in the **web server's** PHP (the panel's Settings -> CAPTCHA says so too). Install it if you want the image (otherwise nothing breaks).
    Run `scripts/exposure-check.sh` (it now probes the font and `guard/captcha.php`).
@@ -118,7 +118,7 @@ Only a client that is actually shown a CAPTCHA pays this (and the per-IP budget 
 (about 1-4 us) and goes on. Existing overrides, rules, GeoIP and the logs are untouched. `scripts/geo-fixture.php` (test tooling) now
 packs kind 3 with 2-byte values.
 
-**Upgrade steps (existing install `/home/cloud/bot-guard`, monitor mode)**
+**Upgrade steps (existing install `<install-dir>`, monitor mode)**
 
 1. Deploy the files. Make sure `lists/` is writable by the web user (the panel creates it if the project directory allows) and keep
    `lists/.htaccess`; run `bash scripts/exposure-check.sh` (it probes `lists/` too). No new Python package, no new cron entry: small
@@ -206,7 +206,7 @@ one it does not: it returns at step 3a, before any Redis connection (0 Redis com
   audit-logged, once per 30 s). The child's stderr goes to `/dev/null`, and a child that hangs is killed (SIGTERM, then SIGKILL after 1 s) so `proc_close` cannot wait for ever.
   New ignored file: `analyzer/.cron-check-live.json` (and `.cron-check-refresh`).
 
-**Upgrade steps** (`/home/cloud/bot-guard`, monitor mode)
+**Upgrade steps** (`<install-dir>`, monitor mode)
 
 1. Deploy the files. No config change, no new extension, no new cron entry is required.
 2. Run `bash scripts/cron-check.sh` over SSH and fix what it reports (add missing entries, add a `GV_PYTHON=` line if the packages live in a
@@ -249,7 +249,7 @@ than before; links on reasons, device and override behave as they always did.
 **Compatibility.** Every existing link keeps working (a bare `act=403` is "is 403"). `gp_log_match()` still accepts the old
 scalar filters. `gp_audit_read()` still accepts a search string.
 
-**Upgrade steps** (`/home/cloud/bot-guard`, monitor mode): deploy the files. Nothing to configure, no cron change, no new
+**Upgrade steps** (`<install-dir>`, monitor mode): deploy the files. Nothing to configure, no cron change, no new
 extension. Hard-reload the browser once so it loads the new `app.css`.
 
 **Rollback**: redeploy the previous release; nothing was written to the data files.
@@ -282,7 +282,7 @@ scan caps.
 **Compatibility.** `guard/rules.json` files and `guard/rules.cache.php` written by the previous release keep working
 unchanged (a rule without `country` / `asn` has none). Nothing reads `geo/` unless a rule needs it or `geo.log` is on.
 
-**Upgrade steps (existing install `/home/cloud/bot-guard`, monitor mode)**
+**Upgrade steps (existing install `<install-dir>`, monitor mode)**
 
 1. Deploy the files. `pip install -r analyzer/requirements.txt` in the analyzer's virtualenv (adds `maxminddb`).
    Make sure `geo/` is writable by the web user if you want to upload from the panel; otherwise copy files with SFTP.

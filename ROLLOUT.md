@@ -4,6 +4,11 @@ Development is finished. Everything below is operations. Each stage has a pass
 criterion; do not start a stage until the previous one has met it. The whole
 sequence is roughly 8–10 weeks, and almost all of that is waiting for data.
 
+> **Scope of this checklist.** It plans the *global* switches (`enforce.*`, holdout, signals,
+> outcome capture). Access rules, GeoIP, IP lists and the image CAPTCHA came later: for those
+> (starter rules in monitor mode, impact preview, challenge before block, country rules) follow
+> the [safe rollout plan in the README](README.md#16-safe-rollout-plan) alongside the stages below.
+
 Rollback at any point: `touch /full/path/bot-guard/guard.off` — instant, no deploy, no restart.
 The file goes in the project's top directory (next to `prepend.php`), **not** inside
 `guard/`: a `guard/guard.off` does nothing.

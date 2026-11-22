@@ -276,4 +276,4 @@ directory must be writable only by the user the cron jobs run as.
   harmless; the analyzer reads the newest files by its own date, so keep PHP and
   the system on the same time zone.
 - **PHP 8.0+** is required. Below that `prepend.php` returns at once and the
-  guard does nothing, silently.
+  guard does nothing; it leaves one line (`php_too_old`) in `logs/guard-errors.log`, at most once an hour.

@@ -45,10 +45,11 @@ keeps working on its static scoring.
 
 ## Part 1 — The guard (request path)
 
-Files: `prepend.php` (entry point), `guard/guard.php` (all decision logic),
-`guard/redis.php` (Redis client), `guard/challenge.php` (token + interstitial),
-`guard/log.php` (JSONL logger), `guard/outcome.php` (shutdown capture),
-`guard/config.php` (per-deployment config).
+Files: `prepend.php` (entry point), `guard/guard.php` (config, scoring, decision, `gv_run`),
+`guard/redis.php` (Redis client), `guard/challenge.php` (token + check page), `guard/captcha.php`
+(image CAPTCHA, headless signals), `guard/rules.php` (access rules), `guard/geo.php` and
+`guard/iplist.php` (compiled range lookups), `guard/log.php` (JSONL logger), `guard/outcome.php`
+(shutdown capture), `guard/config.php` (per-deployment config).
 
 ### How it is loaded
 
@@ -64,76 +65,60 @@ guarantee, established at the very first line.
 
 The guard reads the superglobals in exactly one place (`gv_facts()`) and passes an
 explicit facts array everywhere else, so the scoring, CIDR matching and IP
-resolution are pure and testable. The flow, in order, with the first matching
-branch winning:
+resolution are pure and testable. The flow, in order, with the first branch that
+returns or exits winning and **exactly one log row per request**. (The README has the
+same list as a table with the cost of each step: [README §2.2](../README.md#22-request-lifecycle-and-precedence).)
 
-1. **Facts.** Extract everything the guard needs from the request: client IP
-   (resolving `X-Forwarded-For` only when `REMOTE_ADDR` is inside a configured CDN
-   range, and then only its last hop), method, path, query, user agent, a handful
-   of headers, header count, HTTPS-ness, and the guard's own cookie.
-
-2. **Challenge handshake intercept.** If this is the `POST` that the interstitial
-   page makes back to itself carrying a valid nonce, mint a signed token, set it
-   as a cookie, log `token_issued`, and return `204`. This runs before exemptions
-   so the handshake can always complete.
-
-3. **Exemptions.** If the path prefix or a configured query parameter is exempt
-   (e.g. payment callbacks, cron endpoints, webhooks), log `exempt`, arm outcome
-   capture, and return — the host app runs untouched.
-
-   **3a. IP lists** (`lists/allow.bin`, `lists/block.bin`; see *IP allow / block lists* below). A binary
-   search on the client address, only when an enabled list of that type exists. An enforced allow-list
-   hit returns here (`allow_override`). The enforced **block** list is decided even earlier, at **1b**,
-   right after the facts and *before* the handshake of step 2 (an exempt path still bypasses it). Neither
-   touches Redis.
-
-4. **Redis connect.** One connection. If it fails, the guard enters degraded mode:
-   all counters and verdict reads are skipped, and the request can only ever be
-   allowed. A Redis outage is never a bypass in the dangerous direction — it can
-   only make the guard *more* permissive.
-
-5. **Known bots.** If the user agent matches a configured known-bot substring,
-   read the out-of-band reverse-DNS verdict for this IP. If it was refuted (`bad`),
-   revoke the free pass and fall through into normal scoring with a penalty. If it
-   is ok or simply unknown, give the fast pass (subject to a generous bot rate
-   ceiling) and return. No DNS is ever done in-band — the analyzer did it earlier.
-
-6. **Honeypot.** If the path is the configured honeypot path (a URL no human would
-   visit, linked invisibly), record an IP flag, log `404_hp`, and serve a 404.
-   This is labelling data and fires regardless of the enforce toggles.
-
-7. **Token, offline verdicts, overrides.** Verify the cookie into a device id.
-   Then, if there is a device id and Redis is up, read the three offline verdicts
-   (reputation, anomaly level, classifier level). Then read operator overrides — an
-   `allow` override short-circuits everything below with zero output; a `deny`
-   override is recorded and enforced later.
-
-8. **Static score.** Compute the Phase 1 score from the facts (empty UA, script
-   UA, missing Accept-Language on a navigation, missing Sec-Fetch on a modern
-   browser, too few headers, honeypot history). Add a penalty if step 5 refuted a
-   bot claim.
-
-9. **Rate counters.** Increment the per-device, per-IP+UA, and per-IP fixed-window
-   counters (skipped entirely in degraded mode), plus two long fixed windows per
-   device: one hour and one day. The short window sees speed; the long ones see the
-   client that never hurries and never stops, from whatever address. Any counter
-   over its limit sets an "over" flag.
-
-10. **Decision.** Fold the offline verdicts into the static score to get an
-    *effective* score (each signal contributes only if its toggle is on — otherwise
-    the effective score equals the static score exactly, so signals are visible in
-    logs long before they change anything). Then decide, first match wins: deny
-    override → block; effective score over the hard block threshold on a GET
-    → block; over a rate limit → 429; a GET with no valid token → challenge (the
-    gate is the method alone, never `Accept` or `X-Requested-With`, which the
-    client chooses);
-    otherwise allow.
-
-11. **Act.** Log exactly one line. If the decision is "allow," arm outcome capture
-    and return with zero output. Otherwise consult the enforce toggle for that
-    action: if enforcement is off (monitor mode) or this request is in the holdout
-    slice, log what *would* have happened, allow, and let the app run. If
-    enforcement is on, emit the block / 429 / challenge response and exit.
+0. **`prepend.php`.** Skips CLI, skips PHP below 8.0 (one throttled line in
+   `logs/guard-errors.log`), and returns when the **kill-switch file `guard.off`** exists in the
+   top directory. Nothing is logged then.
+1. **Config and facts.** Defaults, then `guard/config.php`, then the panel's overlay
+   `guard/config.local.json`; a placeholder or empty `secret` forces every `enforce.*` off. Facts:
+   client IP (`X-Forwarded-For` only when `REMOTE_ADDR` is inside a `cdn_ranges` entry, and then
+   only its last hop), method, path, query, User-Agent, a handful of headers, header count,
+   HTTPS-ness and the guard's own cookies.
+   **1b. Enforced IP block list** (`lists/block.bin`): a hit returns `403` here, before the
+   handshake, unless the path is exempt or an *enforced* allow list also holds the address.
+2. **Challenge handshake intercept.** The `POST` that the check page makes back to the same URL
+   (header `X-GV`). A six-part nonce is the CAPTCHA handshake; otherwise the HMAC, the binding to
+   UA and IP, the nonce age and the proof of work are checked first (no storage), then one Redis
+   pipeline claims the nonce (`SET NX`, single use), reads the IP's allow override and bumps the
+   counters. Success sets the signed token cookie and answers `204`; a headless-looking proof
+   can be answered `202` (reload into a CAPTCHA, `captcha.escalate_score`). This runs before
+   exemptions so the page can always finish its own handshake. With `enforce.challenge` off the
+   rejections are only logged (`sh=1`).
+   **2b. Operator test switch** (`challenge.test_key`): shows the real check page to one browser.
+3. **Exemptions.** `exempt_paths` / `exempt_params` (payment callbacks, cron endpoints, webhooks):
+   log `exempt`, arm outcome capture, return; the application runs untouched.
+   **3a. IP allow list.** An enforced hit behaves like an operator allow override (act
+   `allow_override`, no Redis). Monitor-mode lists only add `SH_IPL_*` to the row.
+   **3b. Access rules** (`guard/rules.cache.php`, below): a pure match on the request facts, no Redis.
+   GeoIP lookups run only when `geo.log` is on or a rule needs them.
+4. **Token.** The `_gv` cookie is verified by HMAC into a device id and a level (`p` from the
+   check page, `c` from a solved CAPTCHA).
+5. **Redis.** One connection; if it fails the guard is degraded and can only allow. One pipeline reads
+   every key this request can need (bot verdicts, the three offline verdicts, overrides, the honeypot
+   flag, the CAPTCHA budget). **Known bots** (`known_bots`): read the out-of-band reverse-DNS verdict.
+   A refuted claim (`bad`) loses the pass and gets `+35` (`BOT_FAKE`); an unverified claim draws on
+   the shared `limits.bot_unverified`; otherwise the request is allowed (`allow_bot`) after bumping
+   its own bot counters. An enforced rule that does not skip verified crawlers replaces the pass.
+   **Link-preview fetchers** (`preview_bots`) pass inside one site-wide budget per name.
+6. **Honeypot.** The configured `honeypot_path` records an IP flag for 7 days, logs `404_hp` and
+   serves a 404, regardless of the enforce toggles.
+7. **Offline verdicts and overrides.** An operator `allow` (device or IP) short-circuits everything
+   below with zero output; a `deny` is recorded and enforced later (needs `enforce.block`).
+8. **Static score** from the facts, plus the bot-fake penalty.
+9. **Rule action** from step 3b and the CAPTCHA escalation flag.
+10. **Rate counters** in one pipeline: per device (short window, one hour, one day), per
+    IP + UA, per IP. Skipped in degraded mode.
+11. **Decision.** The effective score folds in the offline signals whose toggle is on, then, first
+    match wins: deny override → `403`; score at or above `hard_block_score` on a gated request →
+    `403`; over a limit → `429`; no valid token on a gated request → challenge; otherwise allow.
+    `gv_served` then applies the `enforce.*` switches and the holdout (monitor mode logs what
+    *would* have happened with `sh=1` and lets the request through); an *enforced* rule can add a
+    `403`, or upgrade an allow or challenge to a challenge or CAPTCHA. The gate is the method
+    alone (every method except `OPTIONS`), never `Accept` or `X-Requested-With`, which the client
+    chooses; a token-less POST is only enforced with `challenge.gate_post`.
 
 ### Access rules
 
@@ -364,18 +349,18 @@ for `redis.breaker_ttl` seconds later requests skip Redis (`rd=1`). Failures go 
 
 ### The challenge
 
-`guard/challenge.php` issues stateless, HMAC-signed tokens and nonces — they carry
-their own timestamp and signature, so no server-side storage is needed and the
-handshake works identically with or without Redis. The interstitial is a single
-inline HTML document with no external assets: it waits a fraction of a second,
-`fetch()`es a `POST` back to the same URL carrying the nonce, and reloads when the
-guard answers `204`. A real browser sails through transparently. This is **not** a
-JavaScript proof-of-work, though: a client that parses the page and issues the one
-POST — no JavaScript required — completes the handshake just as well, so the nonce
-filters naive fetchers rather than determined ones. The real brake on automated
-token minting is the per-IP request rate limit (`gv:ri:{ip}`), not the handshake
-itself. The token is deliberately **not** bound to the client IP, so CGNAT and
-mobile carrier IP rotation do not re-challenge real users on every network change.
+`guard/challenge.php` issues stateless, HMAC-signed tokens and nonces: they carry their own
+timestamp and signature, so the handshake works identically with or without Redis. The check
+page is a single inline HTML document with no external assets, served with HTTP status `503`.
+Its script solves a **proof of work** (`challenge.pow_bits`, default 16: about 65,000 SHA-256
+attempts, well under a second in a current browser; 0 disables it), collects a few
+client-reported headless signals (`X-GV-S`, hints only), `fetch()`es a `POST` back to the same URL
+carrying the nonce and the proof, and reloads when the guard answers `204`. The nonce is bound to the
+User-Agent and, by default (`challenge.bind_ip`), the IP it was issued to, expires after `nonce_ttl`
+and is single use (a Redis claim). A client that does not run JavaScript gets no token; one that
+computes the proof pays for every token it mints, and the per-IP `limits.mint` and the device
+budgets bound how many it can use. The token itself is deliberately **not** bound to the IP, so CGNAT
+and mobile address changes do not re-challenge real users.
 
 ### Outcome capture
 

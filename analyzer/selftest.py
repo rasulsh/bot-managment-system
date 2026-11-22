@@ -2981,7 +2981,7 @@ ok('crontab.cagefs is tried first and wins', src_cc == 'crontab.cagefs' and text
 cc_calls[:] = []
 cron_check.subprocess.run = fake_run_factory({'crontab': (0, CC_FULL, '')})
 ok('without crontab.cagefs the plain crontab -l is used', cron_check.read_live() == (CC_FULL, 'crontab') and cc_calls == ['/usr/bin/crontab.cagefs', 'crontab'])
-cron_check.subprocess.run = fake_run_factory({'crontab': (1, '', 'no crontab for cloud')})
+cron_check.subprocess.run = fake_run_factory({'crontab': (1, '', 'no crontab for example')})
 ok('"no crontab for user" is an empty crontab, not an error', cron_check.read_live() == ('', 'crontab'))
 cron_check.subprocess.run = fake_run_factory({})
 ok('no crontab command at all: unreadable (None), reported as such', cron_check.read_live() == (None, ''))

@@ -113,6 +113,8 @@ enough):
 | `logs/` | guard | daily request logs |
 | `guard/` | panel | `config.local.json`, its `.lock` and temp file (settings saved in the panel) |
 | `panel/` | panel | `audit.jsonl` (audit trail), `.ratelimit/` (login limit when Redis is down) |
+| `geo/` | panel | uploaded GeoIP databases, compiled `country.bin` / `asn.bin` and their status files |
+| `lists/` | panel | IP list sources, compiled `allow.bin` / `block.bin`, `lists.json`, `lists-status.json` |
 | `bot-guard/` (top) | panel | `guard.off` (the kill switch on the dashboard) |
 
 **PHP runs as a different user** (a VPS with plain Apache and `mod_php`, where PHP

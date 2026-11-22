@@ -1,6 +1,6 @@
 # Phase 5 — admin panel
 
-Setup is also summarised in the [README](../README.md#next-steps).
+Setup is also summarised in the [README](../README.md#26-installation-by-environment) (developers) and [panel tour](../README.md#14-first-login-and-a-tour-of-the-panel) (operators).
 
 Everything the first four phases built is operated from a terminal: `jq` over
 JSONL, `ctl.py` for overrides, an editor for `guard/config.php`, `replay.py`
@@ -188,7 +188,7 @@ who steals the session.
 | Panel username, password, session secret | `setpass.php` only. A panel that can rewrite its own credentials from a session is one XSS away from a permanent backdoor. |
 | Reputation weights (`analyzer/reputation.py`), `DECISION_SPAN`, model internals | Code, not configuration. Changing them changes what every historical score meant, and the honest way to do that is a diff, a replay and a deploy. |
 | Log deletion, audit deletion | Append-only by design. Rotation is `scripts/guard-logrotate.sh`. |
-| Arbitrary jobs | The queue accepts exactly eight named types — `verify`, `nightly`, `train`, `train_clf`, `replay_full`, `promote_ml`, `promote_clf`, `snapshot`. Queued training always writes to `--candidate`, so a job fired from a browser can never make the guard more permissive while nobody is watching. |
+| Arbitrary jobs | The queue accepts exactly ten named types — `verify`, `nightly`, `train`, `train_clf`, `replay_full`, `promote_ml`, `promote_clf`, `snapshot`, `geo_compile`, `iplist_compile` (`gp_job_types()` in `panel/jobs.php`, `HANDLERS` in `analyzer/worker.py`). Queued training always writes to `--candidate`, so a job fired from a browser can never make the guard more permissive while nobody is watching. |
 
 ## What the panel does
 
