@@ -133,6 +133,20 @@
 		});
 	})();
 	// Confirm dialogs for anything destructive or site-wide.
+	// Settings > CAPTCHA: redraw the sample image with the values typed in the form (nothing is saved).
+	(function () {
+		var img = document.getElementById('cap-preview'), btn = document.getElementById('cap-preview-btn');
+		if (!img || !btn) { return; }
+		var keys = ['level', 'length', 'charset', 'warp', 'noise', 'overlap'];
+		btn.addEventListener('click', function () {
+			var q = ['r=captcha_preview', '_=' + Date.now()], i, el;
+			for (i = 0; i < keys.length; i++) {
+				el = document.querySelector('[name="f[captcha.' + keys[i] + ']"]');
+				if (el && el.value !== '') { q.push(keys[i] + '=' + encodeURIComponent(el.value)); }
+			}
+			img.src = 'index.php?' + q.join('&');
+		});
+	})();
 	document.querySelectorAll('form[data-confirm]').forEach(function (form) {
 		form.addEventListener('submit', function (event) {
 			if (!window.confirm(form.getAttribute('data-confirm'))) {

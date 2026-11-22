@@ -9,23 +9,38 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 // the client IP - CGNAT and mobile carrier rotation would re-challenge real
 // users on every network change.
 
-// Issue a token: device_id . issued_at . signature.
-// $nonce_id, when given, fixes the device id: one nonce, one device.
-function gv_tok_make($secret, $nonce_id = '') {
+// Issue a token: device_id . issued_at . signature (the "PoW level", the only format before the image
+// CAPTCHA, and still what a proof-of-work handshake issues), or, after a solved CAPTCHA,
+// device_id . issued_at . c . signature (level "c": the signature covers the "c" too, so a PoW token
+// cannot be upgraded). $nonce_id, when given, fixes the device id: one nonce, one device.
+function gv_tok_make($secret, $nonce_id = '', $level = 'p') {
 	$dev = ((string)$nonce_id !== '')
 		? substr(hash_hmac('sha256', 'dev|' . $nonce_id, $secret), 0, 24)
 		: bin2hex(random_bytes(12));
 	$p = $dev . '.' . time();                                // device_id . issued_at
+	if ($level === 'c') {
+		$p .= '.c';
+	}
 	return $p . '.' . hash_hmac('sha256', $p, $secret);
 }
 
-// Verify a token. Returns the device id on success, false otherwise.
-function gv_tok_check($t, $secret, $ttl) {
+// Verify a token. Returns array(device id, level 'p' | 'c') on success, false otherwise. A token issued before
+// the image CAPTCHA (three parts) is level 'p'.
+function gv_tok_parse($t, $secret, $ttl) {
 	$x = explode('.', (string)$t);
-	if (count($x) !== 3) return false;
-	if (!hash_equals(hash_hmac('sha256', $x[0] . '.' . $x[1], $secret), $x[2])) return false;
+	$n = count($x);
+	if ($n !== 3 && $n !== 4) return false;
+	if ($n === 4 && $x[2] !== 'c') return false;
+	$body = ($n === 4) ? $x[0] . '.' . $x[1] . '.c' : $x[0] . '.' . $x[1];
+	if (!hash_equals(hash_hmac('sha256', $body, $secret), $x[$n - 1])) return false;
 	if ((time() - (int)$x[1]) >= $ttl) return false;
-	return $x[0];                                            // device_id
+	return array($x[0], $n === 4 ? 'c' : 'p');
+}
+
+// Verify a token. Returns the device id on success, false otherwise (any level).
+function gv_tok_check($t, $secret, $ttl) {
+	$r = gv_tok_parse($t, $secret, $ttl);
+	return $r === false ? false : $r[0];
 }
 
 // --------------------------------------------------------------------------
@@ -146,7 +161,7 @@ function gv_set_token_cookie(array $cfg, $token, $https) {
 // Retry policy: a rejected handshake reloads the page for a fresh challenge, at
 // most MAX times (counted in sessionStorage, window.name as a fallback, no
 // cookies), then shows the localized failure text with a manual retry link.
-function gv_challenge_js() {
+function gv_challenge_js_raw() {
 	return <<<'JS'
 (function () {
 var N = '__N__', B = __B__, MAX = 2, SK = 'gv_r';
@@ -181,13 +196,21 @@ function loadBlock(buf, off) {
 		W[i] = (buf[j] << 24) | (buf[j + 1] << 16) | (buf[j + 2] << 8) | buf[j + 3];
 	}
 }
-var pre = N + ':', L = pre.length, mid = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
-var pb = new Uint8Array(L), i0;
-for (i0 = 0; i0 < L; i0++) { pb[i0] = pre.charCodeAt(i0) & 255; }
-var nfull = Math.floor(L / 64), r = L - nfull * 64;
-for (i0 = 0; i0 < nfull; i0++) { loadBlock(pb, i0 * 64); compress(mid, mid); }
-var buf = new Uint8Array(128), st = new Uint32Array(8);
-for (i0 = 0; i0 < r; i0++) { buf[i0] = pb[nfull * 64 + i0]; }
+var L = 0, nfull = 0, r = 0, mid = new Uint32Array(8), buf = new Uint8Array(128), st = new Uint32Array(8);
+// The midstate of everything hashed before the counter. The proof-of-work page hashes "nonce:counter". The CAPTCHA page in
+// "bound" mode (difficulty 20 or more, which is what a CAPTCHA served while Redis was down carries) hashes
+// "nonce:typed answer:counter": setup() runs again with the typed answer, so every guess needs its own proof of work.
+function setup(pre) {
+	var pb, i0, init = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+	L = pre.length;
+	for (i0 = 0; i0 < 8; i0++) { mid[i0] = init[i0]; }
+	pb = new Uint8Array(L);
+	for (i0 = 0; i0 < L; i0++) { pb[i0] = pre.charCodeAt(i0) & 255; }
+	nfull = Math.floor(L / 64); r = L - nfull * 64;
+	for (i0 = 0; i0 < nfull; i0++) { loadBlock(pb, i0 * 64); compress(mid, mid); }
+	for (i0 = 0; i0 < r; i0++) { buf[i0] = pb[nfull * 64 + i0]; }
+}
+setup(N + ':');
 function test(c) {
 	var ds = String(c), n = ds.length, tl = r + n, nb = (tl + 9 <= 64) ? 1 : 2, end = nb * 64, i;
 	for (i = 0; i < n; i++) { buf[r + i] = ds.charCodeAt(i); }
@@ -210,6 +233,51 @@ function solve(done) {
 		setTimeout(step, 0);
 	})();
 }
+var T0 = Date.now(), IN = 0, NS = '';
+(function () {
+	var ev = ['pointermove', 'keydown', 'touchstart', 'mousedown', 'wheel', 'click'], i;
+	function mark(e) { if (e && e.isTrusted) { IN = 1; } }
+	for (i = 0; i < ev.length; i++) { try { addEventListener(ev[i], mark, {passive: true}); } catch (x) {} }
+	try {
+		if (typeof Notification !== 'undefined' && navigator.permissions && navigator.permissions.query) {
+			navigator.permissions.query({name: 'notifications'}).then(function (r) {
+				NS = (Notification.permission === 'denied' && r.state === 'prompt') ? '1' : '0';
+			}, function () {});
+		}
+	} catch (x) {}
+})();
+// The headless signals: yes / no answers and one number, never a raw value. A signal that cannot be read is left
+// out (the server treats a missing one as neutral). See guard/captcha.php.
+function sig(cap) {
+	var o = [], nv = navigator, u = '', v, c, d, gl, ext, k;
+	function put(key, val) { o.push(key + val); }
+	try { put('w', nv.webdriver === true ? 1 : 0); } catch (e) {}
+	try { u = String(nv.userAgent || ''); put('h', /HeadlessChrome/i.test(u) ? 1 : 0); } catch (e) {}
+	try {
+		d = nv.userAgentData;
+		if (d && d.brands) {
+			v = false; c = false;
+			for (k = 0; k < d.brands.length; k++) {
+				if (/Headless/i.test(d.brands[k].brand)) { v = true; } else if (/Chrom/i.test(d.brands[k].brand)) { c = true; }
+			}
+			put('m', (v || (/Chrome\//.test(u) && !c)) ? 1 : 0);
+		}
+	} catch (e) {}
+	try { put('l', (!nv.languages || nv.languages.length === 0) ? 1 : 0); } catch (e) {}
+	try { if (/Chrome\//.test(u)) { put('c', window.chrome ? 0 : 1); } } catch (e) {}
+	try { if (/Chrome\//.test(u) && !/Mobile|Android/.test(u) && nv.plugins && nv.mimeTypes) { put('p', (nv.plugins.length === 0 && nv.mimeTypes.length === 0) ? 1 : 0); } } catch (e) {}
+	try {
+		c = document.createElement('canvas'); gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+		ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+		if (ext) { put('g', /SwiftShader|llvmpipe/i.test(String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL))) ? 1 : 0); }
+	} catch (e) {}
+	try { put('s', (screen.width === 0 || screen.height === 0 || window.outerWidth === 0 || window.outerHeight === 0) ? 1 : 0); } catch (e) {}
+	if (NS !== '') { put('n', NS); }
+	put('t', Math.min(99999, Math.max(0, Date.now() - T0)));
+	if (cap) { put('i', IN); }
+	return o.join('.');
+}
+/*GV_TAIL*/
 function sget() { try { return sessionStorage.getItem(SK); } catch (e) { return window.name.indexOf(SK + '=') === 0 ? window.name.slice(SK.length + 1) : null; } }
 function sset(v) { try { sessionStorage.setItem(SK, v); } catch (e) { try { window.name = SK + '=' + v; } catch (e2) {} } }
 // State "failures:successes:timestamp", forgotten after a minute. failures: refused
@@ -230,8 +298,10 @@ document.getElementById('gv-retry2').onclick = document.getElementById('gv-retry
 function post(counter) {
 	var h = {'X-GV': N};
 	if (B > 0) { h['X-GV-P'] = String(counter); }
+	try { h['X-GV-S'] = sig(false); } catch (e) {}
 	fetch(location.href, {method: 'POST', headers: h, credentials: 'same-origin'})
-		.then(function (r) { if (r.status === 204) { var s = gst(); gput(s[0], s[1] + 1); location.reload(); } else { retry(); } })
+		// 202: the server wants a CAPTCHA instead of a token (an escalation): reload, the next page is the CAPTCHA.
+		.then(function (r) { if (r.status === 204) { var s = gst(); gput(s[0], s[1] + 1); location.reload(); } else if (r.status === 202) { location.reload(); } else { retry(); } })
 		.catch(retry);
 }
 // Back on a challenge right after a successful handshake: the cookie was not kept.
@@ -240,6 +310,49 @@ if (gst()[1] >= 1) { show('gv-cookie'); return; }
 setTimeout(function () { if (B > 0) { solve(post); } else { post(0); } }, 50);
 })();
 JS;
+}
+
+// The proof-of-work page script.
+function gv_challenge_js() {
+	return str_replace('/*GV_TAIL*/', '', gv_challenge_js_raw());
+}
+
+// The CAPTCHA page script: the same SHA-256 solver and signals (everything before the marker), then the
+// form handling. The proof of work is solved in the background while the visitor types, and the answer
+// goes out percent-encoded (a Persian keyboard types non-Latin digits, which a header cannot carry).
+function gv_captcha_js($nonce, $bits, array $msgs) {
+	$raw = gv_challenge_js_raw();
+	$core = substr($raw, 0, strpos($raw, '/*GV_TAIL*/'));
+	$tail = <<<'JS'
+var M = __M__, form = document.getElementById('gv-cform'), inp = document.getElementById('gv-ca'), btn = document.getElementById('gv-cs'), nw = document.getElementById('gv-cn'), er = document.getElementById('gv-ce');
+var pc = null, pd = (B === 0), want = false, busy = false, bound = (B >= 20);
+function say(t) { er.textContent = t; er.hidden = false; }
+function again() { busy = false; btn.disabled = false; }
+function send() {
+	var h = {'X-GV': N, 'X-GV-A': encodeURIComponent(inp.value)};
+	if (B > 0) { h['X-GV-P'] = String(pc); }
+	try { h['X-GV-S'] = sig(true); } catch (e) {}
+	fetch(location.href, {method: 'POST', headers: h, credentials: 'same-origin'}).then(function (r) {
+		if (r.status === 204) { location.reload(); }
+		else if (r.status === 422) { say(M.wrong); again(); inp.select(); }
+		else { say(r.status === 410 ? M.expired : M.failed); btn.disabled = true; inp.disabled = true; }
+	}).catch(function () { say(M.failed); again(); });
+}
+// Difficulty below 20: the proof of work is solved in the background while the visitor types. 20 or more (a CAPTCHA served while Redis
+// was down, where attempts cannot be counted): it is bound to the typed answer, so it starts at submit and every guess pays for itself.
+if (B > 0 && !bound) { solve(function (c) { pc = c; pd = true; if (want) { send(); } }); }
+form.onsubmit = function (ev) {
+	ev.preventDefault();
+	if (busy || !inp.value) { return; }
+	busy = true; btn.disabled = true; er.hidden = true; want = true;
+	if (bound) { setup(N + ':' + encodeURIComponent(inp.value) + ':'); solve(function (c) { pc = c; send(); }); }
+	else if (pd) { send(); }
+};
+nw.onclick = function () { location.reload(); };
+try { inp.focus(); } catch (e) {}
+})();
+JS;
+	return str_replace(array('__N__', '__B__', '__M__'), array($nonce, (string)(int)$bits, json_encode($msgs, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT)), $core . $tail);
 }
 
 // Render the interstitial. Single inline document, no external assets.

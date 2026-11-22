@@ -268,6 +268,12 @@ who steals the session.
   Warnings on the page: an address in both an allow and a block list (the allow list wins; the overlapping ranges are listed),
   an allow entry wider than /16 (/32 for IPv6), an allow entry in the carrier-grade NAT range `100.64.0.0/10` or inside a mobile
   operator AS, a block entry that covers a verified crawler seen in the recent logs, and a list changed but not yet compiled.
+- **CAPTCHA** (Settings tab and a rule action) — Settings -> **CAPTCHA**: the GD status ("CAPTCHA unavailable (GD not installed)" when it is missing),
+  a **live preview image** drawn with the values typed in the form (*Update preview*; nothing is saved), the level, every individual value, the per-IP budget,
+  the proof-of-work switch, the escalation score, CAPTCHA instead of the device 429, and the **weight of each headless signal**, each with a tooltip.
+  The CAPTCHA page texts are in the Strings tab. Rules get the action **Image CAPTCHA**; the form warns when GD is missing, and the **impact preview** shows
+  how many of the matching requests would get a CAPTCHA (HTML, gated, no CAPTCHA-level token, not exempt, not allowed, not a verified crawler). Sample images:
+  ![level 1](img/captcha-level-1.png) ![level 3](img/captcha-level-3.png) ![level 5](img/captcha-level-5.png).
 - **Overrides and Identity** — a deny override for an address (or a device seen on an address) inside an *enforced* IP allow list has no
   effect, because the allow list is checked first: the page shows a warning with a link to the list, and so does the flash right after the deny
   is created.
@@ -284,6 +290,7 @@ cheap Redis command), never from the snapshot, because the snapshot job is one o
    free disk below `log_min_free_mb`; logs over the cap; no snapshot or a stale one; analyzer and panel time zones differ;
    **PR 1:** `rules.json` invalid, `rules.cache.php` older than `rules.json` (the guard then reads the JSON on every request);
    **PR 2:** a GeoIP database missing or corrupt while a geo rule is enabled (critical), older than 45 days (warning);
+   **PR 6:** a CAPTCHA rule, escalation or the CAPTCHA device budget is enabled but GD is not installed (warning, opens Settings);
    **PR 5:** a compiled IP list file missing or corrupt while its list is enabled (critical), the last IP list compile failed or its
    worker job failed (critical), entries dropped by the safety caps (warning; **critical** when an allow list lost an entry wider than /8),
    lists changed more than 10 minutes ago and still not compiled (warning);
@@ -292,7 +299,7 @@ cheap Redis command), never from the snapshot, because the snapshot job is one o
    `GV_PYTHON` missing or invalid (warnings).
 2. **Protection state:** the kill switch (prominent), each enforce toggle, enabled rules by mode and action, and a global summary:
    *monitor only* (also when `secret` is the placeholder, which forces it), *partly enforcing*, *enforcing*.
-3. **Last 24 hours:** requests, allowed, blocked (403), rate-limited (429), challenged, challenge success rate, rule hits,
+3. **Last 24 hours:** requests, allowed, blocked (403), rate-limited (429), challenged, challenge success rate, rule hits, (plus a CAPTCHA row when there was CAPTCHA activity: shown, solved, failed attempts, expired, solve rate, median solve time; a rate near 100 % with very short times looks like a solving service)
    honeypot hits and degraded rows, each against the 24 hours before (from the snapshot).
 4. **Top lists** (each entry opens the Logs page with the matching filter): rules by hits, reasons, addresses, devices and
    User-Agents being acted on, countries (needs *log country*), paths hit by blocked clients.

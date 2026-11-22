@@ -16,13 +16,18 @@ $groups = array(
 		'limits.mint', 'limits.device_hour', 'limits.device_day', 'limits.preview', 'limits.bot_unverified')),
 	'tokens'   => array('set_group_tokens', '', array('challenge.pow_bits', 'token_ttl', 'nonce_ttl', 'challenge.bind_ip')),
 	'strings'  => array('set_group_strings', 'set_group_strings_sub', array('strings.lang', 'strings.dir', 'strings.title', 'strings.sub',
-		'strings.noscript', 'strings.failed', 'strings.nocookie', 'strings.retry')),
+		'strings.noscript', 'strings.failed', 'strings.nocookie', 'strings.retry', 'strings.cap_title', 'strings.cap_sub', 'strings.cap_label', 'strings.cap_submit',
+		'strings.cap_new', 'strings.cap_wrong', 'strings.cap_failed', 'strings.cap_expired')),
 	'holdout'  => array('set_group_holdout', '', array('holdout_pct', 'capture_outcomes')),
 	'paths'    => array('set_group_paths', '', array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'honeypot_path')),
 	'network'  => array('set_group_network', '', array('cdn_ranges')),
 	'bots'     => array('set_group_bots', '', array('known_bots', 'preview_bots', 'bot_suffixes')),
 	'logs'     => array('set_group_logs', 'set_group_logs_sub', array('log_skip_paths', 'log_retention_days', 'log_max_mb', 'log_min_free_mb', 'log_floor_delete', 'log_floor_keep_days')),
 	'geo'      => array('set_group_geo', 'set_group_geo_sub', array('geo.log')),
+	'captcha'  => array('set_group_captcha', 'set_group_captcha_sub', array('captcha.level', 'captcha.length', 'captcha.charset', 'captcha.warp', 'captcha.noise', 'captcha.overlap',
+		'captcha.time_limit', 'captcha.max_attempts', 'captcha.ip_budget', 'captcha.ip_window', 'captcha.require_pow', 'captcha.escalate_score', 'captcha.device_budget',
+		'captcha.w_webdriver', 'captcha.w_ua_headless', 'captcha.w_ua_mismatch', 'captcha.w_no_languages', 'captcha.w_no_chrome', 'captcha.w_no_plugins', 'captcha.w_webgl_soft',
+		'captcha.w_screen_zero', 'captcha.w_notification', 'captcha.w_too_fast', 'captcha.w_no_input', 'captcha.w_ua_spoof')),
 	'analyzer' => array('set_group_analyzer', 'set_group_analyzer_sub', array('analyzer.window_days', 'analyzer.session_gap_s',
 		'analyzer.rep_ttl', 'analyzer.ml_ttl', 'analyzer.botv_ttl', 'analyzer.botbad_ttl', 'analyzer.dns_canary',
 		'analyzer.ml_min_train', 'analyzer.contamination', 'analyzer.clf_min_positive', 'analyzer.clf_target_precision',
@@ -90,8 +95,7 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 			<input class="gp-input" type="text" id="<?= gp_e($id) ?>" name="<?= gp_e($name) ?>"
 				<?= $type === 'text' ? 'maxlength="' . (int)$spec[1] . '"' : '' ?>
 				value="<?= gp_e(is_scalar($value) ? (string)$value : '') ?>"
-				<?= ($key === 'strings.title' || $key === 'strings.sub' || $key === 'strings.noscript' || $key === 'strings.failed'
-					|| $key === 'strings.retry' || $key === 'strings.nocookie') ? 'dir="auto"' : 'spellcheck="false"' ?>>
+				<?= strncmp($key, 'strings.', 8) === 0 ? 'dir="auto"' : 'spellcheck="false"' ?>>
 		<?php endif; ?>
 	<?php endif; ?>
 		<div class="gp-set-meta">
@@ -166,6 +170,19 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 		gp_tab_begin('set', $gid, $tab_labels[$gid]); ?>
 		<div class="gp-card">
 		<?php if ($g[1] !== ''): ?><p class="gp-help" style="margin-bottom:.75rem"><?= gp_e(gp_t($g[1])) ?></p><?php endif; ?>
+		<?php if ($gid === 'captcha'): $gd_ok = gv_captcha_available(); ?>
+		<div class="gp-note<?= $gd_ok ? '' : ' gp-note-strong' ?>" role="status" id="cap-gd"><?= gp_e(gp_t($gd_ok ? 'cap_gd_ok' : 'cap_gd_missing')) ?></div>
+		<p class="gp-help"><?= gp_e(gp_t('cap_tab_note')) ?></p>
+		<?php if ($gd_ok): ?>
+		<div class="gp-set gp-set-wide" id="cap-preview-box">
+			<div><span class="gp-set-label"><?= gp_e(gp_t('cap_preview')) ?></span></div>
+			<img id="cap-preview" alt="" width="240" height="76" style="display:block;margin:.4rem 0;border:1px solid #d5d8dd;border-radius:6px;background:#fff;max-width:100%;height:auto"
+				src="index.php?r=captcha_preview&amp;_=<?= gp_e((string)time()) ?>">
+			<button type="button" class="gp-btn gp-btn-ghost gp-btn-sm" id="cap-preview-btn"><?= gp_e(gp_t('cap_preview_btn')) ?></button>
+			<span class="gp-help"><?= gp_e(gp_t('cap_preview_help')) ?></span>
+		</div>
+		<?php endif; ?>
+		<?php endif; ?>
 		<div class="gp-set-grid">
 			<?php foreach ($g[2] as $k) { if (isset($rules[$k])) { $field($k); } } ?>
 		</div>

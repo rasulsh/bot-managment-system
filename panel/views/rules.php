@@ -234,6 +234,9 @@ $err_text = function ($field) use ($errors, $details) {
 			<dt><?= gp_e(gp_t('rules_impact_ips')) ?></dt><dd class="gp-mono"><?= gp_e(gp_num($im['ips'])) ?></dd>
 			<dt><?= gp_e(gp_t('rules_impact_devices')) ?></dt><dd class="gp-mono"><?= gp_e(gp_num($im['devices'])) ?></dd>
 			<dt><?= gp_e(gp_t('rules_impact_tokened')) ?></dt><dd class="gp-mono"><?= gp_e(gp_num($im['tokened'])) ?></dd>
+			<?php if (!empty($im['captcha'])): ?>
+			<dt><strong><?= gp_e(gp_t('rules_impact_captcha')) ?></strong></dt><dd class="gp-mono" data-captcha-would="<?= gp_e((string)(int)$im['captcha_would']) ?>"><?= gp_e(gp_num($im['captcha_would'])) ?></dd>
+			<?php endif; ?>
 		</dl>
 		<?php if ($im['paths']): ?>
 		<div class="gp-help"><?= gp_e(gp_t('rules_impact_paths')) ?>:</div>
@@ -241,6 +244,7 @@ $err_text = function ($field) use ($errors, $details) {
 			<?php foreach ($im['paths'] as $ip_path => $ip_n): ?><li><?= gp_e($ip_path) ?> &times; <?= gp_e(gp_num($ip_n)) ?></li><?php endforeach; ?>
 		</ul>
 		<?php elseif ($im['requests'] === 0 && !(!empty($im['geo']) && (int)$im['geo_logged'] === 0 && (int)$im['geo_lookup'] === 0)): ?><div class="gp-help"><?= gp_e(gp_t('rules_impact_none')) ?></div><?php endif; ?>
+		<?php if (!empty($im['captcha'])): ?><div class="gp-help"><?= gp_e(gp_t('rules_impact_captcha_note')) ?></div><?php endif; ?>
 		<div class="gp-help"><?= gp_e(gp_t('rules_impact_note')) ?></div>
 	</div>
 	<?php endif; ?>

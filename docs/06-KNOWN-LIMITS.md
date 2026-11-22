@@ -137,6 +137,50 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
   address it sees: an operator behind a proxy the panel does not trust can still lock themselves out. The kill switch
   (`guard.off`) is the way back in.
 
+## Image CAPTCHA and headless signals
+
+- **It raises a cost, it does not stop a determined attacker.** Stealth plugins hide the signals, OCR and paid solving services solve the
+  images (a few cents per thousand). The per-IP CAPTCHA budget, the device budgets and the proof of work are what limit volume. Watch the
+  dashboard: a solve rate near 100 % with very short median times is a solving service or a bot that reads the image.
+- **Accessibility.** An image CAPTCHA excludes people who cannot see it and is hard on small phones at levels 4 and 5. Start at level 2, keep
+  the time limit generous, and prefer `challenge` rules where a CAPTCHA is not needed. There is no audio alternative.
+- **Redis down.** Binding, expiry and the proof of work still apply, but the attempt counter (`captcha.max_attempts`) and the single-use claim
+  need Redis. A CAPTCHA served while Redis is down (`CAPT_DEGRADED`) has a proof of work of at least 20 bits **bound to each typed answer**, so every
+  guess costs real CPU instead of being free. **What remains:** (1) a nonce issued while Redis was UP and answered after it went down has the
+  normal (unbound, background) proof, so its guesses are unlimited until its time limit ends; the window is at most `captcha time limit` (default
+  150 s) after the outage starts. (2) **Enumeration cost.** A CAPTCHA served while Redis is down also has an answer of at least 6 characters (same charset;
+  the time limit stays as configured, 60-180 s by level), and each guess needs its own 20-bit proof (about 10^6 hashes: ~1 ms for a native solver at
+  ~10^9 hashes/s, ~0.5 s in a browser's JavaScript). Digits: 10^6 answers = ~1000 s of native CPU for the whole space, ~500 s on average, against a
+  150 s limit (level 2): about 3-4 native cores finish inside the limit, one core does not. Letters + digits (levels 4-5, 26 symbols, 6-7
+  characters): 3.1x10^8 to 8x10^9 answers = 3x10^5 s or more of native CPU, thousands of cores for one image. So this makes an outage guess-farm
+  expensive for a single machine, not impossible for a multi-core one; the bits were deliberately kept at 20 (22 would cost real mobile users seconds
+  per submit and does not stop a multi-core attacker). Prefer a level with letters if outages are a concern. (3) A
+  solved nonce can be replayed until its time limit ends (the single-use claim needs Redis). The per-IP CAPTCHA
+  budget is not enforced either (it cannot be read), so pages are served. This is the same fail-open policy as the rest of the guard.
+- **GD.** Without it every captcha action is the proof-of-work challenge (the dashboard warns while a CAPTCHA is configured). The panel checks
+  GD in the web server's PHP, which is also the guard's; a command-line PHP can differ. A host that serves the shop through a different PHP
+  build than the panel (rare) can show a wrong GD status.
+- **The page is one self-contained document with a data-URI image.** A site-wide `Content-Security-Policy: img-src 'self'` header added by the
+  application (not by this guard) would block the image and the inline script; exempt such pages or allow `data:` images and inline scripts.
+- **Shared addresses.** The per-IP budget is per address (an IPv6 /64): a carrier-grade NAT or a school shares it. 10 pages per 15 minutes is
+  generous for people and tight for a farm behind one address; raise it before lowering it.
+- **The signals are heuristics.** Privacy extensions, unusual browsers, remote desktops, virtual machines with software WebGL and some
+  enterprise browsers trip single signals; that is why each has a weight and why escalation needs a *score*, not one signal. Start with
+  `captcha.escalate_score` 0 (off), read `hs` / `hf` on the log rows, then try 60 in `monitor` mode (`SH_CAPT_ESC`). A browser with JavaScript
+  off cannot be escalated (it cannot get a token either).
+- **An escalation needs two page loads** (the handshake answers 202, the next page is the CAPTCHA) and a cookie to keep the token; a browser that
+  blocks cookies loops back to the challenge page's own "enable cookies" message.
+- **The escalation flag is per ip + UA, for 10 minutes.** Dropping the cookie does not escape it (the Redis key `cesc:` is read on every navigation
+  request and in the handshake), but rotating the UA string or the address does (a new key); that is the same ip + UA granularity as the other
+  per-client counters. With Redis down the flag cannot be written or read: only the cookie signal works then. The flag is cleared when a level-c
+  token is issued; an operator can also `DEL gv:cesc:<md5>`.
+- **`captcha.device_budget` is a bypass of the hourly / daily device budgets for anyone who can solve an image** (including a solving
+  service). It is off by default; the per-IP budget still caps the number of images.
+- A request that is not an HTML page (an XMLHttpRequest, `Accept: application/json`, an image) is never shown a CAPTCHA and keeps the normal flow:
+  a scraper that asks for JSON is not stopped by a `captcha` rule (the proof-of-work challenge and the rate limits still apply to it).
+- The tokens of this release are not valid for older guard code: rolling back leaves visitors with a CAPTCHA-level cookie that the old code
+  treats as invalid (they get the challenge once and a normal token).
+
 ## Panel filters, tabs and tooltips
 
 - Filters scan the day's log from the end under the existing scan caps. An *exclude* filter ("is not", "does not

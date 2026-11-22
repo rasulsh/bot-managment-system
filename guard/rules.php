@@ -30,7 +30,7 @@ function gv_rules_path() {
 	return __DIR__ . '/rules.json';
 }
 
-function gv_rule_actions() { return array('block', 'challenge', 'log'); }
+function gv_rule_actions() { return array('block', 'challenge', 'captcha', 'log'); }
 function gv_rule_ua_types() { return array('exact', 'contains', 'prefix', 'regex'); }
 
 // Delimiter for every pattern built here. A control character cannot occur in
@@ -516,8 +516,11 @@ function gv_rule_reason(array $rule) {
 // outage (docs/06-KNOWN-LIMITS.md), so the claim counts as verified for this
 // purpose. Only "no verdict because Redis is down" qualifies: a verdict that WAS
 // read as 'bad' or absent while Redis is alive does not skip.
+//
+// A `captcha` rule ignores skip_verified_bots: a verified crawler is NEVER shown a CAPTCHA (it cannot solve
+// one), whatever the rule says.
 function gv_rule_bot_skip(array $rule, $verdict, $redis_alive) {
-	if (empty($rule['skip_verified_bots'])) { return ''; }
+	if (empty($rule['skip_verified_bots']) && $rule['action'] !== 'captcha') { return ''; }
 	if ($verdict === 'ok') { return 'verified'; }
 	if ($verdict === '' && !$redis_alive) { return 'degraded'; }
 	return '';
@@ -527,16 +530,27 @@ function gv_rule_bot_skip(array $rule, $verdict, $redis_alive) {
 //   $tok   token state of the client ('v' = valid)
 //   $gate  the request must carry a token (gv_is_gate)
 //   $page  page rules are enforced for this method (gv_gate_enforced)
+//   $level the token's level ('c' = a solved CAPTCHA, 'p' or '' = proof of work / none)
+//   $nav   the request asks for an HTML page (gv_is_nav): a CAPTCHA is only ever shown to those
+//   $cap_ok  the image CAPTCHA can be drawn (GD)
 // Returns array(intended, served): '' for nothing. A challenge is intended for
 // any gated request without a valid token, served only where the page rules
 // are enforced - a POST with challenge.gate_post off is logged as a shadow
 // challenge, exactly like the built-in challenge rule. A client holding a
 // valid token is never challenged again, so a solved challenge cannot loop.
-function gv_rule_act(array $rule, $tok, $gate, $page) {
+// `captcha`: the same, but only a CAPTCHA-level token satisfies it, and only an HTML request is asked
+// (any other request keeps the normal flow). Without GD it is the proof-of-work challenge.
+function gv_rule_act(array $rule, $tok, $gate, $page, $level = '', $nav = true, $cap_ok = true) {
 	if ($rule['mode'] !== 'enforce') { return array('', ''); }
 	if ($rule['action'] === 'block') { return array('403', '403'); }
 	if ($rule['action'] === 'challenge' && $gate && $tok !== 'v') {
 		return array('challenge', $page ? 'challenge' : '');
+	}
+	if ($rule['action'] === 'captcha' && $gate) {
+		if (!$cap_ok) { return ($tok !== 'v') ? array('challenge', $page ? 'challenge' : '') : array('', ''); }
+		if (!$nav) { return array('', ''); }
+		if ($tok === 'v' && $level === 'c') { return array('', ''); }
+		return array('captcha', $page ? 'captcha' : '');
 	}
 	return array('', '');
 }
@@ -544,7 +558,7 @@ function gv_rule_act(array $rule, $tok, $gate, $page) {
 // Whether an enforced rule takes the place of the free pass a known bot or a
 // link-preview fetcher gets. A log-only rule never does.
 function gv_rule_overrides_pass(array $rule) {
-	return $rule['mode'] === 'enforce' && ($rule['action'] === 'block' || $rule['action'] === 'challenge');
+	return $rule['mode'] === 'enforce' && ($rule['action'] === 'block' || $rule['action'] === 'challenge' || $rule['action'] === 'captcha');
 }
 
 // The starter set: common script and headless clients, all disabled and in

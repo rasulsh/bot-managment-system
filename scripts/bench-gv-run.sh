@@ -24,6 +24,11 @@ if [ -f "$ROOT/guard/iplist.php" ]; then
 	# and the lookup alone.
 	ARGSETS+=("--lists=100000,10000 --list-types=block" "--lists=100000,10000" "--list-lookup --list-types=block" "--list-lookup")
 fi
+if [ -f "$ROOT/guard/captcha.php" ]; then
+	# CAPTCHA: 20 captcha rules that never match, one that matches a client holding a CAPTCHA-level token (not asked), and the
+	# page generation per level (needs GD).
+	ARGSETS+=("--cap-rules=20" "--cap-match" "--cap-gen")
+fi
 for args in "${ARGSETS[@]}"; do
 	for _ in $(seq 1 "$RUNS"); do
 		# shellcheck disable=SC2086

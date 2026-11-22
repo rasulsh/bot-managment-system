@@ -437,6 +437,23 @@ switch ($gp_route) {
 			'prev' => array('allow' => is_file(gv_iplist_file('allow') . '.prev'), 'block' => is_file(gv_iplist_file('block') . '.prev')),
 		));
 
+	case 'captcha_preview':
+		// A sample CAPTCHA image for the Settings page, drawn with the values typed in the form (query string) over the
+		// saved ones. Logged-in operators only (the session check above); nothing is saved and no answer is shown.
+		$cv = gv_cfg_load();
+		$pq = array();
+		if (isset($_GET['level']) && is_string($_GET['level']) && ctype_digit($_GET['level'])) { $pq['level'] = (int)$_GET['level']; }
+		if (isset($_GET['length']) && is_string($_GET['length']) && ctype_digit($_GET['length'])) { $pq['length'] = (int)$_GET['length']; }
+		foreach (array('charset', 'warp', 'noise', 'overlap') as $pk) { if (isset($_GET[$pk]) && is_string($_GET[$pk])) { $pq[$pk] = $_GET[$pk]; } }
+		$pp = gv_captcha_params(array('captcha' => array_merge($cv['captcha'], $pq)));
+		$png = gv_captcha_available() ? gv_captcha_image(gv_captcha_answer($pp['length'], $pp['charset']), $pp) : '';
+		gp_hardening_headers();
+		if ($png === '') { http_response_code(204); exit; }
+		header('Content-Type: image/png');
+		header('Content-Length: ' . strlen($png));
+		echo $png;
+		exit;
+
 	case 'replay':
 		$params = gp_replay_params_from_request();
 		$result = null;

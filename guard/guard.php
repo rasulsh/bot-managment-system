@@ -12,6 +12,7 @@ require_once __DIR__ . '/challenge.php';
 require_once __DIR__ . '/outcome.php';
 require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/iplist.php';
+require_once __DIR__ . '/captcha.php';
 require_once __DIR__ . '/rules.php';
 
 // --------------------------------------------------------------------------
@@ -104,6 +105,15 @@ function gv_cfg_defaults(array $cfg) {
 		'failed'   => 'We could not verify your browser.',
 		'retry'    => 'Try again',
 		'nocookie' => 'Your browser is not keeping cookies. Please enable cookies for this site and try again.',
+		// The image CAPTCHA page (guard/captcha.php).
+		'cap_title' => 'Please confirm you are human',
+		'cap_sub'  => 'Type the characters you see in the picture.',
+		'cap_label' => 'Characters',
+		'cap_submit' => 'Continue',
+		'cap_new'  => 'New image',
+		'cap_wrong' => 'That is not right. Please try again.',
+		'cap_failed' => 'The check failed. Please get a new image.',
+		'cap_expired' => 'The image has expired. Please get a new one.',
 	);
 	if (!isset($cfg['strings']) || !is_array($cfg['strings'])) { $cfg['strings'] = array(); }
 	$cfg['strings'] = array_merge($strings, $cfg['strings']);
@@ -129,6 +139,17 @@ function gv_cfg_defaults(array $cfg) {
 	// Off by default: the lookup then only runs when a rule needs it.
 	if (!isset($cfg['geo']) || !is_array($cfg['geo'])) { $cfg['geo'] = array(); }
 	$cfg['geo'] = array_merge(array('log' => false), $cfg['geo']);
+	// The image CAPTCHA and the headless signals (guard/captcha.php). 'auto' / 0 = take the value of the level.
+	// escalate_score 0 = off. The w_* values are the weights of the headless signals.
+	// (a literal: this runs on every request. gv_headless_weights_default() holds the same numbers; a test compares them.)
+	$cap = array('level' => 2, 'length' => 0, 'charset' => 'auto', 'warp' => 'auto', 'noise' => 'auto', 'overlap' => 'auto',
+		'time_limit' => 0, 'max_attempts' => 3, 'ip_budget' => 10, 'ip_window' => 900, 'require_pow' => true,
+		'escalate_score' => 0, 'device_budget' => false,
+		'w_webdriver' => 40, 'w_ua_headless' => 40, 'w_ua_mismatch' => 25, 'w_no_languages' => 15, 'w_no_chrome' => 20, 'w_no_plugins' => 10,
+		'w_webgl_soft' => 15, 'w_screen_zero' => 20, 'w_notification' => 15, 'w_too_fast' => 20, 'w_no_input' => 20, 'w_ua_spoof' => 25);
+	if (!isset($cfg['captcha']) || !is_array($cfg['captcha'])) { $cfg['captcha'] = array(); }
+	$cfg['captcha'] = array_merge($cap, $cfg['captcha']);
+	foreach (array('require_pow', 'device_budget') as $bk) { if (!is_bool($cfg['captcha'][$bk])) { $cfg['captcha'][$bk] = (bool)filter_var($cfg['captcha'][$bk], FILTER_VALIDATE_BOOLEAN); } }
 	$cfg['log_floor_delete'] = (bool)filter_var($cfg['log_floor_delete'], FILTER_VALIDATE_BOOLEAN);
 	// 'false' and 'off' are non-empty strings: without this they read as ON.
 	foreach (array('enforce', 'signals', 'geo') as $grp) {
@@ -209,6 +230,33 @@ function gv_overlay_whitelist() {
 		'bot_suffixes'       => array('suffixes'),
 		// GeoIP: put the country / ASN of every request into its log row.
 		'geo.log'            => array('bool'),
+		// The image CAPTCHA (guard/captcha.php). A level 1-5 preset plus every value it sets, each overridable
+		// ('auto' / 0 = from the level), the per-IP budget, escalation, and the weights of the headless signals.
+		'captcha.level'      => array('int', 1, 5),
+		'captcha.length'     => array('int', 0, 8),
+		'captcha.charset'    => array('enum', array('auto', 'digits', 'alnum')),
+		'captcha.warp'       => array('enum', array('auto', 'low', 'medium', 'high')),
+		'captcha.noise'      => array('enum', array('auto', 'few', 'medium', 'many')),
+		'captcha.overlap'    => array('enum', array('auto', 'no', 'slight', 'yes')),
+		'captcha.time_limit' => array('int', 0, 900),
+		'captcha.max_attempts' => array('int', 1, 10),
+		'captcha.ip_budget'  => array('int', 1, 1000),
+		'captcha.ip_window'  => array('int', 60, 86400),
+		'captcha.require_pow' => array('bool'),
+		'captcha.escalate_score' => array('int', 0, 200),
+		'captcha.device_budget' => array('bool'),
+		'captcha.w_webdriver' => array('int', 0, 100),
+		'captcha.w_ua_headless' => array('int', 0, 100),
+		'captcha.w_ua_mismatch' => array('int', 0, 100),
+		'captcha.w_no_languages' => array('int', 0, 100),
+		'captcha.w_no_chrome' => array('int', 0, 100),
+		'captcha.w_no_plugins' => array('int', 0, 100),
+		'captcha.w_webgl_soft' => array('int', 0, 100),
+		'captcha.w_screen_zero' => array('int', 0, 100),
+		'captcha.w_notification' => array('int', 0, 100),
+		'captcha.w_too_fast' => array('int', 0, 100),
+		'captcha.w_no_input' => array('int', 0, 100),
+		'captcha.w_ua_spoof' => array('int', 0, 100),
 		// The visitor-facing challenge page. Rendered escaped by challenge.php.
 		'strings.lang'       => array('lang'),
 		'strings.dir'        => array('enum', array('ltr', 'rtl')),
@@ -218,6 +266,14 @@ function gv_overlay_whitelist() {
 		'strings.failed'     => array('text', 300),
 		'strings.retry'      => array('text', 60),
 		'strings.nocookie'   => array('text', 300),
+		'strings.cap_title'  => array('text', 200),
+		'strings.cap_sub'    => array('text', 300),
+		'strings.cap_label'  => array('text', 60),
+		'strings.cap_submit' => array('text', 60),
+		'strings.cap_new'    => array('text', 60),
+		'strings.cap_wrong'  => array('text', 300),
+		'strings.cap_failed' => array('text', 300),
+		'strings.cap_expired' => array('text', 300),
 		// Analyzer operation. The guard never reads these; the analyzer picks
 		// them up through scripts/config-dump.php (analyzer/config.py load()).
 		'analyzer.window_days'      => array('int', 1, 60),
@@ -630,12 +686,15 @@ function gv_facts(array $server, array $get, array $cookie, array $cfg) {
 		'xrw'     => isset($server['HTTP_X_REQUESTED_WITH']) ? (string)$server['HTTP_X_REQUESTED_WITH'] : '',
 		'xgv'     => isset($server['HTTP_X_GV']) ? (string)$server['HTTP_X_GV'] : '',
 		'xgvp'    => isset($server['HTTP_X_GV_P']) ? (string)$server['HTTP_X_GV_P'] : '',
+		'xga'     => isset($server['HTTP_X_GV_A']) ? (string)$server['HTTP_X_GV_A'] : '',
+		'xgs'     => isset($server['HTTP_X_GV_S']) ? (string)$server['HTTP_X_GV_S'] : '',
 		'referer' => isset($server['HTTP_REFERER']) ? (string)$server['HTTP_REFERER'] : '',
 		'hc'      => gv_header_count($server),
 		'https'   => $https,
 		'cookie'  => $cookies ? $cookies[0] : '',
 		'cookies' => $cookies,
 		'testck'  => (isset($cookie[$name . 't']) && is_string($cookie[$name . 't'])) ? $cookie[$name . 't'] : '',
+		'capck'   => (isset($cookie[$name . 'c']) && is_string($cookie[$name . 'c'])) ? $cookie[$name . 'c'] : '',
 	);
 }
 
@@ -913,6 +972,13 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 	// country, asn is 0 for an unknown AS. A row without the key was not looked up.
 	if (isset($f['cc'])) { $row['cc'] = (string)$f['cc']; }
 	if (isset($f['asn'])) { $row['asn'] = (int)$f['asn']; }
+	// CAPTCHA and headless signals, short keys, only when they apply: cap = show | ok | wrong | fail | exp | inv | esc,
+	// ct = seconds a solved CAPTCHA took, tl = 'c' for a request that carried a CAPTCHA-level token, hs = the headless
+	// score and hf = the letters of the signals that fired (never a raw value).
+	if (!empty($st['cap'])) { $row['cap'] = (string)$st['cap']; }
+	if (isset($st['ct'])) { $row['ct'] = (int)$st['ct']; }
+	if (!empty($st['tl'])) { $row['tl'] = (string)$st['tl']; }
+	if (isset($st['hs'])) { $row['hs'] = (int)$st['hs']; $row['hf'] = (string)($st['hf'] ?? ''); }
 	return $row;
 }
 
@@ -1225,6 +1291,8 @@ function gv_run($t0) {
 	// IP's allow override and bumps the ip, ip_ua and mint counters. Redis down:
 	// the handshake stays open (fail-open) and only the stateless checks apply.
 	if ($f['method'] === 'POST' && $f['xgv'] !== '') {
+		// The image CAPTCHA handshake (a six-part nonce, guard/captcha.php) is a different protocol: it always ends here.
+		if (substr_count($f['xgv'], '.') === 5) { gv_captcha_handshake($cfg, $f, $st, $t0, $log); exit; }
 		$bind_ip = !empty($cfg['challenge']['bind_ip']);
 		$valid   = gv_nonce_check($f['xgv'], $cfg['secret'], $cfg['nonce_ttl'], $f['ua'],
 			$bind_ip ? $f['ip'] : '');
@@ -1233,7 +1301,23 @@ function gv_run($t0) {
 		// request that cannot become a token never touches the mint counter.
 		$pow_ok  = $parsed ? gv_pow_ok($f['xgv'], $f['xgvp'], $parsed[1]) : false;
 		$window  = $cfg['limits']['window'];
+		// The headless signals the page sent (guard/captcha.php): a score and the letters that fired, logged on every
+		// outcome of this handshake. Pure, no Redis; a missing header is neutral.
+		$sigs = gv_headless_parse($f['xgs']);
+		if ($sigs) {
+			$hsr = gv_headless_score($sigs, gv_headless_weights($cfg), $f['ua'], 45);
+			$st['hs'] = $hsr[0];
+			$st['hf'] = $hsr[1];
+		}
 
+		// Escalation (captcha.escalate_score, enforced only while enforce.challenge is on). The decision for THIS handshake needs
+		// nothing but the signals and the proof of work, so it is made before the pipeline: the server-side flag
+		// cesc:<ip + UA> (10 minutes) is WRITTEN in the same pipeline as the other commands, and when this handshake is not
+		// itself escalated the flag is READ there instead. No extra round trip either way. The cookie flag stays the second signal
+		// (it works with Redis down).
+		$esc_at  = (int)$cfg['captcha']['escalate_score'];
+		$esc_on  = ($esc_at > 0 && !empty($cfg['enforce']['challenge']));
+		$esc_pre = ($esc_on && $parsed && $pow_ok && isset($st['hs']) && $st['hs'] >= $esc_at && gv_captcha_available());
 		$conn  = gv_redis_connect($cfg['redis'], $log);
 		$extra = array(array('GET', gv_key('allow:' . $f['ip'])));
 		if ($parsed) {
@@ -1243,6 +1327,9 @@ function gv_run($t0) {
 			$extra[] = array('SET', gv_key('nonce:' . $parsed[0]), '1', 'EX',
 				(string)(max(1, (int)$cfg['nonce_ttl']) + 60), 'NX');
 		}
+		$esc_at_idx = -1;
+		if ($esc_pre) { $esc_at_idx = count($extra); $extra[] = array('SET', gv_cesc_key($f), '1', 'EX', '600'); }
+		elseif ($esc_on) { $esc_at_idx = count($extra); $extra[] = array('GET', gv_cesc_key($f)); }
 		$items = array(
 			array(gv_key('riu:' . md5($f['ipn'] . '|' . substr(md5((string)$f['ua']), 0, 12))), $window),
 			array(gv_key('ri:' . $f['ipn']), $window),
@@ -1257,6 +1344,7 @@ function gv_run($t0) {
 		$st['ci']  = $counts[1];
 		$allowed_ip = ($reads[0] === '1');
 		$replay     = ($parsed && $reads[1] === null);      // false (error) is no verdict
+		$esc_seen   = ($esc_on && !$esc_pre && $esc_at_idx >= 0 && $reads[$esc_at_idx] === '1');     // flagged earlier, cookie or not
 		$mint_n     = ($mint_at >= 0) ? $counts[$mint_at] : 0;
 		// limits.mint counts tokens ISSUED. The bump rode in the same round trip as
 		// the nonce claim, so give it back when this turns out to be a replay or a
@@ -1315,6 +1403,22 @@ function gv_run($t0) {
 				$act = 'mint_limited';            // shadow: logged, token still issued
 				$sh  = 1;
 			}
+		}
+		// Escalation: a proof of work whose headless score reaches captcha.escalate_score does not get a token but a CAPTCHA, and
+		// neither does ANY later proof of work from the same ip + UA while the server-side flag lives (a bot that drops the cookie
+		// and retries gets the same answer). The answer is 202: the page reloads into the CAPTCHA. Off while the score is 0, and
+		// only when the image can be drawn. In monitor mode (enforce.challenge off) it is only logged (SH_CAPT_ESC) and the token
+		// is issued as usual.
+		if ($reject === '' && ($esc_pre || ($esc_seen && gv_captcha_available()))) {
+			gv_capflag_cookie($cfg, gv_capflag_make($cfg['secret']), time() + 600, $f['https']);
+			$st['rs'][] = 'CAPT_ESC';
+			$st['cap'] = 'esc';
+			gv_emit($f, $st, 'challenge', 0, $t0, $log);
+			if (!headers_sent()) { http_response_code(202); }
+			exit;
+		}
+		if ($reject === '' && $esc_at > 0 && !$esc_on && isset($st['hs']) && $st['hs'] >= $esc_at && gv_captcha_available()) {
+			$st['rs'][] = 'SH_CAPT_ESC';
 		}
 		// The device id is derived from the nonce, not drawn at random: if the
 		// single-use claim is ever unavailable (Redis down, flushed), replaying
@@ -1428,16 +1532,19 @@ function gv_run($t0) {
 	// row of a bot pass or a honeypot hit is unchanged.
 	$tok = 'm';
 	$dev = '';
+	$tl = '';                                     // 'c' = the token came from a solved CAPTCHA
 	foreach ($f['cookies'] as $cand) {
-		$d = gv_tok_check($cand, $cfg['secret'], $cfg['token_ttl']);
+		$d = gv_tok_parse($cand, $cfg['secret'], $cfg['token_ttl']);
 		if ($d === false) {
 			$tok = 'b';
 		} else {
 			$tok = 'v';
-			$dev = $d;
+			$dev = $d[0];
+			$tl = ($d[1] === 'c') ? 'c' : '';
 			break;
 		}
 	}
+	if ($tl === 'c') { $st['tl'] = 'c'; }
 
 	// 5. Redis. A failed connect means degraded mode, never a bypass. At most
 	// two round trips follow: ONE pipeline of every GET this request can need,
@@ -1449,6 +1556,7 @@ function gv_run($t0) {
 	$is_hp = ($f['path'] === (string)$cfg['honeypot_path']);
 
 	$reads = array();
+	$cap_cand = false;
 	if ($bot !== '') {
 		$reads['botbad'] = array('GET', gv_key('botbad:' . $f['ip']));
 		$reads['botok']  = array('GET', gv_key('botok:' . $f['ip']));
@@ -1464,6 +1572,15 @@ function gv_run($t0) {
 		if ($f['ip'] !== '') { $reads['allow_ip'] = array('GET', gv_key('allow:' . $f['ip'])); }
 		$reads['deny_ip'] = array('GET', gv_key('deny:' . $f['ip']));
 		$reads['hp']      = array('GET', gv_key('hp:' . $f['ip']));
+		// A CAPTCHA may be needed (a captcha rule matched, an escalation flag is set, or CAPTCHA instead of a device 429 is on):
+		// the per-IP CAPTCHA budget is READ in this same pipeline, never in a round trip of its own. Every other request
+		// pays one array test and nothing more.
+		// Escalation enforced: a navigation request without a CAPTCHA-level token also reads the server-side escalation flag of
+		// this ip + UA (a client that dropped the flag cookie is still sent to the CAPTCHA). Only while escalation is configured.
+		$esc_read = ((int)$cfg['captcha']['escalate_score'] > 0 && !empty($cfg['enforce']['challenge']) && $gate && $tl !== 'c' && gv_is_nav($f));
+		$cap_cand = ($f['capck'] !== '' || ($rule !== null && $rule['action'] === 'captcha') || !empty($cfg['captcha']['device_budget']) || $esc_read);
+		if ($cap_cand) { $reads['capb'] = array('GET', gv_key('cpi:' . $f['ipn'])); }
+		if ($esc_read) { $reads['cesc'] = array('GET', gv_cesc_key($f)); }
 	}
 	$val = array();                               // label => reply; empty = no signal
 	if ($reads && gv_redis_alive($conn)) {
@@ -1620,9 +1737,31 @@ function gv_run($t0) {
 		$st['rs'][] = 'BOT_FAKE';
 	}
 
+	// What an enforced rule (or an escalation flag) asks of this request. Computed BEFORE the counters because a
+	// CAPTCHA page has to be counted against the per-IP CAPTCHA budget in the same pipeline. Rule actions are operator
+	// actions: they do not depend on enforce.block / enforce.challenge (the rule's own mode does), and the holdout never
+	// suppresses them. The counters below run as for any request, so a blocked client keeps counting up exactly like
+	// one under an operator deny.
+	$page   = gv_gate_enforced($f, !empty($cfg['challenge']['gate_post']));
+	$is_nav = $cap_cand ? gv_is_nav($f) : false;
+	$cap_ok = true;                               // only asked when a CAPTCHA could be needed
+	if ($cap_cand) { $cap_ok = gv_captcha_available(); }
+	$ra = ($rule !== null) ? gv_rule_act($rule, $st['tok'], $gate, $page, $tl, $is_nav, $cap_ok) : array('', '');
+	// An escalation flag (a proof of work that looked headless): the next HTML page is a CAPTCHA, never for an
+	// exempt path or an allowed client (they returned long before this point).
+	if ($ra[1] === '' && $gate && $page && $is_nav && $tl !== 'c' && $cap_ok
+		&& ($rv('cesc') === '1' || ($f['capck'] !== '' && gv_capflag_ok($f['capck'], $cfg['secret'])))) {
+		$ra = array('captcha', 'captcha');
+		$st['rs'][] = 'CAPT_ESC';
+	}
+	$cap_over = false;                            // the client is over its per-IP CAPTCHA budget
+	$cap_dev = false;                             // CAPTCHA instead of the device-budget 429
+	$cap_count = ($ra[1] === 'captcha') ? 'pipe' : '';
+
 	// 9. Rate counters, all in one round trip. Skipped entirely in degraded
 	// mode; values stay 0.
 	$over = $bot_over;
+	$over_long = false;
 	if (gv_redis_alive($conn)) {
 		$window = $cfg['limits']['window'];
 		$items = array();
@@ -1640,14 +1779,21 @@ function gv_run($t0) {
 		$uah = substr(md5((string)$f['ua']), 0, 12);
 		$items[] = array(gv_key('riu:' . md5($f['ipn'] . '|' . $uah)), $window);
 		$items[] = array(gv_key('ri:' . $f['ipn']), $window);
+		// The CAPTCHA page about to be served counts against the per-IP budget in this same pipeline; a client already over
+		// its budget adds NOTHING (no key, no write): it gets a 429 below.
+		if ($cap_count === 'pipe') {
+			$cb = $rv('capb');
+			if (is_numeric($cb) && (int)$cb >= (int)$cfg['captcha']['ip_budget']) { $cap_over = true; }
+			else { $items[] = array(gv_key('cpi:' . $f['ipn']), (int)$cfg['captcha']['ip_window']); }
+		}
 		$counts = gv_bump_many($conn, $items);
 		if ($st['dev'] !== '') {
 			$st['cd'] = array_shift($counts);
 			if ($st['cd'] > (int)$cfg['limits']['device']) { $over = true; }
 			$st['cdh'] = array_shift($counts);
-			if ($st['cdh'] > (int)$cfg['limits']['device_hour']) { $over = true; $st['rs'][] = 'DEV_HOUR'; }
+			if ($st['cdh'] > (int)$cfg['limits']['device_hour']) { $over = true; $over_long = true; $st['rs'][] = 'DEV_HOUR'; }
 			$st['cdd'] = array_shift($counts);
-			if ($st['cdd'] > (int)$cfg['limits']['device_day']) { $over = true; $st['rs'][] = 'DEV_DAY'; }
+			if ($st['cdd'] > (int)$cfg['limits']['device_day']) { $over = true; $over_long = true; $st['rs'][] = 'DEV_DAY'; }
 		}
 		$st['ciu'] = $counts[0];
 		if ($st['ciu'] > (int)$cfg['limits']['ip_ua']) { $over = true; }
@@ -1655,19 +1801,25 @@ function gv_run($t0) {
 		if ($st['ci'] > (int)$cfg['limits']['ip']) { $over = true; }
 	}
 	gv_finish($conn, $st);
+	// CAPTCHA instead of the hourly / daily device 429 (captcha.device_budget, default off): a client holding a
+	// CAPTCHA-level token is waived from those two budgets; one without gets a CAPTCHA, not a 429, when the device
+	// budgets are the ONLY thing it is over and the request asks for an HTML page.
+	if ($over_long && !empty($cfg['captcha']['device_budget'])) {
+		$over_other = ($st['cd'] > (int)$cfg['limits']['device']) || $bot_over || ($st['ciu'] > (int)$cfg['limits']['ip_ua']) || ($st['ci'] > (int)$cfg['limits']['ip']);
+		if ($tl === 'c') { $over = $over_other; }
+		elseif (!$over_other && $gate && $page && $is_nav && $cap_ok) {
+			$cb = $rv('capb');
+			$cap_dev = true;
+			if (is_numeric($cb) && (int)$cb >= (int)$cfg['captcha']['ip_budget']) { $cap_over = true; }
+		}
+	}
 
 	// 10. Decision, now judging the effective score.
 	$st['esc'] = gv_effective_score($st['sc'], $st['rep'], $st['ml'], $st['clf'], $cfg);
 	$intended  = gv_decide($st['esc'], $over, $gate, $st['tok'], $cfg['hard_block_score'],
 		$st['ovr']);
 
-	// 10b. What an enforced rule adds. Rule actions are operator actions: they
-	// do not depend on enforce.block / enforce.challenge (the rule's own mode
-	// does), and the holdout never suppresses them. The counters above ran as
-	// for any request, so a blocked client keeps counting up exactly like one
-	// under an operator deny.
-	$page = gv_gate_enforced($f, !empty($cfg['challenge']['gate_post']));
-	$ra   = ($rule !== null) ? gv_rule_act($rule, $st['tok'], $gate, $page) : array('', '');
+	// 10b. $ra (computed before the counters): what an enforced rule adds.
 
 	// 11. Act. Every branch logs exactly one line.
 	if ($intended === 'allow' && $ra[0] === '') {
@@ -1675,7 +1827,7 @@ function gv_run($t0) {
 		gv_arm_outcome($cfg, $f, $log);
 		return;                                   // zero bytes of output
 	}
-	if ($intended === 'allow') { $intended = $ra[0]; }
+	if ($intended === 'allow') { $intended = ($ra[0] === 'captcha') ? 'challenge' : $ra[0]; }     // a CAPTCHA page is a challenge in the log
 
 	// Holdout: a small deterministic slice measured but never enforced against.
 	// It is the only source of outcome data this system has not already biased
@@ -1692,6 +1844,17 @@ function gv_run($t0) {
 	if ($st['ovr'] === 'deny' && !empty($cfg['enforce']['block'])) { $served = '403'; }
 	if ($ra[1] === '403') { $served = '403'; }
 	elseif ($ra[1] === 'challenge' && $served === 'allow') { $served = 'challenge'; }
+	elseif ($ra[1] === 'captcha' && ($served === 'allow' || $served === 'challenge')) { $served = 'captcha'; }
+	elseif ($cap_dev && $served === '429') { $served = 'captcha'; }
+	// A CAPTCHA for a client over its per-IP CAPTCHA budget is a 429, decided here with NO Redis work at all.
+	if ($served === 'captcha' && $cap_over) { $served = '429'; $st['rs'][] = 'CAPT_BUDGET'; }
+	$served_act = ($served === 'captcha') ? 'challenge' : $served;
+	if ($served === 'captcha') {
+		$st['cap'] = 'show';
+		// Redis is not alive: the attempt counter cannot count, so this CAPTCHA is issued with a proof of work of at least 20 bits
+		// that is bound to every typed answer (gv_captcha_pow_bits): each guess costs real CPU, and an answer of at least 6 characters.
+		if (!empty($st['rd'])) { $st['rs'][] = 'CAPT_DEGRADED'; }
+	}
 
 	if ($served === 'allow') {
 		// Monitor mode or holdout: record what would have happened and allow.
@@ -1701,16 +1864,25 @@ function gv_run($t0) {
 		gv_arm_outcome($cfg, $f, $log);
 		return;
 	}
-	if ($served !== $intended) {
+	if ($served_act !== $intended) {
 		// A higher rule matched but is in shadow, and a lower one is enforced.
 		// One row per request: it carries what was served, and names the
 		// shadowed rule in rs so the would-be action is not lost.
 		$st['rs'][] = 'SH_' . $intended;
 	}
-	gv_emit($f, $st, $served, 0, $t0, $log);
+	gv_emit($f, $st, $served_act, 0, $t0, $log);
 	$intended = $served;
 	if ($intended === '403') { gv_send_403(); exit; }
 	if ($intended === '429') { gv_send_429(); exit; }
+	if ($served === 'captcha') {
+		// The CAPTCHA instead of a device 429 is counted here (one extra command, only on that path); a rule's CAPTCHA
+		// was counted in the counters pipeline.
+		if ($cap_dev && $ra[1] !== 'captcha') { gv_captcha_count_page($cfg, $f, $log); }
+		$pb = max(0, min(24, (int)$cfg['challenge']['pow_bits']));
+		if ($rule !== null && (int)$rule['pow_bits'] > 0) { $pb = (int)$rule['pow_bits']; }
+		gv_captcha_serve($cfg, $f, gv_captcha_pow_bits($cfg, $pb, !empty($st['rd'])), !empty($st['rd']));
+		exit;
+	}
 	$bits  = max(0, min(24, (int)$cfg['challenge']['pow_bits']));
 	if ($ra[1] === 'challenge' && (int)$rule['pow_bits'] > 0) { $bits = (int)$rule['pow_bits']; }
 	$nonce = gv_nonce_make($cfg['secret'], $f['ua'], !empty($cfg['challenge']['bind_ip']) ? $f['ip'] : '', $bits);

@@ -11,7 +11,7 @@
 // Redis (scripts/bench-gv-run.sh starts a throw-away one).
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
-$opt = getopt('', array('n::', 'rules::', 'values::', 'redis-port::', 'regex::', 'geo-rules::', 'geo-ranges::', 'geo-log::', 'geo-ua::', 'lookup::', 'match::', 'lists::', 'list-lookup::', 'list-types::'));
+$opt = getopt('', array('n::', 'rules::', 'values::', 'redis-port::', 'regex::', 'geo-rules::', 'geo-ranges::', 'geo-log::', 'geo-ua::', 'lookup::', 'match::', 'lists::', 'list-lookup::', 'list-types::', 'cap-gen::', 'cap-match::', 'cap-rules::'));
 $n      = isset($opt['n']) ? (int)$opt['n'] : 3000;
 $nrules = isset($opt['rules']) ? (int)$opt['rules'] : 0;
 $nvals  = isset($opt['values']) ? (int)$opt['values'] : 5;
@@ -30,7 +30,15 @@ $lookup_only = isset($opt['lookup']);
 // them covers the benchmark client); --list-lookup times gv_iplist_check() alone.
 $lists_spec = isset($opt['lists']) ? array_map('intval', explode(',', (string)$opt['lists'] . ',0')) : null;
 $list_lookup = isset($opt['list-lookup']);
+// --esc: escalation enforced (the request reads the server-side flag cesc:<ip+UA> in its one pipeline).
+// CAPTCHA: --cap-gen times the image + page generation at every level; --cap-rules=N writes N captcha rules that never match
+// (the cost of having them); --cap-match writes one captcha rule that MATCHES the benchmark client, which holds a CAPTCHA-level
+// token, so it is not asked: the request path of a request that does NOT get a CAPTCHA although a captcha rule applies.
+$cap_gen = isset($opt['cap-gen']);
+$cap_rules = isset($opt['cap-rules']) ? (int)$opt['cap-rules'] : 0;
+$cap_match = isset($opt['cap-match']);
 $list_types = (isset($opt['list-types']) && $opt['list-types'] === 'block') ? array('block' => 9) : array('allow' => 7, 'block' => 9);   // --list-types=block: only a block file
+$esc_on = isset($opt['esc']);        // --esc: escalation enforced (enforce.challenge on, captcha.escalate_score 60): the request also reads cesc:<ip+UA>
 $match_only = isset($opt['match']);     // --match: gv_rules_match() alone, country already known (no lookup)
 $tmp    = sys_get_temp_dir() . '/gv-bench-' . getmypid();
 @mkdir($tmp . '/logs', 0775, true);
@@ -43,6 +51,7 @@ file_put_contents($tmp . '/config.php', "<?php\nif (!defined('GV_BOOT')) { exit;
 	. "\$c['redis']['port'] = $port; \$c['redis']['timeout'] = 0.5; \$c['log_dir'] = " . var_export($tmp . '/logs', true) . ";\n"
 	. "\$c['limits'] = array_merge(\$c['limits'], array('window' => 3600, 'device' => 1000000, 'ip_ua' => 1000000, 'ip' => 1000000, 'device_hour' => 1000000, 'device_day' => 1000000));\n"
 	. ($geolog ? "\$c['geo'] = array('log' => true);\n" : '')
+	. ($esc_on ? "\$c['enforce']['challenge'] = true; \$c['captcha']['escalate_score'] = 60;\n" : '')
 	. "return \$c;\n");
 putenv('GV_CONFIG=' . $tmp . '/config.php');
 
@@ -61,6 +70,18 @@ if ($nrules > 0) {
 			'expires_at' => 0, 'pow_bits' => 0, 'note' => '', 'created_by' => '', 'created_at' => 0, 'updated_at' => 0);
 	}
 	putenv('GV_RULES=' . $tmp . '/rules.json');
+}
+
+if ($cap_rules > 0 || $cap_match) {
+	$rules = array();
+	for ($i = 0; $i < ($cap_match ? 1 : $cap_rules); $i++) {
+		$rules[] = array('id' => 'c' . sprintf('%05d', $i), 'name' => 'cap ' . $i, 'enabled' => true, 'mode' => 'enforce',
+			'action' => 'captcha', 'priority' => 100 + $i, 'skip_verified_bots' => true,
+			'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array($cap_match ? 'Mozilla' : 'scraper-' . $i)), 'path' => null,
+			'expires_at' => 0, 'pow_bits' => 0, 'note' => '', 'created_by' => '', 'created_at' => 0, 'updated_at' => 0);
+	}
+	putenv('GV_RULES=' . $tmp . '/rules.json');
+	$nrules = count($rules);
 }
 
 // The generated GeoIP database (guard/geo.php exists only from the GeoIP release on).
@@ -131,6 +152,29 @@ if ($match_only) {
 	$bench_cleanup();
 	exit;
 }
+if ($cap_gen) {
+	// The CAPTCHA page generation per level: the answer, the PNG and the whole HTML page (everything gv_captcha_serve does,
+	// minus the output). p50 / p99 over 400 pages per level, GD, the shipped font, PHP in-process.
+	foreach (array(1, 2, 3, 4, 5) as $lv) {
+		$pp = gv_captcha_params(array('captcha' => array('level' => $lv)));
+		$img = array(); $page = array(); $bytes = 0;
+		for ($i = 0; $i < 420; $i++) {
+			$t = hrtime(true);
+			$ans = gv_captcha_answer($pp['length'], $pp['charset']);
+			$png = gv_captcha_image($ans, $pp);
+			$t1 = hrtime(true);
+			$nonce = gv_captcha_nonce_make($cfg['secret'], 'ua', '1.2.3.4', 16, $pp['time'], $ans);
+			ob_start(); gv_captcha_render($nonce, $cfg['strings'], 16, $png, $pp); $html = ob_get_clean();
+			$t2 = hrtime(true);
+			if ($i >= 20) { $img[] = ($t1 - $t) / 1000; $page[] = ($t2 - $t) / 1000; $bytes = strlen($html); }
+		}
+		sort($img); sort($page);
+		printf("captcha level %d  (%d %s, %s warp, %s noise, %s overlap)  image p50=%.0fus p99=%.0fus | whole page p50=%.0fus p99=%.0fus  html=%d bytes  (php %s)\n", $lv, $pp['length'], $pp['charset'], $pp['warp'], $pp['noise'], $pp['overlap'],
+			$img[(int)(0.5 * count($img))], $img[(int)(0.99 * count($img))], $page[(int)(0.5 * count($page))], $page[(int)(0.99 * count($page))], $bytes, PHP_VERSION);
+	}
+	$bench_cleanup();
+	exit;
+}
 if ($list_lookup) {
 	// The IP list lookup alone (both files, no match): a fresh request (reset state, open + search both
 	// files) and the search with the files already open. Addresses are random, IPv4 and IPv6 mixed 10:1.
@@ -175,7 +219,7 @@ if ($lookup_only) {
 	exit;
 }
 
-$_COOKIE = array('_gv' => gv_tok_make($cfg['secret']));
+$_COOKIE = array('_gv' => gv_tok_make($cfg['secret'], '', ($cap_match && function_exists('gv_tok_parse')) ? 'c' : 'p'));
 $samples = array();
 for ($i = 0; $i < $n + 300; $i++) {
 	$_SERVER = array('REMOTE_ADDR' => '203.0.113.' . (1 + ($i % 200)), 'REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/p/' . $i,
@@ -190,6 +234,6 @@ for ($i = 0; $i < $n + 300; $i++) {
 }
 sort($samples);
 $pct = function ($p) use ($samples) { return $samples[(int)min(count($samples) - 1, floor($p * count($samples)))]; };
-printf("rules=%d%s%s%s values=%d%s n=%d  p50=%.0fus  p99=%.0fus  max=%.0fus  (php %s)\n", $nrules, $ngeo ? ' geo' . ($geoua ? '+ua' : '') : '', $geolog ? ' geo.log' : '', $lists_spec ? ' iplists=' . $lists_spec[0] . '+' . $lists_spec[1] . (count($list_types) === 1 ? ' block-only' : ' allow+block') : '', $nvals, $regex ? ' regex' : '', count($samples),
+printf("rules=%d%s%s%s values=%d%s n=%d  p50=%.0fus  p99=%.0fus  max=%.0fus  (php %s)\n", $nrules, $ngeo ? ' geo' . ($geoua ? '+ua' : '') : '', $geolog ? ' geo.log' : '', $lists_spec ? ' iplists=' . $lists_spec[0] . '+' . $lists_spec[1] . (count($list_types) === 1 ? ' block-only' : ' allow+block') : '' . ($cap_match ? ' captcha-rule-matches(c-token)' : ($cap_rules ? ' captcha-rules' : '')), $nvals, $regex ? ' regex' : '', count($samples),
 	$pct(0.5), $pct(0.99), end($samples), PHP_VERSION);
 $bench_cleanup();

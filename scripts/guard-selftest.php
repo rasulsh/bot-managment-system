@@ -1640,6 +1640,234 @@ putenv('GV_LISTS_DIR');
 gv_geo_state(true);
 
 // --------------------------------------------------------------------------
+t_section('Image CAPTCHA: image, answer, nonce, token level, rule action, headless score');
+
+$CAP_CFG = gv_cfg_defaults(array('secret' => 'cap-secret'));
+$has_gd = function_exists('imagettftext');
+t_ok('captcha: the five levels carry the preset table (length, charset, warp, noise, overlap, time)',
+	gv_captcha_levels() === array(
+		1 => array('length' => 4, 'charset' => 'digits', 'warp' => 'low',    'noise' => 'few',    'overlap' => 'no',     'time' => 180),
+		2 => array('length' => 5, 'charset' => 'digits', 'warp' => 'low',    'noise' => 'few',    'overlap' => 'no',     'time' => 150),
+		3 => array('length' => 5, 'charset' => 'digits', 'warp' => 'medium', 'noise' => 'medium', 'overlap' => 'slight', 'time' => 120),
+		4 => array('length' => 6, 'charset' => 'alnum',  'warp' => 'high',   'noise' => 'many',   'overlap' => 'yes',    'time' => 90),
+		5 => array('length' => 7, 'charset' => 'alnum',  'warp' => 'high',   'noise' => 'many',   'overlap' => 'yes',    'time' => 60)));
+$cp = function (array $c) use ($CAP_CFG) { return gv_captcha_params(array_merge($CAP_CFG, array('captcha' => array_merge($CAP_CFG['captcha'], $c)))); };
+t_ok('captcha: a level sets every value; the default level is 2', $cp(array())['level'] === 2 && $cp(array('level' => 4))['length'] === 6 && $cp(array('level' => 4))['charset'] === 'alnum' && $cp(array('level' => 1))['time'] === 180);
+t_ok('captcha: every value can be overridden on top of the level; "auto" and 0 mean the level; junk falls back to the level',
+	$cp(array('level' => 1, 'length' => 6, 'charset' => 'alnum', 'warp' => 'high', 'noise' => 'many', 'overlap' => 'yes', 'time_limit' => 45)) === array('length' => 6, 'charset' => 'alnum', 'warp' => 'high', 'noise' => 'many', 'overlap' => 'yes', 'time' => 45, 'level' => 1)
+	&& $cp(array('level' => 3, 'length' => 0, 'charset' => 'auto', 'time_limit' => 0))['length'] === 5 && $cp(array('level' => 9))['level'] === 2 && $cp(array('length' => 99, 'warp' => 'x'))['warp'] === 'low' && $cp(array('length' => 99))['length'] === 5);
+t_ok('captcha: the answer alphabet has no ambiguous character: digits only, or letters without O I S Z B and digits without 0 1 2 5 8',
+	gv_captcha_charset('digits') === '0123456789' && !preg_match('/[OISZB01258]/', gv_captcha_charset('alnum')) && preg_match('/^[A-Z0-9]+$/', gv_captcha_charset('alnum')) === 1);
+$amb = 0; $badlen = 0;
+for ($i = 0; $i < 400; $i++) {
+	$a = gv_captcha_answer(6, 'alnum');
+	if (preg_match('/[^34679ACDEFGHJKLMNPQRTUVWXY]/', $a)) { $amb++; }
+	if (strlen($a) !== 6 || !ctype_digit(gv_captcha_answer(5, 'digits')) || strlen(gv_captcha_answer(5, 'digits')) !== 5) { $badlen++; }
+}
+t_ok('captcha: 400 generated answers have the right length and alphabet (' . $amb . ' / ' . $badlen . ' bad)', $amb === 0 && $badlen === 0);
+t_ok('captcha: Persian and Arabic-Indic digits become Latin; spaces, zero-width and direction marks go; letters are upper-cased',
+	gv_captcha_normalize('۱۲۳۴۵') === '12345' && gv_captcha_normalize('٦٧٨٩٠') === '67890' && gv_captcha_normalize(' 1 ۲ 3 ') === '123' && gv_captcha_normalize("a\xE2\x80\x8Cb\xE2\x80\x8Fc\xC2\xA0d") === 'ABCD'
+	&& gv_captcha_normalize('ab3k') === 'AB3K' && gv_captcha_normalize('') === '' && strlen(gv_captcha_normalize(str_repeat('1', 500))) === 64 && gv_captcha_normalize('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩') === '01234567890123456789');
+// The image, at every level.
+if (!$has_gd) {
+	t_skip('captcha: image generation at every level (PNG, size, characters)', 'PHP GD is not installed here: the fallback tests below still run');
+} else {
+	$bad = array();
+	foreach (array(1, 2, 3, 4, 5) as $lv) {
+		$pp = $cp(array('level' => $lv));
+		$ans = gv_captcha_answer($pp['length'], $pp['charset']);
+		$png = gv_captcha_image($ans, $pp, $lv);
+		$info = @getimagesizefromstring($png);
+		if (substr($png, 0, 8) !== "\x89PNG\r\n\x1a\n" || !$info || $info[2] !== IMAGETYPE_PNG || $info[1] !== 76 || strlen($ans) !== $pp['length']) { $bad[] = 'level ' . $lv; }
+		if ($info && $info[0] < $pp['length'] * 20) { $bad[] = 'width ' . $lv; }
+	}
+	t_ok('captcha: every level draws a real PNG of the right height, a width that grows with the length, and a bounded size' . ($bad ? ' (bad: ' . implode(',', $bad) . ')' : ''), !$bad);
+	$p1 = $cp(array('level' => 1)); $p5 = $cp(array('level' => 5));
+	$w1 = getimagesizefromstring(gv_captcha_image('1234', $p1, 1))[0]; $w5 = getimagesizefromstring(gv_captcha_image('ABCDEFG', $p5, 1))[0];
+	t_ok('captcha: a longer answer is a wider image (4 chars vs 7 chars)', $w5 > $w1);
+	t_ok('captcha: the same text and seed draw the same image, another seed another image, another text another image',
+		gv_captcha_image('4821', $p1, 7) === gv_captcha_image('4821', $p1, 7) && gv_captcha_image('4821', $p1, 7) !== gv_captcha_image('4821', $p1, 8) && gv_captcha_image('4821', $p1, 7) !== gv_captcha_image('4822', $p1, 7));
+	t_ok('captcha: a harder level draws a busier picture than an easier one (more bytes of PNG: noise, warp, overlap)', strlen(gv_captcha_image('482137', $cp(array('level' => 5, 'length' => 6)), 3)) > strlen(gv_captcha_image('482137', $cp(array('level' => 1, 'length' => 6)), 3)));
+	$t0 = microtime(true);
+	for ($i = 0; $i < 50; $i++) { gv_captcha_image('48213', $cp(array('level' => 3)), $i); }
+	t_ok('captcha: a level 3 image takes well under 20 ms', (microtime(true) - $t0) / 50 < 0.02);
+	t_ok('captcha: the shipped font and its licence are in guard/', is_file(GV_CAPTCHA_FONT) && is_file(__DIR__ . '/../guard/captcha-font.LICENSE.txt') && strpos(file_get_contents(__DIR__ . '/../guard/captcha-font.LICENSE.txt'), 'Permission is hereby granted') !== false);
+}
+// GD missing: the fallback.
+putenv('GV_CAPTCHA_NO_GD=1');
+t_ok('captcha: with GD "missing" the image is not available and nothing is drawn', gv_captcha_available() === false && gv_captcha_image('1234', $cp(array()), 1) === '');
+$fb_f = array('ua' => 'ua', 'ip' => '1.2.3.4');
+ob_start(); gv_captcha_serve(array_merge($CAP_CFG, array('secret' => 'cap-secret')), $fb_f, 14); $fb = ob_get_clean();
+t_ok('captcha: without GD a captcha action serves the proof-of-work challenge with the requested difficulty (a four-part nonce, no image)',
+	preg_match("/var N = '([0-9a-f.]+)', B = 14,/", $fb, $m) === 1 && count(explode('.', $m[1])) === 4 && strpos($fb, 'data:image') === false && strpos($fb, 'gv-cform') === false);
+putenv('GV_CAPTCHA_NO_GD');
+t_ok('captcha: and the GD check is back on once the knob is gone', gv_captcha_available() === $has_gd);
+
+// The nonce: answer commitment, binding, expiry.
+$cn = gv_captcha_nonce_make('cap-secret', 'ua/1', '203.0.113.5', 12, 150, '4821');
+$cx = explode('.', $cn);
+t_ok('captcha nonce: six parts, the PoW nonce parser refuses it and the CAPTCHA parser refuses a PoW nonce', count($cx) === 6 && gv_nonce_parse($cn) === false && gv_captcha_nonce_parse(gv_nonce_make('cap-secret', 'ua/1', '203.0.113.5', 12)) === false
+	&& gv_captcha_nonce_parse($cn)[2] === 12 && gv_captcha_nonce_parse($cn)[3] === 150);
+t_ok('captcha nonce: the answer is NOT in the nonce (only an HMAC of it), whatever the case or the digits typed',
+	strpos($cn, '4821') === false && gv_captcha_answer_ok($cn, 'cap-secret', '4821') && gv_captcha_answer_ok($cn, 'cap-secret', ' ۴۸۲۱ ') && gv_captcha_answer_ok($cn, 'cap-secret', '٤٨٢١')
+	&& !gv_captcha_answer_ok($cn, 'cap-secret', '4822') && !gv_captcha_answer_ok($cn, 'cap-secret', '') && !gv_captcha_answer_ok($cn, 'other-secret', '4821') && !gv_captcha_answer_ok('garbage', 'cap-secret', '4821'));
+$cn2 = gv_captcha_nonce_make('cap-secret', 'ua/1', '203.0.113.5', 0, 60, 'ab3k');
+t_ok('captcha nonce: letters are case-insensitive', gv_captcha_answer_ok($cn2, 'cap-secret', 'AB3K') && gv_captcha_answer_ok($cn2, 'cap-secret', 'aB3k') && !gv_captcha_answer_ok($cn2, 'cap-secret', 'AB3L'));
+t_ok('captcha nonce: ok for its own UA and IP, bad for another UA, another IP, another secret, a flipped byte, a swapped answer commitment',
+	gv_captcha_nonce_state($cn, 'cap-secret', 'ua/1', '203.0.113.5') === 'ok' && gv_captcha_nonce_state($cn, 'cap-secret', 'ua/2', '203.0.113.5') === 'bad' && gv_captcha_nonce_state($cn, 'cap-secret', 'ua/1', '203.0.113.6') === 'bad'
+	&& gv_captcha_nonce_state($cn, 'x', 'ua/1', '203.0.113.5') === 'bad' && gv_captcha_nonce_state(substr($cn, 0, -1) . ($cn[strlen($cn) - 1] === '0' ? '1' : '0'), 'cap-secret', 'ua/1', '203.0.113.5') === 'bad'
+	&& gv_captcha_nonce_state(implode('.', array($cx[0], $cx[1], $cx[2], $cx[3], str_repeat('0', 16), $cx[5])), 'cap-secret', 'ua/1', '203.0.113.5') === 'bad');
+t_ok('captcha nonce: the time limit is part of the signed nonce: ok at 149 s, expired at 150 s, "bad" for a nonce from the future, a limit changed by the client is bad',
+	gv_captcha_nonce_state($cn, 'cap-secret', 'ua/1', '203.0.113.5', (int)$cx[0] + 149) === 'ok' && gv_captcha_nonce_state($cn, 'cap-secret', 'ua/1', '203.0.113.5', (int)$cx[0] + 150) === 'exp'
+	&& gv_captcha_nonce_state($cn, 'cap-secret', 'ua/1', '203.0.113.5', (int)$cx[0] - 100) === 'bad' && gv_captcha_nonce_state(implode('.', array($cx[0], $cx[1], $cx[2], '3600', $cx[4], $cx[5])), 'cap-secret', 'ua/1', '203.0.113.5') === 'bad');
+t_ok('captcha nonce: without bind_ip the IP is not part of the binding (empty on both sides)', gv_captcha_nonce_state(gv_captcha_nonce_make('s', 'u', '', 0, 60, '1234'), 's', 'u', '') === 'ok');
+t_ok('captcha nonce: parser limits (bits 0-24, time 1-3600, hex shapes)', gv_captcha_nonce_parse('1.' . str_repeat('a', 16) . '.25.60.' . str_repeat('b', 16) . '.' . str_repeat('c', 64)) === false
+	&& gv_captcha_nonce_parse('1.' . str_repeat('a', 16) . '.12.0.' . str_repeat('b', 16) . '.' . str_repeat('c', 64)) === false && gv_captcha_nonce_parse('1.' . str_repeat('a', 16) . '.12.3601.' . str_repeat('b', 16) . '.' . str_repeat('c', 64)) === false
+	&& gv_captcha_nonce_parse('1.' . str_repeat('a', 16) . '.12.60.' . str_repeat('b', 15) . '.' . str_repeat('c', 64)) === false && gv_captcha_nonce_parse('') === false);
+t_ok('captcha: the escalation flag is a signed expiry that grants nothing', gv_capflag_ok(gv_capflag_make('s'), 's') && !gv_capflag_ok(gv_capflag_make('s'), 't') && !gv_capflag_ok(gv_capflag_make('s', -5), 's') && !gv_capflag_ok('x', 's') && !gv_capflag_ok('', 's'));
+
+// Escalation flag in Redis + the degraded (Redis down) CAPTCHA: the helpers and the wiring.
+$bc = array('captcha' => array('require_pow' => 1));
+t_ok('captcha bits: the configured difficulty while Redis is up; require_pow off means none',
+	gv_captcha_pow_bits($bc, 14, false) === 14 && gv_captcha_pow_bits(array('captcha' => array('require_pow' => 0)), 14, false) === 0);
+t_ok('captcha bits: Redis down raises it to at least 20 (also with require_pow off), never lowers a higher one, never above 24',
+	gv_captcha_pow_bits($bc, 14, true) === 20 && gv_captcha_pow_bits(array('captcha' => array('require_pow' => 0)), 0, true) === 20
+	&& gv_captcha_pow_bits($bc, 22, true) === 22 && gv_captcha_pow_bits($bc, 30, true) === 24);
+$bn = 'nonce.abc'; $bl = null;
+for ($i = 0; $bl === null; $i++) { if (gv_pow_ok($bn, (string)$i, 8)) { $bl = $i; } }
+t_ok('captcha pow: below 20 bits the proof covers the nonce alone (background solving), whatever the answer header says',
+	gv_captcha_pow_ok($bn, 'x', (string)$bl, 8) === true && gv_captcha_pow_ok($bn, '', (string)$bl, 8) === true);
+$bf = null; for ($i = 0; $i < 20000000 && $bf === null; $i++) { if (gv_pow_ok($bn . ':4821', (string)$i, 20)) { $bf = $i; } }
+t_ok('captcha pow: a solved bound proof is good for ITS answer only (another guess needs its own work)',
+	$bf !== null && gv_captcha_pow_ok($bn, '4821', (string)$bf, 20) === true && gv_captcha_pow_ok($bn, '4822', (string)$bf, 20) === false && gv_captcha_pow_ok($bn, '', (string)$bf, 20) === false);
+$ke = array('ipn' => 'ip1', 'ua' => 'Mozilla A'); $ke2 = array('ipn' => 'ip1', 'ua' => 'Mozilla B'); $ke3 = array('ipn' => 'ip2', 'ua' => 'Mozilla A');
+t_ok('escalation flag key: cesc:<md5>, stable for one ip + UA, different for another UA or another IP',
+	preg_match('/^.*cesc:[0-9a-f]{32}$/', gv_cesc_key($ke)) === 1 && gv_cesc_key($ke) === gv_cesc_key($ke) && gv_cesc_key($ke) !== gv_cesc_key($ke2) && gv_cesc_key($ke) !== gv_cesc_key($ke3));
+$gsrc = file_get_contents(__DIR__ . '/../guard/guard.php');
+t_ok('escalation flag: written (SET .. EX 600) or read (GET) inside the handshake pipeline, read in the request pipeline: no extra connect or pipeline',
+	strpos($gsrc, "array('SET', gv_cesc_key(\$f), '1', 'EX', '600')") !== false && strpos($gsrc, "array('GET', gv_cesc_key(\$f))") !== false);
+$cj = gv_captcha_js('n.n', 20, array());
+t_ok('captcha page script: the solver midstate is set up per subject and an answer-bound proof is solved at submit', strpos($cj, 'function setup(') !== false && strpos($cj, 'bound') !== false);
+$dg = ''; ob_start(); gv_captcha_serve(array_merge($CAP_CFG, array('secret' => 'cap-secret')), array('ua' => 'ua', 'ip' => '1.2.3.4'), 20); $dg = ob_get_clean();
+t_ok('captcha serve: with 20 bits the page carries B = 20 (bound proof) in a six-part nonce',
+	!$has_gd || (preg_match("/var N = '([0-9a-f.]+)', B = 20,/", $dg, $m) === 1 && count(explode('.', $m[1])) === 6));
+t_ok('captcha degraded length: at least 6 characters, a longer configured length is kept (max 8), the charset is untouched',
+	gv_captcha_degraded_length(4) === 6 && gv_captcha_degraded_length(5) === 6 && gv_captcha_degraded_length(6) === 6 && gv_captcha_degraded_length(7) === 7 && gv_captcha_degraded_length(0) === 6);
+if ($has_gd) {
+	// The answer of a served page is only in the nonce as an HMAC: recover it by brute force for the digit levels.
+	$len_of = function ($degraded) use ($CAP_CFG) {
+		$cfg = array_merge($CAP_CFG, array('secret' => 'cap-secret', 'captcha' => array_merge($CAP_CFG['captcha'], array('level' => 1))));
+		ob_start(); gv_captcha_serve($cfg, array('ua' => 'ua', 'ip' => '1.2.3.4'), 20, $degraded); $pg = ob_get_clean();
+		if (!preg_match("/var N = '([0-9a-f.]+)'/", $pg, $mm)) { return 0; }
+		for ($n = 3; $n <= 6; $n++) {
+			for ($i = 0, $max = (int)pow(10, $n); $i < $max; $i++) {
+				if (gv_captcha_answer_ok($mm[1], 'cap-secret', str_pad((string)$i, $n, '0', STR_PAD_LEFT))) { return $n; }
+			}
+		}
+		return 0;
+	};
+	t_ok('captcha degraded: level 1 asks for 4 digits normally and 6 digits (same charset) when served while Redis is down', $len_of(false) === 4 && $len_of(true) === 6);
+}
+
+// Token levels: old tokens are PoW level.
+$tp = gv_tok_make('tk'); $tc = gv_tok_make('tk', 'nonceid', 'c'); $tc2 = gv_tok_make('tk', 'nonceid', 'c');
+t_ok('token level: a token issued the old way (three parts) is level p, a CAPTCHA token (four parts, third = c) is level c, the device id comes from the nonce', count(explode('.', $tp)) === 3 && count(explode('.', $tc)) === 4 && explode('.', $tc)[2] === 'c'
+	&& gv_tok_parse($tp, 'tk', 3600)[1] === 'p' && gv_tok_parse($tc, 'tk', 3600)[1] === 'c' && gv_tok_parse($tc, 'tk', 3600)[0] === gv_tok_parse($tc2, 'tk', 3600)[0] && gv_tok_make('tk', 'nonceid') !== '');
+t_ok('token level: gv_tok_check still returns the device id for both levels (every existing caller keeps working)', gv_tok_check($tp, 'tk', 3600) === gv_tok_parse($tp, 'tk', 3600)[0] && gv_tok_check($tc, 'tk', 3600) === gv_tok_parse($tc, 'tk', 3600)[0]);
+$tcx = explode('.', $tc);
+t_ok('token level: a PoW token cannot be upgraded to c (the signature covers the c), a c token cannot be downgraded, a wrong third part, a tampered or expired token',
+	gv_tok_parse($tcx[0] . '.' . $tcx[1] . '.c.' . explode('.', $tp)[2], 'tk', 3600) === false && gv_tok_parse($tcx[0] . '.' . $tcx[1] . '.' . $tcx[3], 'tk', 3600) === false
+	&& gv_tok_parse($tcx[0] . '.' . $tcx[1] . '.p.' . $tcx[3], 'tk', 3600) === false && gv_tok_parse($tc, 'other', 3600) === false && gv_tok_parse($tc, 'tk', 0) === false && gv_tok_parse('a.b.c.d.e', 'tk', 3600) === false && gv_tok_parse('', 'tk', 3600) === false);
+
+// The rule action.
+$rc = array('mode' => 'enforce', 'action' => 'captcha', 'skip_verified_bots' => true, 'pow_bits' => 0);
+t_ok('captcha rule: "captcha" is a rule action and is validated like the others', in_array('captcha', gv_rule_actions(), true) && gv_rule_validate(array('id' => 'cp1', 'name' => 'c', 'enabled' => true, 'mode' => 'enforce', 'action' => 'captcha', 'priority' => 5,
+	'skip_verified_bots' => true, 'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('x')), 'path' => null, 'expires_at' => 0, 'pow_bits' => 0, 'note' => ''))[0] === true);
+t_ok('captcha rule: no token / a PoW-level token -> a CAPTCHA is asked; only a CAPTCHA-level token satisfies it',
+	gv_rule_act($rc, 'm', true, true, '', true, true) === array('captcha', 'captcha') && gv_rule_act($rc, 'v', true, true, '', true, true) === array('captcha', 'captcha') && gv_rule_act($rc, 'b', true, true, '', true, true) === array('captcha', 'captcha')
+	&& gv_rule_act($rc, 'v', true, true, 'c', true, true) === array('', ''));
+t_ok('captcha rule: a non-HTML request, a request that is not gated, and a monitor rule are never asked',
+	gv_rule_act($rc, 'm', true, true, '', false, true) === array('', '') && gv_rule_act($rc, 'm', false, true, '', true, true) === array('', '') && gv_rule_act(array_merge($rc, array('mode' => 'monitor')), 'm', true, true, '', true, true) === array('', ''));
+t_ok('captcha rule: a token-less POST with gate_post off is a shadow (intended captcha, nothing served)', gv_rule_act($rc, 'm', true, false, '', true, true) === array('captcha', ''));
+t_ok('captcha rule: without GD it is the proof-of-work challenge: any token satisfies it, no token gets the PoW page, a non-HTML request is challenged like a challenge rule',
+	gv_rule_act($rc, 'm', true, true, '', true, false) === array('challenge', 'challenge') && gv_rule_act($rc, 'v', true, true, '', true, false) === array('', '') && gv_rule_act($rc, 'm', true, true, '', false, false) === array('challenge', 'challenge'));
+t_ok('captcha rule: it takes the place of the bot / preview pass like block and challenge', gv_rule_overrides_pass($rc) === true && gv_rule_overrides_pass(array_merge($rc, array('action' => 'log'))) === false);
+t_ok('captcha rule: a verified crawler is skipped EVEN with skip_verified_bots off; so is a known-bot UA while Redis is down; an unverified or refuted claim is not',
+	gv_rule_bot_skip(array_merge($rc, array('skip_verified_bots' => false)), 'ok', true) === 'verified' && gv_rule_bot_skip(array_merge($rc, array('skip_verified_bots' => false)), '', false) === 'degraded'
+	&& gv_rule_bot_skip(array_merge($rc, array('skip_verified_bots' => false)), '', true) === '' && gv_rule_bot_skip(array_merge($rc, array('skip_verified_bots' => false)), 'bad', true) === ''
+	&& gv_rule_bot_skip(array_merge($rc, array('action' => 'block', 'skip_verified_bots' => false)), 'ok', true) === '');
+$rcache = gv_rules_cache_source(array(array_merge($rc, array('id' => 'cp1', 'enabled' => true, 'priority' => 1, 'ua' => array('op' => 'include', 'type' => 'contains', 'values' => array('x')), 'path' => null, 'expires_at' => 0))));
+t_ok('captcha rule: the generated rules cache carries the action like any other', strpos($rcache, "'action' => 'captcha'") !== false);
+
+// Headless signals: pure scoring.
+$W = gv_headless_weights($CAP_CFG);
+t_ok('headless: the parser reads the fixed set (letter + whole number), ignores unknown letters, refuses the server-side "u", a bad shape or an oversized header',
+	gv_headless_parse('w1.h0.t412.i1') === array('w' => 1, 'h' => 0, 't' => 412, 'i' => 1) && gv_headless_parse('w1.z9.l0') === array('w' => 1, 'l' => 0) && gv_headless_parse('u1.w1') === array('w' => 1)
+	&& gv_headless_parse('w1.w0') === array('w' => 1) && gv_headless_parse('') === array() && gv_headless_parse('w1;h1') === array() && gv_headless_parse('W1') === array() && gv_headless_parse('w123456') === array() && gv_headless_parse(str_repeat('w1.', 60)) === array()
+	&& gv_headless_parse('w1.' . str_repeat('l0.', 20)) === array());
+t_ok('headless: each weight defaults as documented and comes from the config (captcha.w_*), an invalid value falls back',
+	$W === array('w' => 40, 'h' => 40, 'm' => 25, 'l' => 15, 'c' => 20, 'p' => 10, 'g' => 15, 's' => 20, 'n' => 15, 't' => 20, 'i' => 20, 'u' => 25)
+	&& gv_headless_weights(array('captcha' => array('w_webdriver' => 5, 'w_ua_headless' => 101, 'w_no_chrome' => 'x', 'w_too_fast' => 0)))['w'] === 5 && gv_headless_weights(array('captcha' => array('w_ua_headless' => 101)))['h'] === 40
+	&& gv_headless_weights(array('captcha' => array('w_no_chrome' => 'x')))['c'] === 20 && gv_headless_weights(array('captcha' => array('w_too_fast' => 0)))['t'] === 0 && gv_headless_weights(array())['w'] === 40);
+t_ok('headless: every signal fires with ITS weight and no other (webdriver, headless UA, mismatch, languages, chrome, plugins, webgl, screen, notification)',
+	gv_headless_score(array('w' => 1), $W) === array(40, 'w') && gv_headless_score(array('l' => 1), $W) === array(15, 'l') && gv_headless_score(array('c' => 1), $W) === array(20, 'c') && gv_headless_score(array('p' => 1), $W) === array(10, 'p')
+	&& gv_headless_score(array('g' => 1), $W) === array(15, 'g') && gv_headless_score(array('s' => 1), $W) === array(20, 's') && gv_headless_score(array('n' => 1), $W) === array(15, 'n') && gv_headless_score(array('m' => 1), $W) === array(25, 'm'));
+t_ok('headless: a signal at 0 and a missing signal are neutral; an empty set scores 0', gv_headless_score(array('w' => 0, 'l' => 0, 'c' => 0, 'g' => 0), $W) === array(0, '') && gv_headless_score(array(), $W) === array(0, ''));
+t_ok('headless: "too fast" fires below the threshold only (45 ms by default, below the 50 ms the page waits itself; the caller picks it); "no input" only when the page said 0',
+	gv_headless_score(array('t' => 44), $W) === array(20, 't') && gv_headless_score(array('t' => 45), $W) === array(0, '') && gv_headless_score(array('t' => 100), $W) === array(0, '') && gv_headless_score(array('t' => 699), $W, '', 700) === array(20, 't') && gv_headless_score(array('t' => 700), $W, '', 700) === array(0, '')
+	&& gv_headless_score(array('i' => 0), $W) === array(20, 'i') && gv_headless_score(array('i' => 1), $W) === array(0, ''));
+t_ok('headless: the server-side check: the request UA says HeadlessChrome but the page says it does not (or the reverse) is a spoof; both agreeing is not', gv_headless_score(array('h' => 0), $W, 'Mozilla HeadlessChrome/120') === array(25, 'u')
+	&& gv_headless_score(array('h' => 1), $W, 'Mozilla Chrome/120') === array(65, 'hu') && gv_headless_score(array('h' => 1), $W, 'Mozilla HeadlessChrome/120') === array(40, 'h') && gv_headless_score(array('h' => 0), $W, 'Mozilla Chrome/120') === array(0, '') && gv_headless_score(array('t' => 900), $W, 'HeadlessChrome') === array(0, ''));
+t_ok('headless: a real headless Chrome (webdriver, HeadlessChrome, no languages, no chrome object, SwiftShader, 0x0) sums its weights; a normal browser scores 0',
+	gv_headless_score(gv_headless_parse('w1.h1.m1.l1.c1.p1.g1.s1.n1.t30'), $W, 'HeadlessChrome') === array(40 + 40 + 25 + 15 + 20 + 10 + 15 + 20 + 15 + 20, 'whmlcpgsnt') && gv_headless_score(gv_headless_parse('w0.h0.m0.l0.c0.p0.g0.s0.n0.t1200.i1'), $W, 'Mozilla/5.0 Chrome') === array(0, ''));
+t_ok('headless: a changed weight changes the score; a weight of 0 switches the signal off', gv_headless_score(array('w' => 1), array_merge($W, array('w' => 7))) === array(7, 'w') && gv_headless_score(array('w' => 1), array_merge($W, array('w' => 0))) === array(0, 'w'));
+// What reaches the log: letters and a number only.
+$lr = gv_log_row(array('rid' => 'r', 'ip' => '1.2.3.4', 'ua' => 'u', 'method' => 'POST', 'path' => '/', 'query' => '', 'referer' => '', 'hc' => 5, 'sf' => '', 'al' => 'en', 'xrw' => '', 'accept' => 'text/html'),
+	array_merge(gv_state_new(), array('cap' => 'ok', 'ct' => 12, 'tl' => 'c', 'hs' => 105, 'hf' => 'whu')), 'token_issued', 0, microtime(true));
+t_ok('log: the CAPTCHA and headless keys are short (cap, ct, tl, hs, hf) and only present when they apply; nothing else about the browser is logged',
+	$lr['cap'] === 'ok' && $lr['ct'] === 12 && $lr['tl'] === 'c' && $lr['hs'] === 105 && $lr['hf'] === 'whu' && !array_key_exists('cap', gv_log_row(array('rid' => 'r', 'ip' => '1.2.3.4', 'ua' => 'u', 'method' => 'GET', 'path' => '/', 'query' => '', 'referer' => '', 'hc' => 5, 'sf' => '', 'al' => '', 'xrw' => '', 'accept' => ''), gv_state_new(), 'allow', 0, microtime(true)))
+	&& !array_key_exists('hs', gv_log_row(array('rid' => 'r', 'ip' => '1.2.3.4', 'ua' => 'u', 'method' => 'GET', 'path' => '/', 'query' => '', 'referer' => '', 'hc' => 5, 'sf' => '', 'al' => '', 'xrw' => '', 'accept' => ''), gv_state_new(), 'allow', 0, microtime(true))));
+
+// Config.
+t_ok('config: captcha.* defaults (level 2, 3 attempts, 10 pages per 900 s, PoW with it, escalation and device budget off) and every key is whitelisted',
+	$CAP_CFG['captcha']['level'] === 2 && $CAP_CFG['captcha']['max_attempts'] === 3 && $CAP_CFG['captcha']['ip_budget'] === 10 && $CAP_CFG['captcha']['ip_window'] === 900 && $CAP_CFG['captcha']['require_pow'] === true
+	&& $CAP_CFG['captcha']['escalate_score'] === 0 && $CAP_CFG['captcha']['device_budget'] === false && !array_filter(array_keys($CAP_CFG['captcha']), function ($k) { return !isset(gv_overlay_whitelist()['captcha.' . $k]); }));
+t_ok('config: captcha.* validation: level 1-5, length 0-8, enums, ranges are REJECTED not clamped, booleans are real booleans',
+	gv_overlay_validate('captcha.level', 5)[0] && !gv_overlay_validate('captcha.level', 6)[0] && !gv_overlay_validate('captcha.level', 0)[0] && gv_overlay_validate('captcha.length', 0)[0] && !gv_overlay_validate('captcha.length', 9)[0]
+	&& gv_overlay_validate('captcha.charset', 'alnum')[0] && !gv_overlay_validate('captcha.charset', 'letters')[0] && gv_overlay_validate('captcha.warp', 'auto')[0] && !gv_overlay_validate('captcha.noise', 'lots')[0]
+	&& !gv_overlay_validate('captcha.max_attempts', 0)[0] && !gv_overlay_validate('captcha.ip_budget', 1001)[0] && !gv_overlay_validate('captcha.ip_window', 59)[0] && gv_overlay_validate('captcha.require_pow', false)[0] && !gv_overlay_validate('captcha.require_pow', 'no')[0]
+	&& gv_overlay_validate('captcha.w_webdriver', 100)[0] && !gv_overlay_validate('captcha.w_webdriver', 101)[0] && !gv_overlay_validate('captcha.w_no_chrome', -1)[0] && gv_overlay_validate('captcha.escalate_score', 0)[0] && !gv_overlay_validate('captcha.escalate_score', 201)[0]);
+t_ok('config: the literal weight defaults in gv_cfg_defaults are the numbers of gv_headless_weights_default()', (function () use ($CAP_CFG) {
+	foreach (gv_headless_weight_keys() as $letter => $key) { if ($CAP_CFG['captcha'][$key] !== gv_headless_weights_default()[$letter]) { return false; } }
+	return count(gv_headless_weight_keys()) === count(gv_headless_weights_default());
+})());
+t_ok('config: "off" / "false" in a hand-edited captcha block read as off', gv_cfg_defaults(array('captcha' => array('require_pow' => 'off', 'device_budget' => 'true')))['captcha']['require_pow'] === false && gv_cfg_defaults(array('captcha' => array('device_budget' => 'true')))['captcha']['device_budget'] === true
+	&& gv_cfg_defaults(array('captcha' => 'x'))['captcha']['level'] === 2);
+t_ok('config: the CAPTCHA page strings are whitelisted text keys with defaults', gv_overlay_validate('strings.cap_title', 'Prove it')[0] && !gv_overlay_validate('strings.cap_title', str_repeat('x', 201))[0] && isset($CAP_CFG['strings']['cap_wrong']) && isset($CAP_CFG['strings']['cap_expired']));
+t_ok('config: no secret reaches the overlay through the new keys', !array_filter(array_keys(gv_overlay_whitelist()), function ($k) { return $k === 'secret' || $k === 'holdout_salt'; }));
+
+// The page.
+if ($has_gd) {
+	$pg_p = $cp(array('level' => 1));
+	$pg_png = gv_captcha_image('4821', $pg_p, 3);
+	ob_start(); gv_captcha_render(gv_captcha_nonce_make('s', 'u', '1.1.1.1', 12, 180, '4821'), array_merge($CAP_CFG['strings'], array('cap_title' => 'T <b>x</b> "q"', 'dir' => 'rtl', 'lang' => 'fa')), 12, $pg_png, $pg_p); $pg = ob_get_clean();
+	t_ok('captcha page: the image is a data URI, the answer is nowhere in the page, the nonce is, the strings are escaped, lang / dir follow the settings',
+		strpos($pg, 'src="data:image/png;base64,') !== false && strpos($pg, '4821') === false && preg_match("/var N = '[0-9a-f.]{80,}', B = 12,/", $pg) === 1 && strpos($pg, '<b>x</b>') === false && strpos($pg, '&lt;b&gt;x&lt;/b&gt;') !== false
+		&& strpos($pg, 'lang="fa" dir="rtl"') !== false && strpos($pg, 'inputmode="numeric"') !== false && strpos($pg, 'id="gv-ca"') !== false && strpos($pg, 'noindex') !== false);
+	$pg_p5 = $cp(array('level' => 5));
+	ob_start(); gv_captcha_render(gv_captcha_nonce_make('s', 'u', '1.1.1.1', 0, 60, 'AB3K7CD'), $CAP_CFG['strings'], 0, gv_captcha_image('AB3K7CD', $pg_p5, 3), $pg_p5); $pg5 = ob_get_clean();
+	t_ok('captcha page: a letters-and-digits charset has no numeric keyboard; with no proof of work B is 0; the form has a "new image" button and the shipped texts',
+		strpos($pg5, 'inputmode="numeric"') === false && strpos($pg5, 'B = 0,') !== false && strpos($pg5, 'id="gv-cn"') !== false && strpos($pg5, 'Please confirm you are human') !== false);
+	t_ok('captcha page: the script has the solver, the signals and the answer header, and encodes the answer (a Persian keyboard)', strpos($pg, 'encodeURIComponent(inp.value)') !== false && strpos($pg, "X-GV-A") !== false && strpos($pg, "X-GV-S") !== false && strpos($pg, 'function sig(cap)') !== false
+		&& strpos($pg, 'function solve(done)') !== false && strpos($pg, '}\n})();') !== false || substr_count($pg, '})();') >= 2);
+}
+t_ok('challenge page: the PoW script now also sends the signals and treats a 202 as "reload" (an escalation)', strpos(gv_challenge_js(), "h['X-GV-S'] = sig(false)") !== false && strpos(gv_challenge_js(), 'r.status === 202') !== false && strpos(gv_challenge_js(), '/*GV_TAIL*/') === false);
+t_ok('challenge page: the signals are yes / no answers and one number: no renderer or plugin string is ever sent', preg_match('/getParameter\(ext\.UNMASKED_RENDERER_WEBGL\)\)\)\s*\?\s*1\s*:\s*0/', gv_challenge_js()) === 1 && strpos(gv_challenge_js(), "put('g', /SwiftShader") !== false && strpos(gv_challenge_js(), 'join(\'.\')') !== false);
+t_ok('the guard stays fail-open for the new code: a CAPTCHA in front of no GD, a bad header, a bad nonce never throw', (function () use ($CAP_CFG) {
+	try { gv_headless_parse("\x00\xff"); gv_headless_score(array('x' => 1), array()); gv_captcha_normalize("\xff\xfe"); gv_captcha_answer_ok("\xff", 's', "\xff"); gv_captcha_nonce_state("\xff", 's'); gv_tok_parse("\xff.\xfe.c.\xfd", 's', 5); return true; } catch (\Throwable $e) { return false; }
+})());
+
+// --------------------------------------------------------------------------
 echo "\n";
 echo "PASS " . $GV_PASS . "  FAIL " . $GV_FAIL . "  SKIP " . $GV_SKIP . "\n";
 exit($GV_FAIL === 0 ? 0 : 1);

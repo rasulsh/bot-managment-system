@@ -355,7 +355,19 @@ function gp_health_inputs($now = null) {
 		'noeviction' => gp_redis_noeviction(), 'cron' => gp_cron_check($now), 'tz_offset' => (int)date('Z', $now),
 		'geo_used' => gp_geo_status($now)['country'] !== null || gp_geo_status($now)['asn'] !== null,
 		'iplist_warn' => gp_iplists_health($now),
+		'captcha_gd_needed' => gp_captcha_needed($cfg, $rs['rules']),
+		'captcha_gd' => gv_captcha_available(),
 	);
+}
+
+// Whether a CAPTCHA is configured at all: an enabled enforced rule with the action captcha, an escalation score above 0,
+// or CAPTCHA instead of the device 429.
+function gp_captcha_needed(array $cfg, array $rules) {
+	$c = isset($cfg['captcha']) && is_array($cfg['captcha']) ? $cfg['captcha'] : array();
+	if (!empty($c['escalate_score']) || !empty($c['device_budget'])) { return true; }
+	$now = time();
+	foreach ($rules as $r) { if (gv_rule_live($r, $now) && $r['action'] === 'captcha' && $r['mode'] === 'enforce') { return true; } }
+	return false;
 }
 
 // The critical-alert list from gathered inputs. PURE: every decision is here, so every case is testable.
@@ -395,6 +407,9 @@ function gp_health_alerts(array $in) {
 		$crit = in_array($g, array('missing', 'corrupt'), true) && !empty($in['geo_rules']);
 		$add('geo_' . $g, $crit ? 'critical' : 'warning', 'geo_w_' . $g, '', 'geo');
 	}
+	// GD is missing while a CAPTCHA is configured: every captcha action falls back to the proof-of-work challenge. The panel
+	// runs in the web server's PHP, like the guard (a CLI PHP can differ: check the web server's phpinfo if this looks wrong).
+	if (!empty($in['captcha_gd_needed']) && empty($in['captcha_gd'])) { $add('captcha_gd', 'warning', 'al_captcha_gd', '', 'settings'); }
 	foreach ((array)($in['iplist_warn'] ?? array()) as $w) {
 		// A list file that is missing or corrupt while its list is enabled, or a failed compile: the guard
 		// silently treats the list as empty (fail-open), so these are critical. A pending compile is a warning.

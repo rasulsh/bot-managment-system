@@ -285,6 +285,72 @@ an enabled flag and a text of IPv4 / IPv6 addresses and CIDRs, one per line.
 * **Log and snapshot.** One row per request as always. The analyzer snapshot counts list hits per list (`iplists`,
   24 h / 7 d / last hit, keyed `allow:<id>` / `block:<id>`), shown on the IP lists page.
 
+### Image CAPTCHA and the headless signals
+
+`guard/captcha.php` (image, nonce, scoring, page, the answer handshake), `guard/challenge.php` (token levels, the page script),
+`guard/rules.php` (the action). **Self-hosted**: the image is drawn with PHP GD (the only extension this project allows, and optional)
+with a shipped open-licensed font (`guard/captcha-font.ttf`, DejaVu Sans Mono Bold, licence next to it) and sent inside the page as a
+data URI (no extra public URL to hammer, `Cache-Control: no-store`). No external service: reCAPTCHA, hCaptcha and Turnstile are
+unreliable from Iran and leak visitors to third parties. Without GD every `captcha` action falls back to the proof-of-work challenge
+with the rule's `pow_bits`.
+
+* **Where it is used.** (1) A rule with the action **Image CAPTCHA**: an HTML request without a CAPTCHA-level token gets the page.
+  (2) **Escalation** (`captcha.escalate_score`, off at 0): a proof of work whose headless score reaches it does not get a token but
+  a CAPTCHA instead. The client then stays escalated for 10 minutes by two flags, and the next HTML page is the CAPTCHA: a signed cookie (`<cookie>c`, works with Redis down) **and** the Redis key
+  `cesc:<md5(ip net|UA hash)>` (works when the client drops cookies). The key is written with `SET .. EX 600` in the handshake's own
+  pipeline (or read with `GET` there when this handshake is not itself escalated) and read in the request path's one existing pipeline, so
+  escalation adds no round trip: while it exists, a navigation request from that ip + UA without a level-c token gets the CAPTCHA, cookie or no
+  cookie, and a proof-of-work handshake from it is answered 202 (reload into the CAPTCHA) instead of a level-p token. A level-c token deletes
+  the key (one extra `DEL`, only on that success path; a refused or replayed correct answer does not lift it). It only escalates while
+  `enforce.challenge` is on; in monitor mode the row carries `SH_CAPT_ESC` and the token is issued. With escalation on, a token-less navigation
+  request carries two more `GET`s (`cesc`, and the CAPTCHA budget) inside the same pipeline; with `escalate_score` 0 nothing is added.
+  (3) **`captcha.device_budget`** (off): a device over its
+  hourly / daily budget (and over nothing else) gets a CAPTCHA instead of a 429, and a CAPTCHA-level token is waived from those two
+  budgets.
+* **Redis down: bound proof of work.** The attempt counter lives in Redis, so while it is down a wrong answer cannot be counted. A request that
+  SERVES the CAPTCHA while Redis is not alive therefore issues the nonce with `pow_bits = max(configured, 20)` (reason `CAPT_DEGRADED`), and a CAPTCHA
+  nonce with 20 or more bits has a proof of work **bound to the typed answer**: the hash covers `nonce:answer-header:counter`, solved by the page
+  when the visitor submits (below 20 bits it covers the nonce alone and is solved in the background while the visitor reads the image). Each guess
+  needs its own proof, so every guess costs CPU, and the answer has at least 6 characters (same charset, `gv_captcha_degraded_length`), which makes
+  the whole answer space cost far more CPU than the time limit allows one core. The remaining window is in [06-KNOWN-LIMITS.md](06-KNOWN-LIMITS.md).
+* **Never shown to**: an address in an *enforced* allow list, an operator allow override, a verified crawler (a captcha rule ignores
+  `skip_verified_bots`: a verified crawler is skipped regardless; with Redis down a known-bot UA counts as verified), an exempt path,
+  a non-HTML request (`gv_is_nav` false: it keeps the normal flow), or a block-listed address (that is a 403 at step 1b, long before).
+  A request that is not gated, and a monitor-mode rule, are never asked either.
+* **Token level.** A token is `device.issued.signature` (level **p**, proof of work: every token issued before this release, and what
+  a proof-of-work handshake still issues) or `device.issued.c.signature` (level **c**, a solved CAPTCHA). The signature covers the
+  `c`, so a p token cannot be upgraded. `gv_tok_check()` still returns the device id for both; only a `captcha` rule asks for `c`.
+* **The nonce** is `issued.random.bits.time.answer_mac.signature` (six parts; the PoW nonce has four, neither parser accepts the
+  other). `answer_mac = HMAC(secret, "cap|" random "|" normalised_answer)`, the signature covers all of it plus the UA / IP binding, and
+  `time` is the signed time limit. The answer is never sent to the client. The visitor's text is normalised first: Persian
+  (U+06F0-06F9) and Arabic-Indic (U+0660-0669) digits become Latin, spaces and zero-width / direction marks go, letters are
+  upper-cased. The answer alphabet has no look-alikes (letters without O I S Z B, digits without 0 1 2 5 8 when mixed with letters).
+* **The handshake** (`POST` with `X-GV: <six-part nonce>`, `X-GV-A: <percent-encoded answer>`, `X-GV-P: <PoW counter>`,
+  `X-GV-S: <signals>`), always ends in `gv_captcha_handshake()`, cheapest check first: signature / binding / expiry (403 `inv`, 410
+  `exp`), proof of work (when `captcha.require_pow`), the answer, then ONE Redis pipeline: the attempt counter `ca:<id>` (every answer
+  counts), the single-use claim of a correct answer (`SET NX`, as for the PoW nonce), the usual per-IP counters and the minting limit.
+  204 = token level c; 422 = wrong, attempts left; 403 = out of attempts or a replay; 429 = minting limit. Log rows reuse the
+  handshake actions (`token_issued`, `nonce_bad`, `pow_bad`, `nonce_replay`, `mint_limited`) and carry `cap` = `ok | wrong | fail |
+  exp | inv | esc`, `ct` (seconds to solve) and `tl`.
+* **The per-IP CAPTCHA budget** (`captcha.ip_budget` pages per `captcha.ip_window` s, per address / IPv6 /64, key `cpi:<ipn>`) is *read*
+  in the single pipeline of GETs (only for a request that may need a CAPTCHA) and *counted* in the single pipeline of counters, in the
+  same round trip as the other counters. A client already over its budget gets a **429 with no Redis work for the CAPTCHA at all**: no
+  page, no nonce, no key, the counter does not move (`CAPT_BUDGET` on the row). A reload or the "New image" button is just another page
+  and counts. The CAPTCHA instead of a device 429 counts its page with one extra command, on that path only.
+* **Headless signals.** The challenge script collects a small fixed set of yes / no answers and one number and sends it in `X-GV-S`
+  (`w1.h0.m0.l0.c0.p0.g0.s0.n0.t412.i1`): `w` navigator.webdriver, `h` HeadlessChrome in navigator.userAgent, `m` userAgentData
+  disagrees with the UA, `l` no languages, `c` no window.chrome on a Chrome UA, `p` no plugins / mimeTypes on a desktop Chrome,
+  `g` WebGL renderer SwiftShader / llvmpipe, `s` screen or outer window 0x0, `n` Notification.permission vs the permissions API,
+  `t` ms from page load to submit (too fast: under 45 ms on the PoW page, whose own script waits 50 ms first, and under 700 ms on the CAPTCHA page), `i` no trusted pointer /
+  keyboard / touch event before submit (CAPTCHA page). Every signal is feature-detected inside try / catch and a missing one is
+  neutral. **Nothing else leaves the browser**: no renderer string, plugin list or screen size. The server turns them into a score with
+  a pure function (`gv_headless_score`, each signal has a weight in the config, `captcha.w_*`) plus one server-side check (`u`: the
+  request UA and the page disagree about HeadlessChrome), and logs `hs` (the score) and `hf` (the letters that fired): short keys, never a raw
+  value. A header that is malformed, too long or has unknown letters is ignored.
+* **What it is and is not.** The CAPTCHA, the signals and the proof of work raise the cost of automation. They do not make headless
+  browsers impossible (stealth plugins, OCR, paid solving services). What limits volume is the per-IP CAPTCHA budget, the device budgets
+  and the proof of work.
+
 ### Redis contract (request path)
 
 At most two round trips per request: one pipeline of every `GET` the request can need

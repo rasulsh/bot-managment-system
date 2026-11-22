@@ -2,6 +2,93 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Image CAPTCHA and headless-browser signals
+
+**New**
+
+* **A self-hosted image CAPTCHA** (PHP GD, no external service) with five difficulty levels, used by a new rule action **Image CAPTCHA**, by an optional
+  escalation of headless-looking browsers, and optionally instead of the hourly / daily device 429. See
+  [02-ARCHITECTURE.md](02-ARCHITECTURE.md#image-captcha-and-the-headless-signals). New files: `guard/captcha.php`, `guard/captcha-font.ttf` (+ its licence).
+  GD is the only extension this project allows and it is **optional**: without it every captcha action is the proof-of-work challenge, and the dashboard
+  warns while a CAPTCHA is configured.
+* **Never shown to** an enforced allow-list address, an operator allow override, a verified crawler, an exempt path or a non-HTML request; a block-listed
+  address gets 403 (decided long before). A captcha rule skips a verified crawler even with `skip_verified_bots` off.
+* **Token levels.** A solved CAPTCHA issues a **level c** token (`device.issued.c.signature`); every token issued before this release is **level p** and stays
+  valid (a captcha rule still asks for a CAPTCHA, the normal challenge accepts both). `gv_tok_check()` is unchanged for callers.
+* **Settings -> CAPTCHA**: level 1-5 and every individual value (length, alphabet, distortion, noise, overlap, time limit), attempts per image, the
+  per-IP CAPTCHA budget (default 10 pages per 15 minutes, checked in the existing single pipeline: a client over it gets a 429 with **no Redis work**), the
+  proof-of-work switch (default on), the escalation score, CAPTCHA instead of the device 429 (default off), the **weight of every headless signal**, a **live
+  preview image**, and the GD status; the CAPTCHA page texts are in the Strings tab (`strings.cap_*`, Persian defaults in the shipped `config.php`).
+* Visitors: Persian / Arabic-Indic digits are normalised, answers are case-insensitive, look-alike characters are never used, a numeric keyboard opens for
+  digit answers, "New image" is a reload (counted against the per-IP budget).
+* **Headless signals** (`X-GV-S`): the challenge script sends yes / no answers and one number (webdriver, HeadlessChrome UA, UA-data mismatch, no languages,
+  no `window.chrome`, no plugins, software WebGL, 0x0 screen, notification permission mismatch, time to submit, input events on the CAPTCHA page); the server
+  scores them with a pure function and logs `hs` / `hf` (short keys, no raw fingerprint). A browser the script cannot read is neutral.
+* **Dashboard**: a CAPTCHA row (shown, solved, failed attempts, expired, solve rate, median solve time, each against the previous 24 h) and an alert when GD is
+  missing while a captcha rule, escalation or the CAPTCHA device budget is enabled. The impact preview of a captcha rule shows how many matching requests would
+  get a CAPTCHA.
+* New log keys (only when they apply): `cap`, `ct`, `tl`, `hs`, `hf`; reasons `CAPT_BUDGET`, `CAPT_ESC`, `SH_CAPT_ESC`, `CAPT_DEGRADED`; Redis keys `cpi:<ip>`, `ca:<id>`, `cesc:<md5>`. The
+  snapshot's KPIs gain `captcha_*`. The challenge page script now also sends the signals and treats a 202 as "reload".
+* **Review changes (escalation and Redis down).** (1) **Escalation no longer depends on the client keeping a cookie.** An enforced escalation also sets the
+  Redis flag `cesc:<md5(ip net|UA hash)>` (600 s), written in the handshake's own pipeline (no extra round trip); while it exists a navigation request from
+  that ip + UA without a level-c token gets the CAPTCHA, cookie or not, and a proof-of-work handshake from it is answered 202 (reload into the CAPTCHA) instead of a
+  level-p token. The cookie stays as the second signal (it works with Redis down). A level-c token deletes the key. Monitor mode is unchanged (`SH_CAPT_ESC` only).
+  (2) **Answer guessing while Redis is down.** A CAPTCHA served while Redis is not alive is issued with `pow_bits = max(configured, 20)` (reason `CAPT_DEGRADED`).
+  **Extension to the brief, please review:** the proof of work is bound to the nonce only, so one solved counter would serve every guess; therefore a CAPTCHA nonce
+  with 20 or more bits has a proof **bound to the typed answer** (`nonce:answer:counter`), solved by the page on submit, so every guess really costs CPU.
+  Below 20 bits nothing changes (background solving). `scripts/pow-solve.php` takes the answer as an optional second argument. The remaining window and the native-solver
+  residual are in [06-KNOWN-LIMITS.md](06-KNOWN-LIMITS.md). The bits stay at 20 (22 costs real mobile users seconds per submit and does not stop a multi-core attacker); instead a CAPTCHA served while Redis is down also gets an **answer of at least 6 characters** (same charset, time limit as configured), so enumerating it costs ~1000 s of native CPU for digits (3x10^5 s+ for letters + digits) against a 60-180 s limit.
+* CI installs GD; `scripts/captcha-solve.php` (test tooling), `rules-e2e.sh` sections M / K2, `browser-test.js` scenarios, `bench-gv-run.php --cap-gen`.
+
+**Compatibility.** Nothing changes until a captcha rule is enabled, `captcha.escalate_score` is above 0 or `captcha.device_budget` is on (all off by default).
+Existing tokens, rules, lists and logs are untouched. Rolling back: a level c cookie is invalid for the old code (the visitor gets the challenge once).
+
+**Upgrade steps (existing install `/home/cloud/bot-guard`, monitor mode)**
+
+1. Deploy. Check GD: `php -m | grep -i gd` in the **web server's** PHP (the panel's Settings -> CAPTCHA says so too). Install it if you want the image (otherwise nothing breaks).
+   Run `scripts/exposure-check.sh` (it now probes the font and `guard/captcha.php`).
+2. Open Settings -> CAPTCHA, look at the preview at levels 1, 2 and 3, keep **level 2**.
+3. Create a rule with the action **Image CAPTCHA** in `monitor` mode (for example on `HeadlessChrome`, `python-requests` or the `<empty>` UA), read the **impact
+   preview** and the `SH_RULE:` rows. Switch it to `enforce` only after that, and watch the dashboard CAPTCHA row for a day (solve rate, median time, failed).
+4. (Escalation) Redis keeps the escalation flag for 10 minutes; nothing to migrate. After deploying, `redis-cli --scan --pattern 'gv:cesc:*'` lists escalated clients.
+   Optional: read `hs` / `hf` on the log rows of real visitors for a few days, then set `captcha.escalate_score` to 60 (it only acts while `enforce.challenge` is on;
+   in monitor mode it logs `SH_CAPT_ESC`). Leave `captcha.device_budget` off until the device budgets look right.
+
+**Rollback.** Disable or delete the rule; set `captcha.escalate_score` to 0; or switch the kill switch (`guard.off`). Removing GD makes every captcha action the
+proof-of-work challenge.
+
+**Cost** (`bash scripts/bench-gv-run.sh`; PHP 8.3 with OPcache, `gv_run` on a request that does NOT get a CAPTCHA, Redis `noeviction`, a fresh request each time,
+median of 15 runs of 6000 requests in rotating order, same machine):
+
+| | p50 | p99 |
+|---|---|---|
+| master | 251 us | 548 us |
+| this branch, no captcha rule, escalation off (the default) | 241 us | 515 us |
+| this branch, escalation ENFORCED (`escalate_score` 60 + `enforce.challenge`): the request also reads `cesc` and the CAPTCHA budget | 256 us | 495 us |
+| this branch, a captcha rule that MATCHES the client, which holds a CAPTCHA-level token (so it is not asked) | 250 us | 584 us |
+
+(Re-run for the review changes on a slower machine than the first run, hence the higher absolute numbers; the master row is the baseline of THIS run. Median of 15 rounds
+of 6000 requests, four variants in rotating order, Redis on a local socket with `noeviction`.)
+
+Budget: a request that does not get a CAPTCHA stays within +20 us p50 of master: met (+5 us in the worst case above, escalation enforced; the default configuration is within noise of master). Escalation adds two `GET`s to the existing pipeline only for token-less or level-p navigation requests while it is enabled, never a round trip. A
+request that no captcha rule matches pays one extra array test; one that may need a CAPTCHA pays one more GET in the existing pipeline and one `is_file` for the font.
+(The first version of this release built the 25 captcha defaults with function calls on every request and cost +12 us p50 on every request; they are a literal now.)
+
+CAPTCHA page generation (`php scripts/bench-gv-run.php --cap-gen`, in-process: the answer, the PNG and the whole HTML page, 400 pages per level, GD 2.3 + FreeType,
+median of 3 runs):
+
+| level | p50 (image) | p99 (image) | p50 (whole page) | p99 (whole page) | page size |
+|---|---|---|---|---|---|
+| 1 (4 digits, light) | 1.4 ms | 2.1 ms | 1.4 ms | 2.2 ms | 16 KB |
+| 2 (5 digits, light) | 1.6 ms | 2.4 ms | 1.7 ms | 2.4 ms | 16 KB |
+| 3 (5 digits, medium) | 1.8 ms | 2.1 ms | 1.9 ms | 2.1 ms | 19 KB |
+| 4 (6 letters+digits, heavy) | 2.2 ms | 3.7 ms | 2.2 ms | 3.7 ms | 22 KB |
+| 5 (7 letters+digits, heaviest) | 2.4 ms | 3.3 ms | 2.5 ms | 3.4 ms | 23 KB |
+
+Only a client that is actually shown a CAPTCHA pays this (and the per-IP budget limits how often).
+
+**Known and not changed:** see [06-KNOWN-LIMITS.md](06-KNOWN-LIMITS.md#image-captcha-and-headless-signals).
+
 ## IP allow / block lists (files)
 
 **New**

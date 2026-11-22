@@ -13,7 +13,10 @@ step at a time.** Do not skip the monitor period.
 
 - **PHP 8.0 or newer**. No PHP extensions are required for the guard — the Redis
   client is a raw socket implementation. (The overlay is read from disk on every
-  request; there is no APCu cache.)
+  request; there is no APCu cache.) The one OPTIONAL extension is **GD with FreeType**
+  (`php -m | grep -i gd`; Debian / Ubuntu: `php-gd`, cPanel: EasyApache -> PHP Extensions -> `gd`),
+  used only to draw the image CAPTCHA. Without it every `captcha` action falls back to the
+  proof-of-work challenge and the dashboard says so while a CAPTCHA is configured.
 - **Redis** reachable from PHP (default `127.0.0.1:6379`). The guard works without
   it, but in a degraded mode that can only ever allow — Redis is what makes rate
   limiting and offline verdicts function.
