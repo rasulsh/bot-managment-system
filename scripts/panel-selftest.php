@@ -4169,7 +4169,32 @@ $d6_clean();
 $_COOKIE[GP_KNOWN_COOKIE] = $kd;
 for ($i = 0; $i < GP_LOGIN_MAX_ATTEMPTS * 4; $i++) { gp_attempts_bump('user', GP_LOGIN_WINDOW); }
 $d6_ip(61);
-t_ok('known device: the panel-wide limit still applies', gp_login_attempt('known.admin', 'known-admin-password-1')[1] === 'login_locked');
+// A distributed attempt (20 wrong passwords from 4 addresses) reaches the panel-wide limit: a known device is NOT locked out by it.
+for ($i = 0; $i < GP_LOGIN_MAX_ATTEMPTS * 4; $i++) { $d6_ip(70 + ($i % 4)); gp_login_record_failure('someone.else'); }
+$d6_ip(80);
+t_ok('panel-wide limit reached from other addresses: the counter is at the limit (and shown as locked)', gp_login_global_state()['locked'] === true && gp_login_global_state()['n'] >= GP_LOGIN_MAX_ATTEMPTS * 4);
+$_COOKIE[GP_KNOWN_COOKIE] = 'x';
+t_ok('panel-wide limit: an unknown device is locked (any user name), with the same message and an audit line', gp_login_attempt('known.admin', 'known-admin-password-1')[1] === 'login_locked'
+	&& gp_login_attempt('nobody.here', 'x')[1] === 'login_locked' && gp_audit_read(5, 'login_locked') !== array());
+$_COOKIE[GP_KNOWN_COOKIE] = $kd;
+$d6_ip(81);
+$rk = gp_login_attempt('known.admin', 'known-admin-password-1');
+t_ok('panel-wide limit: a known device of that user still signs in (audit: login_ok, no login_locked for it)', $rk[0] === true && (function () { $a = gp_audit_read(3); return $a && ($a[0]['event'] ?? '') === 'login_ok'; })());
+t_ok('panel-wide limit: a known device with a wrong password is a plain failure, counted against its own address and still bumps the panel-wide counter',
+	(function () use ($d6_ip) { $d6_ip(82); $before = gp_attempts_get('user', GP_LOGIN_WINDOW); $r = gp_login_attempt('known.admin', 'wrong-pw'); return $r[1] === 'login_failed' && gp_attempts_get('198.51.100.82', GP_LOGIN_WINDOW) === 1 && gp_attempts_get('user', GP_LOGIN_WINDOW) === $before + 1; })());
+t_ok('panel-wide limit: a known device is still stopped by its own address limit', (function () use ($d6_ip) { $d6_ip(83); for ($i = 0; $i < 5; $i++) { gp_login_attempt('known.admin', 'wrong-' . $i); } return gp_login_attempt('known.admin', 'known-admin-password-1')[1] === 'login_locked'; })());
+t_ok('panel-wide limit: another user\'s cookie does not help for this name', (function () use ($bo, $d6_secret, $d6_ip) { $_COOKIE[GP_KNOWN_COOKIE] = gp_known_make($bo, $d6_secret); $d6_ip(84); return gp_login_attempt('known.admin', 'known-admin-password-1')[1] === 'login_locked'; })());
+$_COOKIE[GP_KNOWN_COOKIE] = $kd;
+t_ok('panel-wide limit: the wait shown to a known device does not use the global counter', gp_login_retry_after('known.admin', true) === GP_LOGIN_LOCKOUT || gp_login_retry_after('known.admin', true) > 0);
+// Users page and dashboard show it
+$lks = gp_login_lock_state();
+t_ok('lock state: global counter exact; per-user and per-address counts come from Redis when it is up', $lks['global']['locked'] === true && isset($lks['users'], $lks['ips'], $lks['scanned']));
+$al = gp_health_alerts(array('login_global' => gp_login_global_state()));
+$al_ids = array_map(function ($x) { return $x['id']; }, $al);
+t_ok('dashboard: a warning while the panel-wide limit is reached, linking to Users; none when it is not', in_array('login_global', $al_ids, true) && (function () use ($al) { foreach ($al as $x) { if ($x['id'] === 'login_global') { return $x['link'] === 'users' && $x['level'] === 'warning'; } } return false; })()
+	&& !in_array('login_global', array_map(function ($x) { return $x['id']; }, gp_health_alerts(array('login_global' => array('locked' => false)))), true));
+$lk_html = (function () use ($lks) { ob_start(); $locks = $lks; $users = array(); $all_count = 0; $filter = array(); $state = array('ok' => true); $me = 'x'; $roles = array('admin', 'operator', 'demo'); $fmt = function ($t) { return ''; }; try { require __DIR__ . '/../panel/views/users.php'; } catch (\Throwable $e) { } return ob_get_clean(); })();
+t_ok('Users page: shows the panel-wide counter as locked with the minutes left, and the counts', strpos($lk_html, 'data-lock-global="1"') !== false && strpos($lk_html, gp_t('usr_locks_title')) !== false);
 $d6_clean();
 // bound to session_version: password reset, disable, role change
 $_COOKIE[GP_KNOWN_COOKIE] = $kd;

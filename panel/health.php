@@ -378,6 +378,7 @@ function gp_health_inputs($now = null) {
 		'update_warn' => function_exists('gp_upd_health') ? gp_upd_health($now) : array(),
 		'perms' => gp_perm_scan(false, $now),
 		'php_env' => gp_php_env(),
+		'login_global' => gp_login_global_state(),
 		'captcha_gd_needed' => gp_captcha_needed($cfg, $rs['rules']),
 		'captcha_gd' => gv_captcha_available(),
 	);
@@ -434,6 +435,8 @@ function gp_health_alerts(array $in) {
 	// runs in the web server's PHP, like the guard (a CLI PHP can differ: check the web server's phpinfo if this looks wrong).
 	if (!empty($in['captcha_gd_needed']) && empty($in['captcha_gd'])) { $add('captcha_gd', 'warning', 'al_captcha_gd', '', 'settings'); }
 	foreach (gp_php_env_warnings(isset($in['php_env']) && is_array($in['php_env']) ? $in['php_env'] : array()) as $code) { $add($code, 'warning', 'al_' . $code, '', 'jobs'); }
+	// The panel-wide sign-in limit is reached: nobody on an unknown device can sign in until it expires or an administrator clears it.
+	if (!empty($in['login_global']['locked'])) { $add('login_global', 'warning', 'al_login_global', (string)(int)ceil(((int)($in['login_global']['ttl'] ?? 0)) / 60), 'users'); }
 	$pm = isset($in['perms']) && is_array($in['perms']) ? $in['perms'] : null;
 	if ($pm !== null) {
 		if (!empty($pm['secret_readable'])) { $add('perm_secret', 'critical', 'al_perm_secret', implode(', ', array_slice($pm['secret_readable'], 0, 4)), 'jobs'); }

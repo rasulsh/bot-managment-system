@@ -602,10 +602,46 @@ function gp_login_locked($username, $known = false) {
 	if ($username !== '') {
 		// A known device (a valid cookie for this user) is not subject to the per-username limit: see "Known device" above.
 		if (!$known && gp_attempts_get(gp_login_user_bucket($username), GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 2) { return true; }
-		// A distributed attempt spread over many addresses and names still hits this.
-		if (gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) { return true; }
+		// A distributed attempt spread over many addresses and names still hits this - for everybody EXCEPT a known device: otherwise
+		// 20 wrong passwords from 4 addresses would lock every user out of their own browser. The failures of a known device
+		// still count (below), against its address and against this counter, so a stolen cookie guessed from many addresses is visible.
+		if (!$known && gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) { return true; }
 	}
 	return false;
+}
+
+// What is locked right now, for the Users page and the dashboard. The global counter is exact. The per-username and per-address
+// counters are counted from Redis (their keys are hashed, so names are not shown); with Redis down only the global one is known.
+function gp_login_global_state() {
+	$limit = GP_LOGIN_MAX_ATTEMPTS * 4;
+	$n = gp_attempts_get('user', GP_LOGIN_WINDOW);
+	return array('n' => $n, 'limit' => $limit, 'locked' => $n >= $limit, 'ttl' => $n >= $limit ? gp_attempts_ttl('user', GP_LOGIN_WINDOW) : 0);
+}
+
+function gp_login_lock_state() {
+	$out = array('global' => gp_login_global_state(), 'users' => 0, 'ips' => 0, 'scanned' => false);
+	$cfg = gv_cfg_load();
+	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
+	if (!$conn) { return $out; }
+	$out['scanned'] = true;
+	$prefix = gp_key('login:');
+	$cursor = '0'; $guard = 0;
+	do {
+		$reply = gv_redis_cmd($conn, array('SCAN', $cursor, 'MATCH', $prefix . '*', 'COUNT', '200'));
+		if (!is_array($reply) || count($reply) < 2) { break; }
+		$cursor = (string)$reply[0];
+		foreach ((array)$reply[1] as $k) {
+			$bucket = substr((string)$k, strlen($prefix));
+			if ($bucket === 'user') { continue; }
+			$v = gv_r_get($conn, $k);
+			if (!is_string($v) || !ctype_digit($v)) { continue; }
+			if (strncmp($bucket, 'u:', 2) === 0) { if ((int)$v >= GP_LOGIN_MAX_ATTEMPTS * 2) { $out['users']++; } }
+			elseif ((int)$v >= GP_LOGIN_MAX_ATTEMPTS) { $out['ips']++; }
+		}
+		$guard++;
+	} while ($cursor !== '0' && $guard < 50);
+	gv_redis_close($conn);
+	return $out;
 }
 
 // Seconds until the counter of one bucket expires (0 when it is not running).
@@ -635,7 +671,7 @@ function gp_login_retry_after($username, $known = false) {
 	if ($username !== '') {
 		$ub = gp_login_user_bucket($username);
 		if (!$known && gp_attempts_get($ub, GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 2) { $wait = max($wait, gp_attempts_ttl($ub, GP_LOGIN_WINDOW)); }
-		if (gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) { $wait = max($wait, gp_attempts_ttl('user', GP_LOGIN_WINDOW)); }
+		if (!$known && gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) { $wait = max($wait, gp_attempts_ttl('user', GP_LOGIN_WINDOW)); }
 	}
 	return $wait > 0 ? $wait : GP_LOGIN_LOCKOUT;
 }

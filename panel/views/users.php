@@ -93,6 +93,15 @@ foreach ($users as $u) { if ($u['role'] === 'admin' && $u['enabled']) { $admins+
 
 <section class="gp-card" id="users-unlock">
 	<h2 class="gp-card-title"><?= gp_e(gp_t('usr_unlock_title')) ?></h2>
+	<?php $lk = isset($locks) && is_array($locks) ? $locks : null; if ($lk): $lg = $lk['global']; ?>
+	<div class="gp-table-wrap"><table class="gp-table"><caption class="gp-help"><?= gp_e(gp_t('usr_locks_title')) ?><?= gp_tip('usr_locks') ?></caption><tbody>
+		<tr><th scope="row"><?= gp_e(gp_t('usr_locks_global')) ?></th>
+			<td class="gp-mono"><?= gp_e(gp_num((int)$lg['n']) . ' / ' . gp_num((int)$lg['limit'])) ?>
+				<span class="gp-badge <?= $lg['locked'] ? 'gp-badge-bad' : 'gp-badge-on' ?>" data-lock-global="<?= $lg['locked'] ? '1' : '0' ?>"><?= gp_e($lg['locked'] ? sprintf(gp_t('usr_locks_global_on'), (string)(int)ceil((int)$lg['ttl'] / 60)) : gp_t('usr_locks_global_off')) ?></span></td></tr>
+		<tr><th scope="row"><?= gp_e(gp_t('usr_locks_users')) ?></th><td class="gp-mono"><?= $lk['scanned'] ? gp_e(gp_num((int)$lk['users'])) : gp_e(gp_t('usr_locks_noredis')) ?></td></tr>
+		<tr><th scope="row"><?= gp_e(gp_t('usr_locks_ips')) ?></th><td class="gp-mono"><?= $lk['scanned'] ? gp_e(gp_num((int)$lk['ips'])) : gp_e(gp_t('usr_locks_noredis')) ?></td></tr>
+	</tbody></table></div>
+	<?php endif; ?>
 	<p class="gp-help"><?= gp_e(gp_t('usr_unlock_help')) ?></p>
 	<form method="post" action="index.php?r=users" class="gp-form">
 		<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">

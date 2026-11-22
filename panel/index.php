@@ -611,7 +611,7 @@ switch ($gp_route) {
 			$urows[] = $u;
 		}
 		usort($urows, function ($a, $b) { return strcmp($a['username'], $b['username']); });
-		gp_render('users', array('users' => $urows, 'all_count' => count($ust['users']), 'filter' => $ufilter, 'state' => $ust, 'me' => $gp_user));
+		gp_render('users', array('locks' => gp_login_lock_state(), 'users' => $urows, 'all_count' => count($ust['users']), 'filter' => $ufilter, 'state' => $ust, 'me' => $gp_user));
 
 	case 'account':
 		// Any role: change your OWN password (the current one is required). Other sessions of the user end; this one is reissued.
