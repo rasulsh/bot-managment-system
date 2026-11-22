@@ -135,7 +135,7 @@ All keys are panel-tunable (Settings -> CAPTCHA, overlay keys). A level 1-5 pres
 | `captcha.max_attempts` | 3 | Answers one image accepts (counted in Redis). |
 | `captcha.ip_budget` / `ip_window` | 10 / 900 | CAPTCHA pages per address (IPv6 /64) per window (s). Over it: 429 and no Redis work. |
 | `captcha.require_pow` | true | The proof of work (`challenge.pow_bits`, or the rule's `pow_bits`) is still required with the CAPTCHA. |
-| `captcha.escalate_score` | 0 | 0 = off. A proof of work whose headless score reaches it gets a CAPTCHA instead of a token (only while `enforce.challenge` is on). |
+| `captcha.escalate_score` | 0 | 0 = off. A proof of work whose headless score reaches it gets a CAPTCHA instead of a token (only while `enforce.challenge` is on). The client (ip + UA) stays escalated for 10 minutes by a Redis flag AND a cookie. |
 | `captcha.device_budget` | false | CAPTCHA instead of the hourly / daily device 429; a CAPTCHA-level token is waived from those two budgets. |
 | `captcha.w_webdriver` 40, `w_ua_headless` 40, `w_ua_mismatch` 25, `w_no_languages` 15, `w_no_chrome` 20, `w_no_plugins` 10, `w_webgl_soft` 15, `w_screen_zero` 20, `w_notification` 15, `w_too_fast` 20, `w_no_input` 20, `w_ua_spoof` 25 | | Weight (0-100) of each headless signal; 0 switches it off. |
 | `strings.cap_title`, `cap_sub`, `cap_label`, `cap_submit`, `cap_new`, `cap_wrong`, `cap_failed`, `cap_expired` | English / Persian defaults | The CAPTCHA page texts (escaped, any language, RTL follows `strings.dir`). |
@@ -143,9 +143,11 @@ All keys are panel-tunable (Settings -> CAPTCHA, overlay keys). A level 1-5 pres
 Rule action: `captcha` (rules cache like the others). Files: `guard/captcha-font.ttf` + `guard/captcha-font.LICENSE.txt` (DejaVu Sans Mono Bold, free
 Bitstream Vera / public-domain licence). Test knob: `GV_CAPTCHA_NO_GD=1` makes the guard behave as if GD were missing.
 
-Redis keys (prefixed): `cpi:<ip net>` pages per window, `ca:<nonce id>` attempts at a nonce, `nonce:<id>` the usual single-use claim.
+Redis keys (prefixed): `cpi:<ip net>` pages per window, `ca:<nonce id>` attempts at a nonce, `nonce:<id>` the usual single-use claim, `cesc:<md5(ip net|UA hash)>`
+the escalation flag (600 s, deleted when a level-c token is issued).
+`pow_bits` of 20 or more on a CAPTCHA (also what a CAPTCHA served while Redis is down gets) means the proof of work is bound to the typed answer and solved at submit.
 Log row keys (only when they apply): `cap` = `show | ok | wrong | fail | exp | inv | esc`, `ct` seconds a solved CAPTCHA took, `tl` = `c` for a request that
-carried a CAPTCHA-level token, `hs` the headless score, `hf` the letters of the signals that fired. Reasons: `CAPT_BUDGET`, `CAPT_ESC`, `SH_CAPT_ESC`.
+carried a CAPTCHA-level token, `hs` the headless score, `hf` the letters of the signals that fired. Reasons: `CAPT_BUDGET`, `CAPT_ESC`, `SH_CAPT_ESC`, `CAPT_DEGRADED` (the CAPTCHA was served while Redis was down, with a 20-bit answer-bound proof).
 Token cookie: `device.issued.signature` (level p) or `device.issued.c.signature` (level c). Escalation flag cookie: `<cookie_name>c` (signed expiry).
 
 ## IP list files (`lists/`)

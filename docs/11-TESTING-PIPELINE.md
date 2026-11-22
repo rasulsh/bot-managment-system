@@ -132,8 +132,8 @@ compatibility, the rule action matrix, the headless scoring function with every 
 "GD missing" fallback via `GV_CAPTCHA_NO_GD`), `panel-selftest.php` (impact preview, the GD alert, the Settings tab, tooltips, the dashboard KPIs),
 `analyzer/selftest.py` (the KPIs), `rules-e2e.sh` sections M and K2 over HTTP (the answer is found by brute force with `scripts/captcha-solve.php`, the proof of
 work with `scripts/pow-solve.php`: the whole flow, wrong / right / Persian-digit answers, attempts, single use, the token level, every "never shown" case, the
-per-IP budget with no Redis work, escalation, CAPTCHA instead of the device 429, GD missing, Redis down) and `scripts/browser-test.js` (a real browser
+per-IP budget with no Redis work, escalation (also a client that drops its cookie, the Redis flag, its removal on solve, command and connection counts), the 20-bit answer-bound proof while Redis is down, CAPTCHA instead of the device 429, GD missing, Redis down) and `scripts/browser-test.js` (a real browser
 that looks headless is escalated and solves it; one that does not passes without it). `php scripts/bench-gv-run.php --cap-gen` times the page generation per
-level, `--cap-rules=20` / `--cap-match` the request path with captcha rules. CI installs GD (`extensions: gd`); the suites run the "GD missing" case with the knob on a PHP that has it.
+level, `--cap-rules=20` / `--cap-match` the request path with captcha rules, `--esc` with escalation enforced. CI installs GD (`extensions: gd`); the suites run the "GD missing" case with the knob on a PHP that has it.
 
 `rules-e2e.sh` needs `php`, `python3`, `curl`, `redis-server`; it creates and removes `guard.off` in the project root.

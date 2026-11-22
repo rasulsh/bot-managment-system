@@ -196,13 +196,21 @@ function loadBlock(buf, off) {
 		W[i] = (buf[j] << 24) | (buf[j + 1] << 16) | (buf[j + 2] << 8) | buf[j + 3];
 	}
 }
-var pre = N + ':', L = pre.length, mid = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
-var pb = new Uint8Array(L), i0;
-for (i0 = 0; i0 < L; i0++) { pb[i0] = pre.charCodeAt(i0) & 255; }
-var nfull = Math.floor(L / 64), r = L - nfull * 64;
-for (i0 = 0; i0 < nfull; i0++) { loadBlock(pb, i0 * 64); compress(mid, mid); }
-var buf = new Uint8Array(128), st = new Uint32Array(8);
-for (i0 = 0; i0 < r; i0++) { buf[i0] = pb[nfull * 64 + i0]; }
+var L = 0, nfull = 0, r = 0, mid = new Uint32Array(8), buf = new Uint8Array(128), st = new Uint32Array(8);
+// The midstate of everything hashed before the counter. The proof-of-work page hashes "nonce:counter". The CAPTCHA page in
+// "bound" mode (difficulty 20 or more, which is what a CAPTCHA served while Redis was down carries) hashes
+// "nonce:typed answer:counter": setup() runs again with the typed answer, so every guess needs its own proof of work.
+function setup(pre) {
+	var pb, i0, init = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+	L = pre.length;
+	for (i0 = 0; i0 < 8; i0++) { mid[i0] = init[i0]; }
+	pb = new Uint8Array(L);
+	for (i0 = 0; i0 < L; i0++) { pb[i0] = pre.charCodeAt(i0) & 255; }
+	nfull = Math.floor(L / 64); r = L - nfull * 64;
+	for (i0 = 0; i0 < nfull; i0++) { loadBlock(pb, i0 * 64); compress(mid, mid); }
+	for (i0 = 0; i0 < r; i0++) { buf[i0] = pb[nfull * 64 + i0]; }
+}
+setup(N + ':');
 function test(c) {
 	var ds = String(c), n = ds.length, tl = r + n, nb = (tl + 9 <= 64) ? 1 : 2, end = nb * 64, i;
 	for (i = 0; i < n; i++) { buf[r + i] = ds.charCodeAt(i); }
@@ -317,7 +325,7 @@ function gv_captcha_js($nonce, $bits, array $msgs) {
 	$core = substr($raw, 0, strpos($raw, '/*GV_TAIL*/'));
 	$tail = <<<'JS'
 var M = __M__, form = document.getElementById('gv-cform'), inp = document.getElementById('gv-ca'), btn = document.getElementById('gv-cs'), nw = document.getElementById('gv-cn'), er = document.getElementById('gv-ce');
-var pc = null, pd = (B === 0), want = false, busy = false;
+var pc = null, pd = (B === 0), want = false, busy = false, bound = (B >= 20);
 function say(t) { er.textContent = t; er.hidden = false; }
 function again() { busy = false; btn.disabled = false; }
 function send() {
@@ -330,12 +338,15 @@ function send() {
 		else { say(r.status === 410 ? M.expired : M.failed); btn.disabled = true; inp.disabled = true; }
 	}).catch(function () { say(M.failed); again(); });
 }
-if (B > 0) { solve(function (c) { pc = c; pd = true; if (want) { send(); } }); }
+// Difficulty below 20: the proof of work is solved in the background while the visitor types. 20 or more (a CAPTCHA served while Redis
+// was down, where attempts cannot be counted): it is bound to the typed answer, so it starts at submit and every guess pays for itself.
+if (B > 0 && !bound) { solve(function (c) { pc = c; pd = true; if (want) { send(); } }); }
 form.onsubmit = function (ev) {
 	ev.preventDefault();
 	if (busy || !inp.value) { return; }
 	busy = true; btn.disabled = true; er.hidden = true; want = true;
-	if (pd) { send(); }
+	if (bound) { setup(N + ':' + encodeURIComponent(inp.value) + ':'); solve(function (c) { pc = c; send(); }); }
+	else if (pd) { send(); }
 };
 nw.onclick = function () { location.reload(); };
 try { inp.focus(); } catch (e) {}

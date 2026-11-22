@@ -30,6 +30,7 @@ $lookup_only = isset($opt['lookup']);
 // them covers the benchmark client); --list-lookup times gv_iplist_check() alone.
 $lists_spec = isset($opt['lists']) ? array_map('intval', explode(',', (string)$opt['lists'] . ',0')) : null;
 $list_lookup = isset($opt['list-lookup']);
+// --esc: escalation enforced (the request reads the server-side flag cesc:<ip+UA> in its one pipeline).
 // CAPTCHA: --cap-gen times the image + page generation at every level; --cap-rules=N writes N captcha rules that never match
 // (the cost of having them); --cap-match writes one captcha rule that MATCHES the benchmark client, which holds a CAPTCHA-level
 // token, so it is not asked: the request path of a request that does NOT get a CAPTCHA although a captcha rule applies.
@@ -37,6 +38,7 @@ $cap_gen = isset($opt['cap-gen']);
 $cap_rules = isset($opt['cap-rules']) ? (int)$opt['cap-rules'] : 0;
 $cap_match = isset($opt['cap-match']);
 $list_types = (isset($opt['list-types']) && $opt['list-types'] === 'block') ? array('block' => 9) : array('allow' => 7, 'block' => 9);   // --list-types=block: only a block file
+$esc_on = isset($opt['esc']);        // --esc: escalation enforced (enforce.challenge on, captcha.escalate_score 60): the request also reads cesc:<ip+UA>
 $match_only = isset($opt['match']);     // --match: gv_rules_match() alone, country already known (no lookup)
 $tmp    = sys_get_temp_dir() . '/gv-bench-' . getmypid();
 @mkdir($tmp . '/logs', 0775, true);
@@ -49,6 +51,7 @@ file_put_contents($tmp . '/config.php', "<?php\nif (!defined('GV_BOOT')) { exit;
 	. "\$c['redis']['port'] = $port; \$c['redis']['timeout'] = 0.5; \$c['log_dir'] = " . var_export($tmp . '/logs', true) . ";\n"
 	. "\$c['limits'] = array_merge(\$c['limits'], array('window' => 3600, 'device' => 1000000, 'ip_ua' => 1000000, 'ip' => 1000000, 'device_hour' => 1000000, 'device_day' => 1000000));\n"
 	. ($geolog ? "\$c['geo'] = array('log' => true);\n" : '')
+	. ($esc_on ? "\$c['enforce']['challenge'] = true; \$c['captcha']['escalate_score'] = 60;\n" : '')
 	. "return \$c;\n");
 putenv('GV_CONFIG=' . $tmp . '/config.php');
 

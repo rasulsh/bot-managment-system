@@ -604,8 +604,8 @@ echo "-- M: headless signals, escalation and the device budget"
 # escalation in MONITOR mode (server 1, enforce.challenge off): logged, the token is still issued
 write_rules "$(rule r-pow Pow enforce challenge '["escbot"]')"
 page=$(body 'x escbot' /m50 -b "$WORK/e1.jar" -c "$WORK/e1.jar"); NE=$(printf '%s' "$page" | nonce_of); CE=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE")
-hpost() { # PORT NONCE POW SIGNALS JAR
-	curl -s -o /dev/null -w '%{http_code}' -D "$WORK/hdr.txt" -X POST -H 'User-Agent: x escbot' -H "X-GV: $2" -H "X-GV-P: $3" -H "X-GV-S: $4" -b "$5" -c "$5" "http://127.0.0.1:$1/"
+hpost() { # PORT NONCE POW SIGNALS JAR [UA]
+	curl -s -o /dev/null -w '%{http_code}' -D "$WORK/hdr.txt" -X POST -H "User-Agent: ${6:-x escbot}" -H "X-GV: $2" -H "X-GV-P: $3" -H "X-GV-S: $4" -b "$5" -c "$5" "http://127.0.0.1:$1/"
 }
 eq "M50 a handshake with headless signals (score 105 >= escalate_score 60), enforce.challenge OFF: the token is issued (shadow)" "$(hpost "$PORT" "$NE" "$CE" 'w1.h1.t900' "$WORK/e1.jar")" 204
 has 'SH_CAPT_ESC'; ok "M51 ...logged with SH_CAPT_ESC and the score and letters only (hs, hf)" "$([ $? -eq 0 ] && has '"hs":105' && has '"hf":"whu"' && echo 1 || echo 0)"
@@ -618,6 +618,7 @@ body2() { local ua="$1" path="$2"; shift 2; curl -s -H "User-Agent: $ua" -H 'Acc
 write_rules
 page=$(body2 'x escbot' /m60 -b "$WORK/e3.jar" -c "$WORK/e3.jar"); NE=$(printf '%s' "$page" | nonce_of); CE=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE")
 eq "M60 server 2 (challenge enforced): the same signals escalate: 202, no token" "$(hpost "$PORT2" "$NE" "$CE" 'w1.h1.t900' "$WORK/e3.jar")" 202
+ok "M60b ...and the server-side flag cesc:<ip + UA> exists in Redis" "$([ "$(redis-cli -p "$RPORT" --scan --pattern 'gv:cesc:*' | wc -l | tr -d ' ')" = 1 ] && [ "$(redis-cli -p "$RPORT" ttl "$(redis-cli -p "$RPORT" --scan --pattern 'gv:cesc:*' | head -1)" | tr -d '\r')" -gt 500 ] && echo 1 || echo 0)"
 ok "M61 ...a signed flag cookie is set, and no token cookie" "$(grep -q '_gvc' "$WORK/hdr.txt" && ! grep -qi 'set-cookie: _gv=' "$WORK/hdr.txt" && echo 1 || echo 0)"
 has2() { tail -1 "$WORK"/logs/guard-*.jsonl | grep -q "$1"; }
 has2 '"cap":"esc"'; ok "M62 ...logged as a challenge with CAPT_ESC" "$([ $? -eq 0 ] && has2 'CAPT_ESC' && echo 1 || echo 0)"
@@ -625,7 +626,42 @@ page=$(body2 'x escbot' /m63 -b "$WORK/e3.jar" -c "$WORK/e3.jar")
 ok "M63 the next page load is the CAPTCHA, not the PoW challenge" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
 NE3=$(printf '%s' "$page" | nonce_of); AE3=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$NE3" 4 2>/dev/null); PE3=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE3")
 eq "M64 solving it gives a CAPTCHA-level token" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: x escbot' -H "X-GV: $NE3" -H "X-GV-A: $AE3" -H "X-GV-P: $PE3" -b "$WORK/e3.jar" -c "$WORK/e3.jar" "http://127.0.0.1:$PORT2/")" 204
+ok "M64b ...and the flag is removed from Redis when the CAPTCHA-level token is issued" "$([ "$(redis-cli -p "$RPORT" --scan --pattern 'gv:cesc:*' | wc -l | tr -d ' ')" = 0 ] && echo 1 || echo 0)"
 eq "M65 with it the pages load" "$(get2 'x escbot' /m65 -b "$WORK/e3.jar")" 200
+
+echo "-- M2: the escalation survives a dropped cookie (server-side flag, same ip + UA)"
+nkeys() { redis-cli -p "$RPORT" --scan --pattern 'gv:cesc:*' | wc -l | tr -d ' '; }
+conns() { redis-cli -p "$RPORT" info stats | sed -n 's/^total_connections_received:\([0-9]*\).*/\1/p' | tr -d '\r'; }
+R flushall
+# three clients with a PoW challenge in hand: one that will drop its cookie, one that escalates, one that is clean (UA differs: its own flag key)
+page=$(body2 'x escbot' /m66a -b "$WORK/e5.jar" -c "$WORK/e5.jar"); NE5=$(printf '%s' "$page" | nonce_of); CE5=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE5")
+page=$(body2 'x escbot' /m66b -b "$WORK/e4.jar" -c "$WORK/e4.jar"); NE4=$(printf '%s' "$page" | nonce_of); CE4=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE4")
+page=$(body2 'x escbot' /m66c -b "$WORK/e8.jar" -c "$WORK/e8.jar"); NE8=$(printf '%s' "$page" | nonce_of); CE8=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE8")
+page=$(body2 'x cleanbot' /m66d -b "$WORK/e6.jar" -c "$WORK/e6.jar"); NE6=$(printf '%s' "$page" | nonce_of); CE6=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE6")
+a=$(cmds); ca=$(conns); code6=$(hpost "$PORT2" "$NE6" "$CE6" 'w0.h0.l0.t900' "$WORK/e6.jar" 'x cleanbot'); b=$(cmds); cb=$(conns)
+CLEAN_CMDS=$(( b - a )); CLEAN_CONNS=$(( cb - ca ))
+eq "M66 a clean handshake (escalation on) is not escalated: 204" "$code6" 204
+a=$(cmds); ca=$(conns); code4=$(hpost "$PORT2" "$NE4" "$CE4" 'w1.h1.t900' "$WORK/e4.jar"); b=$(cmds); cb=$(conns)
+eq "M67 a handshake with the headless signals escalates: 202" "$code4" 202
+eq "M68 ...and costs the same number of Redis commands as the clean one (the flag write replaces the flag read) and no extra connection" "$(( b - a )).$(( cb - ca ))" "$CLEAN_CMDS.$CLEAN_CONNS"
+eq "M68b ...and ONE connection, as every request"  "$(( cb - ca - 2 ))" 1
+eq "M69 the flag exists" "$(nkeys)" 1
+code5=$(hpost "$PORT2" "$NE5" "$CE5" 'w0.h0.l0.t900' "$WORK/e5.jar")
+eq "M70 the same ip + UA with ANOTHER cookie jar (cookie dropped) and clean signals: 202, no token (the flag, not the cookie, decides)" "$code5" 202
+ok "M71 ...no token cookie is set" "$(! grep -qi 'set-cookie: _gv=' "$WORK/hdr.txt" && echo 1 || echo 0)"
+page=$(body2 'x escbot' /m72)
+ok "M72 a page load with NO cookie at all gets the CAPTCHA" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
+ok "M73 ...and another UA from the same address is not affected (its own flag key)" "$([ "$(get2 'x cleanbot' /m73 -b "$WORK/e6.jar")" = 200 ] && echo 1 || echo 0)"
+ca=$(conns); get2 'x freshbot' /m72b >/dev/null; cb=$(conns)
+eq "M72b the request path reads the flag in its ONE pipeline: a token-less page load opens one connection (no extra round trip)" "$(( cb - ca - 1 ))" 1
+NE7=$(printf '%s' "$page" | nonce_of); AE7=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$NE7" 4 2>/dev/null); PE7=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NE7")
+eq "M74 solving it gives a CAPTCHA-level token" "$(curl -s -o /dev/null -w '%{http_code}' -D "$WORK/hdr.txt" -X POST -H 'User-Agent: x escbot' -H "X-GV: $NE7" -H "X-GV-A: $AE7" -H "X-GV-P: $PE7" -c "$WORK/e7.jar" "http://127.0.0.1:$PORT2/")" 204
+eq "M75 ...and the flag is gone" "$(nkeys)" 0
+eq "M76 ...the pages load with the token" "$(get2 'x escbot' /m76 -b "$WORK/e7.jar")" 200
+# the cookie as the second signal: an escalated client whose flag is NOT in Redis (written by a handshake while Redis was down, or evicted) still gets the CAPTCHA
+code8=$(hpost "$PORT2" "$NE8" "$CE8" 'w1.h1.t900' "$WORK/e8.jar"); R flushall
+eq "M77 e8 escalates (202) and its Redis flag is removed again (flushall)" "$code8.$(nkeys)" "202.0"
+ok "M78 ...the cookie alone still sends it to the CAPTCHA (Redis has no flag)" "$(body2 'x escbot' /m78 -b "$WORK/e8.jar" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
 # the device budget: a PoW-level token over device_hour (3) gets a CAPTCHA instead of a 429
 page=$(body2 'x devbot' /m70 -b "$WORK/d1.jar" -c "$WORK/d1.jar"); ND=$(printf '%s' "$page" | nonce_of); CD=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$ND")
 curl -s -o /dev/null -X POST -H 'User-Agent: x devbot' -H "X-GV: $ND" -H "X-GV-P: $CD" -b "$WORK/d1.jar" -c "$WORK/d1.jar" "http://127.0.0.1:$PORT2/"
@@ -683,14 +719,18 @@ write_rules "$(grule r-noir NotIR enforce block exclude '["IR"]')"
 eq "K6 Bingbot UA from a US address, Redis down: served" "$(get 'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)' /k6)" 200
 eq "K7 a fake crawler UA that is not in known_bots is still blocked" "$(get 'Mozilla/5.0 (compatible; Notabot/2.0)' /k7)" 403
 
-echo "== K2. CAPTCHA with Redis down: the stateless checks still work (documented: attempts are not counted)"
+echo "== K2. CAPTCHA with Redis down: attempts are not counted, so every guess must cost CPU (a proof of work of >= 20 bits BOUND to the typed answer)"
 write_rules "$(rule r-cap Cap enforce captcha '["capbot"]')" "$(SKIP=false PRI=50 rule r-gcap GCap enforce captcha '["googlebot"]')"
 page=$(body 'x capbot' /k20 -b "$WORK/k2.jar" -c "$WORK/k2.jar"); NK=$(printf '%s' "$page" | nonce_of)
 ok "K20 Redis down: the CAPTCHA page is still served (no budget can be read)" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
-AK=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$NK" 4 2>/dev/null); PK=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NK")
-eq "K21 Redis down: wrong answers are 422 and never run out (no counter: the documented guessing window; the time limit and the PoW still bound it)" "$(cpost "$NK" 1111x "$PK" "$WORK/k2.jar")$(cpost "$NK" 2222x "$PK" "$WORK/k2.jar")$(cpost "$NK" 3333x "$PK" "$WORK/k2.jar")$(cpost "$NK" 4444x "$PK" "$WORK/k2.jar")" 422422422422
-eq "K22 Redis down: the right answer still gives a CAPTCHA-level token" "$(cpost "$NK" "$AK" "$PK" "$WORK/k2.jar")" 204
+has 'CAPT_DEGRADED'; ok "K20b ...logged with CAPT_DEGRADED, and the page carries a proof of work of 20 bits (a six-part nonce)" "$([ $? -eq 0 ] && printf '%s' "$page" | grep -q "B = 20," && [ "$(printf '%s' "$NK" | tr -cd '.' | wc -c | tr -d ' ')" = 5 ] && echo 1 || echo 0)"
+AK=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$NK" 4 2>/dev/null)
+P1=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NK" 1111x); P2=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NK" 2222x); PK=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NK" "$AK")
+eq "K21 Redis down: a proof solved for ONE answer does not carry over to another guess (403 pow_bad)" "$(cpost "$NK" 2222x "$P1" "$WORK/k2.jar")" 403
+eq "K21b Redis down: each wrong guess WITH its own proof is a plain 422 (no counter: the number of guesses is bounded only by the CPU they cost and the time limit, see docs/06)" "$(cpost "$NK" 1111x "$P1" "$WORK/k2.jar")$(cpost "$NK" 2222x "$P2" "$WORK/k2.jar")" 422422
+eq "K22 Redis down: the right answer with its own proof still gives a CAPTCHA-level token" "$(cpost "$NK" "$AK" "$PK" "$WORK/k2.jar")" 204
 eq "K23 Redis down: a bad proof of work is refused" "$(cpost "$NK" "$AK" 1 "$WORK/k2.jar")" 403
+ok "K23b Redis down: an escalated client whose cookie is the only signal still gets the CAPTCHA (and the degraded proof)" "$(body2 'x escbot' /k23 -b "$WORK/e8.jar" | grep -q "B = 20," && echo 1 || echo 0)"
 eq "K24 Redis down: a known-bot UA keeps its pass; a captcha rule never asks a crawler (RULE_SKIP_DEGRADED)" "$(get "$GBOT" /k24)" 200
 has '"RULE_SKIP_DEGRADED"'; ok "K25 ...with the reason on the row" "$([ $? -eq 0 ] && echo 1 || echo 0)"
 write_rules

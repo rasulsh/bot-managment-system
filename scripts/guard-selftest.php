@@ -1726,6 +1726,32 @@ t_ok('captcha nonce: parser limits (bits 0-24, time 1-3600, hex shapes)', gv_cap
 	&& gv_captcha_nonce_parse('1.' . str_repeat('a', 16) . '.12.60.' . str_repeat('b', 15) . '.' . str_repeat('c', 64)) === false && gv_captcha_nonce_parse('') === false);
 t_ok('captcha: the escalation flag is a signed expiry that grants nothing', gv_capflag_ok(gv_capflag_make('s'), 's') && !gv_capflag_ok(gv_capflag_make('s'), 't') && !gv_capflag_ok(gv_capflag_make('s', -5), 's') && !gv_capflag_ok('x', 's') && !gv_capflag_ok('', 's'));
 
+// Escalation flag in Redis + the degraded (Redis down) CAPTCHA: the helpers and the wiring.
+$bc = array('captcha' => array('require_pow' => 1));
+t_ok('captcha bits: the configured difficulty while Redis is up; require_pow off means none',
+	gv_captcha_pow_bits($bc, 14, false) === 14 && gv_captcha_pow_bits(array('captcha' => array('require_pow' => 0)), 14, false) === 0);
+t_ok('captcha bits: Redis down raises it to at least 20 (also with require_pow off), never lowers a higher one, never above 24',
+	gv_captcha_pow_bits($bc, 14, true) === 20 && gv_captcha_pow_bits(array('captcha' => array('require_pow' => 0)), 0, true) === 20
+	&& gv_captcha_pow_bits($bc, 22, true) === 22 && gv_captcha_pow_bits($bc, 30, true) === 24);
+$bn = 'nonce.abc'; $bl = null;
+for ($i = 0; $bl === null; $i++) { if (gv_pow_ok($bn, (string)$i, 8)) { $bl = $i; } }
+t_ok('captcha pow: below 20 bits the proof covers the nonce alone (background solving), whatever the answer header says',
+	gv_captcha_pow_ok($bn, 'x', (string)$bl, 8) === true && gv_captcha_pow_ok($bn, '', (string)$bl, 8) === true);
+$bf = null; for ($i = 0; $i < 20000000 && $bf === null; $i++) { if (gv_pow_ok($bn . ':4821', (string)$i, 20)) { $bf = $i; } }
+t_ok('captcha pow: a solved bound proof is good for ITS answer only (another guess needs its own work)',
+	$bf !== null && gv_captcha_pow_ok($bn, '4821', (string)$bf, 20) === true && gv_captcha_pow_ok($bn, '4822', (string)$bf, 20) === false && gv_captcha_pow_ok($bn, '', (string)$bf, 20) === false);
+$ke = array('ipn' => 'ip1', 'ua' => 'Mozilla A'); $ke2 = array('ipn' => 'ip1', 'ua' => 'Mozilla B'); $ke3 = array('ipn' => 'ip2', 'ua' => 'Mozilla A');
+t_ok('escalation flag key: cesc:<md5>, stable for one ip + UA, different for another UA or another IP',
+	preg_match('/^.*cesc:[0-9a-f]{32}$/', gv_cesc_key($ke)) === 1 && gv_cesc_key($ke) === gv_cesc_key($ke) && gv_cesc_key($ke) !== gv_cesc_key($ke2) && gv_cesc_key($ke) !== gv_cesc_key($ke3));
+$gsrc = file_get_contents(__DIR__ . '/../guard/guard.php');
+t_ok('escalation flag: written (SET .. EX 600) or read (GET) inside the handshake pipeline, read in the request pipeline: no extra connect or pipeline',
+	strpos($gsrc, "array('SET', gv_cesc_key(\$f), '1', 'EX', '600')") !== false && strpos($gsrc, "array('GET', gv_cesc_key(\$f))") !== false);
+$cj = gv_captcha_js('n.n', 20, array());
+t_ok('captcha page script: the solver midstate is set up per subject and an answer-bound proof is solved at submit', strpos($cj, 'function setup(') !== false && strpos($cj, 'bound') !== false);
+$dg = ''; ob_start(); gv_captcha_serve(array_merge($CAP_CFG, array('secret' => 'cap-secret')), array('ua' => 'ua', 'ip' => '1.2.3.4'), 20); $dg = ob_get_clean();
+t_ok('captcha serve: with 20 bits the page carries B = 20 (bound proof) in a six-part nonce',
+	!$has_gd || (preg_match("/var N = '([0-9a-f.]+)', B = 20,/", $dg, $m) === 1 && count(explode('.', $m[1])) === 6));
+
 // Token levels: old tokens are PoW level.
 $tp = gv_tok_make('tk'); $tc = gv_tok_make('tk', 'nonceid', 'c'); $tc2 = gv_tok_make('tk', 'nonceid', 'c');
 t_ok('token level: a token issued the old way (three parts) is level p, a CAPTCHA token (four parts, third = c) is level c, the device id comes from the nonce', count(explode('.', $tp)) === 3 && count(explode('.', $tc)) === 4 && explode('.', $tc)[2] === 'c'

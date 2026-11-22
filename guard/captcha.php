@@ -22,6 +22,9 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 // proof of work are what limit volume.
 
 define('GV_CAPTCHA_FONT', __DIR__ . '/captcha-font.ttf');
+// A CAPTCHA nonce with this many proof-of-work bits or more is "bound": the proof of work is over "nonce:answer-header:counter",
+// so every guess costs its own work. A CAPTCHA served while Redis is down (no attempt counter) is issued with at least this many.
+define('GV_CAPTCHA_BOUND_BITS', 20);
 
 // The five presets. length, charset (digits | alnum), warp / noise / overlap level, time limit (s).
 function gv_captcha_levels() {
@@ -50,6 +53,27 @@ function gv_captcha_params(array $cfg) {
 	if (isset($c['overlap']) && in_array($c['overlap'], array('no', 'slight', 'yes'), true)) { $p['overlap'] = $c['overlap']; }
 	if (!empty($c['time_limit']) && (int)$c['time_limit'] >= 20 && (int)$c['time_limit'] <= 900) { $p['time'] = (int)$c['time_limit']; }
 	return $p;
+}
+
+// The proof-of-work difficulty a CAPTCHA page is issued with: the configured one (0 when captcha.require_pow is off), and at least
+// GV_CAPTCHA_BOUND_BITS while Redis is not alive (the attempt counter cannot count, so every guess must cost CPU). Pure.
+function gv_captcha_pow_bits(array $cfg, $pb, $degraded) {
+	$b = !empty($cfg['captcha']['require_pow']) ? (int)$pb : 0;
+	if ($degraded) { $b = max($b, GV_CAPTCHA_BOUND_BITS); }
+	return max(0, min(24, $b));
+}
+
+// The proof of work of a CAPTCHA answer. Below GV_CAPTCHA_BOUND_BITS it is over the nonce alone (solved once, in the background);
+// from there it is over the nonce AND the answer header exactly as the client sent it. Pure.
+function gv_captcha_pow_ok($nonce, $answer_header, $counter, $bits) {
+	$bits = (int)$bits;
+	if ($bits >= GV_CAPTCHA_BOUND_BITS) { return gv_pow_ok((string)$nonce . ':' . (string)$answer_header, $counter, $bits); }
+	return gv_pow_ok($nonce, $counter, $bits);
+}
+
+// The Redis key that says "this ip + UA was escalated to a CAPTCHA" (10 minutes). Same net / UA-hash shape as the riu counter.
+function gv_cesc_key(array $f) {
+	return gv_key('cesc:' . md5($f['ipn'] . '|' . substr(md5((string)$f['ua']), 0, 12)));
 }
 
 // Whether the image can be drawn here. GV_CAPTCHA_NO_GD is a test knob (the suites run the
@@ -417,7 +441,7 @@ function gv_captcha_handshake(array $cfg, array $f, array $st, $t0, $log) {
 	if ($state === 'bad') { $reply(403, 'nonce_bad', 'inv'); }
 	if ($state === 'exp') { $reply(410, 'nonce_bad', 'exp'); }
 	$p = gv_captcha_nonce_parse($f['xgv']);
-	if ($p[2] > 0 && !gv_pow_ok($f['xgv'], $f['xgvp'], $p[2])) { $reply(403, 'pow_bad', 'inv'); }
+	if ($p[2] > 0 && !gv_captcha_pow_ok($f['xgv'], $f['xga'], $f['xgvp'], $p[2])) { $reply(403, 'pow_bad', 'inv'); }
 	$correct = gv_captcha_answer_ok($f['xgv'], $secret, rawurldecode($f['xga']));
 	$max = max(1, (int)$cfg['captcha']['max_attempts']);
 	$window = $cfg['limits']['window'];
@@ -445,6 +469,11 @@ function gv_captcha_handshake(array $cfg, array $f, array $st, $t0, $log) {
 	$mint_refused = ($mint_n > (int)$cfg['limits']['mint']) && !$allowed_ip && !empty($cfg['enforce']['ratelimit']);
 	if ($mint_at >= 0 && ($replay || $mint_refused || $tries > $max) && gv_redis_alive($conn)) {
 		gv_redis_cmd($conn, array('DECR', gv_key('mint:' . $f['ipn'])));
+	}
+	// A level-c token is about to be issued: the escalation flag of this ip + UA has done its job (one command, on this
+	// success path only; the cookie flag is cleared below). Not before: a refused answer must not lift the flag.
+	if ($correct && !$replay && $tries <= $max && !$mint_refused && (int)$cfg['captcha']['escalate_score'] > 0 && gv_redis_alive($conn)) {
+		gv_redis_cmd($conn, array('DEL', gv_cesc_key($f)));
 	}
 	gv_finish($conn, $st);
 

@@ -295,11 +295,23 @@ unreliable from Iran and leak visitors to third parties. Without GD every `captc
 with the rule's `pow_bits`.
 
 * **Where it is used.** (1) A rule with the action **Image CAPTCHA**: an HTML request without a CAPTCHA-level token gets the page.
-  (2) **Escalation** (`captcha.escalate_score`, off at 0): a proof of work whose headless score reaches it does not get a token but a
-  signed 10 minute flag cookie (`<cookie>c`), and the next HTML page is the CAPTCHA. It only escalates while `enforce.challenge` is
-  on; in monitor mode the row carries `SH_CAPT_ESC` and the token is issued. (3) **`captcha.device_budget`** (off): a device over its
+  (2) **Escalation** (`captcha.escalate_score`, off at 0): a proof of work whose headless score reaches it does not get a token but
+  a CAPTCHA instead. The client then stays escalated for 10 minutes by two flags, and the next HTML page is the CAPTCHA: a signed cookie (`<cookie>c`, works with Redis down) **and** the Redis key
+  `cesc:<md5(ip net|UA hash)>` (works when the client drops cookies). The key is written with `SET .. EX 600` in the handshake's own
+  pipeline (or read with `GET` there when this handshake is not itself escalated) and read in the request path's one existing pipeline, so
+  escalation adds no round trip: while it exists, a navigation request from that ip + UA without a level-c token gets the CAPTCHA, cookie or no
+  cookie, and a proof-of-work handshake from it is answered 202 (reload into the CAPTCHA) instead of a level-p token. A level-c token deletes
+  the key (one extra `DEL`, only on that success path; a refused or replayed correct answer does not lift it). It only escalates while
+  `enforce.challenge` is on; in monitor mode the row carries `SH_CAPT_ESC` and the token is issued. With escalation on, a token-less navigation
+  request carries two more `GET`s (`cesc`, and the CAPTCHA budget) inside the same pipeline; with `escalate_score` 0 nothing is added.
+  (3) **`captcha.device_budget`** (off): a device over its
   hourly / daily budget (and over nothing else) gets a CAPTCHA instead of a 429, and a CAPTCHA-level token is waived from those two
   budgets.
+* **Redis down: bound proof of work.** The attempt counter lives in Redis, so while it is down a wrong answer cannot be counted. A request that
+  SERVES the CAPTCHA while Redis is not alive therefore issues the nonce with `pow_bits = max(configured, 20)` (reason `CAPT_DEGRADED`), and a CAPTCHA
+  nonce with 20 or more bits has a proof of work **bound to the typed answer**: the hash covers `nonce:answer-header:counter`, solved by the page
+  when the visitor submits (below 20 bits it covers the nonce alone and is solved in the background while the visitor reads the image). Each guess
+  needs its own proof, so every guess costs CPU. The remaining window is in [06-KNOWN-LIMITS.md](06-KNOWN-LIMITS.md).
 * **Never shown to**: an address in an *enforced* allow list, an operator allow override, a verified crawler (a captcha rule ignores
   `skip_verified_bots`: a verified crawler is skipped regardless; with Redis down a known-bot UA counts as verified), an exempt path,
   a non-HTML request (`gv_is_nav` false: it keeps the normal flow), or a block-listed address (that is a 403 at step 1b, long before).

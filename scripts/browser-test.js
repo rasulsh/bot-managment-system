@@ -46,7 +46,8 @@ return $c;`);
   const cfgPath2 = path.join(tmp, 'config-captcha.php');
   fs.writeFileSync(cfgPath2, `<?php if (!defined('GV_BOOT')) { exit; }
 $c = require '${cfgPath}';
-$c['captcha'] = array('level' => 1, 'escalate_score' => 80, 'max_attempts' => 3, 'ip_budget' => 1000);
+$c['captcha'] = array('level' => 1, 'escalate_score' => 80, 'max_attempts' => 3, 'ip_budget' => 1000, 'require_pow' => true);
+$c['challenge']['pow_bits'] = 20;           // >= 20: the CAPTCHA's proof of work is BOUND to the typed answer and solved at submit
 $c['log_dir'] = '${tmp}/logs2';
 return $c;`);
   const port = 18000 + Math.floor(Math.random() * 1000);
@@ -146,6 +147,7 @@ return $c;`);
         try { await ph.waitForSelector('#gv-cform', { timeout: 20000 }); } catch (e) { esc = false; }
         check('chromium (headless, webdriver true): escalated to the image CAPTCHA instead of a token', esc);
         const html = await ph.content();
+        check('the CAPTCHA carries a 20-bit proof of work bound to the answer (solved at submit, not in the background)', /B = 20,/.test(html) && /bound = \(B >= 20\)/.test(html));
         check('the CAPTCHA page shows an image and an empty text box', esc && (await ph.isVisible('img')) && (await ph.isVisible('#gv-ca')) && (await ph.inputValue('#gv-ca')) === '');
         const ctoken = (await ctxh.cookies()).some(c => c.name === '_gv');
         check('no token cookie while the CAPTCHA is open', esc && !ctoken);
