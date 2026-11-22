@@ -54,6 +54,7 @@ cleanly instead of writing partial verdicts. Both entry points also accept
 Cron:
 
 ```
+PATH=/usr/local/bin:/usr/bin:/bin
 */10 * * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh verify  >/dev/null 2>&1
 17 4   * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh nightly >/dev/null 2>&1
 41 5   * * 0 bash /full/path/bot-guard/scripts/analyzer-cron.sh train   >/dev/null 2>&1

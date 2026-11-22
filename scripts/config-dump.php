@@ -19,7 +19,9 @@
 // block (credentials included) and the panel's analyzer settings for analyzer/bridge.py to read over a pipe so
 // the analyzer connects with the same settings as the guard. It is not meant
 // to be run by hand, logged or captured.
-if (PHP_SAPI !== 'cli') { exit; }
+// The CLI, or a CGI build of php run from a shell (cPanel cron's PATH often finds php-cgi first; `php -q` suppresses its HTTP
+// headers). A web request (REQUEST_METHOD / REMOTE_ADDR set) never gets here: scripts/.htaccess denies the directory.
+if (!(PHP_SAPI === 'cli' || (strncmp(PHP_SAPI, 'cgi', 3) === 0 && !isset($_SERVER['REQUEST_METHOD']) && !isset($_SERVER['REMOTE_ADDR'])))) { exit; }
 if (PHP_VERSION_ID < 80000) { fwrite(STDERR, 'Bot Guard requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n"); exit(1); }
 
 define('GV_BOOT', 1);
@@ -92,6 +94,8 @@ unset($gv_cfg['secret'], $gv_cfg['holdout_salt'],
 
 $gv_flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
 if (defined('JSON_PRETTY_PRINT')) { $gv_flags |= JSON_PRETTY_PRINT; }
+// What the binary that ran this is: the analyzer warns when it is not the command-line build.
+$gv_cfg['_php'] = array('sapi' => PHP_SAPI, 'version' => PHP_VERSION, 'binary' => (string)PHP_BINARY);
 $gv_json = json_encode($gv_cfg, $gv_flags);
 if ($gv_json === false) {
 	fwrite(STDERR, "ERROR: could not encode the configuration as JSON\n");

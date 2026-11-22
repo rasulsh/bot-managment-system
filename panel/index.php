@@ -104,10 +104,15 @@ $gp_role = gp_current_role();      // '' when nobody is signed in
 $gp_flash = array();          // array of array(kind, message)
 gp_flash_load_from_cookie();  // pick up any flash left by the previous redirect
 $gp_post = ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST';
+$gp_section = ($gp_post && gp_section_valid(gp_post_section($gp_route, $_POST))) ? gp_post_section($gp_route, $_POST) : '';   // where this POST's messages go
 
-function gp_flash($kind, $message) {
-	global $gp_flash;
-	$gp_flash[] = array('kind' => $kind, 'message' => $message);
+// $section: the page section the message belongs to (default: the section of the POST action being handled, see gp_post_section).
+function gp_flash($kind, $message, $section = null) {
+	global $gp_flash, $gp_section;
+	$e = array('kind' => $kind, 'message' => $message);
+	$sec = $section === null ? (string)$gp_section : (string)$section;
+	if ($sec !== '') { $e['section'] = $sec; }
+	$gp_flash[] = $e;
 }
 
 // Persist any pending flashes into a short-lived signed cookie (gp_flash_encode
@@ -155,6 +160,11 @@ function gp_flash_clear_cookie() {
 function gp_redirect($route, $extra = array()) {
 	$query = array_merge(array('r' => $route), $extra);
 	$url = 'index.php?' . http_build_query($query);
+	// Back to the section that was acted on, so the message is on screen (same page only).
+	global $gp_flash, $gp_route;
+	if ($route === $gp_route && !empty($gp_flash)) {
+		foreach (array_reverse($gp_flash) as $m) { if (!empty($m['section'])) { $url .= '#msg-' . $m['section']; break; } }
+	}
 	gp_flash_save_to_cookie();                 // carry any pending flash across the 303
 	if (!headers_sent()) { header('Location: ' . $url, true, 303); }
 	exit;
@@ -240,6 +250,7 @@ switch ($gp_route) {
 				gp_audit_append(array('event' => 'killswitch', 'actor' => $gp_user,
 					'ip' => $gp_ip, 'key' => 'guard.off',
 					'old' => $stop ? false : true, 'new' => $stop ? true : false));
+				gp_flash($stop ? 'warn' : 'ok', gp_t($stop ? 'dash_kill_stopped' : 'dash_kill_started'));
 			} else {
 				// The emergency button did nothing (the project directory is not
 				// writable by PHP). Saying so is the whole point of the button.
@@ -327,7 +338,7 @@ switch ($gp_route) {
 		if ($gp_post && isset($_POST['do']) && is_string($_POST['do'])) {
 			$res = gp_rules_action($_POST['do'], $_POST, $gp_user, $gp_ip, $rcfg);
 			if ($res['ok']) {
-				gp_flash('ok', gp_t($res['msg']));
+				gp_flash('ok', gp_t($res['msg']), $res['msg'] === 'rule_saved' || $_POST['do'] === 'save' ? 'rules-list' : null);
 				gp_redirect('rules');
 			}
 			gp_flash(in_array($res['msg'], array('rule_warnings', 'rule_preview'), true) ? 'warn' : 'error', gp_t($res['msg']));
@@ -409,7 +420,7 @@ switch ($gp_route) {
 			$r = array(false, 'err_generic', '');
 			if ($do === 'save') {
 				$sv = gp_iplists_save($_POST, isset($_FILES['file']) && is_array($_FILES['file']) ? $_FILES['file'] : null, $gp_user, $gp_ip);
-				if ($sv['ok']) { gp_flash('ok', gp_t($sv['msg']) . ($sv['detail'] !== '' ? ': ' . $sv['detail'] : '')); gp_redirect('iplists'); }
+				if ($sv['ok']) { gp_flash('ok', gp_t($sv['msg']) . ($sv['detail'] !== '' ? ': ' . $sv['detail'] : ''), 'ipl-lists'); gp_redirect('iplists'); }
 				gp_flash($sv['msg'] === 'ipl_confirm' ? 'warn' : 'error', gp_t($sv['msg']) . ($sv['detail'] !== '' ? ': ' . $sv['detail'] : ''));
 				$ipl_save = $sv;
 			} else {
@@ -572,6 +583,20 @@ switch ($gp_route) {
 			elseif ($do === 'disable') { $r = gp_users_set_enabled($gp_user, $target, false); }
 			elseif ($do === 'reset') { $r = gp_users_reset_password($gp_user, $target, $pw); }
 			elseif ($do === 'delete') { $r = gp_users_delete($gp_user, $target); }
+			elseif ($do === 'unlock') {
+				// Clear a sign-in lockout (admin only, like everything on this page): a name, an address, or every counter.
+				$ul_user = is_string($_POST['unlock_user'] ?? null) ? gp_users_norm(substr($_POST['unlock_user'], 0, 64)) : '';
+				$ul_ip = is_string($_POST['unlock_ip'] ?? null) ? trim(substr($_POST['unlock_ip'], 0, 64)) : '';
+				$ul_all = !empty($_POST['unlock_all']);
+				if ($ul_ip !== '' && filter_var($ul_ip, FILTER_VALIDATE_IP) === false) { $r = array(false, 'usr_err_unlock_ip'); }
+				elseif (!$ul_all && $ul_user === '' && $ul_ip === '') { $r = array(false, 'usr_err_unlock_none'); }
+				else {
+					$cleared = gp_login_unlock($ul_user, $ul_ip !== '' ? gv_ip_canon($ul_ip) : '', $ul_all);
+					gp_audit_append(array('event' => 'login_unlock', 'actor' => $gp_user, 'ip' => $gp_ip, 'key' => $ul_all ? 'all' : trim($ul_user . ' ' . $ul_ip),
+						'old' => null, 'new' => array('cleared' => $cleared)));
+					$r = array(true, '');
+				}
+			}
 			gp_flash($r[0] ? 'ok' : 'error', $r[0] ? gp_t('usr_done_' . $do) : gp_t($r[1]));
 			gp_redirect('users');
 		}
@@ -586,7 +611,7 @@ switch ($gp_route) {
 			$urows[] = $u;
 		}
 		usort($urows, function ($a, $b) { return strcmp($a['username'], $b['username']); });
-		gp_render('users', array('users' => $urows, 'all_count' => count($ust['users']), 'filter' => $ufilter, 'state' => $ust, 'me' => $gp_user));
+		gp_render('users', array('locks' => gp_login_lock_state(), 'users' => $urows, 'all_count' => count($ust['users']), 'filter' => $ufilter, 'state' => $ust, 'me' => $gp_user));
 
 	case 'account':
 		// Any role: change your OWN password (the current one is required). Other sessions of the user end; this one is reissued.
@@ -709,7 +734,7 @@ switch ($gp_route) {
 		$jhealth = gp_job_health();
 		$jcron = gp_cron_check();
 		gp_render('jobs', array('jobs' => gp_job_list(), 'redis_up' => gp_redis_up(), 'health' => $jhealth, 'detail' => $jdetail,
-			'queue' => gp_queue_health(), 'cron' => $jcron, 'cron_lines' => gp_cron_setup_lines($jhealth, $jcron), 'perms' => gp_perm_scan(),
+			'queue' => gp_queue_health(), 'cron' => $jcron, 'cron_lines' => gp_cron_setup_lines($jhealth, $jcron), 'perms' => gp_perm_scan(), 'php_env' => gp_php_env(),
 			'runs' => $jdetail !== '' ? gp_job_runs($jdetail) : array(), 'errors' => $jdetail !== '' ? gp_job_error_blocks($jdetail) : array()));
 }
 

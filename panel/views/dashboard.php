@@ -97,7 +97,7 @@ $queue = isset($queue) && is_array($queue) ? $queue : array('length' => 0, 'olde
 		<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('dash_iplists')) ?></span>
 			<span class="gp-stat-val"><a href="index.php?r=iplists"><?= gp_num($isum['enabled']) ?> / <?= gp_num($isum['total']) ?></a></span></div>
 		<?php foreach ($isum['by'] as $k => $n): list($it, $im) = explode('/', $k); ?>
-		<div class="gp-stat-row"><span class="gp-stat-key gp-mono"><?= gp_e(gp_t('ipl_type_' . $it)) ?> · <?= gp_e(gp_t('rules_mode_' . $im)) ?></span>
+		<div class="gp-stat-row"><span class="gp-stat-key gp-mono"><span class="gp-badge <?= gp_e(gp_ipl_badge_class($it)) ?>"><?= gp_e(gp_t('ipl_type_' . $it)) ?></span> · <?= gp_e(gp_t('rules_mode_' . $im)) ?></span>
 			<span class="gp-stat-val"><?= gp_num($n) ?></span></div>
 		<?php endforeach; ?>
 	</div>
@@ -119,6 +119,7 @@ $queue = isset($queue) && is_array($queue) ? $queue : array('length' => 0, 'olde
 			<?= gp_e($kill ? gp_t('dash_kill_start') : gp_t('dash_kill_stop')) ?>
 		</button>
 	</form>
+	<?= gp_msg('killswitch') ?>
 </div>
 </div>
 </section>
@@ -197,7 +198,7 @@ $lists = array(
 				<p class="gp-help"><?= gp_e(gp_t($lk === 'countries' ? 'dash_top_nogeo' : 'dash_top_none')) ?></p>
 			<?php else: foreach ($rows as $r): ?>
 			<div class="gp-stat-row">
-				<a class="gp-stat-key gp-mono gp-ltr gp-truncate" href="<?= gp_e($ld[1]((string)$r[0])) ?>"><?= gp_e((string)$r[0]) ?></a>
+				<a class="gp-stat-key gp-mono gp-ltr gp-truncate" href="<?= gp_e($ld[1]((string)$r[0])) ?>"><?php if ($lk === 'reasons' && gp_reason_ipl_type((string)$r[0]) !== ''): ?><span class="gp-badge <?= gp_e(gp_reason_badge_class((string)$r[0])) ?>"><?= gp_e((string)$r[0]) ?></span><?php else: ?><?= gp_e((string)$r[0]) ?><?php endif; ?></a>
 				<span class="gp-stat-val"><?= gp_e(gp_num((int)$r[1])) ?></span>
 			</div>
 			<?php endforeach; endif; ?>

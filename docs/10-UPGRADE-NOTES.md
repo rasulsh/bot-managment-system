@@ -2,6 +2,26 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Panel round 3: messages in context, IP list colours, pick lists, Logs filters, lockout resistance, cron PHP (2026.11.26)
+
+**Nothing to do for a normal upgrade** (no configuration change; the Update page is enough). What is new:
+
+* **Results appear where the button is.** Saving settings, *Check again*, saving a rule or a list, an override and the kill switch show their message in the same
+  section and bring it into view. The kill switch now says what it did. Old links keep working.
+* **IP lists:** *Allow* is blue, *Block* is red everywhere (buttons, badges, Logs reasons, dashboard, tester).
+* **Pick lists** replace the browser datalist on every choice filter (checkboxes, free text still allowed, no-JavaScript fallback is the plain text box).
+* **Logs:** new filters *Method* and *IP list at request time* / *IP list name* (from the `IPL_ALLOW` / `IPL_BLOCK` reasons).
+* **Jobs page:** *The web server's PHP* card; a dashboard warning when `opcache.validate_timestamps = 0`.
+* **A person who knows the password can no longer be locked out of their own browser** by someone hammering their username (known-device cookie `gp_kd`,
+  90 days; exempt from the per-username and the panel-wide limit, the per-IP limit still applies). The Users page lists the current lockouts and the dashboard warns while the panel-wide limit is reached. *Clear a login lockout*: Users page (admin) or `php panel/setpass.php --unlock-user|--unlock-ip|--unlock-all`.
+* **Cron and the PHP binary (fixes "verify: Redis unavailable" on cPanel):** the analyzer runs `php -q`, strips CGI headers, picks the binary from `php_bin`, then
+  `GV_PHP`, then `php`, and warns when it is not the command-line build. **Add `PATH=/usr/local/bin:/usr/bin:/bin` as the first line of your crontab** (the
+  dashboard Cron setup card and `cron-check.sh` print it) or set `GV_PHP=/usr/local/bin/php`. The wording distinguishes "Redis settings not confirmed (the PHP
+  bridge failed)" from "Redis unavailable".
+
+**Rollback.** Use the Update page (*Roll back*) or `php updates/rollback.php`. Nothing in this release writes a new data format; a `gp_kd` cookie is ignored by the
+older code, `login_unlock` audit lines are shown as an unknown event by it.
+
 ## Hotfix: the update health check was blocked by `panel/.htaccess` (stuck "Waiting for the check")
 
 **Symptom.** After a ZIP update on LiteSpeed / Apache the browser lands on the web server's own 403 page for

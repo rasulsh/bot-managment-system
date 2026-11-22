@@ -274,8 +274,9 @@ def main(argv=None):
 
     # What a "successful" run that did nothing useful must say out loud (status: warning).
     if client is None:
-        print('Redis unavailable: verdicts were computed but not stored.')
-        jobreport.warn('Redis unavailable: verdicts were computed but not stored')
+        reason = redis_io.unavailable_reason(cfg)
+        print(reason + '.')
+        jobreport.warn(reason)
     if not rows:
         jobreport.warn('no input rows: the log directory has no decision rows in the last %s day(s)' % cfg['window_days'])
     if not model_mod.SKLEARN_AVAILABLE:

@@ -56,6 +56,7 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 		<span class="gp-help"><?= gp_e(gp_t('job_seen_help')) ?></span>
 	</form>
 	<?php endif; ?>
+	<?= gp_msg('jobs-detail') ?>
 	<?php if ($runs): ?>
 	<div class="gp-card-title" style="margin-top:.75rem"><?= gp_e(gp_t('job_recent_runs')) ?></div>
 	<div class="gp-table-wrap"><table class="gp-table">
@@ -98,6 +99,7 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 			<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit" name="cron_refresh" value="1"><?= gp_e(gp_t('cron_refresh_btn')) ?></button>
 		</form></div>
+	<?= gp_msg('jobs-cron') ?>
 	<?php if (!is_array($cron['report'])): ?>
 	<p class="gp-note gp-note-strong"><?= gp_e(gp_t('cron_unreadable')) ?> <code class="gp-mono">scripts/cron-check.sh</code></p>
 	<?php else: ?>
@@ -109,6 +111,10 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 			<td><span class="gp-badge <?= ($cj['severity'] ?? 'ok') === 'ok' ? 'gp-badge-on' : (($cj['severity'] ?? '') === 'critical' ? 'gp-badge-bad' : (($cj['severity'] ?? '') === 'warning' ? 'gp-badge-warn' : 'gp-badge-off')) ?>"><?= gp_e(gp_t('cron_s_' . $cj['state'])) ?></span></td>
 			<td class="gp-mono gp-ltr"><?= gp_e((string)($cj['schedule'] ?? '')) ?></td><td class="gp-help"><?= gp_e((string)($cj['message'] ?? '')) ?></td></tr>
 		<?php endforeach; ?></tbody></table></div>
+	<?php $gph = $cron['report']['php'] ?? null; if (is_array($gph)): ?>
+	<p class="gp-help"><?= gp_e(gp_t('cron_php_title')) ?>: <code class="gp-mono"><?= gp_e((string)$gph['binary']) ?></code>
+		<?= !empty($gph['ok']) ? gp_e(gp_t('cron_php_ok')) . ' (PHP ' . gp_e((string)$gph['version']) . ')' : '<strong>' . gp_e(gp_t('cron_php_bad')) . '</strong>: ' . gp_e((string)$gph['message']) ?></p>
+	<?php endif; ?>
 	<?php $gpy = $cron['report']['gv_python']; ?>
 	<p class="gp-help">GV_PYTHON: <?= !empty($gpy['set']) ? '<code class="gp-mono">' . gp_e($gpy['value']) . '</code> ' . gp_e(gp_t(!empty($gpy['ok']) ? 'cron_py_ok' : 'cron_py_bad')) : gp_e(gp_t('cron_py_unset')) ?></p>
 	<?php endif; ?>
@@ -118,6 +124,23 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 	<?php endif; ?>
 </div>
 
+<?php /* ------------------------------------------------------------ the web server's PHP (OPcache) */ ?>
+<?php if (isset($php_env) && is_array($php_env)): $php_warn = gp_php_env_warnings($php_env);
+	$yn = function ($v) { return gp_e(gp_t($v ? 'yes' : 'no')); }; ?>
+<div class="gp-card" id="web-php">
+	<div class="gp-card-title"><?= gp_e(gp_t('wphp_title')) ?></div>
+	<p class="gp-help"><?= gp_e(gp_t('wphp_help')) ?><?= gp_tip('web_php') ?></p>
+	<div class="gp-stat-row"><span class="gp-stat-key">PHP</span><span class="gp-stat-val gp-mono"><?= gp_e($php_env['version']) ?> (<?= gp_e($php_env['sapi']) ?>)</span></div>
+	<div class="gp-stat-row"><span class="gp-stat-key">opcache.enable</span><span class="gp-stat-val gp-mono"><?= gp_e($php_env['opcache_enable'] === null ? gp_t('wphp_not_loaded') : $php_env['opcache_enable']) ?></span></div>
+	<div class="gp-stat-row"><span class="gp-stat-key">opcache.validate_timestamps</span><span class="gp-stat-val gp-mono"><?= gp_e($php_env['validate_timestamps'] === null ? gp_t('wphp_not_loaded') : $php_env['validate_timestamps']) ?></span></div>
+	<div class="gp-stat-row"><span class="gp-stat-key">opcache.revalidate_freq</span><span class="gp-stat-val gp-mono"><?= gp_e($php_env['revalidate_freq'] === null ? gp_t('wphp_not_loaded') : $php_env['revalidate_freq']) ?></span></div>
+	<div class="gp-stat-row"><span class="gp-stat-key">GD</span><span class="gp-stat-val"><?= $yn($php_env['gd']) ?></span></div>
+	<div class="gp-stat-row"><span class="gp-stat-key">ZipArchive</span><span class="gp-stat-val"><?= $yn($php_env['zip']) ?></span></div>
+	<div class="gp-stat-row"><span class="gp-stat-key">zlib</span><span class="gp-stat-val"><?= $yn($php_env['zlib']) ?></span></div>
+	<?php if ($php_warn): ?><div class="gp-note gp-note-strong" role="alert"><?= gp_e(gp_t('al_opcache_no_validate')) ?></div><?php endif; ?>
+</div>
+<?php endif; ?>
+
 <?php /* ------------------------------------------------------------ file permissions */ ?>
 <?php if (isset($perms) && is_array($perms)): $perm_bad = gp_perm_has_issues($perms); ?>
 <div class="gp-card" id="perms">
@@ -126,6 +149,7 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 			<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit" name="perm_refresh" value="1"><?= gp_e(gp_t('perm_rescan')) ?></button>
 		</form></div>
+	<?= gp_msg('jobs-perms') ?>
 	<p class="gp-help"><?= gp_e(gp_t('perm_help')) ?><?= gp_tip('perm_check') ?></p>
 	<p class="gp-help"><?= gp_e(gp_t('perm_scanned')) ?>: <span class="gp-mono"><?= gp_num((int)$perms['scanned']) ?></span>
 		(<?= gp_e(gp_age(max(0, time() - (int)$perms['time']))) ?> <?= gp_e(gp_t('ago')) ?>; <?= gp_e(gp_t('perm_cached')) ?>)</p>
@@ -159,6 +183,7 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 			<?php endforeach; ?>
 		</div>
 	</form>
+	<?= gp_msg('jobs-start') ?>
 </div>
 
 <div class="gp-card">

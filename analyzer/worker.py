@@ -296,7 +296,7 @@ def main(argv=None):
 
     client = redis_io.connect(cfg, write=True)
     if client is None:
-        print('Redis unavailable: no jobs can be drained.')
+        print(redis_io.unavailable_reason(cfg, 'no jobs can be drained') + '.')
         return 0
 
     done = 0

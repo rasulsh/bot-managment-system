@@ -56,6 +56,7 @@
 				<?= gp_e(gp_t('id_deny')) ?></button>
 		</div>
 	</form>
+	<?= gp_msg('override-add') ?>
 </div>
 
 <?= gp_filter_form_html('overrides', array(
@@ -67,6 +68,7 @@
 		<?= gp_e(gp_t('ovr_title')) ?>
 		<span class="gp-card-sub"><?= gp_num(count($items)) ?> / <?= gp_num(count($items_all)) ?></span>
 	</div>
+	<?= gp_msg('override-list') ?>
 	<?php if (!$items): ?>
 		<p class="gp-help"><?= gp_e(gp_t('no_results')) ?></p>
 	<?php else: ?>
@@ -93,6 +95,7 @@
 					<input type="hidden" name="identity" value="<?= gp_e($item['identity']) ?>">
 					<?php // "Extend" must never shorten: keep what is left when that is more than a day. ?>
 					<input type="hidden" name="ttl" value="<?= (int)max(86400, (int)($item['ttl'] ?? 0)) ?>">
+					<input type="hidden" name="from" value="list">
 					<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit"
 						name="override" value="<?= gp_e($item['kind']) ?>">
 						<?= gp_e(gp_t('ovr_extend')) ?></button>
@@ -104,6 +107,7 @@
 					<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit"
 						name="override" value="clear"><?= gp_e(gp_t('ovr_clear')) ?></button>
 				</form>
+				<?= gp_msg('ovr-' . gp_row_key($item['identity'])) ?>
 			</div>
 		</div>
 		<?php endforeach; ?>

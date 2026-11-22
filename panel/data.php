@@ -485,7 +485,27 @@ function gp_log_filter_spec() {
 		'botv' => array('botv', 'choice', false, true, true),
 		'dev' => array('dev', 'ident', false, false, true), 'ip' => array('ip', 'ident'),
 		'path' => array('p', 'text'), 'ua' => array('ua', 'text'),
+		// Method: GET, POST, ... or free text (always present, so "is not POST" includes every other row).
+		'method' => array('m', 'choice', true),
+		// IP list membership AT REQUEST TIME, read from the row's reasons (IPL_ALLOW:<id> / IPL_BLOCK:<id>, SH_ prefixed
+		// for a monitor list): allow / block / (none) = not listed. ipln = the list id. Derived in gp_log_ipl_kinds().
+		'ipl' => array('_ipl', 'choice', true, false, true), 'ipln' => array('_ipln', 'choice', false, false, true),
 	);
+}
+
+// The IP lists a row was a member of when it was logged: array(kinds => ('allow'|'block'), ids => list ids).
+// Pure: it reads only the row's reason codes, so it describes the request, not today's list contents.
+function gp_log_ipl_kinds(array $row) {
+	$kinds = array();
+	$ids = array();
+	foreach ((isset($row['rs']) && is_array($row['rs'])) ? $row['rs'] : array() as $r) {
+		if (is_string($r) && preg_match('/^(?:SH_)?IPL_(ALLOW|BLOCK):(.*)$/', $r, $m)) {
+			$k = strtolower($m[1]);
+			if (!in_array($k, $kinds, true)) { $kinds[] = $k; }
+			if ($m[2] !== '' && !in_array($m[2], $ids, true)) { $ids[] = $m[2]; }
+		}
+	}
+	return array($kinds, $ids);
 }
 
 // Whether a row's outcome status is in one of the classes of a "status" filter value.
@@ -505,6 +525,7 @@ function gp_log_status_is($row, $want) {
 // "contains") or exclude ("is not" / "does not contain"); a bare scalar means "is".
 // Fields are AND-ed; the score ranges keep no operator.
 function gp_log_match(array $row, array $f) {
+	if (isset($f['ipl']) || isset($f['ipln'])) { $ik = gp_log_ipl_kinds($row); $row['_ipl'] = $ik[0]; $row['_ipln'] = $ik[1]; }
 	foreach (gp_log_filter_spec() as $key => $def) {
 		if (!isset($f[$key])) { continue; }
 		$fd = gp_filter_def($f[$key]);
@@ -522,7 +543,7 @@ function gp_log_match(array $row, array $f) {
 			continue;
 		}
 		$actual = isset($row[$def[0]]) ? $row[$def[0]] : '';
-		if (is_array($actual) && $def[0] !== 'rs') { $actual = ''; }
+		if (is_array($actual) && !in_array($def[0], array('rs', '_ipl', '_ipln'), true)) { $actual = ''; }
 		if ($def[0] === 'rs') { $actual = array_values(array_filter((array)$actual, 'is_string')); }
 		elseif (is_int($actual) || is_float($actual)) { $actual = (string)(int)$actual; }
 		if ($key === 'asn' && $actual === '0') { $actual = ''; }          // 0 = looked up, no AS found

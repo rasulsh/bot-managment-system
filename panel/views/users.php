@@ -20,6 +20,7 @@ foreach ($users as $u) { if ($u['role'] === 'admin' && $u['enabled']) { $admins+
 
 <section class="gp-card" id="users-list">
 	<h2 class="gp-card-title"><?= gp_e(gp_t('usr_list')) ?> <span class="gp-card-sub"><?= gp_num(count($users)) ?> / <?= gp_num($all_count) ?></span></h2>
+	<?= gp_msg('users-list') ?>
 	<?php if (!$users): ?><p class="gp-help"><?= gp_e(gp_t('no_results')) ?></p><?php else: ?>
 	<div class="gp-table-wrap"><table class="gp-table">
 		<thead><tr><th><?= gp_e(gp_t('usr_username')) ?></th><th><?= gp_e(gp_t('usr_role')) ?></th><th><?= gp_e(gp_t('usr_enabled')) ?></th>
@@ -57,6 +58,7 @@ foreach ($users as $u) { if ($u['role'] === 'admin' && $u['enabled']) { $admins+
 					<input type="hidden" name="username" value="<?= gp_e($u['username']) ?>">
 					<button class="gp-btn gp-btn-danger gp-btn-sm" type="submit" name="do" value="delete"<?= $self ? ' disabled title="' . gp_e(gp_t('usr_err_self')) . '"' : '' ?>><?= gp_e(gp_t('usr_delete')) ?></button>
 				</form>
+				<?= gp_msg('usr-' . gp_row_key($u['username'])) ?>
 			</td>
 		</tr>
 		<?php endforeach; ?>
@@ -86,4 +88,33 @@ foreach ($users as $u) { if ($u['role'] === 'admin' && $u['enabled']) { $admins+
 		</label>
 		<button class="gp-btn gp-btn-primary" type="submit" name="do" value="create"><?= gp_e(gp_t('usr_create_btn')) ?></button>
 	</form>
+	<?= gp_msg('users-create') ?>
+</section>
+
+<section class="gp-card" id="users-unlock">
+	<h2 class="gp-card-title"><?= gp_e(gp_t('usr_unlock_title')) ?></h2>
+	<?php $lk = isset($locks) && is_array($locks) ? $locks : null; if ($lk): $lg = $lk['global']; ?>
+	<div class="gp-table-wrap"><table class="gp-table"><caption class="gp-help"><?= gp_e(gp_t('usr_locks_title')) ?><?= gp_tip('usr_locks') ?></caption><tbody>
+		<tr><th scope="row"><?= gp_e(gp_t('usr_locks_global')) ?></th>
+			<td class="gp-mono"><?= gp_e(gp_num((int)$lg['n']) . ' / ' . gp_num((int)$lg['limit'])) ?>
+				<span class="gp-badge <?= $lg['locked'] ? 'gp-badge-bad' : 'gp-badge-on' ?>" data-lock-global="<?= $lg['locked'] ? '1' : '0' ?>"><?= gp_e($lg['locked'] ? sprintf(gp_t('usr_locks_global_on'), (string)(int)ceil((int)$lg['ttl'] / 60)) : gp_t('usr_locks_global_off')) ?></span></td></tr>
+		<tr><th scope="row"><?= gp_e(gp_t('usr_locks_users')) ?></th><td class="gp-mono"><?= $lk['scanned'] ? gp_e(gp_num((int)$lk['users'])) : gp_e(gp_t('usr_locks_noredis')) ?></td></tr>
+		<tr><th scope="row"><?= gp_e(gp_t('usr_locks_ips')) ?></th><td class="gp-mono"><?= $lk['scanned'] ? gp_e(gp_num((int)$lk['ips'])) : gp_e(gp_t('usr_locks_noredis')) ?></td></tr>
+	</tbody></table></div>
+	<?php endif; ?>
+	<p class="gp-help"><?= gp_e(gp_t('usr_unlock_help')) ?></p>
+	<form method="post" action="index.php?r=users" class="gp-form">
+		<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
+		<label class="gp-field">
+			<span class="gp-label"><?= gp_e(gp_t('usr_unlock_user')) ?><?= gp_tip('usr_unlock_user') ?></span>
+			<input class="gp-input" type="text" name="unlock_user" autocomplete="off" spellcheck="false" dir="ltr">
+		</label>
+		<label class="gp-field">
+			<span class="gp-label"><?= gp_e(gp_t('usr_unlock_ip')) ?><?= gp_tip('usr_unlock_ip') ?></span>
+			<input class="gp-input" type="text" name="unlock_ip" autocomplete="off" spellcheck="false" dir="ltr">
+		</label>
+		<label class="gp-check"><input type="checkbox" name="unlock_all" value="1"> <?= gp_e(gp_t('usr_unlock_all')) ?></label>
+		<button class="gp-btn gp-btn-ghost" type="submit" name="do" value="unlock"><?= gp_e(gp_t('usr_unlock_btn')) ?></button>
+	</form>
+	<?= gp_msg('users-unlock') ?>
 </section>

@@ -340,6 +340,25 @@ function gp_rules_cache_stale() {
 	return ($cm === false || $cm < $jm);
 }
 
+// What the WEB server's PHP is, read in the panel request itself (`php -i` over SSH shows the command-line PHP, which can differ).
+function gp_php_env() {
+	$ini = function ($k) { $v = ini_get($k); return $v === false ? null : (string)$v; };
+	return array('version' => PHP_VERSION, 'sapi' => PHP_SAPI, 'opcache_loaded' => extension_loaded('Zend OPcache'), 'opcache_enable' => $ini('opcache.enable'),
+		'validate_timestamps' => $ini('opcache.validate_timestamps'), 'revalidate_freq' => $ini('opcache.revalidate_freq'),
+		'gd' => extension_loaded('gd'), 'zip' => class_exists('ZipArchive'), 'zlib' => extension_loaded('zlib'), 'opcache_reset' => function_exists('opcache_reset'));
+}
+
+// OPcache that never looks at the files again keeps serving OLD rules, lists and config after an update or a save until PHP restarts.
+// Pure: array of alert codes for a gp_php_env() result.
+function gp_php_env_warnings(array $e) {
+	$out = array();
+	if (!empty($e['opcache_loaded']) && (string)($e['opcache_enable'] ?? '') !== '' && (string)$e['opcache_enable'] !== '0' && strtolower((string)$e['opcache_enable']) !== 'off'
+		&& isset($e['validate_timestamps']) && ((string)$e['validate_timestamps'] === '0' || strtolower((string)$e['validate_timestamps']) === 'off' || (string)$e['validate_timestamps'] === '')) {
+		$out[] = 'opcache_no_validate';
+	}
+	return $out;
+}
+
 // Gather every input the alerts need. Live reads only; each is small.
 function gp_health_inputs($now = null) {
 	$now = $now === null ? time() : (int)$now;
@@ -358,6 +377,8 @@ function gp_health_inputs($now = null) {
 		'iplist_warn' => gp_iplists_health($now),
 		'update_warn' => function_exists('gp_upd_health') ? gp_upd_health($now) : array(),
 		'perms' => gp_perm_scan(false, $now),
+		'php_env' => gp_php_env(),
+		'login_global' => gp_login_global_state(),
 		'captcha_gd_needed' => gp_captcha_needed($cfg, $rs['rules']),
 		'captcha_gd' => gv_captcha_available(),
 	);
@@ -413,6 +434,9 @@ function gp_health_alerts(array $in) {
 	// GD is missing while a CAPTCHA is configured: every captcha action falls back to the proof-of-work challenge. The panel
 	// runs in the web server's PHP, like the guard (a CLI PHP can differ: check the web server's phpinfo if this looks wrong).
 	if (!empty($in['captcha_gd_needed']) && empty($in['captcha_gd'])) { $add('captcha_gd', 'warning', 'al_captcha_gd', '', 'settings'); }
+	foreach (gp_php_env_warnings(isset($in['php_env']) && is_array($in['php_env']) ? $in['php_env'] : array()) as $code) { $add($code, 'warning', 'al_' . $code, '', 'jobs'); }
+	// The panel-wide sign-in limit is reached: nobody on an unknown device can sign in until it expires or an administrator clears it.
+	if (!empty($in['login_global']['locked'])) { $add('login_global', 'warning', 'al_login_global', (string)(int)ceil(((int)($in['login_global']['ttl'] ?? 0)) / 60), 'users'); }
 	$pm = isset($in['perms']) && is_array($in['perms']) ? $in['perms'] : null;
 	if ($pm !== null) {
 		if (!empty($pm['secret_readable'])) { $add('perm_secret', 'critical', 'al_perm_secret', implode(', ', array_slice($pm['secret_readable'], 0, 4)), 'jobs'); }
@@ -443,6 +467,8 @@ function gp_health_alerts(array $in) {
 		if ($noexec) { $add('cron_not_exec', 'critical', 'al_cron_not_exec', implode(', ', $noexec), 'jobs'); }
 		if ($miss) { $add('cron_missing', 'critical', 'al_cron_missing', implode(', ', $miss), 'jobs'); }
 		if ($other) { $add('cron_wrong', 'warning', 'al_cron_wrong', implode(', ', $other), 'jobs'); }
+		$ph = $c['report']['php'] ?? null;
+		if (is_array($ph) && empty($ph['ok'])) { $add('cron_php', 'warning', 'al_cron_php', (string)($ph['binary'] ?? '') . ' ' . (string)($ph['sapi'] ?? ''), 'jobs'); }
 		$py = $c['report']['gv_python'] ?? array('set' => true, 'ok' => true);
 		if (!empty($py['set']) && empty($py['ok'])) { $add('gv_python_bad', 'warning', 'al_gv_python_bad', (string)$py['value'], 'jobs'); }
 		elseif (empty($py['set'])) { $add('gv_python_missing', 'warning', 'al_gv_python_missing', '', 'jobs'); }
@@ -512,6 +538,10 @@ function gp_cron_setup_lines(array $jobs, array $cron, $root = null) {
 	$lines = array();
 	$venv = $root . '/.venv/bin/python';
 	$py = is_array($cron['report'] ?? null) ? $cron['report']['gv_python'] : array('set' => false, 'ok' => false);
+	// The template starts with a PATH line (cron's own PATH may find a php that is not the command line build): always when the
+	// crontab could not be read (the full documented set), else when the crontab check found the php that cron would run unusable.
+	$php = is_array($cron['report'] ?? null) && isset($cron['report']['php']) ? $cron['report']['php'] : null;
+	if (!is_array($cron['report'] ?? null) || ($php !== null && empty($php['ok']))) { $lines[] = 'PATH=/usr/local/bin:/usr/bin:/bin'; }
 	if (empty($py['set']) || empty($py['ok'])) { $lines[] = 'GV_PYTHON=' . (is_file($venv) ? $venv : '/path/to/virtualenv/bin/python'); }
 	$missing = null;
 	if (is_array($cron['report'] ?? null)) {

@@ -183,6 +183,25 @@ function gp_filter_chips_html(array $chips) {
 	return $h . '</ul>';
 }
 
+// A choice field with a pick list: the plain text input (comma list, free text allowed) plus, when JavaScript runs, a
+// button that opens a checkbox list of the usual values. The input is what the form submits and what works without
+// JavaScript; the checkboxes carry no name. Replaces the browser datalist, which is not a multi-select and looks different in every
+// browser. $options: values offered (include GP_FILTER_NONE where the field offers "(none)"). $attr: extra input attributes
+// (already escaped), e.g. a placeholder.
+function gp_multi_input($id, $name, $value, array $options, $attr = '') {
+	$h = '<div class="gp-ms" data-gp-ms>'
+		. '<input class="gp-input gp-ltr" type="text" id="' . gp_e($id) . '" name="' . gp_e($name) . '" value="' . gp_e($value) . '" spellcheck="false" autocomplete="off"' . ($attr !== '' ? ' ' . $attr : '') . '>';
+	if ($options) {
+		$h .= '<button type="button" class="gp-ms-toggle" data-gp-ms-toggle hidden aria-haspopup="true" aria-expanded="false" aria-controls="' . gp_e($id) . '-ms">' . gp_e(gp_t('flt_pick')) . ' &#9662;</button>'
+			. '<div class="gp-ms-panel" id="' . gp_e($id) . '-ms" role="group" aria-label="' . gp_e(gp_t('flt_pick')) . '" data-gp-ms-panel hidden>';
+		foreach ($options as $o) {
+			$h .= '<label class="gp-ms-opt"><input type="checkbox" value="' . gp_e($o) . '"> <span class="gp-ltr">' . gp_e($o) . '</span></label>';
+		}
+		$h .= '</div>';
+	}
+	return $h . '</div>';
+}
+
 // A complete filter form for a list page: one row per field (operator + value), a
 // Filter / Reset pair, and the removable chips. $fields: key => array(label key,
 // 'is' | 'has', datalist values, tooltip key). $hidden: extra GET parameters to keep
@@ -198,13 +217,7 @@ function gp_filter_form_html($route, array $fields, array $filter, array $hidden
 		$v = isset($filter[$key]) ? $filter[$key] : null;
 		$h .= '<div class="gp-field"><label class="gp-label" for="f-' . gp_e($route . '-' . $key) . '">' . gp_e(gp_t($d[0])) . (isset($d[3]) ? gp_tip($d[3]) : '') . '</label>'
 			. '<div class="gp-fgroup">' . gp_filter_op_select($key, $v, $d[1])
-			. '<input class="gp-input gp-ltr" type="text" id="f-' . gp_e($route . '-' . $key) . '" name="' . gp_e($key) . '" value="' . gp_e(gp_filter_text($v)) . '"'
-			. ($d[2] ? ' list="dl-' . gp_e($route . '-' . $key) . '"' : '') . ' spellcheck="false" autocomplete="off">';
-		if ($d[2]) {
-			$h .= '<datalist id="dl-' . gp_e($route . '-' . $key) . '">';
-			foreach ($d[2] as $o) { $h .= '<option value="' . gp_e($o) . '">'; }
-			$h .= '</datalist>';
-		}
+			. gp_multi_input('f-' . $route . '-' . $key, $key, gp_filter_text($v), $d[2]);
 		$h .= '</div></div>';
 	}
 	$h .= '</div><div class="gp-row-head"><button class="gp-btn gp-btn-primary" type="submit">' . gp_e(gp_t('filter')) . '</button>'

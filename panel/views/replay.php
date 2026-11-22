@@ -168,6 +168,7 @@ $r = is_array($result) ? $result : null;
 				<?= gp_e(gp_t('rep_full')) ?></button>
 		</div>
 	</form>
+	<?= gp_msg('replay-actions') ?>
 </div>
 
 <?php endif; ?>

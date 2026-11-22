@@ -48,6 +48,7 @@ $rules = gv_overlay_whitelist();
 		<button class="gp-btn gp-btn-primary" type="submit"><?= gp_e(gp_t('cf_save')) ?></button>
 		<a class="gp-btn gp-btn-ghost" href="index.php?r=config_file"><?= gp_e(gp_t('cf_reload')) ?></a>
 	</div>
+	<?= gp_msg('config-file') ?>
 </form>
 
 <details class="gp-card">

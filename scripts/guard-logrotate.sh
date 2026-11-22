@@ -43,10 +43,11 @@ JS_ROOT="$REPO"
 # shellcheck source=lib-jobstatus.sh
 . "$REPO/scripts/lib-jobstatus.sh"
 js_begin logrotate
+js_php_check "$PHP_BIN"
 
 # One effective setting, or nothing when PHP or the key is unavailable.
 cfg_get() {
-	"$PHP_BIN" "$REPO/scripts/config-dump.php" --get "$1" 2>/dev/null
+	"$PHP_BIN" -q "$REPO/scripts/config-dump.php" --get "$1" 2>/dev/null
 }
 # A whole number at least $2, else the default $3.
 int_or() {

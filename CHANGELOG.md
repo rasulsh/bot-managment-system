@@ -4,6 +4,21 @@ Newest first. Each entry is one version, written as `## <version>` (the same str
 The Update page of the panel shows the entries between the installed version and the one in the ZIP.
 Older history and upgrade steps: [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md).
 
+## 2026.11.27
+
+- **Login lockout resistance, completed:** a known device (valid `gp_kd` cookie for the submitted user name) is now also exempt from the **panel-wide** sign-in limit, so 20 wrong passwords from a few addresses can no longer lock every administrator out of their own browser. The per-IP limit still applies to it, and its own failures still count against its address and the panel-wide counter.
+- The Users page shows the current panel-wide, per-user-name and per-address lockouts next to the unlock form; the dashboard raises a warning while the panel-wide limit is reached.
+
+## 2026.11.26
+
+- **Messages in context:** the result of every panel action (save settings, Check again, rule / list save, override, kill switch, users, update ...) is drawn in its own section next to the button, the redirect ends in `#msg-<section>`, and the page scrolls to it and focuses it; a message with no section on the page falls back to the top. The kill switch reports what it did.
+- **IP lists:** Allow = blue (`gp-btn-info`), Block = red, in buttons and badges on every page including the Logs reasons `IPL_ALLOW` / `IPL_BLOCK`, the dashboard and the tester; AA contrast checked in both themes.
+- **Pick list instead of `<datalist>`** on every choice filter (checkboxes, free text, keyboard, Esc, touch, themes; plain text box without JavaScript).
+- **Logs:** new filters *Method* and *IP list at request time* / *IP list name*, with include / exclude, chips, paging, CSV and share link.
+- **Jobs / dashboard:** the web server's PHP card (OPcache, GD, ZipArchive) and a warning for `opcache.validate_timestamps = 0`.
+- **Login lockout resistance:** a known-device cookie (HMAC, bound to the user and `session_version`, 90 days) exempts the per-username limit only; *Clear a login lockout* on the Users page and `panel/setpass.php --unlock-user|--unlock-ip|--unlock-all` (audited).
+- **Cron PHP binary:** `php -q`, CGI header stripping, binary order `php_bin` -> `GV_PHP` -> `php`, SAPI warnings, a `php` check in `cron-check.sh`, a `PATH=` line in every crontab template, and a clear "Redis settings not confirmed (PHP bridge failed)" message.
+
 ## 2026.11.25
 
 - **Hotfix: the update health check was blocked by `panel/.htaccess`.** `recover.php` was allowed by the `FilesMatch` block but not by the `RewriteRule` allow-list, so mod_rewrite answered the web server's 403, the update stayed "Waiting for the check" and the guard stayed off. Fixed; an install that is stuck can be repaired with one `sed` line (docs/10-UPGRADE-NOTES.md).

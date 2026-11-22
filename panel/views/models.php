@@ -80,5 +80,6 @@ $promote = array('ml' => 'promote_ml', 'clf' => 'promote_clf');
 				name="job" value="<?= gp_e($promote[$kind]) ?>"><?= gp_e(gp_t('mdl_promote')) ?></button>
 		</div>
 	</form>
+	<?= gp_msg('models-' . $kind) ?>
 </div>
 <?php endforeach; ?>

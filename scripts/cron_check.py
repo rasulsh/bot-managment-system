@@ -26,6 +26,7 @@ the job needs is reported. A GV_PYTHON= line must name an existing executable.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -47,6 +48,11 @@ MACROS = {'@hourly': 60, '@daily': 1440, '@midnight': 1440, '@weekly': 10080, '@
 SLACK = 1.05          # a period up to 5 % over the expected interval still counts as on schedule
 
 ENTRY_RE = re.compile(r'(?P<path>\S*(?:analyzer-cron|guard-logrotate)\.sh)(?:\s+(?P<mode>train-clf|train|verify|nightly|snapshot|worker|report|geo)\b)?')
+# What cron's own PATH is when the crontab sets none (Vixie cron: /usr/bin:/bin). On cPanel / CloudLinux the php found there can be a
+# CGI build (php -v says "(cgi-fcgi)"), which prints HTTP headers first; the command-line build is /usr/local/bin/php.
+DEFAULT_CRON_PATH = '/usr/bin:/bin'
+PATH_LINE = 'PATH=/usr/local/bin:/usr/bin:/bin'
+PHP_V_RE = re.compile(r'^PHP (\d+)\.(\d+)\.(\d+)\S*\s+\(([A-Za-z0-9_-]+)\)')
 SHELLS = ('bash', 'sh', 'dash', 'ash', 'zsh')
 ENV_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
 
@@ -165,7 +171,41 @@ def geo_in_use(root):
         return False
 
 
-def evaluate(text, root, source='file', now=None, geo_used=None):
+def check_php(env, default_path=None):
+    """Which php would cron run, and is it the command-line build 8.0 or newer? Resolved with the crontab's OWN PATH (its PATH=
+    line, else cron's default) or its GV_PHP= line. Never raises."""
+    path = env.get('PATH') or default_path or DEFAULT_CRON_PATH
+    binary = env.get('GV_PHP') or shutil.which('php', path=path) or ''
+    info = {'binary': binary, 'search_path': path, 'path_set': 'PATH' in env, 'sapi': '', 'version': '', 'ok': False,
+            'message': '', 'suggest': PATH_LINE}
+    if not binary or not os.path.isfile(binary):
+        info['message'] = 'no php was found on cron\'s PATH (%s): the jobs cannot read the guard\'s settings. Add the line %s' % (path, PATH_LINE)
+        return info
+    try:
+        p = subprocess.run([binary, '-v'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, universal_newlines=True,
+                           env={'PATH': path})
+        first = (p.stdout or '').strip().split('\n')[0]
+    except (OSError, subprocess.SubprocessError):
+        info['message'] = 'could not run %s -v' % binary
+        return info
+    m = PHP_V_RE.match(first)
+    if not m:
+        info['message'] = '%s -v did not say which PHP it is (%s)' % (binary, first[:80])
+        return info
+    info['version'] = '%s.%s.%s' % m.groups()[:3]
+    info['sapi'] = m.group(4)
+    if info['sapi'] != 'cli':
+        info['message'] = ('cron would run %s, which is PHP %s (%s), not the command line build: it prints HTTP headers first, so the jobs cannot read the '
+                           'guard\'s settings (Redis "not confirmed"). Add the line %s above the entries, or set GV_PHP=/usr/local/bin/php'
+                           % (binary, info['version'], info['sapi'], PATH_LINE))
+    elif (int(m.group(1)), int(m.group(2))) < (8, 0):
+        info['message'] = 'cron would run %s, PHP %s: Bot Guard needs PHP 8.0 or newer. Point GV_PHP= (or a PATH= line) at a newer php, e.g. %s' % (binary, info['version'], PATH_LINE)
+    else:
+        info['ok'] = True
+    return info
+
+
+def evaluate(text, root, source='file', now=None, geo_used=None, default_path=None):
     """Compare a crontab with the install. Returns the report dict. Pure apart from path checks."""
     now = int(time.time() if now is None else now)
     env, entries = parse_crontab(text)
@@ -240,9 +280,12 @@ def evaluate(text, root, source='file', now=None, geo_used=None):
             problems += 1
     else:
         warnings += 1
+    php = check_php(env, default_path)
+    if not php['ok']:
+        warnings += 1
     venv = os.path.join(root, '.venv', 'bin', 'python')
     py['suggest'] = 'GV_PYTHON=' + (venv if os.path.isfile(venv) else '/path/to/virtualenv/bin/python')
-    return {'v': 1, 'time': now, 'source': source, 'root': root, 'jobs': jobs, 'gv_python': py,
+    return {'v': 1, 'time': now, 'source': source, 'root': root, 'jobs': jobs, 'gv_python': py, 'php': php,
             'problems': problems, 'warnings': warnings, 'ok': problems == 0, 'editor': 'crontab -e',
             'unreadable': False}
 
@@ -294,9 +337,17 @@ def render(report):
         lines.append('OK       GV_PYTHON=%s' % gp['value'])
     else:
         lines.append('PROBLEM  GV_PYTHON=%s is not an executable file' % gp['value'])
+    php = report.get('php') or {}
+    if php:
+        if php.get('ok'):
+            lines.append('OK       php: %s (PHP %s, %s)' % (php['binary'], php['version'], php['sapi']))
+        else:
+            lines.append('WARNING  php: ' + php['message'])
     need = [j['install_line'] for j in report['jobs'] if j['install_line'] and (j['required'] or j['state'] != 'missing')]
-    if need:
-        lines += ['', 'Add or fix these lines (open the editor with: crontab -e):'] + ['  ' + n for n in need]
+    if need or (php and not php.get('ok')):
+        # The template starts with a PATH line: cron's default PATH may find a php that is not the command line build.
+        head = [] if (php and php.get('path_set') and php.get('ok')) else [PATH_LINE]
+        lines += ['', 'Add or fix these lines (open the editor with: crontab -e):'] + ['  ' + n for n in head + need]
     lines += ['', 'RESULT: ' + ('every required entry is present and correct' if report['ok'] else '%d problem(s)' % report['problems'])
               + ('; %d warning(s)' % report['warnings'] if report['warnings'] else '')]
     return '\n'.join(lines) + '\n'
@@ -305,6 +356,7 @@ def render(report):
 def main(argv):
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     as_json = False
+    default_path = None
     text = None
     source = ''
     i = 0
@@ -320,6 +372,9 @@ def main(argv):
         elif a == '--root' and i + 1 < len(argv):
             root = argv[i + 1]
             i += 1
+        elif a == '--default-path' and i + 1 < len(argv):
+            default_path = argv[i + 1]          # tests: what cron's PATH is when the crontab sets none
+            i += 1
         elif a in ('-h', '--help'):
             print(__doc__)
             return 0
@@ -331,7 +386,7 @@ def main(argv):
                   'problems': 0, 'warnings': 0, 'ok': False, 'editor': 'crontab -e', 'unreadable': True}
         print(json.dumps(report, sort_keys=True) if as_json else render(report), end='' if not as_json else '\n')
         return 2
-    report = evaluate(text, root, source)
+    report = evaluate(text, root, source, default_path=default_path)
     if as_json:
         print(json.dumps(report, sort_keys=True))
     else:

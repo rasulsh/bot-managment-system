@@ -212,8 +212,11 @@ effective config (`guard/config.php` plus the panel), so changes in **Settings â
 storage** apply on its next run. Install it once (as the account user):
 
 ```
+PATH=/usr/local/bin:/usr/bin:/bin
 10 3 * * * bash /full/path/bot-guard/scripts/guard-logrotate.sh >/dev/null 2>&1
 ```
+
+(The `PATH` line is the first line of the crontab: cron's own `PATH` may find a `php` that is not the command line build.)
 
 If `php` is not on cron's PATH, put `GV_PHP=/full/path/to/php` at the top of the crontab;
 without PHP the script uses the defaults (60 days, no cap). Each run writes

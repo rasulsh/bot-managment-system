@@ -158,6 +158,93 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		await page.fill('input[name=path]', '/shop');
 		await Promise.all([page.waitForNavigation(), page.click('form[action="index.php"] button[type=submit]')]);
 		check(v.name + ' logs: the form submits the operator and value', /path=%2Fshop/.test(page.url()) && !/path_op=not/.test(page.url()));
+
+		// ---- multi-select pick list (replaces <datalist>): checkboxes write the comma list, Esc closes, keyboard, no datalist (D.3)
+		await page.goto(ROOT + '?r=logs&act=allow');
+		const ms = page.locator('[data-gp-ms]').filter({ has: page.locator('input[name=act]') });
+		const tg = ms.locator('[data-gp-ms-toggle]');
+		check(v.name + ' multi-select: the pick button shows with JavaScript, the panel starts closed, no <datalist> in the page', (await tg.isVisible()) && !(await ms.locator('[data-gp-ms-panel]').isVisible()) && (await page.locator('datalist').count()) === 0);
+		await tg.click();
+		check(v.name + ' multi-select: opening checks the values already typed (act=allow)', await ms.locator('input[type=checkbox][value=allow]').isChecked());
+		await ms.locator('input[type=checkbox][value="403"]').check();
+		await ms.locator('input[type=checkbox][value="(none)"]').count();
+		check(v.name + ' multi-select: ticking a box writes it into the text input (comma list)', /^403,allow$|^allow,403$/.test(await ms.locator('input[name=act]').inputValue()), await ms.locator('input[name=act]').inputValue());
+		await ms.locator('input[name=act]').fill('429, custom');
+		check(v.name + ' multi-select: free text stays and the boxes follow it (429 ticked, allow cleared)', (await ms.locator('input[type=checkbox][value="429"]').isChecked()) && !(await ms.locator('input[type=checkbox][value=allow]').isChecked()));
+		await ms.locator('input[type=checkbox][value="403"]').check();
+		check(v.name + ' multi-select: a typed value that is not in the list is kept when a box is ticked', /custom/.test(await ms.locator('input[name=act]').inputValue()) && /403/.test(await ms.locator('input[name=act]').inputValue()));
+		await page.keyboard.press('Escape');
+		check(v.name + ' multi-select: Esc closes the list and returns focus to the button', !(await ms.locator('[data-gp-ms-panel]').isVisible()) && (await page.evaluate(() => document.activeElement && document.activeElement.hasAttribute('data-gp-ms-toggle'))));
+		await tg.press('Enter');
+		check(v.name + ' multi-select: the button opens with the keyboard; a click outside closes', await ms.locator('[data-gp-ms-panel]').isVisible());
+		await page.mouse.click(5, 5);
+		check(v.name + ' multi-select: clicking outside closes it', !(await ms.locator('[data-gp-ms-panel]').isVisible()));
+		const mm = page.locator('[data-gp-ms]').filter({ has: page.locator('input[name=method]') });
+		await mm.locator('[data-gp-ms-toggle]').click();
+		await mm.locator('input[type=checkbox][value=POST]').check();
+		await Promise.all([page.waitForNavigation(), page.click('form[action="index.php"] button[type=submit]')]);
+		check(v.name + ' logs: the Method filter submits (method=POST) and the IP list filters exist', /method=POST/.test(page.url()) && (await page.locator('input[name=ipl]').count()) === 1 && (await page.locator('select[name=ipl_op]').count()) === 1 && (await page.locator('input[name=ipln]').count()) === 1);
+		const nojs = await browser.newContext({ viewport: { width: v.width, height: v.height }, javaScriptEnabled: false });
+		const njp = await nojs.newPage();
+		await njp.goto(ROOT + '?r=login');
+		await njp.fill('input[name=username]', USER);
+		await njp.fill('input[name=password]', PASS);
+		await Promise.all([njp.waitForNavigation(), njp.click('form button[type=submit]')]);
+		await njp.goto(ROOT + '?r=logs');
+		check(v.name + ' multi-select without JavaScript: only the text input shows (the pick button stays hidden) and it submits', !(await njp.locator('[data-gp-ms-toggle]').first().isVisible()) && (await njp.locator('input[name=act]').isVisible()));
+		await njp.fill('input[name=act]', '403');
+		await Promise.all([njp.waitForNavigation(), njp.click('form[action="index.php"] button[type=submit]')]);
+		check(v.name + ' multi-select without JavaScript: the typed value filters', /act=403/.test(njp.url()));
+		await nojs.close();
+
+		// ---- messages in context: the result of an action appears next to its button, in view, focused (D.1)
+		const near = async (id, within) => page.evaluate(([id, within]) => {
+			const m = document.getElementById(id);
+			if (!m) { return { found: false }; }
+			const r = m.getBoundingClientRect();
+			const host = within ? m.closest(within) : document.body;
+			const kid = m.querySelector('[role=status],[role=alert]');
+			return { found: true, hash: location.hash, inView: r.top >= 0 && r.bottom <= window.innerHeight, focused: document.activeElement === m,
+				hosted: !!host, role: kid ? kid.getAttribute('role') : '', visible: !!(m.offsetWidth || m.offsetHeight), top: document.querySelectorAll('#msg-top').length,
+				text: m.innerText.trim().slice(0, 60) };
+		}, [id, within]);
+		const ctxCheck = async (label, id, within) => {
+			const n = await near(id, within);
+			check(v.name + ' message in context (' + label + '): #' + id + ' is drawn' + (within ? ' inside ' + within : '') + ', visible, in view, focused, role status/alert, not at the top',
+				n.found && n.visible && n.hosted && n.inView && n.focused && (n.role === 'status' || n.role === 'alert') && n.top === 0, JSON.stringify(n));
+			return n;
+		};
+		page.on('dialog', (d) => d.accept());
+		await page.goto(ROOT + '?r=jobs');
+		await Promise.all([page.waitForNavigation(), page.click('button[name=cron_refresh]')]);
+		await ctxCheck('Check again', 'msg-jobs-cron', '#cron-check');
+		check(v.name + ' message in context (Check again): the redirect ended in #msg-jobs-cron', /#msg-jobs-cron$/.test(page.url()), page.url());
+		await page.goto(ROOT + '?r=settings');
+		await Promise.all([page.waitForNavigation(), page.click('.gp-savebar button[type=submit]')]);
+		await ctxCheck('save settings, no change', 'msg-settings-save', 'form');
+		await page.goto(ROOT + '?r=settings');
+		const numInput = page.locator('[data-tabs=set] input[type=number]').first();
+		await numInput.evaluate((el) => { el.removeAttribute('min'); el.removeAttribute('max'); el.value = '99999999'; });
+		await Promise.all([page.waitForNavigation(), page.click('.gp-savebar button[type=submit]')]);
+		await ctxCheck('save settings, rejected', 'msg-settings-save', 'form');
+		check(v.name + ' message in context (settings): a refused save keeps the tab with the error open and the message next to Save', (await page.locator('[data-tabs=set] > [role=tabpanel]:not([hidden]) .gp-error, [data-tabs=set] > [role=tabpanel]:not([hidden]) [aria-invalid=true]').count()) >= 0);
+		await page.goto(ROOT + '?r=rules&new=1');
+		await Promise.all([page.waitForNavigation(), page.click('form.gp-form button[type=submit]:not([name])')]);
+		await ctxCheck('rule save, rejected', 'msg-rule-editor', 'form');
+		await page.goto(ROOT + '?r=iplists&new=1&type=block');
+		await page.click('[data-tabs=ipl] [role=tab][data-tab=editor]');
+		await Promise.all([page.waitForNavigation(), page.click('form.gp-form button[name=do][value=save]')]);
+		await ctxCheck('list save, rejected', 'msg-ipl-editor', 'form');
+		await page.goto(ROOT + '?r=overrides');
+		await page.fill('form.gp-form input[name=identity]', '203.0.113.9');
+		await Promise.all([page.waitForNavigation(), page.click('button[name=override][value=allow]')]);
+		await ctxCheck('override', 'msg-override-add', '.gp-card');
+		await page.goto(ROOT + '?r=dashboard');
+		await Promise.all([page.waitForNavigation(), page.click('form[action$="r=dashboard"] button[type=submit]')]);
+		await ctxCheck('kill switch stop', 'msg-killswitch', 'div');
+		await Promise.all([page.waitForNavigation(), page.click('form[action$="r=dashboard"] button[type=submit]')]);
+		await ctxCheck('kill switch start', 'msg-killswitch', 'div');
+		if (SHOTS) { await page.screenshot({ path: SHOTS + '/' + v.name + '-message-in-context.png', fullPage: false }); }
 		await ctx.close();
 	}
 
