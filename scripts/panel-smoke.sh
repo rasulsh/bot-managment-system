@@ -259,7 +259,8 @@ ul="$(uform)"
 check "...and no such user exists" "$(! grep -q 'smoke-hack' <<<"$ul" && echo 1 || echo 0)"
 check "the demo user cannot POST either (settings and users: 403)" "$([ "$(curl -sk -o /dev/null -w '%{http_code}' -c "$DMJ" -b "$DMJ" --data-urlencode "csrf=$(curl -sk -c "$DMJ" -b "$DMJ" "$URL?r=account" | csrf)" -d action=save "$URL?r=settings")" = 403 ] && echo 1 || echo 0)"
 check "a POST to a read-only role without the CSRF token is no use either" "$([ "$(curl -sk -o /dev/null -w '%{http_code}' -c "$OPJ" -b "$OPJ" -d action=save "$URL?r=settings")" = 403 ] && echo 1 || echo 0)"
-check "operator: a wrong current password does not change the password (the old one still signs in)" "$([ "$(opost -d do=password -d current=wrong-current-pass -d new=operator-new-pass-2 -d repeat=operator-new-pass-2 "$URL?r=account")" = 303 ] && [ "$(rlogin "$(newjar)" "$OP_NAME" "$OP_PASS")" = 303 ] && echo 1 || echo 0)"
+# (A wrong current password and wrong sign-ins are covered by panel-selftest; here each one would count against the sign-in limit of 127.0.0.1,
+# which the three CI layouts share through Redis, so this script makes only ONE failed sign-in, the disabled-user check below.)
 check "operator: changing your OWN password works (current password required), the session stays signed in" "$([ "$(opost -d do=password --data-urlencode "current=$OP_PASS" -d new=operator-new-pass-2 -d repeat=operator-new-pass-2 "$URL?r=account")" = 303 ] && [ "$(code_of "$OPJ" dashboard)" = 200 ] && echo 1 || echo 0)"
 OP_PASS="operator-new-pass-2"
 check "...the new password signs in" "$([ "$(rlogin "$(newjar)" "$OP_NAME" "$OP_PASS")" = 303 ] && echo 1 || echo 0)"
