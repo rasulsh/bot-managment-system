@@ -258,7 +258,9 @@ check "operator: creating a user, an override, a rule, a job and an update are a
 ul="$(uform)"
 check "...and no such user exists" "$(! grep -q 'smoke-hack' <<<"$ul" && echo 1 || echo 0)"
 check "operator: creating, updating and deleting an IP feed are refused with 403 (admin only)" "$([ "$(opost -d do=feed_save -d name=Hack --data-urlencode "url=https://example.com/x" -d dest=allow "$URL?r=iplists")" = 403 ] && [ "$(opost -d do=feed_update -d id=hack "$URL?r=iplists")" = 403 ] && [ "$(opost -d do=feed_delete -d id=hack "$URL?r=iplists")" = 403 ] && echo 1 || echo 0)"
-check "the IP lists page has the Feeds tab with the CDN warning (admin)" "$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=iplists" | grep -q "CDN ranges do not belong in an allow list" && echo 1 || echo 0)"
+# Captured first: "curl | grep -q" can end with curl's SIGPIPE status under pipefail even when grep matched (a big page, a slower server).
+ipf="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=iplists")"
+check "the IP lists page has the Feeds tab with the CDN warning (admin)" "$(grep -q "CDN ranges do not belong in an allow list" <<<"$ipf" && echo 1 || echo 0)"
 check "operator: clearing a login lockout is refused with 403 (admin only)" "$([ "$(opost -d do=unlock -d unlock_all=1 "$URL?r=users")" = 403 ] && echo 1 || echo 0)"
 check "the admin clears a login lockout from the Users page (303, back to the section, with a message)" "$([ "$(upost -d do=unlock -d unlock_all=1)" = 303 ] && echo 1 || echo 0)"
 uloc="$(t="$(uform | csrf)"; curl -sk -o /dev/null -D - -c "$JAR" -b "$JAR" --data-urlencode "csrf=$t" -d do=unlock -d unlock_all=1 "$URL?r=users" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
