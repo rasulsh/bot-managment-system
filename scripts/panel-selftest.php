@@ -3384,7 +3384,31 @@ $UT_REPO = realpath(__DIR__ . '/..');
 $UT_PHP = PHP_BINARY;
 
 // Copy the repository (code only) into $dst. Local data files are created by the callers.
+// The files a commit of $dir would contain (tracked + untracked-but-not-ignored), as relative paths, or null when $dir is not a git
+// checkout or git is unavailable. This is what the upstream ZIP of the repository holds. Copying the WORKING TREE instead let any stray,
+// ignored runtime file (a cron lock such as analyzer/.feeds.lock, left by a manual job run) into the test ZIP; the updater refuses a file
+// type it does not know ("upd_err_ext"), so EVERY staging in this section failed and the section ended in an uncaught "Call to undefined
+// function gprb_token_ok()" (the update it expected to have applied never ran).
+function ut_repo_files($dir) {
+	$p = @proc_open(array('git', '-C', $dir, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'), array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'), 2 => array('file', '/dev/null', 'w')), $pipes);
+	if (!is_resource($p)) { return null; }
+	$out = stream_get_contents($pipes[1]);
+	fclose($pipes[1]);
+	if (proc_close($p) !== 0 || $out === '') { return null; }
+	return array_values(array_filter(explode("\0", $out), 'strlen'));
+}
 function ut_copy_tree($src, $dst) {
+	global $UT_REPO;
+	if ($src === $UT_REPO && ($files = ut_repo_files($src)) !== null) {
+		foreach ($files as $rel) {
+			$n = basename($rel);
+			if (!is_file($src . '/' . $rel) || preg_match('/\.(pyc|jsonl|log|joblib|candidate|csv)$/', $n) || $n === 'panel.config.php' || $n === 'guard.off' || strpos($rel, '.github/') === 0) { continue; }
+			@mkdir(dirname($dst . '/' . $rel), 0775, true);
+			copy($src . '/' . $rel, $dst . '/' . $rel);
+			chmod($dst . '/' . $rel, fileperms($src . '/' . $rel) & 0777);
+		}
+		return;
+	}
 	@mkdir($dst, 0775, true);
 	foreach ((array)scandir($src) as $n) {
 		if ($n === '.' || $n === '..' || $n === '.git' || $n === '__pycache__' || $n === 'node_modules' || $n === '.ratelimit' || $n === '.github') { continue; }
@@ -3655,6 +3679,30 @@ foreach ($bad_cases as $label => $over) {
 // a web request without the key does not run the check
 $wk = $ut_run($root_k . '/updates/verify.php', array('20260101-000000'));
 t_ok('verify.php refuses an unknown update stamp', $wk[0] === 2);
+
+// Regression: a stray ignored runtime file in the working tree must not reach the test install (and so the test ZIP).
+$rg = sys_get_temp_dir() . '/gp-rg-' . bin2hex(random_bytes(4));
+@mkdir($rg . '/analyzer', 0775, true);
+$rg_git = function (array $a) use ($rg) { $p = @proc_open(array_merge(array('git', '-C', $rg), $a), array(0 => array('file', '/dev/null', 'r'), 1 => array('file', '/dev/null', 'w'), 2 => array('file', '/dev/null', 'w')), $pp); return is_resource($p) ? proc_close($p) : 1; };
+if ($rg_git(array('init', '-q')) !== 0) { t_skip('the test install holds only what a commit would hold (stray runtime files are left out)', 'git is not available'); }
+else {
+	file_put_contents($rg . '/.gitignore', "analyzer/.*.lock\n");
+	file_put_contents($rg . '/tracked.php', "<?php\n");
+	$rg_git(array('add', '.gitignore', 'tracked.php'));
+	file_put_contents($rg . '/new-untracked.php', "<?php\n");          // a new file not added yet: part of the next commit
+	file_put_contents($rg . '/analyzer/.feeds.lock', '');              // ignored runtime lock
+	$rgf = ut_repo_files($rg);
+	t_ok('the test install holds only what a commit would hold: tracked and new files yes, an ignored runtime lock (analyzer/.feeds.lock) no', $rgf !== null
+		&& in_array('tracked.php', $rgf, true) && in_array('new-untracked.php', $rgf, true) && !in_array('analyzer/.feeds.lock', $rgf, true));
+	$UT_REPO_SAVED = $UT_REPO;
+	$UT_REPO = $rg;                                                    // copy THIS scratch repository the way ut_install copies the real one
+	ut_copy_tree($rg, $rg . '-copy');
+	$UT_REPO = $UT_REPO_SAVED;
+	t_ok('ut_copy_tree leaves the ignored runtime lock out of the install copy (staging used to fail with upd_err_ext because of it)', is_file($rg . '-copy/tracked.php')
+		&& is_file($rg . '-copy/new-untracked.php') && !file_exists($rg . '-copy/analyzer/.feeds.lock') && is_file($rg . '/analyzer/.feeds.lock'));
+	gp_upd_rmtree($rg . '-copy');
+}
+gp_upd_rmtree($rg);
 
 // ---- rollback.php with the panel code broken
 $root_b = ut_install();
