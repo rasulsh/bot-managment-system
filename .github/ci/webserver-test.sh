@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CI: run scripts/exposure-check.sh and scripts/panel-smoke.sh against a REAL web
+# CI: run scripts/exposure-check.sh, scripts/panel-smoke.sh and scripts/update-web-e2e.sh against a REAL web
 # server, in each supported layout:
 #   docroot  the whole repository INSIDE the document root (worst case)
 #   symlink  repository outside the docroot, panel exposed by a symlink
@@ -227,12 +227,15 @@ wait_http() {   # until the listener answers (any status), at most ~40 s
 
 start_server() { if [ "$SERVER" = apache ]; then start_apache "$@"; else start_ols "$@"; fi; }
 
-run_checks() {   # <label> <panel path>
+run_checks() {   # <label> <panel path> <install dir>
 	assert_php_user "$2/index.php"
 	log "$SERVER / $1: exposure-check.sh"
 	bash "$REPO/scripts/exposure-check.sh" "http://127.0.0.1:$PORT" "$2" || fail=1
 	log "$SERVER / $1: panel-smoke.sh"
 	bash "$REPO/scripts/panel-smoke.sh" "http://127.0.0.1:$PORT" "$2" admin "$PASSWORD" || fail=1
+	# The update flow through the REAL rewrite rules: recover.php (the web path of the health check) must be reachable.
+	log "$SERVER / $1: update-web-e2e.sh"
+	bash "$REPO/scripts/update-web-e2e.sh" "http://127.0.0.1:$PORT" "$2" "$3" "$PASSWORD" || fail=1
 }
 
 ensure_redis
@@ -244,7 +247,7 @@ stop_server
 deploy /var/www/gv-docroot
 install_panel_login /var/www/gv-docroot
 start_server /var/www/gv-docroot ''
-run_checks docroot /panel
+run_checks docroot /panel /var/www/gv-docroot
 stop_server
 
 # --- layout 2: repository outside, panel by symlink -----------------------------
@@ -258,7 +261,7 @@ runuser -u www-data -- ln -s /var/www/bot-guard/panel /var/www/site/gv-admin
 start_server /var/www/site /var/www/bot-guard
 body="$(curl -s "http://127.0.0.1:$PORT/")"
 if [ "$body" = "host app OK" ]; then echo "PASS  host application still answers"; else echo "FAIL  host application: $body"; fail=1; fi
-run_checks symlink /gv-admin
+run_checks symlink /gv-admin /var/www/bot-guard
 if ls /var/www/bot-guard/logs/guard-*.jsonl >/dev/null 2>&1; then echo "PASS  the guard (auto_prepend_file) logged the requests"; else
 	echo "FAIL  no guard log was written"; fail=1
 	# Say why: without this the job only reports that nothing was logged.
@@ -300,7 +303,7 @@ Alias /gv-admin /var/www/bot-guard/panel
 </Directory>
 CONF
 	start_server /var/www/site "$WORK/alias.conf"
-	run_checks alias /gv-admin
+	run_checks alias /gv-admin /var/www/bot-guard
 	stop_server
 fi
 

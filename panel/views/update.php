@@ -63,10 +63,20 @@ $install_dir = dirname(__DIR__, 2);
 </section>
 <?php endif; ?>
 
-<?php foreach ($history as $h): if ($h['status'] === 'applied' || $h['status'] === 'applying'): ?>
-<div class="gp-flash gp-flash-error" role="alert">
+<?php foreach ($history as $h): if ($h['status'] === 'applied' || $h['status'] === 'applying'):
+	$since = $h['applied_at'] > 0 ? $h['applied_at'] : $h['created'];
+	$overdue = (time() - $since) > GP_UPD_WAIT_ALERT;
+	$off = is_file(gp_upd_root() . '/guard.off'); ?>
+<div class="gp-flash gp-flash-error" role="alert" id="update-waiting">
+	<strong><?= gp_e(gp_t($overdue && $off ? 'upd_waiting_off' : 'upd_waiting')) ?></strong>
 	<?= gp_e(sprintf(gp_t('upd_unverified'), $h['stamp'])) ?>
-	<a class="gp-btn gp-btn-ghost" href="recover.php?a=verify&amp;ts=<?= gp_e(rawurlencode($h['stamp'])) ?>&amp;k=<?= gp_e(rawurlencode($h['verify_key'])) ?>"><?= gp_e(gp_t('upd_verify_now')) ?></a>
+	<form method="post" action="index.php?r=update" style="display:inline">
+		<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
+		<input type="hidden" name="stamp" value="<?= gp_e($h['stamp']) ?>">
+		<button class="gp-btn gp-btn-primary gp-btn-sm" type="submit" name="do" value="verify"><?= gp_e(gp_t('upd_verify_now')) ?></button>
+	</form>
+	<?php if ($h['verify_key'] !== ''): ?><a class="gp-btn gp-btn-ghost gp-btn-sm" href="recover.php?a=verify&amp;ts=<?= gp_e(rawurlencode($h['stamp'])) ?>&amp;k=<?= gp_e(rawurlencode($h['verify_key'])) ?>"><?= gp_e(gp_t('upd_verify_web')) ?></a><?php endif; ?>
+	<?php if ($overdue): ?><p class="gp-help"><?= gp_e(gp_t('upd_shell_hint')) ?> <code class="gp-mono gp-ltr"><?= gp_e(gp_upd_verify_command($h['stamp'])) ?></code></p><?php endif; ?>
 </div>
 <?php endif; break; endforeach; ?>
 

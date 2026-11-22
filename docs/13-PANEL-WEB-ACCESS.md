@@ -43,8 +43,9 @@ How it fits together:
 - Nothing else of `bot-guard/` (configuration, logs, secrets) has a URL.
 - `panel/.htaccess` still applies after the symlink is followed. It allows only
   `index.php`, `recover.php`, `*.css` and `*.woff2`, and answers 403 for every other file.
-  `recover.php` is the web entry of the update recovery: it answers an empty 404 unless a valid one-time
-  token is given (see [09-ADMIN-PANEL.md](09-ADMIN-PANEL.md#update-from-a-zip)).
+  `recover.php` is the web entry of the update health check and recovery: it answers an empty 404 unless a valid one-time
+  token (or an update's check key) is given. It must be allowed in **both** mechanisms of `panel/.htaccess`, the `FilesMatch` block and the `RewriteRule` allow-list
+  (a server 403 for it leaves an update stuck on "Waiting for the check"; `exposure-check.sh` fails on that) (see [09-ADMIN-PANEL.md](09-ADMIN-PANEL.md#update-from-a-zip)).
 
 Replace `USER` with your account name and `gv-admin` with a name of your choice in
 every command below. Pick a name that is not obvious (not `admin`, not `panel`)

@@ -62,7 +62,7 @@
 # Alias block with Options FollowSymLinks.
 <IfModule mod_rewrite.c>
 	RewriteEngine On
-	RewriteRule ^(|index\.php|assets/[A-Za-z0-9._-]+\.(css|woff2))$ - [L]
+	RewriteRule ^(|index\.php|recover\.php|assets/[A-Za-z0-9._-]+\.(css|woff2))$ - [L]
 	RewriteRule ^ - [F,L]
 </IfModule>
 

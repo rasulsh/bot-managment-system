@@ -28,37 +28,8 @@ PASSWORD="update-e2e-pass-12345"
 (cd "$INST" && printf 'admin\n%s\n%s\n' "$PASSWORD" "$PASSWORD" | "$PHP_BIN" panel/setpass.php >/dev/null 2>&1)
 echo '{"mode":"monitor"}' > "$INST/guard/config.local.json"
 
-# The "new release": the same tree with a bumped VERSION, a changed doc and a changelog entry; and a broken one.
-python3 - "$INST" "$WORK" <<'PY'
-import os, sys, zipfile
-inst, work = sys.argv[1], sys.argv[2]
-SKIP = ('guard/config.local.json', 'panel/panel.config.php', 'panel/audit.jsonl', 'guard.off')
-def files():
-    for base, dirs, names in os.walk(inst):
-        dirs[:] = [d for d in dirs if d not in ('.git', '__pycache__', '.ratelimit', '.github')]
-        for n in names:
-            p = os.path.join(base, n)
-            rel = os.path.relpath(p, inst).replace(os.sep, '/')
-            if rel in SKIP or rel.startswith(('panel/users.json', 'updates/', 'logs/', 'lists/', 'geo/')) and not rel.endswith(('.htaccess', '.gitkeep')):
-                continue
-            if n.endswith(('.pyc', '.jsonl', '.log')):
-                continue
-            yield rel, p
-def make(name, version, extra):
-    with zipfile.ZipFile(os.path.join(work, name), 'w', zipfile.ZIP_DEFLATED) as z:
-        for rel, p in files():
-            data = open(p, 'rb').read()
-            if rel == 'VERSION':
-                data = (version + '\n').encode()
-            elif rel == 'CHANGELOG.md':
-                data = ('# Changelog\n\n## %s\n\n- e2e release\n\n' % version).encode()
-            elif rel in extra:
-                data = data + extra[rel].encode()
-            z.writestr('bot-managment-system-master/' + rel, data)
-        z.writestr('bot-managment-system-master/docs/E2E-NEW.md', '# added by the e2e update\n')
-make('good.zip', '2026.02.02', {'docs/09-ADMIN-PANEL.md': '\n<!-- e2e -->\n'})
-make('broken.zip', '2026.03.03', {'guard/log.php': '\nfunction gv_log_policy() {}\n'})
-PY
+# The "new release" (good) and one whose new code fails the health check (broken): scripts/update-fixture.py.
+python3 "$ROOT/scripts/update-fixture.py" "$INST" "$WORK" 2026.02.02 2026.03.03
 
 "$PHP_BIN" -S "127.0.0.1:$PORT" -t "$INST" >"$WORK/php.log" 2>&1 &
 PID=$!
