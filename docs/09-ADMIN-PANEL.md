@@ -87,9 +87,10 @@ ignores `.htaccess`, put `panel/` outside the document root and alias only
 | control | behaviour |
 |---|---|
 | **No setup wizard** | If `panel/panel.config.php` is absent or malformed, **every panel route returns a bare 404** — no hint that a panel exists. A first-run setup screen reachable by whoever finds the URL first is how admin panels get taken over; one install-time command is the correct trade. |
-| **Session** | Signed cookie `gp_sess` = `user.issued_at.hmac`, verified with `hash_equals`, sliding renewal at half of `session_ttl` (default 12 h). Tampering with any part invalidates it. |
+| **Session** | Signed cookie `gp_sess` = `user.issued_at.hmac`, verified with `hash_equals`, sliding renewal at half of `session_ttl` (default 12 h). Tampering with any part invalidates it. The signature also covers the user's `session_version`, and the user must exist and be enabled: disabling, a role change, a password reset or a password change ends the user's sessions on their next request. |
+| **Roles** | Administrator, Monitoring operator, Demo. One permission map (`panel/acl.php`), checked in the router for GET and POST before any handler, deny by default, HTTP 403 plus an `acl_denied` audit line. See [Users and roles](#users-and-roles). |
 | **CSRF** | Per-session token in a hidden field on every state-changing POST, verified with `hash_equals`. GET routes never change state. |
-| **Login rate limit** | 5 attempts per 15 minutes per IP (`gp:login:{ip}`), plus a second global counter across all addresses (`gp:login:user`) at four times that, so an attempt spread over many IPs is caught too. Wrong user and wrong password give an identical message and an identical response time. Messages are drawn inside the login card (`role="alert"`); after a failed login the typed username is kept (never the password) and the password field takes focus. A locked-out visitor sees a separate message with the minutes left to wait, which is the same whether or not the username exists. |
+| **Login rate limit** | 5 attempts per 15 minutes per IP (`gp:login:{ip}`), 10 per **username** (`gp:login:u:<hash>`, counted the same for names that do not exist), plus a global counter across all addresses (`gp:login:user`) at four times that, so an attempt spread over many IPs is caught too. Wrong user and wrong password give an identical message and an identical response time. Messages are drawn inside the login card (`role="alert"`); after a failed login the typed username is kept (never the password) and the password field takes focus. A locked-out visitor sees a separate message with the minutes left to wait, which is the same whether or not the username exists. |
 | **Redis down** | The limiter falls back to a **file counter**, not to no limit. This is the one place in the whole system that deliberately does **not** fail open. |
 | **IP allowlist** | Optional `ip_allowlist` in `panel/panel.config.php`: IPv4 and IPv6 addresses or CIDR ranges. Empty means no restriction (default, so upgrades lock nobody out); a non-empty list with no valid entry refuses everyone (fail closed). It is checked before any route, login included. `X-Forwarded-For` is read only when the connection comes from an address in `trusted_proxies`, walking from the right past trusted hops. The same address feeds the login rate limit and the audit trail. |
 | **Search engines** | `X-Robots-Tag: noindex, nofollow, noarchive, nosnippet` on every response (PHP, and `.htaccess` for assets and server errors) plus a robots meta tag. No `robots.txt`, on purpose. |
@@ -279,6 +280,7 @@ who steals the session.
   is created.
 - **Audit** — the append-only trail, searchable (filters: event, user, text; each include or exclude).
 - **Jobs** also has a **File permissions** card: group- or world-writable files and directories, cron scripts without the execute bit and secret files readable by everybody, each with the exact commands (cached one hour, **Scan again**, recomputed after an update). The same findings are dashboard alerts.
+- **Users** (administrators) and **My account** (everybody) — see [Users and roles](#users-and-roles).
 - **Update** — install a newer version from the GitHub ZIP, review it, apply it with your password, roll it back. See [Update from a ZIP](#update-from-a-zip).
 
 ## Dashboard, job health and alerts
@@ -359,9 +361,55 @@ one place, with an argv array, to run `scripts/cron-check.sh`.
     exclude and need no `(none)`.
   `(none)` survives paging, the CSV export link and *Share link*.
 
+## Users and roles
+
+Pages: **Users** (administrators only, `?r=users`) and **My account** (every role, `?r=account`).
+
+| Role (label) | Can see | Can change |
+|---|---|---|
+| **Administrator** (`admin`) | everything | everything, including **Users** and **Update** |
+| **Monitoring operator** (`operator`) | every report and page an administrator sees, except secrets, the raw **Config file** page, **Update** and **Users** | **nothing**: no form of any kind, except signing out and changing **their own** password |
+| **Demo** (`demo`) | only high-level numbers: the dashboard's request counts and trends, the protection state and counts of rules, lists and jobs. Never an address, device, User-Agent, path, rule pattern, list entry, log row, error text, file path, setting or another user's name | nothing except signing out |
+
+**Users page.** List (username, role, enabled, created and by whom, last sign-in and address) with include / exclude filters (role, enabled, username contains) and a
+tooltip on every field. Per row: set role, disable / enable, reset password, delete (browser confirmation). *Create a user*: username (`[a-z0-9._-]{3,32}`, lowercased,
+unique case-insensitively), role, first password (at least 12 characters, not the username). Rules: you cannot disable, demote or delete yourself; the last enabled
+administrator cannot be disabled, demoted or deleted; disabling, a role change and a password reset end the user's sessions at once (`session_version`); a disabled user
+gets the generic login failure. Every action is audited (`user_*`: actor, target, before / after, never a hash).
+
+**My account.** Role, last sign-in, and *Change password* (current password required; 12 characters minimum; your other sessions end, this one stays signed in).
+Read-only roles can use this form.
+
+**Permission table** (route, GET minimum role, POST minimum role; anything not listed: administrator):
+
+| Route | GET | POST |
+|---|---|---|
+| `dashboard` | demo (the Demo role gets the aggregate view) | admin (kill switch) |
+| `account` | demo | demo for `do=password`, admin otherwise |
+| `logout` | demo | demo |
+| `logs` | operator (CSV export and share links included) | admin |
+| `identity` | operator | admin (quick block, mark seen) |
+| `overrides`, `rules`, `geo`, `iplists`, `replay`, `models`, `settings`, `jobs`, `audit`, `captcha_preview` | operator (the test and lookup boxes, exports and the CAPTCHA sample are GET reads) | admin |
+| `config_file` | admin (raw overlay editor) | admin |
+| `update` | admin | admin |
+| `users` | admin | admin |
+
+A test reads every route of the router and fails when one has no explicit entry in `gp_acl_map()`; another walks every route x GET / POST x role (and logged out).
+
+**The Demo dashboard** is rendered from a separate server-side view model (`panel/demo.php`): KPI numbers and their change against the previous period, the protection state
+(*Monitoring*, *Partly enforcing*, *Enforcing*) and counts (rules, IP lists, jobs healthy / unhealthy). No address, device id, User-Agent, path, query string, country or ASN of a
+client, rule pattern, list entry, log row, error text, file path, host name, setting value, audit entry or other user name is ever read into it. The banner *Demo mode — sensitive
+data hidden* is shown on every demo page.
+
+**Operator and secrets.** `secret`, `holdout_salt`, the Redis password and the panel's password hashes never appear on a page an operator can open (Settings shows only whether
+a secret is set; the raw Config file page is administrator only; the overlay whitelist contains no secret key, so the audit trail cannot hold one).
+
+**Storage and migration.** `panel/users.json` (see [README §2.12](../README.md#users-roles-and-the-permission-map)); migrated from `panel/panel.config.php` on first load; a damaged store
+fails closed. **Recovery:** `php panel/setpass.php` (creates or resets an administrator and re-enables it; can move a damaged store aside; optionally logs out every session).
+
 ## Update from a ZIP
 
-Admin page **Update** (`?r=update`). It applies the GitHub ZIP of this repository (Code, Download ZIP, or a release ZIP) and
+Admin-only page **Update** (`?r=update`; an operator or demo user gets HTTP 403). It applies the GitHub ZIP of this repository (Code, Download ZIP, or a release ZIP) and
 can undo it. The installed version is the `VERSION` file at the repository root (shown in the footer of every page and on this
 page); `CHANGELOG.md` lists what changed, newest first.
 

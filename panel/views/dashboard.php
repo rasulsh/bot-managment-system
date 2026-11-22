@@ -53,7 +53,7 @@ $queue = isset($queue) && is_array($queue) ? $queue : array('length' => 0, 'olde
 				<span class="gp-badge <?= $crit ? 'gp-badge-bad' : 'gp-badge-warn' ?>"><?= gp_e(gp_t($crit ? 'al_critical' : 'al_warning')) ?></span>
 				<span class="gp-alert-text"><?= gp_e(gp_t($al['key'])) ?><?php if ($al['detail'] !== ''): ?>
 					<span class="gp-mono gp-ltr"> — <?= gp_e($al['detail']) ?></span><?php endif; ?></span>
-				<?php if ($al['link'] !== ''): ?><a class="gp-btn gp-btn-ghost gp-btn-sm" href="index.php?r=<?= gp_e($al['link']) ?>"><?= gp_e(gp_t('al_open')) ?></a><?php endif; ?>
+				<?php if ($al['link'] !== '' && gp_acl_allows($role ?? 'admin', preg_split('/[&#]/', $al['link'])[0], 'GET')): ?><a class="gp-btn gp-btn-ghost gp-btn-sm" href="index.php?r=<?= gp_e($al['link']) ?>"><?= gp_e(gp_t('al_open')) ?></a><?php endif; ?>
 			</li>
 		<?php endforeach; ?>
 		</ul>

@@ -13,13 +13,13 @@
 // directory in the 5th argument when given.
 const { chromium } = require('playwright');
 
-const [BASE, PANEL, USER, PASS, SHOTS] = process.argv.slice(2);
+const [BASE, PANEL, USER, PASS, SHOTS, OP_USER, OP_PASS, DM_USER, DM_PASS] = process.argv.slice(2);
 if (!BASE || !USER || !PASS) { console.error('Usage: node panel-layout-test.js BASE_URL PANEL_PATH USER PASSWORD [SHOT_DIR]'); process.exit(2); }
 const ROOT = BASE.replace(/\/$/, '') + '/' + (PANEL || '/panel').replace(/^\/|\/$/g, '') + '/index.php';
 const ORIGIN = new URL(BASE).origin;
 const VIEWS = [{ name: 'desktop', width: 1600, height: 1000 }, { name: 'mobile', width: 390, height: 844 }];
 const PAGES = ['dashboard', 'logs', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'identity&id=203.0.113.5', 'overrides', 'rules', 'rules&new=1', 'rules&edit=ZZ',
-	'geo', 'geo&test=1&ip=203.0.113.7', 'iplists', 'iplists&new=1&type=block', 'iplists&test=1&ip=203.0.113.7', 'replay', 'models', 'settings', 'config_file', 'jobs', 'jobs&job=verify', 'audit&event=config&event_op=not', 'update'];
+	'geo', 'geo&test=1&ip=203.0.113.7', 'iplists', 'iplists&new=1&type=block', 'iplists&test=1&ip=203.0.113.7', 'replay', 'models', 'settings', 'config_file', 'jobs', 'jobs&job=verify', 'audit&event=config&event_op=not', 'update', 'users', 'users&role=admin&role_op=not&q=lay', 'account'];
 let failed = 0;
 const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } else { failed++; console.log('FAIL  ' + name + (extra ? ' (' + extra + ')' : '')); } };
 
@@ -83,7 +83,7 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 			check(label + ': HTTP 200', resp && resp.status() === 200, resp && String(resp.status()));
 			check(label + ': no horizontal page scroll', m.over <= 1, 'overflow ' + m.over + ' px');
 			if (v.name === 'desktop' && p === 'dashboard') { check('desktop: the wide layout uses the screen (shell >= 1500 px at 1600)', m.shell >= 1500, 'shell ' + m.shell); }
-			if (SHOTS && ['dashboard', 'update', 'settings', 'rules&new=1', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'geo'].indexOf(p) >= 0) {
+			if (SHOTS && ['dashboard', 'update', 'users', 'settings', 'rules&new=1', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'geo'].indexOf(p) >= 0) {
 				await page.screenshot({ path: SHOTS + '/' + v.name + '-' + p.split('&')[0] + (p.indexOf('new=1') > 0 ? '-form' : '') + (p.indexOf('act_op') > 0 ? '-filters' : '') + '.png', fullPage: false });
 			}
 		}
@@ -159,6 +159,48 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		await Promise.all([page.waitForNavigation(), page.click('form[action="index.php"] button[type=submit]')]);
 		check(v.name + ' logs: the form submits the operator and value', /path=%2Fshop/.test(page.url()) && !/path_op=not/.test(page.url()));
 		await ctx.close();
+	}
+
+	// ---- one sign-in per role: every page the role may see answers 200 without horizontal scroll, every other page 403;
+	// the Demo dashboard carries the banner and none of the sample traffic (addresses, User-Agents, paths, device ids, rule names).
+	if (OP_USER && DM_USER) {
+		const ALL = ['dashboard', 'logs', 'identity&id=203.0.113.5', 'overrides', 'rules', 'geo', 'iplists', 'replay', 'models', 'settings', 'config_file', 'jobs', 'audit', 'update', 'users', 'account'];
+		const OP_DENIED = ['config_file', 'update', 'users'];
+		const DM_ALLOWED = ['dashboard', 'account'];
+		const SENSITIVE = ['203.0.113.', '198.51.100.', 'curl/8.4.0', 'Mozilla/5.0', '/shop/item-', 'dev3', 'st-curl', 'UA_SCRIPT', 'python-requests', 'r=logs', 'r=identity'];
+		for (const v of VIEWS) {
+			for (const role of [{ name: 'operator', user: OP_USER, pass: OP_PASS }, { name: 'demo', user: DM_USER, pass: DM_PASS }]) {
+				const ctx = await browser.newContext({ viewport: { width: v.width, height: v.height }, ignoreHTTPSErrors: true, deviceScaleFactor: 1 });
+				const page = await ctx.newPage();
+				await page.goto(ROOT + '?r=login');
+				await page.fill('input[name=username]', role.user);
+				await page.fill('input[name=password]', role.pass);
+				await Promise.all([page.waitForNavigation(), page.click('form button[type=submit]')]);
+				for (const p of ALL) {
+					const key = p.split('&')[0];
+					const allowed = role.name === 'operator' ? OP_DENIED.indexOf(key) < 0 : DM_ALLOWED.indexOf(key) >= 0;
+					const resp = await page.goto(ROOT + '?r=' + p);
+					const st = resp ? resp.status() : 0;
+					const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+					check(v.name + ' ' + role.name + ' ' + key + ': ' + (allowed ? '200' : '403'), st === (allowed ? 200 : 403), String(st));
+					check(v.name + ' ' + role.name + ' ' + key + ': no horizontal page scroll', over <= 1, 'overflow ' + over + ' px');
+				}
+				if (role.name === 'demo') {
+					await page.goto(ROOT + '?r=dashboard');
+					const html = await page.content();
+					const leaked = SENSITIVE.filter((n) => html.indexOf(n) >= 0);
+					check(v.name + ' demo: the dashboard has the "Demo mode - sensitive data hidden" banner', /Demo mode\s*\S+\s*sensitive data hidden/.test(await page.locator('[data-demo-banner]').first().innerText()));
+					check(v.name + ' demo: none of the sample traffic (addresses, User-Agents, paths, device ids, rule names) is anywhere in the page', leaked.length === 0, leaked.join(', '));
+					if (SHOTS) { await page.screenshot({ path: SHOTS + '/' + v.name + '-demo-dashboard.png', fullPage: false }); }
+					check(v.name + ' demo: the page shows aggregate numbers', (await page.locator('.gp-kpi').count()) >= 5);
+				} else {
+					await page.goto(ROOT + '?r=settings');
+					const dis = await page.evaluate(() => Array.prototype.every.call(document.querySelectorAll('main form[method=post] button[type=submit]'), (b) => b.disabled));
+					check(v.name + ' operator: the write buttons of a page are disabled for the read-only role', dis);
+				}
+				await ctx.close();
+			}
+		}
 	}
 	await browser.close();
 	console.log(failed ? 'FAILED: ' + failed + ' check(s)' : 'OK: panel layout test passed.');

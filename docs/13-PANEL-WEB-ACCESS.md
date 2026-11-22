@@ -114,7 +114,7 @@ enough):
 |---|---|---|
 | `logs/` | guard | daily request logs |
 | `guard/` | panel | `config.local.json`, its `.lock` and temp file (settings saved in the panel) |
-| `panel/` | panel | `audit.jsonl` (audit trail), `.ratelimit/` (login limit when Redis is down) |
+| `panel/` | panel | `audit.jsonl` (audit trail), `users.json` (the accounts, mode 0600, with `users.json.lock` next to it), `.ratelimit/` (login limit when Redis is down) |
 | `geo/` | panel | uploaded GeoIP databases, compiled `country.bin` / `asn.bin` and their status files |
 | `lists/` | panel | IP list sources, compiled `allow.bin` / `block.bin`, `lists.json`, `lists-status.json` |
 | `bot-guard/` (top) | panel | `guard.off` (the kill switch on the dashboard) |
@@ -235,6 +235,7 @@ page itself).
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' https://example.com/gv-admin/panel.config.php
 curl -s -o /dev/null -w '%{http_code}\n' https://example.com/gv-admin/audit.jsonl
+curl -s -o /dev/null -w '%{http_code}\n' https://example.com/gv-admin/users.json
 ```
 
 **3. The full exposure check:**
@@ -249,6 +250,8 @@ It ends with `OK: no sensitive path answered 200 ...` and exit code 0.
 **4. Sign in.** Open `https://example.com/gv-admin/` in a browser and log in with
 the user from `setpass.php`. The **Data pipeline** card on the dashboard should
 say that requests are being logged.
+
+**3a. `users.json` must not be reachable.** It holds every account's password hash. `panel/.htaccess` denies it and `exposure-check.sh` checks `/panel/users.json`, `users.json.lock` and `$PANEL_PATH/users.json`; on nginx add `location = /gv-admin/users.json { return 404; }` (README §2.6).
 
 **3b. The updater workspace is refused too** (the exposure check covers `updates/recovery.json`, `updates/installed.json`, `updates/rollback.php`, `updates/verify.php`, `VERSION`, `CHANGELOG.md`, and `panel/recover.php` without a token, which must not answer 200).
 

@@ -20,6 +20,7 @@ if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 //    be used to enumerate the operator's username.
 
 require_once __DIR__ . '/../guard/redis.php';
+require_once __DIR__ . '/users.php';
 
 define('GP_LOGIN_MAX_ATTEMPTS', 5);
 define('GP_LOGIN_WINDOW', 900);          // 15 minutes
@@ -211,13 +212,25 @@ function gp_ip_allowed(array $cfg) {
 // Session cookie: user.issued_at.hmac
 // --------------------------------------------------------------------------
 
-function gp_session_sign($user, $issued, $secret) {
-	return hash_hmac('sha256', $user . '.' . $issued, $secret);
+// $ver is the user's session_version (panel/users.php). It is part of what the signature covers but not of the token: a
+// bump (disable, role change, password reset) makes every older token of that user fail its signature. Version 0 signs
+// exactly what the single-user panel signed, so sessions that exist at upgrade time stay valid.
+function gp_session_sign($user, $issued, $secret, $ver = 0) {
+	return hash_hmac('sha256', $user . '.' . $issued . ((int)$ver > 0 ? '.v' . (int)$ver : ''), $secret);
 }
 
-function gp_session_make($user, $secret, $issued = null) {
+function gp_session_make($user, $secret, $issued = null, $ver = 0) {
 	$issued = $issued === null ? time() : (int)$issued;
-	return $user . '.' . $issued . '.' . gp_session_sign($user, $issued, $secret);
+	return $user . '.' . $issued . '.' . gp_session_sign($user, $issued, $secret, $ver);
+}
+
+// The user name a token claims (NOT verified): the lookup that tells which session_version to verify against.
+function gp_session_claimed_user($token) {
+	$token = (string)$token;
+	$last = strrpos($token, '.');
+	if ($last === false) { return ''; }
+	$mid = strrpos(substr($token, 0, $last), '.');
+	return $mid === false ? '' : substr($token, 0, $mid);
 }
 
 // Verify a session token. Returns array(user, issued) or false.
@@ -230,7 +243,7 @@ function gp_session_make($user, $secret, $issued = null) {
 // the right instead: the last field is the hmac, the one before it the issued
 // timestamp, and everything before that is the user. The security properties
 // are unchanged - the hmac still covers user.issued.
-function gp_session_check($token, $secret, $ttl, $now = null) {
+function gp_session_check($token, $secret, $ttl, $now = null, $ver = 0) {
 	$now = $now === null ? time() : (int)$now;
 	$token = (string)$token;
 	$last_dot = strrpos($token, '.');
@@ -243,7 +256,7 @@ function gp_session_check($token, $secret, $ttl, $now = null) {
 	$issued = substr($head, $mid_dot + 1);
 	if ($user === '' || !ctype_digit($issued)) { return false; }
 	$issued = (int)$issued;
-	if (!hash_equals(gp_session_sign($user, $issued, $secret), $hmac)) { return false; }
+	if (!hash_equals(gp_session_sign($user, $issued, $secret, $ver), $hmac)) { return false; }
 	if ($issued > $now + 60) { return false; }          // clock skew, not a future session
 	if (($now - $issued) >= (int)$ttl) { return false; }
 	return array('user' => $user, 'issued' => $issued);
@@ -306,23 +319,44 @@ function gp_effective_session_token($set = null) {
 	return $tok;
 }
 
-// The current logged-in user, or null. Renews a half-expired session in place.
+// The record of the user the current request belongs to (without the password hash), or null.
+function gp_session_record($set = false) {
+	static $rec = null;
+	if ($set !== false) { $rec = $set; }
+	return $rec;
+}
+
+// The current logged-in user name, or null. The session must verify against the user's CURRENT session_version, and the
+// user must still exist and be enabled, so a disable, a role change or a password reset ends a session on its next
+// request. A user store that cannot be read logs nobody in (fail closed). Renews a half-expired session in place.
 function gp_current_user() {
+	gp_session_record(null);
 	$cfg = gp_panel_config();
 	if ($cfg === null) { return null; }
 	$token = isset($_COOKIE[GP_SESSION_COOKIE]) ? (string)$_COOKIE[GP_SESSION_COOKIE] : '';
 	if ($token === '') { return null; }
-	$session = gp_session_check($token, $cfg['session_secret'], $cfg['session_ttl']);
+	$claimed = gp_session_claimed_user($token);
+	if ($claimed === '') { return null; }
+	$u = gp_users_find($claimed);
+	if ($u === null || !$u['enabled']) { return null; }
+	$session = gp_session_check($token, $cfg['session_secret'], $cfg['session_ttl'], null, (int)$u['session_version']);
 	if ($session === false) { return null; }
-	if (!hash_equals($cfg['username'], $session['user'])) { return null; }
 	if (gp_session_should_renew($session['issued'], $cfg['session_ttl'])) {
 		// Build the renewed token once and use it for both the cookie and the
 		// request-scoped holder, so CSRF tokens rendered this request match it.
-		$new = gp_session_make($session['user'], $cfg['session_secret']);
+		$new = gp_session_make($session['user'], $cfg['session_secret'], null, (int)$u['session_version']);
 		gp_session_set_cookie($new, $cfg['session_ttl']);
 		gp_effective_session_token($new);
 	}
+	unset($u['password_hash']);
+	gp_session_record($u);
 	return $session['user'];
+}
+
+// The role of the current request's user ('' when nobody is logged in).
+function gp_current_role() {
+	$r = gp_session_record();
+	return $r === null ? '' : $r['role'];
 }
 
 // --------------------------------------------------------------------------
@@ -492,13 +526,20 @@ function gp_attempts_get_file($bucket, $window) {
 // window is short, the per-IP and single global 'user' counters both still
 // trip, and password_verify runs on every attempt - so this is left as a
 // documented bound rather than adding decrement/compare-and-set complexity.
+function gp_login_user_bucket($username) {
+	return 'u:' . substr(hash('sha256', gp_users_norm($username)), 0, 24);
+}
+
+// Locked when: this address has failed too often, this USERNAME has (any address, so a guess spread over many addresses against
+// one account still stops), or the whole panel has (the global counter, four times the per-address limit). The bucket of a
+// username that does not exist counts the same, so the lock reveals nothing about which accounts exist.
 function gp_login_locked($username) {
 	$ip = gp_client_ip();
 	if (gp_attempts_get($ip, GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS) { return true; }
-	if ($username !== ''
-		&& gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) {
-		// A distributed attempt spread over many addresses still hits this.
-		return true;
+	if ($username !== '') {
+		if (gp_attempts_get(gp_login_user_bucket($username), GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 2) { return true; }
+		// A distributed attempt spread over many addresses and names still hits this.
+		if (gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) { return true; }
 	}
 	return false;
 }
@@ -527,15 +568,18 @@ function gp_login_retry_after($username) {
 	if (gp_attempts_get(gp_client_ip(), GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS) {
 		$wait = max($wait, gp_attempts_ttl(gp_client_ip(), GP_LOGIN_WINDOW));
 	}
-	if ($username !== '' && gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) {
-		$wait = max($wait, gp_attempts_ttl('user', GP_LOGIN_WINDOW));
+	if ($username !== '') {
+		$ub = gp_login_user_bucket($username);
+		if (gp_attempts_get($ub, GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 2) { $wait = max($wait, gp_attempts_ttl($ub, GP_LOGIN_WINDOW)); }
+		if (gp_attempts_get('user', GP_LOGIN_WINDOW) >= GP_LOGIN_MAX_ATTEMPTS * 4) { $wait = max($wait, gp_attempts_ttl('user', GP_LOGIN_WINDOW)); }
 	}
 	return $wait > 0 ? $wait : GP_LOGIN_LOCKOUT;
 }
 
-function gp_login_record_failure() {
+function gp_login_record_failure($username = '') {
 	gp_attempts_bump(gp_client_ip(), GP_LOGIN_WINDOW);
 	gp_attempts_bump('user', GP_LOGIN_WINDOW);
+	if ($username !== '') { gp_attempts_bump(gp_login_user_bucket($username), GP_LOGIN_WINDOW); }
 }
 
 // --------------------------------------------------------------------------
@@ -543,13 +587,14 @@ function gp_login_record_failure() {
 // --------------------------------------------------------------------------
 
 // Attempt a login. Returns array(ok, message_key[, wait_seconds]).
-// Wrong user and wrong password are indistinguishable by message, status and
-// - because password_verify runs either way - by timing.
+// Wrong user, wrong password and a disabled account are indistinguishable by message, status and - because password_verify
+// runs on a dummy hash for an unknown name - by timing. The one different answer is login_store: the user store cannot be
+// read (fail closed), which says nothing about any account.
 function gp_login_attempt($username, $password) {
 	$cfg = gp_panel_config();
 	if ($cfg === null) { return array(false, 'login_failed'); }
 	// A form field can arrive as an array (username[]=x); that is not a login.
-	$username = is_string($username) ? $username : '';
+	$username = is_string($username) ? gp_users_norm(substr($username, 0, 200)) : '';
 	$password = is_string($password) ? $password : '';
 
 	if (gp_login_locked($username)) {
@@ -558,20 +603,25 @@ function gp_login_attempt($username, $password) {
 		return array(false, 'login_locked', gp_login_retry_after($username));
 	}
 
-	$user_ok = hash_equals($cfg['username'], $username);
-	// Always run the hash comparison, even for a wrong username, so the two
-	// failures cost the same amount of time.
-	$pass_ok = password_verify($password, $cfg['password_hash']);
+	$st = gp_users_state();
+	if (!$st['ok']) {
+		gp_audit_append(array('event' => 'login_store_error', 'actor' => $username, 'ip' => gp_client_ip(), 'key' => $st['error']));
+		return array(false, 'login_store');
+	}
+	$u = isset($st['users'][$username]) ? $st['users'][$username] : null;
+	// Always run the hash comparison, even for a wrong or disabled user, so the failures cost the same amount of time.
+	$pass_ok = password_verify($password, $u !== null ? $u['password_hash'] : gp_users_dummy_hash());
 
-	if ($user_ok && $pass_ok) {
-		gp_session_set_cookie(gp_session_make($cfg['username'], $cfg['session_secret']),
+	if ($u !== null && $u['enabled'] && $pass_ok) {
+		gp_session_set_cookie(gp_session_make($u['username'], $cfg['session_secret'], null, (int)$u['session_version']),
 			$cfg['session_ttl']);
-		gp_audit_append(array('event' => 'login_ok', 'actor' => $cfg['username'],
+		gp_users_record_login($u['username'], gp_client_ip());
+		gp_audit_append(array('event' => 'login_ok', 'actor' => $u['username'], 'key' => $u['role'],
 			'ip' => gp_client_ip()));
 		return array(true, 'login_ok');
 	}
 
-	gp_login_record_failure();
+	gp_login_record_failure($username);
 	gp_audit_append(array('event' => 'login_failed', 'actor' => $username,
 		'ip' => gp_client_ip()));
 	return array(false, 'login_failed');
@@ -581,12 +631,11 @@ function gp_login_attempt($username, $password) {
 // A wrong password counts against the same login limiter, so this cannot be used to guess the password
 // from a stolen session.
 function gp_reauth($user, $password) {
-	$cfg = gp_panel_config();
-	if ($cfg === null || !is_string($password) || $password === '') { return 'bad'; }
+	$u = gp_users_find($user);
+	if ($u === null || !$u['enabled'] || !is_string($password) || $password === '') { return 'bad'; }
 	if (gp_login_locked((string)$user)) { return 'locked'; }
-	$ok = hash_equals($cfg['username'], (string)$user) & password_verify($password, $cfg['password_hash']);
-	if ($ok) { return 'ok'; }
-	gp_login_record_failure();
+	if (password_verify($password, $u['password_hash'])) { return 'ok'; }
+	gp_login_record_failure((string)$user);
 	gp_audit_append(array('event' => 'reauth_failed', 'actor' => (string)$user, 'ip' => gp_client_ip()));
 	return 'bad';
 }

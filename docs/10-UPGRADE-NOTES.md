@@ -2,6 +2,35 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Users and roles (panel)
+
+**New**
+
+* **Several panel users with three roles**: Administrator, Monitoring operator (every report except secrets and user management; changes nothing) and Demo (aggregate numbers only,
+  from a separate server-side view model). New pages **Users** (administrators) and **My account** (everybody); the top bar shows the user and role. The updater is administrator only.
+* **One deny-by-default permission map** (`panel/acl.php`) checked in the router for GET and POST before any handler; a denial is HTTP 403 and an `acl_denied` audit line.
+* **User store** `panel/users.json` (git-ignored, protected from updates, mode 0600, atomic writes under a lock). Fails closed when damaged.
+* Per-username login limit (10 per 15 minutes) next to the per-address and global limits; a disabled user gets the generic failure.
+* `panel/setpass.php` is now also the recovery tool: create or reset an administrator and re-enable it, move a damaged store aside, optionally log out every session.
+* New files: `panel/users.php`, `panel/acl.php`, `panel/demo.php`, `panel/views/{users,account,demo,forbidden}.php`. Changed: `panel/auth.php`, `panel/index.php`, `panel/setpass.php`,
+  `panel/views/layout.php`, `panel/.htaccess` is unchanged. `scripts/exposure-check.sh` also checks `/panel/users.json`; `scripts/secret-values.php` redacts every account's password hash in job logs.
+
+**Migration (automatic).** On the first request after the upgrade `users.json` is created from `panel/panel.config.php`: that single user becomes an enabled administrator with the same
+password hash (the name is lowercased; it may be shorter, longer or use other characters than the rule for new names and still signs in). **Nobody has to change a password.** Open
+sessions stay valid (session version 0 signs exactly as before). `panel.config.php` keeps the install settings (`ip_allowlist`, `trusted_proxies`, session secret). If the panel
+directory is not writable the migrated administrator still works from memory and the Users page says users cannot be changed until `panel/` is writable (or use `setpass.php`).
+
+**Upgrade**
+
+1. Update from the panel (or copy the files). `users.json` appears on the first request. Make sure it is not web-reachable: `bash scripts/exposure-check.sh <url> <panel>`; on nginx add
+   `location = /gv-admin/users.json { return 404; }`.
+2. Create the other accounts under **Users**. Give colleagues who only watch the **Monitoring operator** role.
+3. If nobody can sign in: `php panel/setpass.php` (README, "Recover admin access").
+
+**Rollback.** Restore the previous files. The previous code reads `panel/panel.config.php` only, so the first account signs in with the password **it had before the upgrade** (run
+`php panel/setpass.php` with the same username afterwards if you changed it under *My account*); the other accounts do not exist for the old code. `users.json` can stay; a later
+upgrade picks it up again.
+
 ## File modes, crontab through bash, permission health check
 
 **Why.** On a live server the files had mode 666 and the cron scripts had no execute bit, so every crontab line that called a script directly

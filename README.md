@@ -272,6 +272,11 @@ that is **late**, **failing** or **never** ran. *Safe to change:* buttons start 
 *What it is for:* an append-only record of who changed what, when and from which address
 (settings, rules, lists, overrides, kill switch, logins, updates). *Safe to change:* it is read-only.
 
+### Users and My account
+*What it is for:* **Users** (administrators only) lists who can sign in, creates accounts, changes roles, disables, resets passwords and deletes
+([Users and roles](#users-and-roles)). **My account** (everybody) shows your role and changes your own password. *Safe to change:* disable
+instead of delete when unsure.
+
 ### Update
 *What it is for:* installing a newer version of Bot Guard from the GitHub ZIP, without SSH or git, and
 rolling it back. *Look at first:* the installed version and the green "writable" badge. *Safe to change:*
@@ -397,6 +402,41 @@ While it exists the guard logs nothing and decides nothing. It is the only insta
 1. **Logs:** set your filter and press **Export CSV (this page)**. It contains the rows on the page only (at most 200), not all filtered results.
 2. For a whole day, copy the daily files `<install-dir>/logs/guard-YYYYMMDD.jsonl` (finished days are compressed to `.gz`). One JSON object per line.
 3. **Privacy:** logs hold visitor addresses, paths and the first 100 characters of query strings (which may include tokens from e-mail links). Share them only with people who may see that data.
+
+### Users and roles
+
+Several people can have their own login, each with one of three roles:
+
+| Role (label) | Can see | Can change |
+|---|---|---|
+| **Administrator** (`admin`) | everything | everything, including **Users** and **Update** |
+| **Monitoring operator** (`operator`) | every report and page an administrator sees, except secrets, the raw **Config file** page, **Update** and **Users** | **nothing**: no form of any kind, except signing out and changing **their own** password |
+| **Demo** (`demo`) | only high-level numbers: the dashboard's request counts and trends, the protection state and counts of rules, lists and jobs. Never an address, device, User-Agent, path, rule pattern, list entry, log row, error text, file path, setting or another user's name | nothing except signing out |
+
+The top bar always shows who is signed in and with which role. A Monitoring operator sees the same pages as an administrator except
+Config file, Update and Users; their buttons are disabled, and the server refuses (HTTP 403, and a line in the audit trail) anything they
+try anyway. A Demo user gets a different page built only from numbers, with the banner *Demo mode — sensitive data hidden*.
+
+**Create a user.** *Users*, fill *Create a user* (username a-z, 0-9, `.`, `_`, `-`, 3 to 32 characters; role; a first password of at least 12
+characters that is not the username), press **Create user**. Tell the person the password over a safe channel; they change it under
+*My account*. **Disable a user.** *Users*, the row, **Disable**: their sessions end at once and they cannot sign in (the message stays the
+generic "Wrong username or password"). **Enable** brings the account back; **Reset password** ends their sessions too; **Delete** asks for
+confirmation. Safety rules: you cannot disable, demote or delete yourself, and the **last enabled administrator** is protected.
+
+**Recover admin access** (nobody can sign in, or the last administrator is locked out). On the server, as the account that owns the install:
+
+```bash
+php <install-dir>/panel/setpass.php
+```
+
+Answer `y`, then enter an administrator name and a new password: a new administrator is created, or an existing account is reset (new password,
+role administrator, enabled, its sessions ended). Other accounts are not touched. If `panel/users.json` is damaged the script offers to move it
+aside (`users.json.bad-<time>`) and start a new store with the administrator you enter. The same script, answered with `y` to the last question,
+also logs out every session.
+
+**First upgrade.** Nothing to do: the existing login becomes an enabled administrator with the same password. Sessions that are open stay open.
+Rolling back to the previous version signs that first account in with the password it had before the upgrade (`panel/panel.config.php` is
+not rewritten by the panel); run `setpass.php` for it if you changed that password under *My account* in the meantime.
 
 ### Updating Bot Guard
 
@@ -714,6 +754,7 @@ exception for `index.php`, `recover.php` and static assets) `panel/`.
   # Panel (symlinked or aliased as /gv-admin/): serve only index.php and the assets.
   location = /gv-admin/panel.config.php { return 404; }
   location = /gv-admin/audit.jsonl      { return 404; }
+  location = /gv-admin/users.json       { return 404; }     # the user store
   # recover.php (the update recovery entry) must stay reachable: it answers an empty 404 unless a one-time token is given.
   location ^~ /gv-admin/views/          { return 404; }
   ```
@@ -913,10 +954,42 @@ writable only by the cron user.** The PHP decision (`gv_effective_score`, `gv_de
 - **Tokens and nonces.** HMAC-SHA256, compared with `hash_equals`. The device id is derived from the nonce, so replaying one nonce yields the same device. A nonce is bound to UA and (with `challenge.bind_ip`, default on) IP, expires after `nonce_ttl`, and is **single-use** (`SET NX` claim, `nonce_replay`); the claim outlives the nonce by 60 s. The token is bound to neither IP nor UA.
 - **Proof of work.** SHA-256 with `pow_bits` leading zero bits, checked statelessly **before** Redis. A CAPTCHA with ≥ 20 bits binds the proof to the typed answer.
 - **Client-reported headless signals are untrusted hints.** `X-GV-S` is parsed by a strict pure function (letters and small integers, ≤ 120 characters), weighted by the operator, logged as `hs`/`hf` and used only for optional escalation. A stealth browser can lie; they raise a cost, they do not prove anything.
-- **Panel.** No setup wizard (without `panel.config.php` every route is a bare 404); credentials via CLI only (≥ 12 characters, hashed); sessions signed, 12 h by default, `HttpOnly`, `SameSite=Strict`; **CSRF token on every state-changing POST**, GET never changes state; the login limiter (5 attempts / 15 min) is the one component that does **not** fail open (file fallback without Redis); wrong user and wrong password look identical; optional `ip_allowlist` and `trusted_proxies`; strict CSP and `X-Robots-Tag: noindex` headers; **append-only audit** (`panel/audit.jsonl`: who, when, address, before/after); no PHP is ever written and no shell command built (`proc_open` is used in one place, with an argv array, to run `scripts/cron-check.sh`); the worker accepts only a closed list of typed jobs, validated again in Python.
+- **Panel.** No setup wizard (without `panel.config.php` every route is a bare 404); accounts in `panel/users.json` with three roles (administrator, Monitoring operator, Demo) enforced by one deny-by-default permission map on the server; first account and recovery via CLI only (≥ 12 characters, hashed); sessions signed, 12 h by default, ended at once by a disable, role change or password reset, `HttpOnly`, `SameSite=Strict`; **CSRF token on every state-changing POST**, GET never changes state; the login limiter (5 attempts / 15 min per address, 10 per username) is the one component that does **not** fail open (file fallback without Redis); wrong user and wrong password look identical; optional `ip_allowlist` and `trusted_proxies`; strict CSP and `X-Robots-Tag: noindex` headers; **append-only audit** (`panel/audit.jsonl`: who, when, address, before/after); no PHP is ever written and no shell command built (`proc_open` is used in one place, with an argv array, to run `scripts/cron-check.sh`); the worker accepts only a closed list of typed jobs, validated again in Python.
 - **Compile safety caps.** `0.0.0.0/0` and `::/0` are always dropped; allow entries wider than /16 (IPv4) or /32 (IPv6), block entries wider than /8 or /32, and block entries covering private, loopback, link-local or the server's own addresses are dropped unless the list is saved with *force* (panel only, audited). The same rule set runs in the panel and in `analyzer/iplist.py` (a test keeps them in byte parity). Rules: ≤ 200 rules, ≤ 50 values of ≤ 300 characters, a regex is refused when it back-references, takes > 1 ms on stress and browser strings or hits the backtrack limit; a file over 2 MiB is ignored.
 - **Trust boundaries.** Trusted: the operator, `config.php`, the analyzer's Redis writes. Not trusted: every request header (UA, `Accept`, `X-Requested-With`, XFF unless `REMOTE_ADDR` is in `cdn_ranges`), cookies, and the headless signals. Model files are pickles: protect `analyzer/`.
 - **Exposure.** The repository belongs outside the web root; `scripts/exposure-check.sh` and the deny-all `.htaccess` files are the safety net.
+
+### Users, roles and the permission map
+
+Code: `panel/users.php` (the user store), `panel/acl.php` (the permission map), `panel/demo.php` and `panel/views/demo.php` (the Demo view model and page),
+`panel/views/users.php`, `panel/views/account.php`, the router gate in `panel/index.php`, `panel/setpass.php` (shell recovery). Tests:
+`scripts/panel-selftest.php` (*Users and roles*), `scripts/panel-smoke.sh` and `scripts/panel-layout-test.sh` (one sign-in per role, every page).
+
+- **Permission map.** One file, `gp_acl_map()`: route => minimum role for GET and for POST (`POST` may list actions; only *My account* has one, `do=password`).
+  The router calls `gp_acl_allows($role, $route, $method, $action)` right after the session check and **before CSRF and before any handler**, for GET and POST.
+  Deny by default: a route that is not in the map, or a POST action that is not listed, needs `admin`. A denial is HTTP 403 plus an `acl_denied` audit line.
+  Hiding a button is only courtesy (read-only roles get their forms disabled by a few lines of JavaScript); the server decides. A test reads every `case` of the
+  router and fails when a route has no explicit entry.
+- **Decision table.** Operator: all GET pages except `config_file`, `update`, `users`; **no POST** except `logout` and its own password. The pure-read helpers stay
+  open to the operator because they are GETs (log CSV export and share links, the rule, GeoIP and IP-list lookup boxes, the IP-list export, the CAPTCHA sample
+  image, job detail); everything that writes is a POST and is admin only (settings, rules, lists, GeoIP upload / compile / rollback, overrides, kill switch, jobs,
+  mark seen, *Check again*, replay, quick block, Update). Demo: `dashboard` (the data-minimised view) and `account`. Full table: `docs/09-ADMIN-PANEL.md`.
+- **Demo view model.** `gp_demo_model()` reduces the snapshot, rules, lists and job health to numbers and fixed words *on the server*; the demo page is rendered from
+  that array alone, so the sensitive fields are never in the response (not hidden with CSS, not in comments or JSON). A test renders the page with seeded
+  addresses, User-Agents, paths, device ids, rule patterns, file paths, host names, errors and secrets and asserts that none appears.
+- **User store.** `panel/users.json` (git-ignored, protected from updates, denied by `.htaccess`, listed in `exposure-check.sh`), mode 0600, written atomically (temp file,
+  `rename()`, `flock`). Fields: `username`, `role`, `enabled`, `password_hash` (`password_hash()`, default algorithm), `created_at`, `created_by`, `updated_at`,
+  `last_login_at`, `last_login_ip`, `session_version`. A missing, empty, damaged or invalid store (unknown role, duplicate name) **fails closed**: nobody signs in
+  (the login page says the store cannot be read), nothing overwrites the file, and `setpass.php` is the way out.
+- **Migration.** First load without `users.json`: the user of `panel/panel.config.php` becomes an enabled admin (name lowercased, same password hash); the file keeps the
+  install settings (session secret, `ip_allowlist`, `trusted_proxies`) and its username / hash, so the previous code still works after a rollback.
+- **Sessions.** The cookie is still `user.issued.hmac`; `session_version` is part of what the HMAC covers (version 0 signs the old way, so sessions survive the upgrade).
+  Disable, enable, a role change, a password reset and a password change bump the version, so the user's other sessions fail on their next request; the user must also
+  still exist and be enabled. The user store is read on every request.
+- **Login limits.** Per address (5 / 15 min), per **username** (10 / 15 min, counted the same for names that do not exist), and the global counter (20); a wrong
+  password, an unknown user and a disabled user give one message, and `password_verify()` runs on a dummy hash for unknown names.
+- **Audit.** `user_create`, `user_role`, `user_enable`, `user_disable`, `user_password_reset`, `user_password_change`, `user_delete`, `user_cli_admin`, `acl_denied`,
+  `login_store_error`: actor, target, before / after, never a password or a hash.
 
 ## 2.13 Extending the system
 
@@ -982,6 +1055,7 @@ ignored files.
 | `bash scripts/identity-check.sh <url>`, `bash scripts/monitor-check.sh` | dev router | Allowed paths are byte-identical with the guard on and off; monitor mode is inert |
 | `node scripts/browser-test.js chromium` (or `firefox`) | Node, Playwright, browsers | Real-browser challenge over http/https |
 | `bash scripts/panel-layout-test.sh` | Node, Playwright, Chromium | Panel layout at 1600 and 390 px |
+| `bash scripts/panel-smoke.sh <url> <panel> <user> <password>` | `curl` (and Node + Playwright for the layout part) | Login, settings, overrides, kill switch, **every page per role (admin, operator, demo)**, session end on disable; throw-away install only |
 | `bash scripts/update-e2e.sh` | PHP, Python 3, `curl` | The in-panel updater over HTTP: upload, review, apply, health check, token, rollback, automatic rollback |
 | `bash scripts/version-check.sh origin/master` | `git` | A change to code must bump `VERSION` and `CHANGELOG.md` (CI, pull requests) |
 | `sudo bash .github/ci/webserver-test.sh apache|ols` | Debian/Ubuntu, root | Exposure check and panel smoke test on a real server, three layouts |

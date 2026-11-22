@@ -15,7 +15,8 @@ if [ -z "$BASE" ] || [ -z "$USER_NAME" ] || [ -z "$PASS" ]; then
 fi
 BASE="${BASE%/}"; PANEL="/${PANEL#/}"; PANEL="${PANEL%/}"
 URL="$BASE$PANEL/index.php"
-JAR="$(mktemp)"; trap 'rm -f "$JAR"' EXIT
+JAR="$(mktemp)"; OPJ="$(mktemp)"; DMJ="$(mktemp)"; NJ="$(mktemp)"; trap 'rm -f "$JAR" "$OPJ" "$DMJ" "$NJ"' EXIT
+newjar() { : > "$NJ"; echo "$NJ"; }
 failed=0
 check() { if [ "$2" = "1" ]; then echo "PASS  $1"; else echo "FAIL  $1"; failed=$((failed + 1)); fi; }
 csrf() { grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//'; }
@@ -207,6 +208,71 @@ tok="$(printf '%s' "$dash" | csrf)"
 curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'killswitch=start' "$URL?r=dashboard"
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
 check "kill switch can be released" "$(grep -q 'value="stop"' <<<"$dash" && echo 1 || echo 0)"
+
+# Roles. The admin creates a Monitoring operator and a Demo user through the Users page, then each of them signs in once and
+# visits every page: allowed pages answer 200, every other page 403; POSTs are refused with 403 (operator) and the effect is
+# checked; the demo dashboard carries the banner and no links into the detail pages; a disabled user's session ends at once.
+OP_NAME="smoke-op"; OP_PASS="operator-smoke-pass-1"; DM_NAME="smoke-demo"; DM_PASS="demo-smoke-pass-12345"
+uform() { curl -sk -c "$JAR" -b "$JAR" "$URL?r=users"; }
+upost() { local t; t="$(uform | csrf)"; curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "csrf=$t" "$@" "$URL?r=users"; }
+ul="$(uform)"
+check "the admin can open the Users page (list, create form)" "$(grep -q 'name="do" value="create"' <<<"$ul" && echo 1 || echo 0)"
+check "the admin creates a Monitoring operator (303)" "$([ "$(upost -d do=create --data-urlencode "username=$OP_NAME" -d role=operator --data-urlencode "password=$OP_PASS")" = 303 ] && echo 1 || echo 0)"
+check "the admin creates a Demo user (303)" "$([ "$(upost -d do=create --data-urlencode "username=$DM_NAME" -d role=demo --data-urlencode "password=$DM_PASS")" = 303 ] && echo 1 || echo 0)"
+upost -d do=create -d username=smoke-short -d role=demo -d password=short >/dev/null
+ul="$(uform)"
+check "a short password is refused (no such user is created)" "$(! grep -q 'smoke-short' <<<"$ul" && echo 1 || echo 0)"
+check "the Users page lists both, with the role labels" "$(grep -q 'Monitoring operator' <<<"$ul" && grep -q "$DM_NAME" <<<"$ul" && echo 1 || echo 0)"
+filtered="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=users&role=demo&role_op=not")"
+check "the Users filters include / exclude (role is not demo hides the demo user)" "$(grep -q "$OP_NAME" <<<"$filtered" && ! grep -q "$DM_NAME" <<<"$filtered" && echo 1 || echo 0)"
+rlogin() { curl -sk -o /dev/null -w '%{http_code}' -c "$1" -b "$1" --data-urlencode "username=$2" --data-urlencode "password=$3" "$URL?r=login"; }
+check "the operator signs in (303)" "$([ "$(rlogin "$OPJ" "$OP_NAME" "$OP_PASS")" = 303 ] && echo 1 || echo 0)"
+check "the demo user signs in (303)" "$([ "$(rlogin "$DMJ" "$DM_NAME" "$DM_PASS")" = 303 ] && echo 1 || echo 0)"
+code_of() { curl -sk -o /dev/null -w '%{http_code}' -c "$1" -b "$1" "$URL?r=$2"; }
+for r in dashboard logs identity overrides rules geo iplists replay models settings jobs audit account; do
+	check "operator: page $r answers 200" "$([ "$(code_of "$OPJ" "$r")" = 200 ] && echo 1 || echo 0)"
+done
+for r in config_file update users; do
+	check "operator: page $r answers 403" "$([ "$(code_of "$OPJ" "$r")" = 403 ] && echo 1 || echo 0)"
+done
+for r in dashboard account; do
+	check "demo: page $r answers 200" "$([ "$(code_of "$DMJ" "$r")" = 200 ] && echo 1 || echo 0)"
+done
+for r in logs identity overrides rules geo iplists replay models settings jobs audit config_file update users captcha_preview; do
+	check "demo: page $r answers 403" "$([ "$(code_of "$DMJ" "$r")" = 403 ] && echo 1 || echo 0)"
+done
+dd="$(curl -sk -c "$DMJ" -b "$DMJ" "$URL?r=dashboard")"
+check "demo: the dashboard shows the banner, and no link into a detail page (logs, identity, jobs, settings, users)" "$(grep -q 'sensitive data hidden' <<<"$dd" && ! grep -qE 'r=(logs|identity|jobs|settings|users|audit|rules)' <<<"$dd" && echo 1 || echo 0)"
+od="$(curl -sk -c "$OPJ" -b "$OPJ" "$URL?r=dashboard")"
+check "operator: the navigation shows no Config file, Update or Users entry and the top bar names the role" "$(! grep -qE 'r=(config_file|update|users)' <<<"$od" && grep -q 'Monitoring operator' <<<"$od" && echo 1 || echo 0)"
+otok="$(curl -sk -c "$OPJ" -b "$OPJ" "$URL?r=account" | csrf)"
+opost() { curl -sk -o /dev/null -w '%{http_code}' -c "$OPJ" -b "$OPJ" --data-urlencode "csrf=$otok" "$@"; }
+check "operator: a settings save is refused with 403" "$([ "$(opost -d action=save -d 'f[hard_block_score]=77' "$URL?r=settings")" = 403 ] && echo 1 || echo 0)"
+sv="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=settings")"
+check "...and the value was not saved" "$(! grep -q 'value="77"' <<<"$sv" && echo 1 || echo 0)"
+ks_before="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard" | grep -c 'value="stop"')"
+kc="$(opost -d "killswitch=$([ "$ks_before" -gt 0 ] && echo stop || echo start)" "$URL?r=dashboard")"
+ks_after="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard" | grep -c 'value="stop"')"
+check "operator: flipping the kill switch is refused with 403 and the switch did not change" "$([ "$kc" = 403 ] && [ "$ks_before" = "$ks_after" ] && echo 1 || echo 0)"
+check "operator: creating a user, an override, a rule, a job and an update are all refused with 403" "$([ "$(opost -d do=create -d username=smoke-hack -d role=admin -d password=hacked-password-1 "$URL?r=users")" = 403 ] && [ "$(opost -d action=add -d ip=203.0.113.9 "$URL?r=overrides")" = 403 ] && [ "$(opost -d do=save "$URL?r=rules")" = 403 ] && [ "$(opost -d job=verify "$URL?r=jobs")" = 403 ] && [ "$(opost -d do=upload "$URL?r=update")" = 403 ] && echo 1 || echo 0)"
+ul="$(uform)"
+check "...and no such user exists" "$(! grep -q 'smoke-hack' <<<"$ul" && echo 1 || echo 0)"
+check "the demo user cannot POST either (settings and users: 403)" "$([ "$(curl -sk -o /dev/null -w '%{http_code}' -c "$DMJ" -b "$DMJ" --data-urlencode "csrf=$(curl -sk -c "$DMJ" -b "$DMJ" "$URL?r=account" | csrf)" -d action=save "$URL?r=settings")" = 403 ] && echo 1 || echo 0)"
+check "a POST to a read-only role without the CSRF token is no use either" "$([ "$(curl -sk -o /dev/null -w '%{http_code}' -c "$OPJ" -b "$OPJ" -d action=save "$URL?r=settings")" = 403 ] && echo 1 || echo 0)"
+# (A wrong current password and wrong sign-ins are covered by panel-selftest; here each one would count against the sign-in limit of 127.0.0.1,
+# which the three CI layouts share through Redis, so this script makes only ONE failed sign-in, the disabled-user check below.)
+check "operator: changing your OWN password works (current password required), the session stays signed in" "$([ "$(opost -d do=password --data-urlencode "current=$OP_PASS" -d new=operator-new-pass-2 -d repeat=operator-new-pass-2 "$URL?r=account")" = 303 ] && [ "$(code_of "$OPJ" dashboard)" = 200 ] && echo 1 || echo 0)"
+OP_PASS="operator-new-pass-2"
+check "...the new password signs in" "$([ "$(rlogin "$(newjar)" "$OP_NAME" "$OP_PASS")" = 303 ] && echo 1 || echo 0)"
+check "the admin disables the operator (303)" "$([ "$(upost -d do=disable --data-urlencode "username=$OP_NAME")" = 303 ] && echo 1 || echo 0)"
+check "...and the operator's open session ends on its next request (redirect to login)" "$([ "$(code_of "$OPJ" dashboard)" = 303 ] && echo 1 || echo 0)"
+dl="$(curl -sk -c "$(newjar)" --data-urlencode "username=$OP_NAME" --data-urlencode "password=$OP_PASS" "$URL?r=login")"
+check "...a disabled user cannot sign in and the message is the generic one" "$(grep -q 'Wrong username or password' <<<"$dl" && echo 1 || echo 0)"
+upost -d do=delete --data-urlencode "username=$USER_NAME" >/dev/null; upost -d do=disable --data-urlencode "username=$USER_NAME" >/dev/null
+ul="$(uform)"
+check "the admin cannot disable or delete their own account" "$(grep -q "$USER_NAME" <<<"$ul" && [ "$(code_of "$JAR" dashboard)" = 200 ] && echo 1 || echo 0)"
+check "the admin deletes the operator and the demo user (303)" "$([ "$(upost -d do=delete --data-urlencode "username=$OP_NAME")" = 303 ] && [ "$(upost -d do=delete --data-urlencode "username=$DM_NAME")" = 303 ] && echo 1 || echo 0)"
+check "...and the deleted demo user's session ends too" "$([ "$(code_of "$DMJ" dashboard)" = 303 ] && echo 1 || echo 0)"
 
 # Every page in a real browser at a desktop (1600 px) and a phone (390 px) width: no horizontal page
 # scroll, wide layout, tabs, tooltips, filter chips, no console error or outside request.

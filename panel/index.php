@@ -16,6 +16,8 @@ define('GP_BOOT', 1);
 
 require_once __DIR__ . '/config_io.php';
 require_once __DIR__ . '/auth.php';
+require_once __DIR__ . '/acl.php';
+require_once __DIR__ . '/demo.php';
 require_once __DIR__ . '/data.php';
 require_once __DIR__ . '/jobs.php';
 require_once __DIR__ . '/update.php';
@@ -98,6 +100,7 @@ if (!gp_ip_allowed($gp_cfg)) {
 
 $gp_route = (isset($_GET['r']) && is_string($_GET['r'])) ? $_GET['r'] : 'dashboard';
 $gp_user = gp_current_user();
+$gp_role = gp_current_role();      // '' when nobody is signed in
 $gp_flash = array();          // array of array(kind, message)
 gp_flash_load_from_cookie();  // pick up any flash left by the previous redirect
 $gp_post = ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST';
@@ -160,8 +163,9 @@ function gp_redirect($route, $extra = array()) {
 // Render a view inside the layout. $view is a fixed name from the route table,
 // never anything derived from the request.
 function gp_render($view, array $vars = array()) {
-	global $gp_user, $gp_flash, $gp_route;
+	global $gp_user, $gp_role, $gp_flash, $gp_route;
 	$vars['user'] = $gp_user;
+	$vars['role'] = $gp_role;
 	$vars['flash'] = ($view === 'login') ? array() : $gp_flash;   // login draws its own message in the card
 	$vars['route'] = $gp_route;
 	$vars['view_file'] = __DIR__ . '/views/' . $view . '.php';
@@ -204,6 +208,17 @@ if ($gp_user === null) {
 	gp_redirect('login');
 }
 
+// Access control: ONE permission map (panel/acl.php), checked here for GET and POST BEFORE any handler runs. Deny by default:
+// a route or POST action that is not in the map needs the admin role. A denied request gets HTTP 403 and an audit line.
+$gp_method = (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') ? 'POST' : 'GET';
+$gp_action = gp_acl_action($gp_route, $_POST);
+if (!gp_acl_allows($gp_role, $gp_route, $gp_method, $gp_action)) {
+	gp_audit_append(array('event' => 'acl_denied', 'actor' => $gp_user, 'ip' => gp_client_ip(), 'key' => substr($gp_route, 0, 60),
+		'old' => null, 'new' => array('method' => $gp_method, 'action' => substr($gp_action, 0, 40), 'role' => $gp_role)));
+	http_response_code(403);
+	gp_render('forbidden');
+}
+
 // State-changing routes are POST only and must carry the CSRF token. A GET
 // never changes state anywhere in this panel.
 if ($gp_post && !gp_csrf_check($_POST['csrf'] ?? '')) {
@@ -217,6 +232,8 @@ $gp_ip = gp_client_ip();
 switch ($gp_route) {
 
 	case 'dashboard':
+		// The Demo role gets a separate, data-minimised view model and nothing else (panel/demo.php).
+		if ($gp_role === 'demo') { gp_render('demo', array('demo' => gp_demo_model())); }
 		if ($gp_post && isset($_POST['killswitch'])) {
 			$stop = $_POST['killswitch'] === 'stop';
 			if (gp_killswitch_set($stop)) {
@@ -541,6 +558,51 @@ switch ($gp_route) {
 			'backups'     => gp_overlay_backups(),
 			'path'        => gv_overlay_path(),
 		));
+
+	case 'users':
+		// Admin only (the ACL above). Every action audits actor, target, before / after; never a password hash.
+		if ($gp_post) {
+			$do = is_string($_POST['do'] ?? null) ? $_POST['do'] : '';
+			$target = is_string($_POST['username'] ?? null) ? $_POST['username'] : '';
+			$pw = is_string($_POST['password'] ?? null) ? $_POST['password'] : '';
+			$r = array(false, 'err_generic');
+			if ($do === 'create') { $r = gp_users_create($gp_user, $target, is_string($_POST['role'] ?? null) ? $_POST['role'] : '', $pw); }
+			elseif ($do === 'role') { $r = gp_users_set_role($gp_user, $target, is_string($_POST['role'] ?? null) ? $_POST['role'] : ''); }
+			elseif ($do === 'enable') { $r = gp_users_set_enabled($gp_user, $target, true); }
+			elseif ($do === 'disable') { $r = gp_users_set_enabled($gp_user, $target, false); }
+			elseif ($do === 'reset') { $r = gp_users_reset_password($gp_user, $target, $pw); }
+			elseif ($do === 'delete') { $r = gp_users_delete($gp_user, $target); }
+			gp_flash($r[0] ? 'ok' : 'error', $r[0] ? gp_t('usr_done_' . $do) : gp_t($r[1]));
+			gp_redirect('users');
+		}
+		$ust = gp_users_state();
+		$ufilter = gp_filter_parse($_GET, array('role' => 'choice', 'enabled' => 'choice', 'q' => 'text'));
+		$urows = array();
+		foreach ($ust['users'] as $u) {
+			if (isset($ufilter['role']) && !gp_filter_test('choice', $ufilter['role'], $u['role'])) { continue; }
+			if (isset($ufilter['enabled']) && !gp_filter_test('choice', $ufilter['enabled'], $u['enabled'] ? 'yes' : 'no')) { continue; }
+			if (isset($ufilter['q']) && !gp_filter_test('text', $ufilter['q'], $u['username'])) { continue; }
+			unset($u['password_hash']);
+			$urows[] = $u;
+		}
+		usort($urows, function ($a, $b) { return strcmp($a['username'], $b['username']); });
+		gp_render('users', array('users' => $urows, 'all_count' => count($ust['users']), 'filter' => $ufilter, 'state' => $ust, 'me' => $gp_user));
+
+	case 'account':
+		// Any role: change your OWN password (the current one is required). Other sessions of the user end; this one is reissued.
+		if ($gp_post && ($_POST['do'] ?? '') === 'password') {
+			$cur = is_string($_POST['current'] ?? null) ? $_POST['current'] : '';
+			$new = is_string($_POST['new'] ?? null) ? $_POST['new'] : '';
+			$rep = is_string($_POST['repeat'] ?? null) ? $_POST['repeat'] : '';
+			if (!hash_equals($new, $rep)) { gp_flash('error', gp_t('acc_err_repeat')); gp_redirect('account'); }
+			$auth = gp_reauth($gp_user, $cur);
+			if ($auth !== 'ok') { gp_flash('error', gp_t($auth === 'locked' ? 'login_locked_short' : 'usr_err_current')); gp_redirect('account'); }
+			$r = gp_users_change_own_password($gp_user, $cur, $new);
+			if ($r[0]) { gp_session_set_cookie(gp_session_make($gp_user, $gp_cfg['session_secret'], null, $r[2]), $gp_cfg['session_ttl']); }
+			gp_flash($r[0] ? 'ok' : 'error', gp_t($r[0] ? 'acc_changed' : $r[1]));
+			gp_redirect('account');
+		}
+		gp_render('account', array('me' => gp_session_record()));
 
 	case 'update':
 		// Admin page: upload a GitHub ZIP, review, apply with the password, roll back. Every POST needs the CSRF token (checked above).

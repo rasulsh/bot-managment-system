@@ -25,6 +25,8 @@ analyzer/*.candidate
 # Phase 5 panel: credentials, overlay, snapshot and audit trail stay local.
 panel/panel.config.php
 panel/audit.jsonl
+panel/users.json
+panel/users.json.*
 panel/*.log
 panel/.ratelimit/
 guard/config.local.json

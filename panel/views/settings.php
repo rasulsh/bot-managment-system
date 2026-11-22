@@ -121,7 +121,7 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 <div>
 	<h1 class="gp-page-title"><?= gp_e(gp_t('set_title')) ?></h1>
 	<p class="gp-page-sub"><?= gp_e(gp_t('set_no_ui')) ?>
-		<a class="gp-link" href="index.php?r=config_file"><?= gp_e(gp_t('set_open_editor')) ?></a></p>
+		<?php if (gp_acl_allows($role ?? 'admin', 'config_file', 'GET')): ?><a class="gp-link" href="index.php?r=config_file"><?= gp_e(gp_t('set_open_editor')) ?></a><?php endif; ?></p>
 </div>
 
 

@@ -10,6 +10,7 @@ define('GP_SELFTEST', 1);
 
 require __DIR__ . '/../guard/guard.php';
 require __DIR__ . '/../panel/config_io.php';
+require __DIR__ . '/../panel/acl.php';          // the views ask it which links the role may follow
 
 // Nothing this suite does may write into the repository tree, also when no Redis is running (a refused connect logs a line):
 // every error log the guard's helpers fall back to goes to a temp directory, removed at exit.
@@ -530,8 +531,9 @@ t_section('Sliding session renewal keeps the CSRF token valid');
 // A session past half its TTL is renewed in place: gp_current_user() issues a
 // new cookie. gp_csrf_token() must bind the form it renders to that renewed
 // token, not the stale cookie, or the next submit fails err_csrf once.
+putenv('GV_USERS=' . $GP_TMP_LOGS . '/users-renew.json');       // the user store of this test (migrated from the injected config)
 $GLOBALS['gp_test_panel_cfg'] = array(
-	'username' => 'operator', 'session_secret' => $sec, 'session_ttl' => 43200);
+	'username' => 'operator', 'password_hash' => 'x', 'session_secret' => $sec, 'session_ttl' => 43200);
 $old_issued = time() - 30000;                  // past half of 43200
 $old_tok = gp_session_make('operator', $sec, $old_issued);
 $_COOKIE[GP_SESSION_COOKIE] = $old_tok;
@@ -552,6 +554,7 @@ t_ok('the renewed csrf validates on the next submit (no one-request failure)',
 
 unset($_COOKIE[GP_SESSION_COOKIE]);
 unset($GLOBALS['gp_test_panel_cfg']);
+putenv('GV_USERS');
 
 // --------------------------------------------------------------------------
 t_section('Flash messages survive a redirect (signed cookie)');
@@ -3451,6 +3454,7 @@ t_ok('upload: a good ZIP is staged and audited', $up[0] === true && strlen($up[1
 gp_upd_upload(array('error' => 0, 'tmp_name' => $UT . '/x.zip', 'name' => 'x.zip'), 'admin');
 t_ok('upload: a refused ZIP is audited as update_refused', strpos((string)@file_get_contents($UT . '/audit.jsonl'), 'update_refused') !== false);
 $ut_ip = $_SERVER['REMOTE_ADDR']; $_SERVER['REMOTE_ADDR'] = '203.0.113.201';
+putenv('GV_USERS=' . $UT . '/users-reauth.json');
 $GLOBALS['gp_test_panel_cfg'] = array('session_secret' => str_repeat('s', 32), 'username' => 'admin', 'password_hash' => password_hash('correct horse battery', PASSWORD_DEFAULT));
 t_ok('the password is asked again: the right one passes, a wrong one and an empty one do not', gp_reauth('admin', 'correct horse battery') === 'ok' && gp_reauth('admin', 'nope') === 'bad' && gp_reauth('admin', '') === 'bad' && gp_reauth('other', 'correct horse battery') === 'bad');
 foreach (array('203.0.113.201', 'user') as $ut_b) {          // leave no login counters behind (file fallback and Redis)
@@ -3460,6 +3464,7 @@ foreach (array('203.0.113.201', 'user') as $ut_b) {          // leave no login c
 }
 $_SERVER['REMOTE_ADDR'] = $ut_ip;
 unset($GLOBALS['gp_test_panel_cfg']);
+putenv('GV_USERS');
 $ut_src = file_get_contents(__DIR__ . '/../panel/index.php');
 $ut_case = substr($ut_src, strpos($ut_src, "case 'update':"), 5200);
 t_ok('the update route is POST-only for every action, behind the session and the CSRF check, and the apply step asks for the password',
@@ -3611,6 +3616,288 @@ putenv('GV_JOBSTATUS_DIR');
 unset($gp_upd_opcache_hook);
 putenv('GV_AUDIT');
 $gp_upd_root = '';
+
+
+// ==========================================================================
+t_section('Users and roles: ACL matrix, demo leakage, sessions, safety rules, migration, fail closed, concurrency, CLI recovery');
+require_once __DIR__ . '/../panel/acl.php';
+require_once __DIR__ . '/../panel/demo.php';
+putenv('GV_AUDIT=' . $UT . '/audit-users.jsonl');
+putenv('GV_USERS=' . $UT . '/users-main.json');
+$uc_secret = bin2hex(random_bytes(32));
+$GLOBALS['gp_test_panel_cfg'] = array('username' => 'LegacyAdmin', 'password_hash' => password_hash('legacy password 1', PASSWORD_DEFAULT), 'session_secret' => $uc_secret, 'session_ttl' => 43200);
+$uc_audit = function () use ($UT) { return is_file($UT . '/audit-users.jsonl') ? (string)file_get_contents($UT . '/audit-users.jsonl') : ''; };
+
+// ---- migration from panel.config.php
+t_ok('migration: users.json does not exist before the first load', !is_file($UT . '/users-main.json'));
+$m0 = gp_users_state(true);
+t_ok('migration: the single user of panel.config.php becomes an enabled admin, name lowercased, same password hash, no password change', $m0['ok'] && $m0['migrated'] && count($m0['users']) === 1
+	&& $m0['users']['legacyadmin']['role'] === 'admin' && $m0['users']['legacyadmin']['enabled'] === true && password_verify('legacy password 1', $m0['users']['legacyadmin']['password_hash'])
+	&& $m0['users']['legacyadmin']['created_by'] === 'migration');
+t_ok('migration: users.json is written (mode 0600), valid JSON with every field of the spec', is_file($UT . '/users-main.json') && (fileperms($UT . '/users-main.json') & 0777) === 0600
+	&& (function () use ($UT) { $d = json_decode(file_get_contents($UT . '/users-main.json'), true); $u = $d['users'][0];
+		foreach (array('username', 'role', 'enabled', 'password_hash', 'created_at', 'created_by', 'updated_at', 'last_login_at', 'last_login_ip', 'session_version') as $f) { if (!array_key_exists($f, $u)) { return false; } } return true; })());
+t_ok('migration: the second load reads the file (not migrated again)', gp_users_state(true)['migrated'] === false);
+$GLOBALS['gp_test_panel_cfg']['username'] = 'someone-else';
+t_ok('migration: once users.json exists panel.config.php no longer decides who exists', gp_users_find('someone-else') === null && gp_users_find('LegacyAdmin') !== null);
+$GLOBALS['gp_test_panel_cfg']['username'] = 'LegacyAdmin';
+
+// ---- the old password still logs in (no password change needed), with the generic failure otherwise
+$_SERVER['REMOTE_ADDR'] = '203.0.113.210';
+$lg = gp_login_attempt('LegacyAdmin', 'legacy password 1');
+t_ok('login: the migrated admin signs in with the existing password (name is case-insensitive)', $lg[0] === true && gp_users_find('legacyadmin')['last_login_at'] > 0 && gp_users_find('legacyadmin')['last_login_ip'] === '203.0.113.210');
+t_ok('login: a wrong password and an unknown user give the same generic message', gp_login_attempt('legacyadmin', 'nope')[1] === 'login_failed' && gp_login_attempt('nobody-here', 'nope')[1] === 'login_failed');
+
+// ---- management and the safety rules
+$A = 'legacyadmin';
+t_ok('create: a user with a valid name, role and password', gp_users_create($A, 'Olivia', 'operator', 'olivia-long-password')[0] === true && gp_users_find('olivia')['role'] === 'operator' && gp_users_find('olivia')['created_by'] === $A);
+t_ok('create: names are unique and case-insensitive', gp_users_create($A, 'OLIVIA', 'demo', 'olivia-long-password')[1] === 'usr_err_exists');
+t_ok('create: the name rule [a-z0-9._-]{3,32}', gp_users_create($A, 'ab', 'demo', 'long-enough-password')[1] === 'usr_err_name' && gp_users_create($A, str_repeat('a', 33), 'demo', 'long-enough-password')[1] === 'usr_err_name'
+	&& gp_users_create($A, 'bad name', 'demo', 'long-enough-password')[1] === 'usr_err_name' && gp_users_create($A, 'bad/name', 'demo', 'long-enough-password')[1] === 'usr_err_name'
+	&& gp_users_create($A, 'a.b_c-d', 'demo', 'long-enough-password')[0] === true);
+t_ok('create: the password rule (12 characters, not the username, case-insensitive)', gp_users_create($A, 'shortpw', 'demo', '12345678901')[1] === 'usr_err_pw_short'
+	&& gp_users_create($A, 'same-as-name-x', 'demo', 'Same-As-Name-X')[1] === 'usr_err_pw_same' && gp_users_create($A, 'okpw-user', 'demo', '123456789012')[0] === true);
+t_ok('create: an unknown role is refused', gp_users_create($A, 'rolebad', 'superuser', 'long-enough-password')[1] === 'usr_err_role');
+t_ok('create: a hash is stored (password_hash default algorithm), never the password', (function () use ($UT) { $raw = file_get_contents($UT . '/users-main.json'); return strpos($raw, 'olivia-long-password') === false && strpos($raw, '$2y$') !== false; })());
+t_ok('safety: an admin cannot disable, demote or delete themselves', (function () use ($A) {
+	gp_users_create($A, 'second.admin', 'admin', 'second-admin-password');
+	return gp_users_set_enabled($A, $A, false)[1] === 'usr_err_self' && gp_users_set_role($A, $A, 'operator')[1] === 'usr_err_self' && gp_users_delete($A, $A)[1] === 'usr_err_self'
+		&& gp_users_find($A)['enabled'] === true && gp_users_find($A)['role'] === 'admin';
+})());
+t_ok('safety: the last enabled admin cannot be disabled, demoted or deleted (even by somebody else)', (function () use ($A) {
+	gp_users_set_enabled($A, 'second.admin', false);                                          // legacyadmin is now the only enabled admin
+	$r = array(gp_users_set_enabled('ghost', $A, false)[1], gp_users_set_role('ghost', $A, 'demo')[1], gp_users_delete('ghost', $A)[1]);
+	gp_users_set_enabled($A, 'second.admin', true);
+	return $r === array('usr_err_last_admin', 'usr_err_last_admin', 'usr_err_last_admin') && gp_users_find($A)['enabled'] === true;
+})());
+t_ok('safety: with two admins one may demote, disable or delete the other', gp_users_set_role($A, 'second.admin', 'operator')[0] === true && gp_users_set_role($A, 'second.admin', 'admin')[0] === true
+	&& gp_users_delete($A, 'second.admin')[0] === true && gp_users_find('second.admin') === null);
+
+// ---- sessions end immediately (disable, role change, password reset, own password change, delete)
+$tokenFor = function ($name) use ($uc_secret) { $u = gp_users_find($name); return gp_session_make($u['username'], $uc_secret, null, (int)$u['session_version']); };
+$who = function ($tok) { $_COOKIE[GP_SESSION_COOKIE] = $tok; $u = gp_current_user(); $r = gp_current_role(); unset($_COOKIE[GP_SESSION_COOKIE]); return array($u, $r); };
+$t1 = $tokenFor('olivia');
+t_ok('session: a session carries its user and role', $who($t1) === array('olivia', 'operator'));
+gp_users_set_role($A, 'olivia', 'demo');
+t_ok('session: a role change ends the existing session at once (a new one has the new role)', $who($t1) === array(null, '') && $who($tokenFor('olivia')) === array('olivia', 'demo'));
+$t2 = $tokenFor('olivia');
+gp_users_set_enabled($A, 'olivia', false);
+t_ok('session: disabling a user ends the session at once, even with a freshly signed token', $who($t2) === array(null, '') && $who($tokenFor('olivia')) === array(null, ''));
+gp_users_set_enabled($A, 'olivia', true);
+t_ok('session: enabling again does not revive the old session', $who($t2) === array(null, '') && $who($tokenFor('olivia'))[0] === 'olivia');
+$t3 = $tokenFor('olivia');
+gp_users_reset_password($A, 'olivia', 'brand-new-password-1');
+t_ok('session: a password reset ends the session at once, and the new password works', $who($t3) === array(null, '') && password_verify('brand-new-password-1', gp_users_find('olivia')['password_hash']));
+$t4 = $tokenFor('olivia'); $other = $tokenFor($A);
+$own = gp_users_change_own_password('olivia', 'brand-new-password-1', 'olivias-own-new-pass');
+t_ok('session: changing your own password needs the current one, ends the other sessions and returns the new version for the current one', $own[0] === true && $who($t4) === array(null, '')
+	&& $who(gp_session_make('olivia', $uc_secret, null, $own[2]))[0] === 'olivia' && gp_users_change_own_password('olivia', 'wrong-current-pass', 'xxxxxxxxxxxxxxx')[1] === 'usr_err_current'
+	&& gp_users_change_own_password('olivia', 'olivias-own-new-pass', 'short')[1] === 'usr_err_pw_short');
+t_ok('session: other users keep their sessions', $who($other) === array($A, 'admin'));
+t_ok('session: a token signed with another version, a tampered user and a deleted user all fail', $who(gp_session_make('olivia', $uc_secret, null, 99)) === array(null, '')
+	&& $who(gp_session_make('olivia', 'x' . $uc_secret, null, (int)gp_users_find('olivia')['session_version'])) === array(null, '') && (function () use ($A, $who, $tokenFor) { gp_users_create($A, 'temp.user', 'demo', 'temporary-password-1'); $t = $tokenFor('temp.user'); gp_users_delete($A, 'temp.user'); return $who($t) === array(null, ''); })());
+t_ok('session: a session issued before the upgrade (version 0, the old token shape) still works', (function () use ($A, $who, $uc_secret) { gp_users_create($A, 'old.session', 'operator', 'old-session-password'); return gp_users_find('old.session')['session_version'] === 0 && $who(gp_session_make('old.session', $uc_secret)) === array('old.session', 'operator'); })());
+t_ok('audit: user management lines carry actor, target and before / after, never a hash',
+	strpos($uc_audit(), '"event":"user_create"') !== false && strpos($uc_audit(), '"event":"user_role"') !== false && strpos($uc_audit(), '"event":"user_disable"') !== false
+	&& strpos($uc_audit(), '"event":"user_password_reset"') !== false && strpos($uc_audit(), '"event":"user_password_change"') !== false && strpos($uc_audit(), '"event":"user_delete"') !== false
+	&& strpos($uc_audit(), '$2y$') === false && strpos($uc_audit(), 'brand-new-password') === false && strpos($uc_audit(), '"old":{"role":"operator","enabled":true}') !== false);
+
+// ---- login limiter per username and per IP
+$_SERVER['REMOTE_ADDR'] = '203.0.113.211';
+$lim = array();
+for ($i = 0; $i < 5; $i++) { $lim[] = gp_login_attempt('victim.one', 'wrong' . $i)[1]; }
+t_ok('limiter: five wrong attempts from one address, then it is locked for every user name', $lim === array_fill(0, 5, 'login_failed') && gp_login_attempt('olivia', 'olivias-own-new-pass')[1] === 'login_locked');
+$_SERVER['REMOTE_ADDR'] = '203.0.113.212';
+$a2 = array();
+for ($i = 0; $i < 10; $i++) { $_SERVER['REMOTE_ADDR'] = '203.0.113.' . (220 + $i); $a2[] = gp_login_attempt('target.user', 'wrong' . $i)[1]; }
+$_SERVER['REMOTE_ADDR'] = '203.0.113.240';
+t_ok('limiter: ten wrong attempts at ONE user name from ten addresses lock that name for a fresh address (per-username limit), with the same wait answer for a name that does not exist',
+	count(array_unique($a2)) === 1 && gp_login_attempt('target.user', 'x')[1] === 'login_locked' && gp_login_attempt('olivia', 'olivias-own-new-pass')[0] === true);
+foreach (array_merge(array('203.0.113.210', '203.0.113.211', '203.0.113.240', 'user', gp_login_user_bucket('victim.one'), gp_login_user_bucket('target.user'), gp_login_user_bucket('nobody-here')), array_map(function ($i) { return '203.0.113.' . (220 + $i); }, range(0, 9))) as $ub) {
+	@unlink(gp_attempts_file($ub));
+	$cc = gv_redis_connect(gv_cfg_load()['redis'], $GP_TMP_LOGS, false);
+	if ($cc) { gv_redis_cmd($cc, array('DEL', gp_key('login:' . $ub))); gv_redis_close($cc); }
+}
+t_ok('login: a disabled user cannot sign in and gets the same generic message', (function () use ($A) { gp_users_set_enabled($A, 'olivia', false); $r = gp_login_attempt('olivia', 'olivias-own-new-pass'); gp_users_set_enabled($A, 'olivia', true); return $r[1] === 'login_failed'; })());
+foreach (array('203.0.113.240') as $ub) { @unlink(gp_attempts_file($ub)); @unlink(gp_attempts_file(gp_login_user_bucket('olivia'))); }
+$_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+
+// ---- the ACL matrix: every route in the router x GET/POST x role (+ logged out)
+$ui_src = file_get_contents(__DIR__ . '/../panel/index.php');
+preg_match_all("/^\tcase '([a-z_]+)':/m", $ui_src, $mm);
+$routes = array_values(array_unique(array_merge($mm[1], array('logout'))));
+$expect = array(   // route => array(GET min role, POST min role)   (the decision table, written out independently of acl.php)
+	'dashboard' => array('demo', 'admin'), 'account' => array('demo', 'admin'), 'logout' => array('demo', 'demo'), 'logs' => array('operator', 'admin'), 'identity' => array('operator', 'admin'),
+	'overrides' => array('operator', 'admin'), 'rules' => array('operator', 'admin'), 'geo' => array('operator', 'admin'), 'iplists' => array('operator', 'admin'), 'replay' => array('operator', 'admin'),
+	'models' => array('operator', 'admin'), 'settings' => array('operator', 'admin'), 'captcha_preview' => array('operator', 'admin'), 'jobs' => array('operator', 'admin'), 'audit' => array('operator', 'admin'),
+	'config_file' => array('admin', 'admin'), 'update' => array('admin', 'admin'), 'users' => array('admin', 'admin'));
+$rank = array('' => 0, 'demo' => 1, 'operator' => 2, 'admin' => 3);
+t_ok('ACL: every route the router handles has an explicit entry in the permission map (a new route without one fails the build)', array_diff($routes, array_keys(gp_acl_map())) === array() && array_diff($routes, array_keys($expect)) === array());
+$bad = array();
+foreach ($routes as $rt) {
+	foreach (array('GET', 'POST') as $me) {
+		foreach (array('admin', 'operator', 'demo', '') as $role) {
+			$want = isset($expect[$rt]) ? ($rank[$role] >= $rank[$expect[$rt][$me === 'GET' ? 0 : 1]] && $role !== '') : ($role === 'admin');
+			if (gp_acl_allows($role, $rt, $me) !== $want) { $bad[] = "$role $me $rt"; }
+		}
+	}
+}
+t_ok('ACL matrix: every route x GET / POST x admin / operator / demo / logged out is allowed or denied exactly as the table says' . ($bad ? ' (' . implode(', ', array_slice($bad, 0, 5)) . ')' : ''), !$bad);
+t_ok('ACL: the operator can POST nothing except logout and its own password; the demo role likewise', (function () use ($routes) {
+	foreach (array('operator', 'demo') as $role) {
+		foreach ($routes as $rt) {
+			$allowed = gp_acl_allows($role, $rt, 'POST', gp_acl_action($rt, array('do' => 'password')));
+			if ($allowed !== in_array($rt, array('logout', 'account'), true)) { return false; }
+		}
+		if (gp_acl_allows($role, 'account', 'POST', 'something-else') || gp_acl_allows($role, 'account', 'POST', '')) { return false; }
+	}
+	return true;
+})());
+t_ok('ACL: admin only is the default (unknown route, unknown method, unlisted POST action)', gp_acl_required('brand_new_route', 'GET') === 'admin' && gp_acl_required('logs', 'DELETE') === 'operator'
+	&& !gp_acl_allows('operator', 'brand_new_route', 'GET') && !gp_acl_allows('demo', 'brand_new_route', 'POST') && gp_acl_allows('admin', 'brand_new_route', 'GET') && gp_acl_required('account', 'POST', 'other') === 'admin');
+t_ok('ACL: demo sees only the dashboard (aggregate view) and My account; operator sees every page except Config, Update and Users',
+	gp_acl_nav('demo') === array('dashboard', 'account') && array_values(array_diff(gp_acl_nav('admin'), gp_acl_nav('operator'))) === array('config_file', 'update', 'users') && array_diff(gp_acl_nav('operator'), gp_acl_nav('admin')) === array());
+$gate = strpos($ui_src, '!gp_acl_allows($gp_role, $gp_route');
+t_ok('ACL: the check sits in the router after the session check and before CSRF and every handler; a denial is HTTP 403 plus an acl_denied audit line',
+	$gate !== false && $gate > strpos($ui_src, 'if ($gp_user === null)') && $gate < strpos($ui_src, "if (\$gp_post && !gp_csrf_check(") && $gate < strpos($ui_src, 'switch ($gp_route)')
+	&& strpos($ui_src, "'acl_denied'") !== false && strpos($ui_src, 'http_response_code(403)') !== false);
+t_ok('ACL: the Update page and the user pages are POST handlers behind the same gate and the CSRF check (new POSTs: users, account)', (function () use ($ui_src) {
+	$csrf = strpos($ui_src, "if (\$gp_post && !gp_csrf_check(");
+	foreach (array("case 'users':", "case 'account':", "case 'update':") as $c) { $p = strpos($ui_src, $c); if ($p === false || $p < $csrf) { return false; } }
+	$blk = substr($ui_src, strpos($ui_src, "case 'users':"), strpos($ui_src, "case 'update':") - strpos($ui_src, "case 'users':"));
+	return substr_count($blk, 'if ($gp_post') === 2;
+})());
+t_ok('ACL: the decision table in acl.php names every route', (function () { $s = file_get_contents(__DIR__ . '/../panel/acl.php'); foreach (array('logs', 'identity', 'overrides', 'rules', 'geo', 'iplists', 'replay', 'models', 'settings', 'jobs', 'audit', 'config_file', 'update', 'users', 'account', 'logout', 'dashboard') as $r) { if (strpos($s, "//   " . $r) === false) { return false; } } return true; })());
+
+// ---- the demo role: a separate, data-minimised view
+$seed = array('ips' => array('203.0.113.77', '198.51.100.9'), 'ua' => 'SecretBot/9.9 (+https://internal.example.test)', 'path' => '/secret/path-xyz', 'dev' => 'dev-abc123def', 'pattern' => 'zz-pattern-qq',
+	'file' => '/home/secretuser/bot-guard/guard/config.php', 'host' => 'redis.internal.example.test', 'country' => 'Ruritania', 'err' => 'Traceback: connect to 10.99.88.77 failed', 'other_user' => 'secret.colleague');
+$snap_seed = array('generated_at' => time() - 60, 'tz' => array('name' => 'Zone/Secret', 'offset' => 3600), 'kpi' => array('window_h' => 24,
+	'cur' => array('requests' => 1840, 'allowed' => 1500, 'blocked' => 210, 'limited' => 12, 'challenged' => 96, 'challenge_success' => 91.4, 'rule_hits' => 140, 'honeypot' => 6, 'degraded' => 0, 'captcha_shown' => 30, 'captcha_solved' => 20, 'captcha_failed' => 5, 'captcha_expired' => 5, 'captcha_solve_rate' => 66.7, 'secret_extra' => $seed['ua']),
+	'prev' => array('requests' => 1500, 'allowed' => 1320, 'blocked' => 120, 'limited' => 12, 'challenged' => 40, 'challenge_success' => 96.0, 'rule_hits' => 100, 'honeypot' => 9, 'degraded' => 0, 'captcha_shown' => 10, 'captcha_solved' => 8, 'captcha_failed' => 1, 'captcha_expired' => 1, 'captcha_solve_rate' => 80.0)),
+	'top' => array('ips' => array(array($seed['ips'][0], 80), array($seed['ips'][1], 60)), 'uas' => array(array($seed['ua'], 120)), 'paths' => array(array($seed['path'], 40)), 'devices' => array(array($seed['dev'], 30)), 'countries' => array(array($seed['country'], 900))),
+	'decisions' => array('allow' => 1500), 'host' => $seed['host']);
+$rules_seed = array(array('id' => 'r1', 'name' => $seed['pattern'], 'enabled' => true, 'mode' => 'enforce', 'action' => 'block', 'pattern' => $seed['pattern']), array('id' => 'r2', 'name' => 'x', 'enabled' => false, 'mode' => 'monitor', 'action' => 'log'));
+$lists_seed = array(array('id' => 'l1', 'name' => $seed['ips'][0], 'enabled' => true, 'type' => 'block', 'mode' => 'enforce', 'entries' => array($seed['ips'][1])));
+$jobs_seed = array('verify' => array('state' => 'failing', 'required' => true, 'last_error' => $seed['err'], 'first_line' => $seed['err'], 'path' => $seed['file']), 'worker' => array('state' => 'ok', 'required' => true), 'train' => array('state' => 'never', 'required' => false));
+$cfg_seed = array('secret' => 'REAL-SECRET-VALUE-123', 'holdout_salt' => 'REAL-SALT', 'enforce' => array('block' => true, 'challenge' => false, 'ratelimit' => false), 'redis' => array('host' => $seed['host'], 'password' => 'REDIS-PASS-XYZ'));
+$model = gp_demo_model(array('snapshot' => $snap_seed, 'cfg' => $cfg_seed, 'rules' => $rules_seed, 'lists' => $lists_seed, 'jobs' => $jobs_seed, 'now' => time()));
+t_ok('demo: the view model has aggregates only (KPI numbers with their change, the protection word, five counts)', $model['kpi']['requests']['cur'] === 1840.0 && $model['kpi']['blocked']['change'] === '+75.0 %'
+	&& $model['protection'] === 'partial' && $model['counts'] === array('rules_total' => 2, 'rules_enabled' => 1, 'lists_total' => 1, 'lists_enabled' => 1, 'jobs_healthy' => 1, 'jobs_unhealthy' => 1) && !isset($model['kpi']['secret_extra']));
+$demo_user = 'demo.viewer';
+$gp_user_save = isset($GLOBALS['gp_user']) ? $GLOBALS['gp_user'] : null;
+ob_start();
+$user = $demo_user; $role = 'demo'; $route = 'dashboard'; $flash = array(); $demo = $model; $view_file = __DIR__ . '/../panel/views/demo.php';
+require __DIR__ . '/../panel/views/layout.php';
+$demo_html = ob_get_clean();
+$leak = array();
+foreach (array_merge($seed['ips'], array($seed['ua'], $seed['path'], $seed['dev'], $seed['pattern'], $seed['file'], $seed['host'], $seed['country'], $seed['err'], $seed['other_user'], '10.99.88.77', 'REAL-SECRET', 'REDIS-PASS', 'internal.example', 'Zone/Secret', 'secretuser')) as $needle) {
+	if (stripos($demo_html, $needle) !== false) { $leak[] = $needle; }
+}
+t_ok('demo: the demo dashboard rendered with seeded sensitive data contains none of it (IPs, User-Agents, paths, device ids, rule patterns, file paths, host names, errors, other users, secrets)' . ($leak ? ' LEAKED: ' . implode(', ', $leak) : ''), !$leak && strlen($demo_html) > 2000);
+t_ok('demo: the page shows the banner, the numbers, and no other nav entry than Dashboard and My account', strpos($demo_html, 'Demo mode') !== false && strpos($demo_html, 'sensitive data hidden') !== false && strpos($demo_html, '1,840') !== false
+	&& strpos($demo_html, 'r=logs') === false && strpos($demo_html, 'r=settings') === false && strpos($demo_html, 'r=users') === false && strpos($demo_html, 'r=account') !== false && strpos($demo_html, $demo_user) !== false);
+t_ok('demo: the view model is a plain array of numbers and fixed words (no string from the data survives json_encode)', (function () use ($model, $seed) { $j = json_encode($model); foreach (array_merge($seed['ips'], array($seed['ua'], $seed['path'], $seed['dev'], $seed['pattern'], $seed['err'])) as $n) { if (strpos($j, $n) !== false) { return false; } } return true; })());
+$dcase = substr($ui_src, strpos($ui_src, "case 'dashboard':"), 900);
+t_ok('demo: the dashboard handler answers a demo user with the demo model BEFORE it reads any health, log or config data', strpos($dcase, "gp_role === 'demo'") !== false && strpos($dcase, "gp_render('demo'") !== false && strpos($dcase, "gp_role === 'demo'") < strpos($ui_src, 'gp_health_inputs()', strpos($ui_src, "case 'dashboard':")));
+$op_html = (function () use ($model) { ob_start(); $user = 'olivia'; $role = 'operator'; $route = 'logs'; $flash = array(); $view_file = __DIR__ . '/../panel/views/forbidden.php'; require __DIR__ . '/../panel/views/layout.php'; return ob_get_clean(); })();
+t_ok('operator: the navigation has every page except Config, Update and Users, shows the read-only note and the role in the top bar', strpos($op_html, 'r=audit') !== false && strpos($op_html, 'r=jobs') !== false && strpos($op_html, 'r=config_file') === false
+	&& strpos($op_html, 'r=update') === false && strpos($op_html, 'r=users') === false && strpos($op_html, 'Monitoring operator') !== false && strpos($op_html, '<body class="gp-body" data-readonly="1">') !== false);
+$ad_html = (function () { ob_start(); $user = 'legacyadmin'; $role = 'admin'; $route = 'users'; $flash = array(); $view_file = __DIR__ . '/../panel/views/forbidden.php'; require __DIR__ . '/../panel/views/layout.php'; return ob_get_clean(); })();
+t_ok('admin: the navigation has Update and Users, and the top bar names user and role', strpos($ad_html, 'r=update') !== false && strpos($ad_html, 'r=users') !== false && strpos($ad_html, 'r=config_file') !== false && strpos($ad_html, 'legacyadmin') !== false && strpos($ad_html, 'Administrator') !== false && strpos($ad_html, '<body class="gp-body">') !== false);
+
+// ---- operator never sees secrets
+t_ok('operator: the raw Config page (overlay editor) is admin only and no secret key is in the operator-visible audit events', gp_acl_required('config_file', 'GET') === 'admin' && !in_array('secret', array_keys(gv_overlay_whitelist()), true)
+	&& !in_array('holdout_salt', array_keys(gv_overlay_whitelist()), true) && !preg_grep('/^redis\./', array_keys(gv_overlay_whitelist())));
+$sv = shell_exec(escapeshellarg($UT_PHP) . ' ' . escapeshellarg(__DIR__ . '/secret-values.php') . ' 2>/dev/null');
+t_ok('secrets: scripts/secret-values.php also lists the password hashes of the user store (job logs redact them)', is_string($sv) && strpos($sv, gp_users_find('olivia')['password_hash']) !== false);
+
+// ---- fail closed: a damaged store logs nobody in; a missing store with no config is an error, not an open door
+$_COOKIE[GP_SESSION_COOKIE] = gp_session_make('legacyadmin', $uc_secret, null, (int)gp_users_find('legacyadmin')['session_version']);
+file_put_contents($UT . '/users-main.json', '{"users": [ not json');
+t_ok('fail closed: a corrupt users.json -> the state is an error, nobody has a session, nobody can log in (own message), nothing overwrites the file',
+	gp_users_state(true)['ok'] === false && gp_users_state()['error'] === 'corrupt' && gp_current_user() === null && gp_login_attempt('legacyadmin', 'legacy password 1')[1] === 'login_store'
+	&& gp_users_create('x', 'newbie.user', 'demo', 'long-enough-password')[1] === 'usr_err_store' && file_get_contents($UT . '/users-main.json') === '{"users": [ not json' && gp_reauth('legacyadmin', 'legacy password 1') === 'bad');
+foreach (array('{"v":1,"users":[{"username":"a1x","role":"god","password_hash":"x"}]}', '{"v":1,"users":[{"username":"dup","role":"admin","password_hash":"x"},{"username":"dup","role":"demo","password_hash":"y"}]}', '{"v":1,"users":[{"username":"nohash","role":"admin"}]}', '', '[]', 'null') as $bad_store) {
+	file_put_contents($UT . '/users-main.json', $bad_store);
+	if (gp_users_state(true)['ok']) { $leak = 1; }
+}
+t_ok('fail closed: an unknown role, a duplicate name, a missing hash, an empty file or a wrong shape are all rejected as a store', empty($leak));
+t_ok('fail closed: the CLI recovery refuses to write into a corrupt store (it offers to move it aside instead)', gp_users_cli_admin('rescue.admin', 'rescue-admin-password')[1] === 'usr_err_store');
+unset($_COOKIE[GP_SESSION_COOKIE]);
+@unlink($UT . '/users-main.json');
+unset($GLOBALS['gp_test_panel_cfg']);
+t_ok('fail closed: no users.json and no panel.config.php -> an error state, nobody signs in', gp_users_state(true)['ok'] === false && gp_users_state()['error'] === 'missing' && gp_current_user() === null);
+
+// ---- concurrent writes: eight processes add eight users to one store
+$GLOBALS['gp_test_panel_cfg'] = array('username' => 'root.user', 'password_hash' => password_hash('root password long', PASSWORD_DEFAULT), 'session_secret' => $uc_secret, 'session_ttl' => 43200);
+@unlink($UT . '/users-conc.json'); putenv('GV_USERS=' . $UT . '/users-conc.json');
+gp_users_state(true);
+$kids = array();
+$code = 'define("GV_BOOT",1);define("GP_BOOT",1);define("GV_NO_AUTORUN",1);define("GP_SELFTEST",1);require ' . var_export(__DIR__ . '/../panel/config_io.php', true) . ';require ' . var_export(__DIR__ . '/../panel/auth.php', true)
+	. ';$r=gp_users_create("root.user","conc".(int)getenv("UC_N"),"operator","concurrent-password-1");exit($r[0]?0:1);';
+for ($i = 1; $i <= 8; $i++) {
+	$pipes = array();
+	$kids[] = proc_open(array($UT_PHP, '-r', $code), array(0 => array('file', '/dev/null', 'r'), 1 => array('file', '/dev/null', 'w'), 2 => array('file', '/dev/null', 'w')), $pipes, null, array('UC_N' => (string)$i, 'GV_USERS' => $UT . '/users-conc.json', 'GV_AUDIT' => $UT . '/audit-conc.jsonl', 'PATH' => getenv('PATH')));
+}
+$codes = array();
+foreach ($kids as $k) { $codes[] = proc_close($k); }
+$cs = gp_users_state(true);
+t_ok('concurrent writes: eight processes each create a user in the same store - all eight and the original are there, the file is valid JSON, no temp file is left', array_sum($codes) === 0 && $cs['ok'] && count($cs['users']) === 9
+	&& isset($cs['users']['conc1'], $cs['users']['conc8'], $cs['users']['root.user']) && glob($UT . '/users-conc.json.tmp*') === array());
+unset($GLOBALS['gp_test_panel_cfg']);
+
+// ---- CLI recovery (php panel/setpass.php) in a scratch copy of the install
+$ur = ut_install();
+@unlink($ur . '/panel/panel.config.php');
+$cli = function ($input) use ($ur, $UT_PHP) {
+	$p = proc_open(array($UT_PHP, $ur . '/panel/setpass.php'), array(0 => array('pipe', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $pipes, $ur, array('PATH' => getenv('PATH'), 'GV_AUDIT' => $ur . '/audit-cli.jsonl'));
+	fwrite($pipes[0], $input); fclose($pipes[0]);
+	$out = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
+	fclose($pipes[1]); fclose($pipes[2]);
+	return array(proc_close($p), $out);
+};
+$ucli = function () use ($ur) { $d = json_decode((string)@file_get_contents($ur . '/panel/users.json'), true); $o = array(); foreach ((array)($d['users'] ?? array()) as $u) { $o[$u['username']] = $u; } return $o; };
+$c1 = $cli("Root.Admin\nfirst-admin-password-1\nfirst-admin-password-1\n");
+$u1 = $ucli();
+t_ok('CLI: the first run creates panel.config.php and the first administrator (lowercased) in users.json, mode 0600', $c1[0] === 0 && isset($u1['root.admin']) && $u1['root.admin']['role'] === 'admin' && $u1['root.admin']['enabled'] === true
+	&& (fileperms($ur . '/panel/users.json') & 0777) === 0600 && is_file($ur . '/panel/panel.config.php') && password_verify('first-admin-password-1', $u1['root.admin']['password_hash']));
+$d = json_decode(file_get_contents($ur . '/panel/users.json'), true);
+$d['users'][0]['enabled'] = false; $d['users'][0]['role'] = 'demo';
+$d['users'][] = array('username' => 'keep.me', 'role' => 'operator', 'enabled' => true, 'password_hash' => password_hash('keep-me-password-1', PASSWORD_DEFAULT), 'created_at' => 1, 'created_by' => 'x', 'updated_at' => 1, 'last_login_at' => 0, 'last_login_ip' => '', 'session_version' => 3);
+file_put_contents($ur . '/panel/users.json', json_encode($d));
+$c2 = $cli("y\nroot.admin\nrecovered-password-1\nrecovered-password-1\nn\n");
+$u2 = $ucli();
+t_ok('CLI recovery: resetting a disabled, demoted admin re-enables it, makes it an administrator again, sets the password and ends its sessions; other accounts are untouched',
+	$c2[0] === 0 && $u2['root.admin']['enabled'] === true && $u2['root.admin']['role'] === 'admin' && password_verify('recovered-password-1', $u2['root.admin']['password_hash']) && $u2['root.admin']['session_version'] === $u1['root.admin']['session_version'] + 1
+	&& $u2['keep.me']['session_version'] === 3 && $u2['keep.me']['role'] === 'operator' && password_verify('keep-me-password-1', $u2['keep.me']['password_hash']));
+$c3 = $cli("y\nnew.admin\nanother-admin-pass-1\nanother-admin-pass-1\nn\n");
+t_ok('CLI recovery: a new administrator can be created while others exist', $c3[0] === 0 && isset($ucli()['new.admin']) && $ucli()['new.admin']['role'] === 'admin' && count($ucli()) === 3);
+$cfg_before = file_get_contents($ur . '/panel/panel.config.php');
+$c4 = $cli("y\nx\n");
+t_ok('CLI: a bad username is refused with an error and exit code 2, nothing written', $c4[0] === 2 && file_get_contents($ur . '/panel/panel.config.php') === $cfg_before && count($ucli()) === 3);
+$cli("y\nroot.admin\nrecovered-password-2\nrecovered-password-2\ny\n");
+t_ok('CLI: answering yes to "log out every session" rotates the session secret', file_get_contents($ur . '/panel/panel.config.php') !== $cfg_before);
+file_put_contents($ur . '/panel/users.json', 'garbage');
+$c5 = $cli("y\nn\n");
+t_ok('CLI recovery: a corrupt users.json is not touched unless you agree', $c5[0] === 2 && file_get_contents($ur . '/panel/users.json') === 'garbage');
+$c6 = $cli("y\ny\nrescue.admin\nrescue-password-123\nrescue-password-123\nn\n");
+t_ok('CLI recovery: ...and with your agreement it is moved aside and a new store starts with the new administrator', $c6[0] === 0 && isset($ucli()['rescue.admin']) && count($ucli()) === 1 && count(glob($ur . '/panel/users.json.bad-*')) === 1);
+$c7 = $cli("y\nroot\nroot\nroot\nn\n");
+t_ok('CLI: a password equal to the username or shorter than 12 characters is refused', $c7[0] === 2);
+
+// ---- the updater is admin only; the new pages carry tooltips and strings
+t_ok('updater: the Update page and every update action are admin only (GET and POST)', gp_acl_required('update', 'GET') === 'admin' && gp_acl_required('update', 'POST') === 'admin' && !gp_acl_allows('operator', 'update', 'GET') && !gp_acl_allows('operator', 'update', 'POST') && !gp_acl_allows('demo', 'update', 'GET'));
+$_SERVER['REQUEST_METHOD'] = 'GET';
+$uview = function ($file, array $vars) { extract($vars); ob_start(); require $file; return ob_get_clean(); };
+$u_html = $uview(__DIR__ . '/../panel/views/users.php', array('users' => array(array('username' => 'olivia', 'role' => 'operator', 'enabled' => true, 'created_at' => 1700000000, 'created_by' => 'x', 'last_login_at' => 0, 'last_login_ip' => '', 'session_version' => 0)),
+	'all_count' => 3, 'filter' => array('role' => array('v' => array('operator'), 'not' => true)), 'state' => array('readonly' => false), 'me' => 'legacyadmin'));
+t_ok('Users page renders the filters (with an exclude chip), the create form, per-row actions with a delete confirmation and a tooltip on every new field',
+	strpos($u_html, 'gp-chip-not') !== false && strpos($u_html, 'name="do" value="create"') !== false && strpos($u_html, 'data-confirm=') !== false && substr_count($u_html, 'gp-tip-btn') >= 5
+	&& substr_count($u_html, 'name="csrf"') >= 3 && strpos($u_html, '$2y$') === false && strpos($u_html, 'Monitoring operator') !== false);
+$a_html = $uview(__DIR__ . '/../panel/views/account.php', array('me' => array('username' => 'olivia', 'role' => 'operator', 'last_login_at' => 0)));
+t_ok('My account page: the form needs the current password, has tooltips, CSRF and is allowed for read-only roles (data-allow)', strpos($a_html, 'name="current"') !== false && strpos($a_html, 'data-allow') !== false && substr_count($a_html, 'gp-tip-btn') >= 2 && strpos($a_html, 'name="csrf"') !== false);
+putenv('GV_AUDIT'); putenv('GV_USERS');
 
 echo "\n";
 // Say so out loud. A green run on a host missing the extension must never be
