@@ -1751,6 +1751,23 @@ t_ok('captcha page script: the solver midstate is set up per subject and an answ
 $dg = ''; ob_start(); gv_captcha_serve(array_merge($CAP_CFG, array('secret' => 'cap-secret')), array('ua' => 'ua', 'ip' => '1.2.3.4'), 20); $dg = ob_get_clean();
 t_ok('captcha serve: with 20 bits the page carries B = 20 (bound proof) in a six-part nonce',
 	!$has_gd || (preg_match("/var N = '([0-9a-f.]+)', B = 20,/", $dg, $m) === 1 && count(explode('.', $m[1])) === 6));
+t_ok('captcha degraded length: at least 6 characters, a longer configured length is kept (max 8), the charset is untouched',
+	gv_captcha_degraded_length(4) === 6 && gv_captcha_degraded_length(5) === 6 && gv_captcha_degraded_length(6) === 6 && gv_captcha_degraded_length(7) === 7 && gv_captcha_degraded_length(0) === 6);
+if ($has_gd) {
+	// The answer of a served page is only in the nonce as an HMAC: recover it by brute force for the digit levels.
+	$len_of = function ($degraded) use ($CAP_CFG) {
+		$cfg = array_merge($CAP_CFG, array('secret' => 'cap-secret', 'captcha' => array_merge($CAP_CFG['captcha'], array('level' => 1))));
+		ob_start(); gv_captcha_serve($cfg, array('ua' => 'ua', 'ip' => '1.2.3.4'), 20, $degraded); $pg = ob_get_clean();
+		if (!preg_match("/var N = '([0-9a-f.]+)'/", $pg, $mm)) { return 0; }
+		for ($n = 3; $n <= 6; $n++) {
+			for ($i = 0, $max = (int)pow(10, $n); $i < $max; $i++) {
+				if (gv_captcha_answer_ok($mm[1], 'cap-secret', str_pad((string)$i, $n, '0', STR_PAD_LEFT))) { return $n; }
+			}
+		}
+		return 0;
+	};
+	t_ok('captcha degraded: level 1 asks for 4 digits normally and 6 digits (same charset) when served while Redis is down', $len_of(false) === 4 && $len_of(true) === 6);
+}
 
 // Token levels: old tokens are PoW level.
 $tp = gv_tok_make('tk'); $tc = gv_tok_make('tk', 'nonceid', 'c'); $tc2 = gv_tok_make('tk', 'nonceid', 'c');

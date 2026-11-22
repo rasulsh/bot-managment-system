@@ -37,7 +37,7 @@ What changed in each release and what to do about it. Newest first.
   **Extension to the brief, please review:** the proof of work is bound to the nonce only, so one solved counter would serve every guess; therefore a CAPTCHA nonce
   with 20 or more bits has a proof **bound to the typed answer** (`nonce:answer:counter`), solved by the page on submit, so every guess really costs CPU.
   Below 20 bits nothing changes (background solving). `scripts/pow-solve.php` takes the answer as an optional second argument. The remaining window and the native-solver
-  residual are in [06-KNOWN-LIMITS.md](06-KNOWN-LIMITS.md); 22 bits would be the cheap knob to narrow it.
+  residual are in [06-KNOWN-LIMITS.md](06-KNOWN-LIMITS.md). The bits stay at 20 (22 costs real mobile users seconds per submit and does not stop a multi-core attacker); instead a CAPTCHA served while Redis is down also gets an **answer of at least 6 characters** (same charset, time limit as configured), so enumerating it costs ~1000 s of native CPU for digits (3x10^5 s+ for letters + digits) against a 60-180 s limit.
 * CI installs GD; `scripts/captcha-solve.php` (test tooling), `rules-e2e.sh` sections M / K2, `browser-test.js` scenarios, `bench-gv-run.php --cap-gen`.
 
 **Compatibility.** Nothing changes until a captcha rule is enabled, `captcha.escalate_score` is above 0 or `captcha.device_budget` is on (all off by default).

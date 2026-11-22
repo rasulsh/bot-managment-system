@@ -148,9 +148,13 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
   need Redis. A CAPTCHA served while Redis is down (`CAPT_DEGRADED`) has a proof of work of at least 20 bits **bound to each typed answer**, so every
   guess costs real CPU instead of being free. **What remains:** (1) a nonce issued while Redis was UP and answered after it went down has the
   normal (unbound, background) proof, so its guesses are unlimited until its time limit ends; the window is at most `captcha time limit` (default
-  150 s) after the outage starts. (2) A native solver does about 10^9 hashes per second, so a 20-bit guess costs it roughly a millisecond: a
-  level 1 answer (10^4 digits) is still enumerable inside the time limit, and level 2 (10^5) too. 22 bits (`challenge.pow_bits` or the rule's
-  `pow_bits`, applied as `max(configured, 20)`) makes that about 4 ms per guess and is the cheapest knob if outages are a real concern. (3) A
+  150 s) after the outage starts. (2) **Enumeration cost.** A CAPTCHA served while Redis is down also has an answer of at least 6 characters (same charset;
+  the time limit stays as configured, 60-180 s by level), and each guess needs its own 20-bit proof (about 10^6 hashes: ~1 ms for a native solver at
+  ~10^9 hashes/s, ~0.5 s in a browser's JavaScript). Digits: 10^6 answers = ~1000 s of native CPU for the whole space, ~500 s on average, against a
+  150 s limit (level 2): about 3-4 native cores finish inside the limit, one core does not. Letters + digits (levels 4-5, 26 symbols, 6-7
+  characters): 3.1x10^8 to 8x10^9 answers = 3x10^5 s or more of native CPU, thousands of cores for one image. So this makes an outage guess-farm
+  expensive for a single machine, not impossible for a multi-core one; the bits were deliberately kept at 20 (22 would cost real mobile users seconds
+  per submit and does not stop a multi-core attacker). Prefer a level with letters if outages are a concern. (3) A
   solved nonce can be replayed until its time limit ends (the single-use claim needs Redis). The per-IP CAPTCHA
   budget is not enforced either (it cannot be read), so pages are served. This is the same fail-open policy as the rest of the guard.
 - **GD.** Without it every captcha action is the proof-of-work challenge (the dashboard warns while a CAPTCHA is configured). The panel checks

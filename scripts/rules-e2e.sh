@@ -720,12 +720,13 @@ write_rules "$(grule r-noir NotIR enforce block exclude '["IR"]')"
 eq "K6 Bingbot UA from a US address, Redis down: served" "$(get 'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)' /k6)" 200
 eq "K7 a fake crawler UA that is not in known_bots is still blocked" "$(get 'Mozilla/5.0 (compatible; Notabot/2.0)' /k7)" 403
 
-echo "== K2. CAPTCHA with Redis down: attempts are not counted, so every guess must cost CPU (a proof of work of >= 20 bits BOUND to the typed answer)"
+echo "== K2. CAPTCHA with Redis down: attempts are not counted, so every guess must cost CPU (a proof of work of >= 20 bits BOUND to the typed answer, and an answer of at least 6 characters)"
 write_rules "$(rule r-cap Cap enforce captcha '["capbot"]')" "$(SKIP=false PRI=50 rule r-gcap GCap enforce captcha '["googlebot"]')"
 page=$(body 'x capbot' /k20 -b "$WORK/k2.jar" -c "$WORK/k2.jar"); NK=$(printf '%s' "$page" | nonce_of)
 ok "K20 Redis down: the CAPTCHA page is still served (no budget can be read)" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
-has 'CAPT_DEGRADED'; ok "K20b ...logged with CAPT_DEGRADED, and the page carries a proof of work of 20 bits (a six-part nonce)" "$([ $? -eq 0 ] && printf '%s' "$page" | grep -q "B = 20," && [ "$(printf '%s' "$NK" | tr -cd '.' | wc -c | tr -d ' ')" = 5 ] && echo 1 || echo 0)"
-AK=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$NK" 4 2>/dev/null)
+has 'CAPT_DEGRADED'; ok "K20b ...logged with CAPT_DEGRADED, the page carries a proof of work of 20 bits (a six-part nonce) and the answer has 6 digits, not the 4 of level 1" "$([ $? -eq 0 ] && printf '%s' "$page" | grep -q "B = 20," && [ "$(printf '%s' "$NK" | tr -cd '.' | wc -c | tr -d ' ')" = 5 ] && echo 1 || echo 0)"
+AK=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$NK" 6 2>/dev/null)
+eq "K20c ...the answer of the degraded CAPTCHA is 6 digits (a 4-digit search finds nothing)" "$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$NK" 4 2>/dev/null | wc -c | tr -d ' ').${#AK}" "0.6"
 P1=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NK" 1111x); P2=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NK" 2222x); PK=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NK" "$AK")
 eq "K21 Redis down: a proof solved for ONE answer does not carry over to another guess (403 pow_bad)" "$(cpost "$NK" 2222x "$P1" "$WORK/k2.jar")" 403
 eq "K21b Redis down: each wrong guess WITH its own proof is a plain 422 (no counter: the number of guesses is bounded only by the CPU they cost and the time limit, see docs/06)" "$(cpost "$NK" 1111x "$P1" "$WORK/k2.jar")$(cpost "$NK" 2222x "$P2" "$WORK/k2.jar")" 422422

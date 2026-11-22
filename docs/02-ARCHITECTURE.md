@@ -311,7 +311,8 @@ with the rule's `pow_bits`.
   SERVES the CAPTCHA while Redis is not alive therefore issues the nonce with `pow_bits = max(configured, 20)` (reason `CAPT_DEGRADED`), and a CAPTCHA
   nonce with 20 or more bits has a proof of work **bound to the typed answer**: the hash covers `nonce:answer-header:counter`, solved by the page
   when the visitor submits (below 20 bits it covers the nonce alone and is solved in the background while the visitor reads the image). Each guess
-  needs its own proof, so every guess costs CPU. The remaining window is in [06-KNOWN-LIMITS.md](06-KNOWN-LIMITS.md).
+  needs its own proof, so every guess costs CPU, and the answer has at least 6 characters (same charset, `gv_captcha_degraded_length`), which makes
+  the whole answer space cost far more CPU than the time limit allows one core. The remaining window is in [06-KNOWN-LIMITS.md](06-KNOWN-LIMITS.md).
 * **Never shown to**: an address in an *enforced* allow list, an operator allow override, a verified crawler (a captcha rule ignores
   `skip_verified_bots`: a verified crawler is skipped regardless; with Redis down a known-bot UA counts as verified), an exempt path,
   a non-HTML request (`gv_is_nav` false: it keeps the normal flow), or a block-listed address (that is a 403 at step 1b, long before).

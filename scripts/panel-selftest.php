@@ -11,6 +11,16 @@ define('GP_SELFTEST', 1);
 require __DIR__ . '/../guard/guard.php';
 require __DIR__ . '/../panel/config_io.php';
 
+// Nothing this suite does may write into the repository tree, also when no Redis is running (a refused connect logs a line):
+// every error log the guard's helpers fall back to goes to a temp directory, removed at exit.
+$GP_TMP_LOGS = sys_get_temp_dir() . '/gp-selftest-logs-' . getmypid();
+@mkdir($GP_TMP_LOGS, 0775, true);
+gv_redis_ctx(array('log_dir' => $GP_TMP_LOGS));
+register_shutdown_function(function () use ($GP_TMP_LOGS) {
+	foreach ((array)glob($GP_TMP_LOGS . '/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+	@rmdir($GP_TMP_LOGS);
+});
+
 $GP_PASS = 0;
 $GP_FAIL = 0;
 $GP_SKIP = 0;

@@ -1852,7 +1852,7 @@ function gv_run($t0) {
 	if ($served === 'captcha') {
 		$st['cap'] = 'show';
 		// Redis is not alive: the attempt counter cannot count, so this CAPTCHA is issued with a proof of work of at least 20 bits
-		// that is bound to every typed answer (gv_captcha_pow_bits): each guess costs real CPU.
+		// that is bound to every typed answer (gv_captcha_pow_bits): each guess costs real CPU, and an answer of at least 6 characters.
 		if (!empty($st['rd'])) { $st['rs'][] = 'CAPT_DEGRADED'; }
 	}
 
@@ -1880,7 +1880,7 @@ function gv_run($t0) {
 		if ($cap_dev && $ra[1] !== 'captcha') { gv_captcha_count_page($cfg, $f, $log); }
 		$pb = max(0, min(24, (int)$cfg['challenge']['pow_bits']));
 		if ($rule !== null && (int)$rule['pow_bits'] > 0) { $pb = (int)$rule['pow_bits']; }
-		gv_captcha_serve($cfg, $f, gv_captcha_pow_bits($cfg, $pb, !empty($st['rd'])));
+		gv_captcha_serve($cfg, $f, gv_captcha_pow_bits($cfg, $pb, !empty($st['rd'])), !empty($st['rd']));
 		exit;
 	}
 	$bits  = max(0, min(24, (int)$cfg['challenge']['pow_bits']));

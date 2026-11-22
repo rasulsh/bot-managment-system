@@ -388,8 +388,13 @@ function gv_captcha_render($nonce, array $strings, $bits, $png, array $params) {
 
 // Serve a CAPTCHA page for this request. $bits: the proof-of-work difficulty that rides with it (0 = none).
 // Without GD it serves the proof-of-work challenge instead. Never throws, does not exit.
-function gv_captcha_serve(array $cfg, array $f, $bits) {
+define('GV_CAPTCHA_DEGRADED_LEN', 6);
+// The answer length of a CAPTCHA served while Redis is down (no attempt counter): at least 6, same charset.
+function gv_captcha_degraded_length($len) { return max((int)$len, GV_CAPTCHA_DEGRADED_LEN); }
+
+function gv_captcha_serve(array $cfg, array $f, $bits, $degraded = false) {
 	$p = gv_captcha_params($cfg);
+	if ($degraded) { $p['length'] = min(8, gv_captcha_degraded_length($p['length'])); }
 	$png = '';
 	$answer = '';
 	if (gv_captcha_available()) {
