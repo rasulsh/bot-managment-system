@@ -30,8 +30,8 @@ foreach ($health as $h) { $wcodes[] = $h; }
 <div class="gp-note"><?= gp_e(gp_t('ipl_precedence')) ?></div>
 
 <?php
-$it = array('lists' => gp_t('ipl_tab_lists'), 'editor' => gp_t('ipl_tab_editor'), 'entries' => gp_t('ipl_tab_entries'), 'tester' => gp_t('ipl_tab_tester'), 'compile' => gp_t('ipl_tab_compile'));
-gp_tabs_begin('ipl', $it, $sv ? array('editor' => max(1, count($errors))) : array());
+$it = array('lists' => gp_t('ipl_tab_lists'), 'editor' => gp_t('ipl_tab_editor'), 'entries' => gp_t('ipl_tab_entries'), 'feeds' => gp_t('ipl_tab_feeds'), 'tester' => gp_t('ipl_tab_tester'), 'compile' => gp_t('ipl_tab_compile'));
+gp_tabs_begin('ipl', $it, $sv ? array('editor' => max(1, count($errors))) : (!empty($feed_save) && !$feed_save['ok'] ? array('feeds' => max(1, count($feed_save['errors']))) : array()));
 gp_tab_begin('ipl', 'lists', $it['lists']);
 ?>
 <div class="gp-card">
@@ -253,6 +253,8 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 	</tbody></table></div>
 	<?php endif; endif; ?>
 </div>
+
+<?php gp_tab_end(); gp_tab_begin('ipl', 'feeds', $it['feeds']); require __DIR__ . '/iplists_feeds.php'; ?>
 
 <?php gp_tab_end(); gp_tab_begin('ipl', 'tester', $it['tester']); ?>
 <form method="get" action="index.php#ipl-tester" class="gp-card gp-form">

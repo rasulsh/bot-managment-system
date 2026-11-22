@@ -4,6 +4,12 @@ Newest first. Each entry is one version, written as `## <version>` (the same str
 The Update page of the panel shows the entries between the installed version and the one in the ZIP.
 Older history and upgrade steps: [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md).
 
+## 2026.11.28
+
+- **IP range feeds** (IP lists -> Feeds tab): a provider's IPv4 ranges fetched from an HTTPS URL into ONE destination, either a managed allow list or the trusted CDN ranges (`cdn_ranges_feed`, merged with the manual `cdn_ranges`). Presets: Google common crawlers and UptimeRobot -> allow list, ArvanCloud and Cloudflare -> CDN ranges, with strong warnings against putting a CDN in an allow list.
+- Plain text, Google JSON and any JSON are auto-detected; IPv6 and `0.0.0.0/0` are dropped. HTTPS only, 3 redirects, 5 MB, timeouts, SSRF guard (every resolved address must be public). A failed fetch keeps the last good entries (dashboard warning after 2 failures), an update removing more than half of them is held for confirmation, entries wider than /16 in an allow list are held by the compile cap until accepted for that feed.
+- New cron mode `analyzer-cron.sh feeds` (PHP only, own job status, `cron-check.sh` recommends it only when an enabled feed has a schedule), `scripts/feeds-sync.php`, setting `analyzer.interval_feeds`.
+
 ## 2026.11.27
 
 - **Login lockout resistance, completed:** a known device (valid `gp_kd` cookie for the submitted user name) is now also exempt from the **panel-wide** sign-in limit, so 20 wrong passwords from a few addresses can no longer lock every administrator out of their own browser. The per-IP limit still applies to it, and its own failures still count against its address and the panel-wide counter.

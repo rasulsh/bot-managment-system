@@ -554,6 +554,7 @@ function gp_iplists_save(array $p, $file, $actor, $client_ip) {
 	$id = isset($p['id']) && is_string($p['id']) ? $p['id'] : '';
 	$existing = $id !== '' ? gp_ipl_find($st['lists'], $id) : null;
 	if ($id !== '' && $existing === null) { $res['msg'] = 'ipl_not_found'; return $res; }
+	if ($existing && function_exists('gp_feed_owner') && gp_feed_owner($existing['id']) !== null) { $res['msg'] = 'ipl_feed_owned'; return $res; }   // a feed's list is edited in the Feeds tab
 	if (!$existing && count($st['lists']) >= GP_IPL_MAX_LISTS) { $res['msg'] = 'ipl_too_many'; return $res; }
 	list($meta, $code) = gp_ipl_meta_from_post($p, $existing, $st['lists'], $st['next_idx'], $actor);
 	$res['draft'] = array('id' => $id, 'name' => isset($p['name']) ? (string)$p['name'] : '', 'type' => $existing ? $existing['type'] : (string)($p['type'] ?? 'block'),
@@ -653,6 +654,7 @@ function gp_iplists_delete($id, $actor, $client_ip) {
 	$st = gp_iplists_state();
 	$l = gp_ipl_find($st['lists'], (string)$id);
 	if ($l === null) { return array(false, 'ipl_not_found', ''); }
+	if (function_exists('gp_feed_owner') && gp_feed_owner($l['id']) !== null) { return array(false, 'ipl_feed_owned', ''); }
 	$r = gp_iplists_update(function ($lists, $next) use ($l) {
 		return array(array_values(array_filter($lists, function ($x) use ($l) { return $x['id'] !== $l['id']; })), $next);
 	});
@@ -669,6 +671,7 @@ function gp_iplists_set(array $p, $actor, $client_ip) {
 	$st = gp_iplists_state();
 	$old = gp_ipl_find($st['lists'], $id);
 	if ($old === null) { return array(false, 'ipl_not_found', ''); }
+	if (function_exists('gp_feed_owner') && gp_feed_owner($old['id']) !== null) { return array(false, 'ipl_feed_owned', ''); }
 	$new = $old;
 	if (isset($p['enabled'])) { $new['enabled'] = ($p['enabled'] === '1'); }
 	if (isset($p['mode']) && in_array($p['mode'], array('enforce', 'monitor'), true)) { $new['mode'] = $p['mode']; }

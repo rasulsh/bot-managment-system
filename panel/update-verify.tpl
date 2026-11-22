@@ -156,7 +156,7 @@ function gpv_main($stamp, $key, $trusted = false) {
 		if (!is_array($cfg) || !isset($cfg['redis'], $cfg['log_dir'])) { return gpv_fail('the configuration did not load'); }
 		$GPV['stage'] = 'panel';
 		if (!defined('GP_BOOT')) { define('GP_BOOT', 1); }
-		foreach (array('config_io', 'auth', 'data', 'jobs', 'health', 'filters', 'ui', 'rules', 'geo', 'iplists', 'perms', 'replay', 'update') as $lib) {
+		foreach (array('config_io', 'auth', 'data', 'jobs', 'health', 'filters', 'ui', 'rules', 'geo', 'iplists', 'feeds', 'perms', 'replay', 'update') as $lib) {
 			if (is_file($root . '/panel/' . $lib . '.php')) { require_once $root . '/panel/' . $lib . '.php'; }
 		}
 		$lang = require $root . '/panel/lang.php';

@@ -41,13 +41,14 @@ JOBS = [
     ('train', 'analyzer-cron.sh', 'train', 10080, False, '41 5 * * 0'),
     ('train-clf', 'analyzer-cron.sh', 'train-clf', 10080, False, '11 6 * * 0'),
     ('geo', 'analyzer-cron.sh', 'geo', 43200, False, '23 3 1 * *'),
+    ('feeds', 'analyzer-cron.sh', 'feeds', 1440, False, '27 3 * * *'),
     ('report', 'analyzer-cron.sh', 'report', 10080, False, '30 7 * * 1'),
 ]
 MACROS = {'@hourly': 60, '@daily': 1440, '@midnight': 1440, '@weekly': 10080, '@monthly': 43200,
           '@yearly': 525600, '@annually': 525600}
 SLACK = 1.05          # a period up to 5 % over the expected interval still counts as on schedule
 
-ENTRY_RE = re.compile(r'(?P<path>\S*(?:analyzer-cron|guard-logrotate)\.sh)(?:\s+(?P<mode>train-clf|train|verify|nightly|snapshot|worker|report|geo)\b)?')
+ENTRY_RE = re.compile(r'(?P<path>\S*(?:analyzer-cron|guard-logrotate)\.sh)(?:\s+(?P<mode>train-clf|train|verify|nightly|snapshot|worker|report|geo|feeds)\b)?')
 # What cron's own PATH is when the crontab sets none (Vixie cron: /usr/bin:/bin). On cPanel / CloudLinux the php found there can be a
 # CGI build (php -v says "(cgi-fcgi)"), which prints HTTP headers first; the command-line build is /usr/local/bin/php.
 DEFAULT_CRON_PATH = '/usr/bin:/bin'
@@ -171,6 +172,17 @@ def geo_in_use(root):
         return False
 
 
+def feeds_scheduled(root):
+    """Whether an enabled IP feed has a schedule (daily / weekly): only then is the `feeds` job recommended."""
+    d = os.environ.get('GV_LISTS_DIR') or os.path.join(root, 'lists')
+    try:
+        with open(os.path.join(d, 'feeds.json')) as fh:
+            data = json.load(fh)
+        return any(isinstance(f, dict) and f.get('enabled') and f.get('schedule') in ('daily', 'weekly') for f in data.get('feeds', []))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def check_php(env, default_path=None):
     """Which php would cron run, and is it the command-line build 8.0 or newer? Resolved with the crontab's OWN PATH (its PATH=
     line, else cron's default) or its GV_PHP= line. Never raises."""
@@ -205,16 +217,19 @@ def check_php(env, default_path=None):
     return info
 
 
-def evaluate(text, root, source='file', now=None, geo_used=None, default_path=None):
+def evaluate(text, root, source='file', now=None, geo_used=None, default_path=None, feeds_used=None):
     """Compare a crontab with the install. Returns the report dict. Pure apart from path checks."""
     now = int(time.time() if now is None else now)
     env, entries = parse_crontab(text)
     geo_used = geo_in_use(root) if geo_used is None else geo_used
+    feeds_used = feeds_scheduled(root) if feeds_used is None else feeds_used
     jobs = []
     problems = 0
     warnings = 0
     for name, script, mode, expected, required, default in JOBS:
         if name == 'geo' and not geo_used:
+            continue
+        if name == 'feeds' and not feeds_used:
             continue
         mine = [e for e in entries if e['script'] == script and e['mode'] == mode]
         live = [e for e in mine if not e['disabled']]
@@ -262,7 +277,7 @@ def evaluate(text, root, source='file', now=None, geo_used=None, default_path=No
         elif state == 'duplicate':
             severity = 'warning'
         if not required and state == 'missing':
-            severity = 'info'
+            severity = 'warning' if name == 'feeds' else 'info'     # feeds is only checked when a scheduled feed exists: then a missing entry is worth a warning
         # not_executable is an error for every job, required or not: an enabled entry that cannot start is never what you want.
         bad_for_exit = state == 'not_executable' or (required and state in ('missing', 'disabled', 'wrong_path', 'wrong_schedule'))
         if bad_for_exit:

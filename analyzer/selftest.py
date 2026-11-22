@@ -2932,6 +2932,25 @@ def cc_state(report, job):
     return [j for j in report['jobs'] if j['job'] == job][0]
 
 
+# The IP feeds job: recommended only when an enabled feed has a schedule, a warning (never an error) when it is missing.
+fd_tmp = tempfile.mkdtemp()
+os.makedirs(os.path.join(fd_tmp, 'lists'))
+with open(os.path.join(fd_tmp, 'lists', 'feeds.json'), 'w') as fh:
+    json.dump({'v': 1, 'feeds': [{'id': 'a', 'enabled': True, 'schedule': 'manual'}, {'id': 'b', 'enabled': False, 'schedule': 'daily'}]}, fh)
+ok('cron-check: feeds that are manual or disabled do not need the job', cron_check.feeds_scheduled(fd_tmp) is False
+   and 'feeds' not in [j['job'] for j in cron_check.evaluate(CC_FULL, CC_ROOT, geo_used=False, feeds_used=False)['jobs']])
+with open(os.path.join(fd_tmp, 'lists', 'feeds.json'), 'w') as fh:
+    json.dump({'v': 1, 'feeds': [{'id': 'c', 'enabled': True, 'schedule': 'weekly'}]}, fh)
+ok('cron-check: an enabled daily or weekly feed makes the job recommended', cron_check.feeds_scheduled(fd_tmp) is True)
+fd_miss = cron_check.evaluate(CC_FULL, CC_ROOT, geo_used=False, feeds_used=True)
+ok('cron-check: a missing feeds entry is a WARNING (not a problem), the report names the line to add', cc_state(fd_miss, 'feeds')['state'] == 'missing' and cc_state(fd_miss, 'feeds')['severity'] == 'warning'
+   and fd_miss['problems'] == 0 and 'analyzer-cron.sh feeds' in cc_state(fd_miss, 'feeds')['install_line'] and 'WARNING  feeds' in cron_check.render(fd_miss))
+fd_ok = cron_check.evaluate(CC_FULL + '27 3 * * * %s/scripts/analyzer-cron.sh feeds >/dev/null 2>&1\n' % CC_ROOT, CC_ROOT, geo_used=False, feeds_used=True)
+ok('cron-check: a daily feeds entry is ok; an entry that runs only weekly is a wrong schedule', cc_state(fd_ok, 'feeds')['state'] == 'ok'
+   and cc_state(cron_check.evaluate(CC_FULL + '27 3 * * 1 %s/scripts/analyzer-cron.sh feeds\n' % CC_ROOT, CC_ROOT, geo_used=False, feeds_used=True), 'feeds')['state'] == 'wrong_schedule')
+ok('cron-check: a corrupt or missing feeds.json is "no scheduled feed", never an error', cron_check.feeds_scheduled(os.path.join(fd_tmp, 'nope')) is False)
+shutil.rmtree(fd_tmp, ignore_errors=True)
+
 full = cron_check.evaluate(CC_FULL, CC_ROOT, geo_used=False, now=1)
 ok('a complete crontab: every required entry ok, exit-style ok flag, no problems', full['ok'] and full['problems'] == 0
    and all(cc_state(full, j)['state'] == 'ok' for j in ('verify', 'worker', 'snapshot', 'nightly', 'logrotate')))

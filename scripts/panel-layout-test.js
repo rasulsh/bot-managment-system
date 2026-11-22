@@ -19,7 +19,7 @@ const ROOT = BASE.replace(/\/$/, '') + '/' + (PANEL || '/panel').replace(/^\/|\/
 const ORIGIN = new URL(BASE).origin;
 const VIEWS = [{ name: 'desktop', width: 1600, height: 1000 }, { name: 'mobile', width: 390, height: 844 }];
 const PAGES = ['dashboard', 'logs', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'identity&id=203.0.113.5', 'overrides', 'rules', 'rules&new=1', 'rules&edit=ZZ',
-	'geo', 'geo&test=1&ip=203.0.113.7', 'iplists', 'iplists&new=1&type=block', 'iplists&test=1&ip=203.0.113.7', 'replay', 'models', 'settings', 'config_file', 'jobs', 'jobs&job=verify', 'audit&event=config&event_op=not', 'update', 'users', 'users&role=admin&role_op=not&q=lay', 'account'];
+	'geo', 'geo&test=1&ip=203.0.113.7', 'iplists', 'iplists&new=1&type=block', 'iplists&test=1&ip=203.0.113.7', 'iplists&new_feed=1&preset=cloudflare#ipl-feeds', 'replay', 'models', 'settings', 'config_file', 'jobs', 'jobs&job=verify', 'audit&event=config&event_op=not', 'update', 'users', 'users&role=admin&role_op=not&q=lay', 'account'];
 let failed = 0;
 const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } else { failed++; console.log('FAIL  ' + name + (extra ? ' (' + extra + ')' : '')); } };
 
@@ -123,7 +123,7 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		await page.goto(ROOT + '?r=geo');
 		check(v.name + ' geoip: tabs', (await page.locator('[data-tabs=geo] > .gp-tablist > [role=tab]').count()) === 3);
 		await page.goto(ROOT + '?r=iplists');
-		check(v.name + ' ip lists: lists / editor / entries / tester / compile tabs', (await page.locator('[data-tabs=ipl] > .gp-tablist > [role=tab]').count()) === 5);
+		check(v.name + ' ip lists: lists / editor / entries / feeds / tester / compile tabs', (await page.locator('[data-tabs=ipl] > .gp-tablist > [role=tab]').count()) === 6);
 		await page.goto(ROOT + '?r=iplists&new=1&type=block#ipl-editor');
 		check(v.name + ' ip lists: the editor tab opens from the URL hash and has tooltips', (await page.locator('[data-tabs=ipl] > .gp-tablist > [aria-selected=true]').getAttribute('data-tab')) === 'editor'
 			&& (await page.locator('[data-panel=editor] .gp-tip-btn').count()) >= 8);
@@ -244,6 +244,25 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		await ctxCheck('kill switch stop', 'msg-killswitch', 'div');
 		await Promise.all([page.waitForNavigation(), page.click('form[action$="r=dashboard"] button[type=submit]')]);
 		await ctxCheck('kill switch start', 'msg-killswitch', 'div');
+		// ---- IP feeds tab: presets, create, a refused fetch (SSRF guard, no network needed), messages in context, delete
+		await page.goto(ROOT + '?r=iplists&new_feed=1&preset=uptimerobot#ipl-feeds');
+		check(v.name + ' feeds: the Feeds tab opens on the hash, the preset fills the form (name, URL, allow-list destination), the CDN warning is visible',
+			(await page.locator('#ipl-feed-editor input[name=name]').inputValue()) === 'UptimeRobot' && /uptimerobot\.com/.test(await page.locator('#ipl-feed-editor input[name=url]').inputValue())
+			&& (await page.locator('#ipl-feed-editor select[name=dest]').inputValue()) === 'allow' && (await page.locator('[role=tabpanel]:not([hidden]) .gp-note-strong').first().innerText()).indexOf('CDN') >= 0);
+		check(v.name + ' feeds: every field of the feed form has a tooltip (?) and the four presets are offered', (await page.locator('#ipl-feed-editor .gp-tip').count()) >= 8 && (await page.locator('a[href*="preset="]').count()) === 4);
+		await page.fill('#ipl-feed-editor input[name=name]', 'SSRF check');
+		await page.fill('#ipl-feed-editor input[name=url]', 'https://127.0.0.1/ips.txt');
+		await Promise.all([page.waitForNavigation(), page.click('#ipl-feed-editor button[value=feed_save]')]);
+		await ctxCheck('feed created', 'msg-feeds-list', 'section, div');
+		const fkey = require('crypto').createHash('md5').update('ssrf-check').digest('hex').slice(0, 8);
+		await Promise.all([page.waitForNavigation(), page.click('form:has(input[name=id][value=ssrf-check]) button[value=feed_update]')]);
+		const fn = await ctxCheck('feed update refused', 'msg-fd-' + fkey, 'td');
+		check(v.name + ' feeds: a private target is refused with the reason, and the last-good note is shown', /private|loopback|refused/i.test(await page.locator('#msg-fd-' + fkey).innerText()) || /refused/i.test(await page.locator('main').innerText()));
+		check(v.name + ' feeds: no horizontal page scroll with a feed listed', (await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)) <= 1);
+		if (SHOTS) { await page.screenshot({ path: SHOTS + '/' + v.name + '-feeds.png', fullPage: false }); }
+		await Promise.all([page.waitForNavigation(), page.click('form:has(input[name=id][value=ssrf-check]) button[value=feed_delete]')]);
+		await ctxCheck('feed deleted', 'msg-feeds-list', 'section, div');
+		check(v.name + ' feeds: the deleted feed and its managed list are gone', (await page.locator('input[name=id][value=ssrf-check]').count()) === 0);
 		if (SHOTS) { await page.screenshot({ path: SHOTS + '/' + v.name + '-message-in-context.png', fullPage: false }); }
 		await ctx.close();
 	}
