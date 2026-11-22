@@ -76,7 +76,7 @@ check "the Update page opens after login and shows the installed version" "$(has
 tok="$(csrf <<<"$page")"
 
 # --- upload without the CSRF token is refused (the page does not change anything)
-code="$(curl -s -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" -F do=upload -F "zip=@$WORK/good.zip" "$URL?r=update")"
+curl -s -o /dev/null -c "$JAR" -b "$JAR" -F do=upload -F "zip=@$WORK/good.zip" "$URL?r=update"
 check "an upload without the CSRF token is not staged" "$([ ! -d "$INST/updates/pending" ] || [ -z "$(ls -A "$INST/updates/pending" 2>/dev/null)" ] && echo 1 || echo 0)"
 # --- upload, review
 loc="$(curl -s -o /dev/null -D - -c "$JAR" -b "$JAR" -F "csrf=$tok" -F do=upload -F "zip=@$WORK/good.zip" "$URL?r=update" | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}')"
@@ -100,7 +100,9 @@ check "the files are the new ones, protected ones untouched" "$([ "$(cat "$INST/
 check "guard.off is gone after a good check" "$([ ! -f "$INST/guard.off" ] && echo 1 || echo 0)"
 token="$(grep -o '<code class="gp-mono">[a-f0-9]\{32\}</code>' <<<"$resp" | head -1 | sed 's/<[^>]*>//g')"
 check "the recovery token is shown on the result page" "$([ ${#token} -eq 32 ] && echo 1 || echo 0)"
-again="$(curl -s -c "$JAR" -b "$JAR" "$URL?r=update&ts=$(ls "$INST/updates" | grep -E '^[0-9]{8}-[0-9]{6}' | head -1)&res=ok")"
+stamp=""
+for d in "$INST"/updates/[0-9]*-[0-9]*; do [ -d "$d" ] && stamp="$(basename "$d")" && break; done
+again="$(curl -s -c "$JAR" -b "$JAR" "$URL?r=update&ts=$stamp&res=ok")"
 check "...and only once (a reload does not show it again)" "$([ "$(has "$token" "$again")" = 0 ] && echo 1 || echo 0)"
 page="$(curl -s -c "$JAR" -b "$JAR" "$URL?r=update")"
 check "the footer and the page show the new version, the history lists the update" "$([ "$(has '2026.02.02' "$page")" = 1 ] && [ "$(has 'name="do" value="rollback"' "$page")" = 1 ] && echo 1 || echo 0)"
