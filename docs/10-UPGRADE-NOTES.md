@@ -2,6 +2,39 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## File modes, crontab through bash, permission health check
+
+**Why.** On a live server the files had mode 666 and the cron scripts had no execute bit, so every crontab line that called a script directly
+failed silently for days, while the crontab check reported the entries as present. A GitHub ZIP carries no reliable Unix modes (and
+`ZipArchive` does not apply them), so an update would have recreated the problem.
+
+**Changed**
+
+* **Updater modes:** every file the updater writes gets an explicit mode: directories it creates 0755, files 0644, `scripts/*.sh` 0755, never group- or
+  world-writable. Files the ZIP delivers but that did not change are corrected too, and code directories (`guard`, `panel`, `analyzer`, `scripts`,
+  `docs`) lose group / world write; data directories (`logs`, `lists`, `geo`, `updates`) keep the mode you gave them. Protected files (`guard/config.php`,
+  `panel/panel.config.php`, `guard/config.local.json`, `panel/users.json`) are never touched. A rollback restores the old bytes without group / world write
+  and keeps scripts executable. The Update result page shows how many modes were corrected and the permission findings.
+* **Crontab through bash.** The recommended lines are now `*/10 * * * * bash <install-dir>/scripts/analyzer-cron.sh verify >/dev/null 2>&1`
+  (README, docs/03, the dashboard card, `cron-check.sh`), so they never depend on the execute bit. **Existing direct lines keep working** as long as the
+  scripts are executable; change them when convenient. `analyzer-cron.sh` also runs `cron-check.sh` through bash.
+* **`cron-check.sh`** accepts both forms. A direct entry whose script exists but is not executable is an ERROR for every job (required or not): "not executable —
+  cron will fail silently", with `chmod 755 <script>` or the bash form; exit code 1; state `not_executable` in `--json` and a critical dashboard alert.
+* **Permission health check** (new `panel/perms.php`): dashboard alerts and a card on the **Jobs** page for files or directories writable by group or others
+  (`.venv`, `.git`, `logs` skipped), cron scripts without the execute bit, and secret files readable by everybody (world-readable; group-readable is not
+  flagged because `0640` is normal when the web server runs under another group), each with the exact commands. The scan is cached in `analyzer/.perm-check.json`
+  for one hour and recomputed after an update or with **Scan again**. Group-writable files are sometimes intended (PHP under another account): ignore that finding,
+  never a readable secret.
+
+**Upgrade**
+
+1. Update from the panel (or copy the files). If the install was copied with 666 modes, the first update from the panel repairs the scripts and files it delivers; or run
+   the commands the Jobs page shows now: `chmod 755 <install-dir>/scripts/*.sh`, `chmod 600 <install-dir>/guard/config.php <install-dir>/panel/panel.config.php`.
+2. Edit the crontab (`crontab -e`): put `bash ` before each script path. Check with `bash scripts/cron-check.sh`.
+3. Nothing to migrate. `analyzer/.perm-check.json` is a cache (gitignored, protected from updates).
+
+**Rollback.** Restore the previous files. Crontab lines with `bash` keep working with the old code.
+
 ## In-panel updater (ZIP), VERSION and CHANGELOG
 
 **New**

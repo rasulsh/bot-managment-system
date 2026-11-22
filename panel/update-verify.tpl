@@ -28,7 +28,7 @@ function gpv_manifest_save(array $m) {
 	global $GPV;
 	$p = gpv_dir() . '/' . $GPV['stamp'] . '/manifest.json';
 	$tmp = $p . '.tmp' . bin2hex(random_bytes(3));
-	if (@file_put_contents($tmp, json_encode($m, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT)) !== false) { @rename($tmp, $p); }
+	if (@file_put_contents($tmp, json_encode($m, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT)) !== false) { @chmod($tmp, 0600); @rename($tmp, $p); }
 }
 
 // Keep the newest N updates (backups included); older directories are deleted.
@@ -150,7 +150,7 @@ function gpv_main($stamp, $key) {
 		if (!is_array($cfg) || !isset($cfg['redis'], $cfg['log_dir'])) { return gpv_fail('the configuration did not load'); }
 		$GPV['stage'] = 'panel';
 		if (!defined('GP_BOOT')) { define('GP_BOOT', 1); }
-		foreach (array('config_io', 'auth', 'data', 'jobs', 'health', 'filters', 'ui', 'rules', 'geo', 'iplists', 'replay', 'update') as $lib) {
+		foreach (array('config_io', 'auth', 'data', 'jobs', 'health', 'filters', 'ui', 'rules', 'geo', 'iplists', 'perms', 'replay', 'update') as $lib) {
 			if (is_file($root . '/panel/' . $lib . '.php')) { require_once $root . '/panel/' . $lib . '.php'; }
 		}
 		$lang = require $root . '/panel/lang.php';

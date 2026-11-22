@@ -2943,7 +2943,7 @@ ok('GV_PYTHON pointing at an executable file is ok', full['gv_python']['set'] an
 empty = cron_check.evaluate('', CC_ROOT, geo_used=False)
 ok('an empty crontab: every required entry missing (critical), not an error of the check', not empty['ok'] and empty['problems'] == 5
    and all(cc_state(empty, j)['severity'] == 'critical' for j in ('verify', 'worker', 'snapshot', 'nightly', 'logrotate')))
-ok('missing entries come with the exact line for THIS install, and the GV_PYTHON hint', cc_state(empty, 'worker')['install_line'] == '* * * * * %s/scripts/analyzer-cron.sh worker >/dev/null 2>&1' % CC_ROOT
+ok('missing entries come with the exact line for THIS install (through bash), and the GV_PYTHON hint', cc_state(empty, 'worker')['install_line'] == '* * * * * bash %s/scripts/analyzer-cron.sh worker >/dev/null 2>&1' % CC_ROOT
    and cc_state(empty, 'logrotate')['install_line'].endswith('/scripts/guard-logrotate.sh >/dev/null 2>&1') and empty['gv_python']['suggest'].startswith('GV_PYTHON=') and empty['editor'] == 'crontab -e')
 
 commented = cron_check.evaluate(CC_FULL.replace('*/15 * * * * ', '#*/15 * * * * ').replace('17 4', '# 17 4'), CC_ROOT, geo_used=False)
@@ -2980,6 +2980,49 @@ ok('a GV_PYTHON that is not an executable file is a problem; a missing one is on
    and cron_check.evaluate(CC_FULL.replace('GV_PYTHON=' + CC_PY + '\n', ''), CC_ROOT, geo_used=False)['ok'] and cron_check.evaluate(CC_FULL.replace('GV_PYTHON=' + CC_PY + '\n', ''), CC_ROOT, geo_used=False)['warnings'] >= 1)
 crlf = cron_check.evaluate(CC_FULL.replace('\n', '\r\n'), CC_ROOT, geo_used=False)
 ok('CRLF line endings (a crontab edited on Windows) give the same result', crlf['ok'] and crlf['gv_python']['ok'] and [j['state'] for j in crlf['jobs']] == [j['state'] for j in full['jobs']])
+
+# --- the execute bit: a direct entry needs it, the bash form does not
+import tempfile as tf_cc
+import shutil as sh_cc
+cc_tmp = tf_cc.mkdtemp(prefix='gp-cc-')
+try:
+    os.makedirs(os.path.join(cc_tmp, 'scripts'))
+    for nm in ('analyzer-cron.sh', 'guard-logrotate.sh'):
+        with open(os.path.join(cc_tmp, 'scripts', nm), 'w') as fh_cc:
+            fh_cc.write('#!/bin/sh\ntrue\n')
+        os.chmod(os.path.join(cc_tmp, 'scripts', nm), 0o644)
+    def cc_text(prefix):
+        return '\n'.join(['GV_PYTHON=' + CC_PY,
+            '*/10 * * * * %s%s/scripts/analyzer-cron.sh verify >/dev/null 2>&1' % (prefix, cc_tmp),
+            '* * * * * %s%s/scripts/analyzer-cron.sh worker >/dev/null 2>&1' % (prefix, cc_tmp),
+            '*/15 * * * * %s%s/scripts/analyzer-cron.sh snapshot >/dev/null 2>&1' % (prefix, cc_tmp),
+            '17 4 * * * %s%s/scripts/analyzer-cron.sh nightly >/dev/null 2>&1' % (prefix, cc_tmp),
+            '10 3 * * * %s%s/scripts/guard-logrotate.sh >/dev/null 2>&1' % (prefix, cc_tmp)]) + '\n'
+    direct = cron_check.evaluate(cc_text(''), cc_tmp, geo_used=False)
+    ok('a direct entry whose script is not executable is an ERROR for every such job (critical, counted as a problem, not ok)',
+       not direct['ok'] and direct['problems'] == 5 and all(cc_state(direct, j)['state'] == 'not_executable' and cc_state(direct, j)['severity'] == 'critical'
+       for j in ('verify', 'worker', 'snapshot', 'nightly', 'logrotate')))
+    ok('...the message says cron fails silently and gives both fixes (chmod 755 and the bash form), and the offered line is the bash form',
+       'fail silently' in cc_state(direct, 'worker')['message'] and 'chmod 755 %s/scripts/analyzer-cron.sh' % cc_tmp in cc_state(direct, 'worker')['message']
+       and 'bash %s/scripts/analyzer-cron.sh' % cc_tmp in cc_state(direct, 'worker')['message'] and cc_state(direct, 'worker')['install_line'] == '* * * * * bash %s/scripts/analyzer-cron.sh worker >/dev/null 2>&1' % cc_tmp)
+    ok('...the human report names it ERROR and says "not executable"', 'ERROR' in cron_check.render(direct) and 'not executable' in cron_check.render(direct))
+    for form in ('bash ', 'sh ', '/bin/bash ', 'sh -e ', '/usr/bin/env bash '):
+        r_sh = cron_check.evaluate(cc_text(form), cc_tmp, geo_used=False)
+        ok('the shell form "%s<script>" works without the execute bit' % form.strip(), r_sh['ok'] and all(cc_state(r_sh, j)['state'] == 'ok' for j in ('verify', 'worker', 'snapshot', 'nightly', 'logrotate')))
+    ok('both forms are parsed: via_shell is set for bash, not for a direct entry', cron_check.parse_crontab(cc_text('bash '))[1][0]['via_shell'] and not cron_check.parse_crontab(cc_text(''))[1][0]['via_shell'])
+    cc_file = os.path.join(cc_tmp, 'crontab.txt')
+    with open(cc_file, 'w') as fh_cc:
+        fh_cc.write(cc_text(''))
+    ok('cron-check exits 1 for a non-executable direct script', cron_check.main(['--file', cc_file, '--root', cc_tmp]) == 1)
+    with open(cc_file, 'w') as fh_cc:
+        fh_cc.write(cc_text('bash '))
+    ok('cron-check exits 0 for the bash form of the same crontab', cron_check.main(['--file', cc_file, '--root', cc_tmp]) == 0)
+    for nm in ('analyzer-cron.sh', 'guard-logrotate.sh'):
+        os.chmod(os.path.join(cc_tmp, 'scripts', nm), 0o755)
+    ok('a direct entry is fine once the script is executable', cron_check.evaluate(cc_text(''), cc_tmp, geo_used=False)['ok'])
+    ok('a missing script file is not judged here (only an existing, non-executable one is)', cron_check.evaluate(CC_FULL, CC_ROOT, geo_used=False)['ok'])
+finally:
+    sh_cc.rmtree(cc_tmp, ignore_errors=True)
 
 cage = ('# DO NOT EDIT THIS FILE - edit the master and reinstall.\n# (/tmp/crontab.XXXX installed on Fri Nov 20 10:00:00 2026)\n# (Cron version -- $Id: crontab.c,v 2.13 1994/01/17 03:20:37 vixie Exp $)\n' + CC_FULL)
 ok('CageFS / vixie-cron header comments are ignored', cron_check.evaluate(cage, CC_ROOT, geo_used=False)['ok'])

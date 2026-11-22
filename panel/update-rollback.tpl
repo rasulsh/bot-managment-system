@@ -26,6 +26,7 @@ function gprb_json_read($path) {
 function gprb_json_write($path, array $data) {
 	$tmp = $path . '.tmp' . bin2hex(random_bytes(4));
 	if (@file_put_contents($tmp, json_encode($data, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT)) === false) { return false; }
+	@chmod($tmp, 0600);
 	if (!@rename($tmp, $path)) { @unlink($tmp); return false; }
 	return true;
 }
@@ -86,7 +87,10 @@ function gprb_one($root, $stamp, array &$log) {
 			if (!is_dir(dirname($target))) { @mkdir(dirname($target), 0755, true); }
 			$tmp = $target . '.rb' . bin2hex(random_bytes(3));
 			if (!@copy($b, $tmp) || !@rename($tmp, $target)) { @unlink($tmp); $bad++; $log[] = 'could not restore ' . $f['path']; continue; }
-			@chmod($target, isset($f['mode_before']) ? (int)$f['mode_before'] : 0644);
+			// The old mode, minus group / world write; scripts/*.sh get 0755 (cron may call them directly).
+			$mode = isset($f['mode_before']) ? ((int)$f['mode_before'] & ~0022 & 0777) : 0644;
+			if (strncmp($f['path'], 'scripts/', 8) === 0 && substr($f['path'], -3) === '.sh') { $mode = 0755; }
+			@chmod($target, $mode);
 		}
 		if (substr($f['path'], -4) === '.php' || substr($f['path'], -4) === '.tpl') { gprb_opcache($target); }
 	}

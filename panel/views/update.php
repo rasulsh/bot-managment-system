@@ -37,6 +37,16 @@ $install_dir = dirname(__DIR__, 2);
 		<?php if ($cron_lines): ?><pre class="gp-mono gp-ltr gp-pre"><?= gp_e(implode("\n", $cron_lines)) ?></pre><?php endif; ?>
 	</div>
 	<?php endif; ?>
+	<?php if (!empty($m['modes_fixed']) && ($m['modes_fixed']['files'] + $m['modes_fixed']['dirs']) > 0): ?>
+	<div class="gp-note"><?= gp_e(sprintf(gp_t('upd_modes_fixed'), (int)$m['modes_fixed']['files'], (int)$m['modes_fixed']['dirs'])) ?></div>
+	<?php endif; ?>
+	<?php if (isset($perms) && is_array($perms) && gp_perm_has_issues($perms)): ?>
+	<div class="gp-note gp-note-strong" role="alert">
+		<?= gp_e(gp_t('upd_perm_found')) ?>
+		<pre class="gp-mono gp-ltr gp-pre"><?= gp_e(implode("\n", gp_perm_fix_commands($perms))) ?></pre>
+		<p class="gp-help"><a href="index.php?r=jobs#perms"><?= gp_e(gp_t('perm_title')) ?></a></p>
+	</div>
+	<?php endif; ?>
 	<?php if (!empty($m['changelog'])): ?>
 	<h2 class="gp-card-title"><?= gp_e(gp_t('upd_changelog')) ?></h2>
 	<?php foreach ($m['changelog'] as $c): ?>

@@ -103,7 +103,7 @@ find . -type d -exec chmod 0755 {} +      # directories: owner writes, server tr
 chmod 0644 panel/index.php panel/assets/* # files the web server serves (git already checks them out 0644)
 chmod 0600 guard/config.php               # holds the secret and the Redis password
 chmod 0600 panel/panel.config.php         # holds the login hash (setpass.php sets this)
-chmod 0755 scripts/*.sh                   # cron runs these directly
+chmod 0755 scripts/*.sh                   # the crontab calls them through bash, but keep them executable
 ls -ld /home/USER                         # must allow traversal: drwx--x--x (0711) or 0750 with the web server's group
 ```
 

@@ -263,7 +263,7 @@ check and automatic backups (the newest 20 are kept). *Safe to change:* only if 
 comfortable with JSON; Settings is easier.
 
 ### Jobs
-*What it is for:* whether each background job ran, when, and what its last error was; the
+*What it is for:* file permission problems of the install (with the commands that fix them), whether each background job ran, when, and what its last error was; the
 crontab check; and the queue of actions you started from the panel. *Look at first:* any job
 that is **late**, **failing** or **never** ran. *Safe to change:* buttons start a job that the
 `worker` cron job then runs within a minute.
@@ -406,8 +406,8 @@ or download a release ZIP. Nothing else.
 1. Open the panel, page **Update**. Check that **Install directory writable** says **Yes**. If it says **No**, the web server user cannot write the project: update over SFTP instead, or fix the ownership.
 2. Under **Upload a ZIP** choose the file and press **Upload and check**. Nothing is changed yet. A ZIP that is damaged, is not this project, contains unsafe paths or has a PHP syntax error is refused with the reason.
 3. Read the **review**: old version to new version, how many files are added, changed and removed, what changed (the changelog) and any warnings (a downgrade, the same version, a `.git` folder, a changed `requirements.txt` or cron script). Your configuration, rules, lists, logs and models are listed as **protected** and are never touched.
-4. Enter your panel password and press **Apply update**. The guard is switched off for a few seconds, the files are swapped, then the new code is checked in a fresh request. If the check fails the update rolls itself back. **Write down the recovery token** shown on the result page: it works once, for 24 hours.
-5. Look at the result page: it tells you whether a `pip_sync` job was queued (Python packages) and whether the crontab needs a new line. Open **Jobs** and **Dashboard** and make sure nothing turned red.
+4. Enter your panel password and press **Apply update**. The updater also sets the file modes itself (scripts 755, other files 644, nothing writable by group or others), so a server that had 666 modes is repaired by the update. The guard is switched off for a few seconds, the files are swapped, then the new code is checked in a fresh request. If the check fails the update rolls itself back. **Write down the recovery token** shown on the result page: it works once, for 24 hours.
+5. Look at the result page: it tells you whether a `pip_sync` job was queued (Python packages), whether the crontab needs a new line, and whether the **permission check** found anything (it lists the exact `chmod` commands). Cron lines should call the scripts through `bash` (`bash <install-dir>/scripts/analyzer-cron.sh worker`), which works even when a script has lost its execute bit. Open **Jobs** and **Dashboard** and make sure nothing turned red.
 
 **Undo an update:** page **Update**, history, **Roll back**. If the panel itself no longer opens, use the recovery token at `<panel-address>/recover.php?token=<token>` or, with a shell, `php <install-dir>/updates/rollback.php`.
 
@@ -787,16 +787,16 @@ A generic crontab (use full paths; cron's `PATH` is minimal):
 ```cron
 # Interpreter that has the analyzer packages (a virtual environment is recommended).
 GV_PYTHON=<python-binary>
-*/10 * * * * <install-dir>/scripts/analyzer-cron.sh verify    >/dev/null 2>&1
-17 4   * * * <install-dir>/scripts/analyzer-cron.sh nightly   >/dev/null 2>&1
-41 5   * * 0 <install-dir>/scripts/analyzer-cron.sh train     >/dev/null 2>&1
-11 6   * * 0 <install-dir>/scripts/analyzer-cron.sh train-clf >/dev/null 2>&1
-*/15 * * * * <install-dir>/scripts/analyzer-cron.sh snapshot  >/dev/null 2>&1
-*    * * * * <install-dir>/scripts/analyzer-cron.sh worker    >/dev/null 2>&1
+*/10 * * * * bash <install-dir>/scripts/analyzer-cron.sh verify    >/dev/null 2>&1
+17 4   * * * bash <install-dir>/scripts/analyzer-cron.sh nightly   >/dev/null 2>&1
+41 5   * * 0 bash <install-dir>/scripts/analyzer-cron.sh train     >/dev/null 2>&1
+11 6   * * 0 bash <install-dir>/scripts/analyzer-cron.sh train-clf >/dev/null 2>&1
+*/15 * * * * bash <install-dir>/scripts/analyzer-cron.sh snapshot  >/dev/null 2>&1
+*    * * * * bash <install-dir>/scripts/analyzer-cron.sh worker    >/dev/null 2>&1
 # Left unredirected on purpose: a non-zero exit (something could not be rotated) should send mail.
-10 3   * * * <install-dir>/scripts/guard-logrotate.sh
+10 3   * * * bash <install-dir>/scripts/guard-logrotate.sh
 # Only with GeoIP rules:
-23 3   1 * * <install-dir>/scripts/analyzer-cron.sh geo       >/dev/null 2>&1
+23 3   1 * * bash <install-dir>/scripts/analyzer-cron.sh geo       >/dev/null 2>&1
 ```
 
 - **`GV_PYTHON`** selects the interpreter (default `python3`). Set `php_bin` (full path) in the analyzer config, or `GV_PHP` for the wrappers, when `php` is not on cron's `PATH`: the analyzer reads Redis credentials and the key prefix through `php scripts/config-dump.php --redis-credentials`, and refuses to write if that bridge fails.
@@ -1003,6 +1003,7 @@ Code: `panel/update.php` (library), `panel/views/update.php`, the two recovery s
 
 - **Stage.** `gp_upd_stage()` reads the ZIP with `ZipArchive` or, when that extension is missing, a pure-PHP reader (stored and deflated entries, zlib `gzinflate`, CRC-checked; ZIP64 and encryption are refused). It refuses traversal (`..`, absolute, backslash, drive letter), symbolic links, entries outside the project folders, unexpected file types, more than 3000 files / 10 MB per file / 100 MB unpacked, a ZIP without `VERSION`, `prepend.php`, `guard/guard.php` or `panel/index.php`, and any PHP file that does not pass `token_get_all($code, TOKEN_PARSE)`. The single GitHub wrapper folder is stripped; `.github/` is ignored. Files land in `updates/pending/<id>/` (discarded after an hour) with a `plan.json`.
 - **Protected files.** `panel/update-protected.txt` plus every pattern of the installed and the shipped `.gitignore`. A file protected by either is never written and never deleted; `.htaccess` / `.gitkeep` inside data directories stay updatable. Files removed upstream are deleted only when the previous update's `updates/installed.json` lists them (so the first ZIP update never deletes anything).
+- **Modes.** Every file written gets an explicit mode (`gp_upd_file_mode()`: 0755 for `scripts/*.sh`, 0644 otherwise; directories it creates 0755), files that did not change are corrected as well, and code directories lose group / world write. The permission scan (`panel/perms.php`, cached an hour in `analyzer/.perm-check.json`, dropped after an update) reports writable files, non-executable cron scripts and world-readable secrets.
 - **Apply.** Under a lock: manifest `updates/<stamp>/manifest.json` (every path, action, sha256 before / after, mode), byte-checked backups in `updates/<stamp>/backup/`, the recovery scripts copied from the running (old) code to `updates/rollback.php` and `updates/verify.php`, a hashed recovery token in `updates/recovery.json`, `guard.off` (only when absent), then write-to-temp-and-`rename()` per file with `opcache_invalidate()`. Any write failure rolls back at once. The disk-space check needs about twice the new bytes plus the old bytes.
 - **Health check.** The browser is redirected to `panel/recover.php?a=verify&ts=<stamp>&k=<key>`, which hands the request to `updates/verify.php` (old code judging new code): syntax of the entry points, `guard/guard.php`, `gv_cfg_load()`, every panel library, `lang.php`, rules, IP lists, GeoIP, then one synthetic `gv_run()` with `GV_DRY_RUN` defined (no log row, no outcome capture). An exception, a parse error or a fatal error (caught in a shutdown function) calls `gprb_run()`. On success it removes `guard.off` only if the updater created it and prunes to the newest 3 updates.
 - **Rollback.** One implementation: `updates/rollback.php` (shell, panel button, `recover.php`, the failed-check path). It verifies every backup's sha256 first (nothing is changed when one is damaged), restores, deletes files the update added, verifies after, and rolls back every newer update first.

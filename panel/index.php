@@ -591,18 +591,19 @@ switch ($gp_route) {
 		}
 		$upd_ts = (isset($_GET['ts']) && is_string($_GET['ts']) && preg_match('/^\d{8}-\d{6}(-\d+)?$/', $_GET['ts'])) ? $_GET['ts'] : '';
 		$upd_res = (isset($_GET['res']) && is_string($_GET['res']) && in_array($_GET['res'], array('ok', 'rolled', 'rollback_failed'), true)) ? $_GET['res'] : '';
-		$upd_m = null; $upd_token = ''; $upd_lines = array();
+		$upd_m = null; $upd_token = ''; $upd_lines = array(); $upd_perms = null;
 		if ($upd_ts !== '' && $upd_res === 'ok') {
 			$upd_m = gp_upd_post_verify($upd_ts, $gp_user);
 			$upd_token = gp_upd_token_take($upd_ts);
 			$uj = gp_job_health(); $uc = gp_cron_check(null, true, true);
 			$upd_lines = gp_cron_setup_lines($uj, $uc);
+			$upd_perms = gp_perm_scan(true);          // the post-update check: modes, cron scripts, readable secrets
 		} elseif ($upd_ts !== '') {
 			foreach (gp_upd_history(10) as $hh) { if ($hh['stamp'] === $upd_ts) { $upd_m = $hh; } }
 		}
 		$upd_plan = isset($_GET['plan']) ? gp_upd_plan_load((string)$_GET['plan']) : null;
 		gp_render('update', array('env' => gp_upd_environment(), 'version' => gp_upd_version(), 'plan' => $upd_plan, 'history' => gp_upd_history(10),
-			'res' => $upd_res, 'ts' => $upd_ts, 'm' => $upd_m, 'token' => $upd_token, 'cron_lines' => $upd_lines,
+			'res' => $upd_res, 'ts' => $upd_ts, 'm' => $upd_m, 'token' => $upd_token, 'cron_lines' => $upd_lines, 'perms' => $upd_perms,
 			'web_url' => 'recover.php'));
 
 	case 'audit':
@@ -619,6 +620,12 @@ switch ($gp_route) {
 				gp_flash($r[0] ? 'ok' : 'warn', gp_t($r[1]));
 				gp_redirect('jobs');
 			}
+			if (isset($_POST['perm_refresh'])) {
+				gp_perm_scan(true);
+				gp_audit_append(array('event' => 'perm_check_refresh', 'actor' => $gp_user, 'ip' => $gp_ip, 'key' => 'perm-check', 'old' => null, 'new' => null));
+				gp_flash('ok', gp_t('perm_rescanned'));
+				gp_redirect('jobs');
+			}
 			if (isset($_POST['seen'])) {
 				$r = gp_jobs_mark_seen((string)$_POST['seen'], $gp_user, $gp_ip);
 				gp_flash($r[0] ? 'ok' : 'error', gp_t($r[1]));
@@ -633,7 +640,7 @@ switch ($gp_route) {
 		$jhealth = gp_job_health();
 		$jcron = gp_cron_check();
 		gp_render('jobs', array('jobs' => gp_job_list(), 'redis_up' => gp_redis_up(), 'health' => $jhealth, 'detail' => $jdetail,
-			'queue' => gp_queue_health(), 'cron' => $jcron, 'cron_lines' => gp_cron_setup_lines($jhealth, $jcron),
+			'queue' => gp_queue_health(), 'cron' => $jcron, 'cron_lines' => gp_cron_setup_lines($jhealth, $jcron), 'perms' => gp_perm_scan(),
 			'runs' => $jdetail !== '' ? gp_job_runs($jdetail) : array(), 'errors' => $jdetail !== '' ? gp_job_error_blocks($jdetail) : array()));
 }
 

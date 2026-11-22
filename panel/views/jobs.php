@@ -118,6 +118,31 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 	<?php endif; ?>
 </div>
 
+<?php /* ------------------------------------------------------------ file permissions */ ?>
+<?php if (isset($perms) && is_array($perms)): $perm_bad = gp_perm_has_issues($perms); ?>
+<div class="gp-card" id="perms">
+	<div class="gp-card-title"><?= gp_e(gp_t('perm_title')) ?>
+		<form method="post" action="index.php?r=jobs#perms" style="display:inline">
+			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
+			<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit" name="perm_refresh" value="1"><?= gp_e(gp_t('perm_rescan')) ?></button>
+		</form></div>
+	<p class="gp-help"><?= gp_e(gp_t('perm_help')) ?><?= gp_tip('perm_check') ?></p>
+	<p class="gp-help"><?= gp_e(gp_t('perm_scanned')) ?>: <span class="gp-mono"><?= gp_num((int)$perms['scanned']) ?></span>
+		(<?= gp_e(gp_age(max(0, time() - (int)$perms['time']))) ?> <?= gp_e(gp_t('ago')) ?>; <?= gp_e(gp_t('perm_cached')) ?>)</p>
+	<?php if (!$perm_bad): ?>
+	<p><span class="gp-badge gp-badge-on"><?= gp_e(gp_t('perm_ok')) ?></span></p>
+	<?php else: ?>
+	<?php if ($perms['secret_readable']): ?><div class="gp-note gp-note-strong" role="alert"><?= gp_e(gp_t('perm_secret')) ?>: <span class="gp-mono"><?= gp_e(implode(', ', $perms['secret_readable'])) ?></span></div><?php endif; ?>
+	<?php if ($perms['cron_not_exec']): ?><div class="gp-note gp-note-strong" role="alert"><?= gp_e(gp_t('perm_cron')) ?>: <span class="gp-mono"><?= gp_e(implode(', ', $perms['cron_not_exec'])) ?></span></div><?php endif; ?>
+	<?php if ($perms['writable_dirs'] + $perms['writable_files'] > 0): ?><div class="gp-note"><?= gp_e(gp_t('perm_writable')) ?>: <span class="gp-mono"><?= gp_num((int)$perms['writable_dirs']) ?> <?= gp_e(gp_t('perm_dirs')) ?>, <?= gp_num((int)$perms['writable_files']) ?> <?= gp_e(gp_t('perm_files')) ?></span>
+		<pre class="gp-mono gp-ltr gp-pre"><?= gp_e(implode("\n", $perms['writable_sample'])) ?></pre></div><?php endif; ?>
+	<p class="gp-help"><?= gp_e(gp_t('perm_fix')) ?></p>
+	<pre class="gp-mono gp-ltr gp-pre"><?= gp_e(implode("\n", gp_perm_fix_commands($perms))) ?></pre>
+	<?php if ($perms['truncated']): ?><p class="gp-help"><?= gp_e(gp_t('perm_truncated')) ?></p><?php endif; ?>
+	<?php endif; ?>
+</div>
+<?php endif; ?>
+
 <div class="gp-card">
 	<div class="gp-card-title"><?= gp_e(gp_t('job_queue')) ?></div>
 	<p class="gp-help"><?= gp_e(gp_t('job_queue_len')) ?>: <span class="gp-mono"><?= gp_num((int)$queue['length']) ?></span><?= $queue['oldest_age'] !== null ? ' · ' . gp_e(gp_t('job_oldest')) . ': ' . gp_e(gp_age(time() - (int)$queue['oldest_age'])) : '' ?></p>

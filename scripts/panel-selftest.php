@@ -2260,11 +2260,11 @@ t_ok('rules summary: enabled rules by mode and action', gp_rules_summary($pm_rul
 $jn_all = array(); foreach (gp_job_defs() as $jn => $jd) { $jn_all[$jn] = gp_job_health_one($jn, $jd, null, 0, 600, $jh_now); }
 $lines_none = gp_cron_setup_lines($jn_all, array('mode' => 'none', 'report' => null), '/home/u/bot-guard');
 t_ok('cron setup lines with an unreadable crontab: the GV_PYTHON line and every required entry, built from the real install directory', $lines_none[0] === 'GV_PYTHON=/path/to/virtualenv/bin/python'
-	&& in_array('* * * * * /home/u/bot-guard/scripts/analyzer-cron.sh worker >/dev/null 2>&1', $lines_none, true) && in_array('10 3 * * * /home/u/bot-guard/scripts/guard-logrotate.sh >/dev/null 2>&1', $lines_none, true)
-	&& count($lines_none) === 6 && !in_array('41 5 * * 0 /home/u/bot-guard/scripts/analyzer-cron.sh train >/dev/null 2>&1', $lines_none, true));
+	&& in_array('* * * * * bash /home/u/bot-guard/scripts/analyzer-cron.sh worker >/dev/null 2>&1', $lines_none, true) && in_array('10 3 * * * bash /home/u/bot-guard/scripts/guard-logrotate.sh >/dev/null 2>&1', $lines_none, true)
+	&& count($lines_none) === 6 && !in_array('41 5 * * 0 bash /home/u/bot-guard/scripts/analyzer-cron.sh train >/dev/null 2>&1', $lines_none, true));
 $cr = array('mode' => 'live', 'age' => 0, 'report' => array('jobs' => array(array('job' => 'worker', 'state' => 'missing', 'required' => true, 'severity' => 'critical', 'schedule' => '', 'message' => 'there is no entry for it'), array('job' => 'verify', 'state' => 'ok', 'required' => true, 'severity' => 'ok', 'schedule' => '*/10 * * * *', 'message' => ''), array('job' => 'geo', 'state' => 'missing', 'required' => false, 'severity' => 'info', 'schedule' => '', 'message' => '')),
 	'gv_python' => array('set' => true, 'ok' => true, 'value' => '/x')));
-t_ok('cron setup lines with a readable crontab: only what is missing or wrong, no GV_PYTHON line when it is fine, recommended entries only when asked', gp_cron_setup_lines($jn_all, $cr, '/home/u/bot-guard') === array('* * * * * /home/u/bot-guard/scripts/analyzer-cron.sh worker >/dev/null 2>&1'));
+t_ok('cron setup lines with a readable crontab: only what is missing or wrong, no GV_PYTHON line when it is fine, recommended entries only when asked', gp_cron_setup_lines($jn_all, $cr, '/home/u/bot-guard') === array('* * * * * bash /home/u/bot-guard/scripts/analyzer-cron.sh worker >/dev/null 2>&1'));
 t_ok('the cron setup card shows when a required job never ran or an entry is missing, and not when all is well', gp_cron_card_needed($jn_all, array('report' => null)) === true && gp_cron_card_needed($ok_jobs, array('report' => null)) === false
 	&& gp_cron_card_needed($ok_jobs, $cr) === true && gp_cron_card_needed($ok_jobs, array('report' => array('jobs' => array(array('job' => 'verify', 'state' => 'ok', 'required' => true))))) === false);
 
@@ -3103,7 +3103,7 @@ function ut_entries($dir, $top, array $over = array(), array $extra = array()) {
 	$local = array('guard/config.local.json', 'guard/rules.json', 'panel/panel.config.php', 'panel/audit.jsonl', 'analyzer/snapshot.json', 'guard.off', 'guard/local-notes.txt');
 	if ($top !== '') { $ent[] = array($top, '', 0040755, 0); }
 	foreach ($all as $rel => $sha) {
-		if (in_array($rel, $local, true) || preg_match('#^(logs|lists|geo)/(?!\.htaccess|\.gitkeep)#', $rel)) { continue; }
+		if (in_array($rel, $local, true) || preg_match('#^(\.venv|\.git)/#', $rel) || preg_match('#^(logs|lists|geo)/(?!\.htaccess|\.gitkeep)#', $rel)) { continue; }
 		if (array_key_exists($rel, $over)) { if ($over[$rel] === null) { unset($over[$rel]); continue; } $data = $over[$rel]; unset($over[$rel]); }
 		else { $data = file_get_contents($dir . '/' . $rel); }
 		$ent[] = array($top . $rel, $data, is_executable($dir . '/' . $rel) ? 0100755 : 0100644);
@@ -3486,6 +3486,128 @@ $al = gp_health_alerts(array('now' => time(), 'redis_up' => true, 'update_warn' 
 t_ok('the dashboard raises an alert for an unverified update and for a failed pip_sync', count(array_filter($al, function ($a) { return $a['id'] === 'update_unverified' && $a['level'] === 'critical'; })) === 1
 	&& count(array_filter($al, function ($a) { return $a['id'] === 'update_pip_failed' && $a['level'] === 'warning'; })) === 1);
 t_ok('the exposure check knows the updates/ files and panel/recover.php', (function () { $s = file_get_contents(__DIR__ . '/exposure-check.sh'); return strpos($s, '/updates/recovery.json') !== false && strpos($s, '/updates/rollback.php') !== false && strpos($s, 'recover.php') !== false; })());
+
+// ---- file modes, the permission health check, the bash crontab form
+t_section('Updater file modes, permission health check, crontab through bash');
+function ut_chmod_tree($root, $fmode, $dmode) {
+	$pat = gp_upd_patterns();
+	foreach (array('guard', 'panel', 'analyzer', 'scripts', 'docs') as $top) {
+		if (!is_dir($root . '/' . $top)) { continue; }
+		$it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root . '/' . $top, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+		foreach ($it as $f) {
+			$rel = substr($f->getPathname(), strlen($root) + 1);
+			if ($f->isDir()) { chmod($f->getPathname(), $dmode); continue; }
+			chmod($f->getPathname(), gp_upd_is_protected($rel, $pat) ? 0600 : $fmode);
+		}
+		chmod($root . '/' . $top, $dmode);
+	}
+	foreach (glob($root . '/*', GLOB_NOSORT) as $f) { if (is_file($f)) { chmod($f, gp_upd_is_protected(basename($f), gp_upd_patterns()) ? 0600 : $fmode); } }
+}
+$ut_umask = umask(0);
+$rm = ut_install();
+ut_chmod_tree($rm, 0666, 0777);                       // what the production server looked like: 666, no execute bit
+foreach (glob($rm . '/scripts/*.sh') as $f) { chmod($f, 0666); }
+$sm = gp_upd_stage(ut_make_zip($rm, '2026.12.12', array('guard/log.php' => file_get_contents($rm . '/guard/log.php') . "\n// m\n", 'scripts/cron-check.sh' => file_get_contents($rm . '/scripts/cron-check.sh') . "\n# m\n",
+	'scripts/new-tool.sh' => "#!/bin/sh\ntrue\n", 'docs/newdir/deep/X.md' => "x\n")), 'm.zip', 'a');
+$am = gp_upd_apply($sm['plan']['id'], 'admin');
+$mode = function ($rel) use ($rm) { return fileperms($rm . '/' . $rel) & 0777; };
+t_ok('modes: every script under scripts/ is 0755 - changed, new and unchanged ones alike', $am['ok'] && $mode('scripts/cron-check.sh') === 0755 && $mode('scripts/new-tool.sh') === 0755
+	&& $mode('scripts/analyzer-cron.sh') === 0755 && $mode('scripts/guard-logrotate.sh') === 0755 && $mode('scripts/lib-jobstatus.sh') === 0755);
+t_ok('modes: every other file the ZIP delivers is 0644 (changed, new and unchanged, with umask 000 and 666 before)', $mode('guard/log.php') === 0644 && $mode('docs/newdir/deep/X.md') === 0644
+	&& $mode('guard/guard.php') === 0644 && $mode('panel/index.php') === 0644 && $mode('VERSION') === 0644 && $mode('prepend.php') === 0644 && $mode('analyzer/worker.py') === 0644);
+t_ok('modes: directories the updater creates are 0755 (also with umask 000)', $mode('docs/newdir') === 0755 && $mode('docs/newdir/deep') === 0755);
+t_ok('modes: the code directories lose group / world write (777 -> 755)', $mode('guard') === 0755 && $mode('panel') === 0755 && $mode('scripts') === 0755 && $mode('docs') === 0755);
+t_ok('modes: no code file of the install is group- or world-writable afterwards (data files and directories keep the mode the operator gave them)', (function () use ($rm) {
+	$pat = gp_upd_patterns();
+	foreach (array_keys(ut_hashes($rm)) as $rel) {
+		if (gp_upd_is_protected($rel, $pat) || preg_match('#^(updates|logs|lists|geo)/#', $rel)) { continue; }
+		if ((fileperms($rm . '/' . $rel) & 0022) !== 0) { return false; }
+	}
+	return true;
+})() && (fileperms($rm . '/updates/rollback.php') & 0022) === 0 && (fileperms($rm . '/updates/installed.json') & 0022) === 0 && (fileperms($rm . '/updates/recovery.json') & 0777) === 0600);
+t_ok('modes: protected files are not touched (the 0600 they had is still there, bytes unchanged)', $mode('guard/config.php') === 0600 && $mode('panel/panel.config.php') === 0600 && $mode('guard/config.local.json') === 0600);
+$mmod = gp_upd_json_read(gp_upd_dir() . '/' . $am['stamp'] . '/manifest.json');
+t_ok('modes: the manifest records how many modes were corrected', $mmod['modes_fixed']['files'] > 50 && $mmod['modes_fixed']['dirs'] >= 4);
+$rbm = gp_upd_rollback($am['stamp']);
+t_ok('modes: a rollback restores the old bytes but not group / world write, and scripts stay executable', $rbm[0] && $mode('guard/log.php') === 0644 && $mode('scripts/cron-check.sh') === 0755 && !is_file($rm . '/scripts/new-tool.sh') && !is_dir($rm . '/docs/newdir'));
+umask($ut_umask);
+
+// the permission scan
+$ut_status = $UT . '/status';
+@mkdir($ut_status, 0775, true);
+putenv('GV_JOBSTATUS_DIR=' . $ut_status);
+$rp = ut_install();
+ut_chmod_tree($rp, 0644, 0755);
+foreach (glob($rp . '/scripts/*.sh') as $f) { chmod($f, 0755); }
+@mkdir($rp . '/.venv', 0777); file_put_contents($rp . '/.venv/y', 'x'); chmod($rp . '/.venv/y', 0666);
+@mkdir($rp . '/.git', 0777); file_put_contents($rp . '/.git/z', 'x'); chmod($rp . '/.git/z', 0666);
+file_put_contents($rp . '/logs/x.log', 'x'); chmod($rp . '/logs/x.log', 0666);
+$t0 = 1000000;
+$sc0 = gp_perm_scan(true, $t0, $rp);
+t_ok('permission scan: a clean install has no findings (.venv, .git and logs are skipped even when writable)', !gp_perm_has_issues($sc0) && $sc0['scanned'] > 100 && gp_perm_fix_commands($sc0) === array());
+chmod($rp . '/guard/log.php', 0666); chmod($rp . '/docs', 0777); chmod($rp . '/scripts/cron-check.sh', 0644); chmod($rp . '/guard/config.php', 0644);
+file_put_contents($rp . '/panel/users.json', '{}'); chmod($rp . '/panel/users.json', 0664);
+$sc1 = gp_perm_scan_now($rp, $t0 + 10);
+t_ok('permission scan: finds a writable file, a writable directory, a cron script without the execute bit and a world-readable secret',
+	$sc1['writable_files'] === 2 && $sc1['writable_dirs'] === 1 && $sc1['cron_not_exec'] === array('scripts/cron-check.sh') && $sc1['secret_readable'] === array('guard/config.php', 'panel/users.json'));
+t_ok('permission scan: a secret file that does not exist (panel/users.json before the user store) is not judged', (function () use ($rp, $t0) { unlink($rp . '/panel/users.json'); $r = gp_perm_scan_now($rp, $t0)['secret_readable']; file_put_contents($rp . '/panel/users.json', '{}'); chmod($rp . '/panel/users.json', 0664); return $r === array('guard/config.php'); })());
+$cmds = gp_perm_fix_commands($sc1);
+t_ok('permission scan: the exact commands are offered (chmod 600 per secret, chmod 755 scripts, find ... -perm /022 for directories and files)',
+	in_array('chmod 600 ' . escapeshellarg($rp . '/guard/config.php'), $cmds, true) && in_array('chmod 755 ' . escapeshellarg($rp) . '/scripts/*.sh', $cmds, true)
+	&& count(array_filter($cmds, function ($c) { return strpos($c, '-type d -perm /022 -exec chmod go-w') !== false; })) === 1 && count(array_filter($cmds, function ($c) { return strpos($c, '-type f -perm /022 -exec chmod go-w') !== false; })) === 1);
+foreach ($cmds as $c) { exec($c . ' 2>&1'); }
+$sc2 = gp_perm_scan_now($rp, $t0 + 20);
+t_ok('permission scan: running the offered commands really fixes everything it found', !gp_perm_has_issues($sc2), json_encode($sc2));
+// cache: one hour, recomputed after an update
+chmod($rp . '/guard/log.php', 0666);
+$ca = gp_perm_scan(true, $t0, $rp);
+chmod($rp . '/guard/log.php', 0644);
+t_ok('permission scan: the result is cached for an hour (an older scan is returned within 3599 s)', gp_perm_scan(false, $t0 + 3599, $rp)['writable_files'] === 1 && gp_perm_scan(false, $t0 + 3599, $rp)['time'] === $t0);
+t_ok('permission scan: ...and recomputed after an hour, on request, and when the install directory differs', gp_perm_scan(false, $t0 + 3601, $rp)['writable_files'] === 0 && gp_perm_scan(true, $t0 + 3602, $rp)['time'] === $t0 + 3602
+	&& gp_perm_scan(false, $t0 + 3603, $UT . '/other')['root'] === $UT . '/other');
+gp_perm_scan(true, time(), $rp);
+$sup = gp_upd_stage(ut_make_zip($rp, '2027.01.01', array('docs/PERM.md' => "p\n")), 'perm.zip', 'a');
+t_ok('permission scan: the cache is dropped when an update is applied', is_file(gp_perm_cache_path()) && gp_upd_apply($sup['plan']['id'], 'a', array('confirm' => array('git_present')))['ok'] && !is_file(gp_perm_cache_path()));
+t_ok('permission scan: reading the cache never touches the repository (the cache file lives in the status directory)', strpos(gp_perm_cache_path(), $ut_status) === 0);
+// alerts
+$al_clean = gp_health_alerts(array('now' => time(), 'redis_up' => true, 'perms' => $sc2));
+$al_bad = gp_health_alerts(array('now' => time(), 'redis_up' => true, 'perms' => $sc1));
+$lv = function ($a, $id) { foreach ($a as $x) { if ($x['id'] === $id) { return $x['level']; } } return ''; };
+t_ok('permission alerts: none on a clean install; critical for a readable secret, warnings for a writable tree and a non-executable cron script',
+	count(array_filter($al_clean, function ($a) { return strpos($a['id'], 'perm_') === 0; })) === 0 && $lv($al_bad, 'perm_secret') === 'critical' && $lv($al_bad, 'perm_cron_exec') === 'warning' && $lv($al_bad, 'perm_writable') === 'warning');
+$cron_bad = array('mode' => 'live', 'age' => 0, 'report' => array('jobs' => array(array('job' => 'worker', 'state' => 'not_executable', 'severity' => 'critical', 'required' => true)), 'gv_python' => array('set' => true, 'ok' => true)));
+t_ok('crontab alert: a direct entry that is not executable is a critical dashboard alert of its own', $lv(gp_health_alerts(array('now' => time(), 'redis_up' => true, 'cron' => $cron_bad)), 'cron_not_exec') === 'critical');
+// the documented crontab lines go through bash
+$direct = 0;
+foreach (array('README.md', 'docs/03-SETUP.md', 'docs/07-CONFIG-REFERENCE.md', 'docs/08-ANALYZER-PHASES.md', 'analyzer/README.md', 'scripts/analyzer-cron.sh') as $docf) {
+	$direct += preg_match_all('~^[#\s]*(?:[0-9*/,\-]+\s+){5}\S*/scripts/(?:analyzer-cron|guard-logrotate)\.sh~m', file_get_contents(__DIR__ . '/../' . $docf));
+}
+t_ok('every documented crontab line calls the script through bash (none calls it directly)', $direct === 0 && substr_count(file_get_contents(__DIR__ . '/../docs/03-SETUP.md'), ' bash /home/youruser/bot-guard/scripts/') >= 8);
+// cron-check.sh as a command: exit code and wording for a non-executable direct script
+$py3 = trim((string)@shell_exec('command -v python3'));
+if ($py3 === '') {
+	t_skip('cron-check.sh exit codes', 'python3 not available');
+} else {
+	$cr = $UT . '/cronroot';
+	mkdir($cr . '/scripts', 0775, true);
+	foreach (array('analyzer-cron.sh', 'guard-logrotate.sh') as $sn) { file_put_contents($cr . '/scripts/' . $sn, "#!/bin/sh\ntrue\n"); chmod($cr . '/scripts/' . $sn, 0644); }
+	$mk = function ($prefix) use ($cr) {
+		return "GV_PYTHON=" . PHP_BINARY . "\n*/10 * * * * {$prefix}{$cr}/scripts/analyzer-cron.sh verify >/dev/null 2>&1\n* * * * * {$prefix}{$cr}/scripts/analyzer-cron.sh worker >/dev/null 2>&1\n"
+			. "*/15 * * * * {$prefix}{$cr}/scripts/analyzer-cron.sh snapshot >/dev/null 2>&1\n17 4 * * * {$prefix}{$cr}/scripts/analyzer-cron.sh nightly >/dev/null 2>&1\n10 3 * * * {$prefix}{$cr}/scripts/guard-logrotate.sh >/dev/null 2>&1\n";
+	};
+	file_put_contents($UT . '/ct-direct.txt', $mk(''));
+	file_put_contents($UT . '/ct-bash.txt', $mk('bash '));
+	exec('bash ' . escapeshellarg(__DIR__ . '/cron-check.sh') . ' --file ' . escapeshellarg($UT . '/ct-direct.txt') . ' --root ' . escapeshellarg($cr) . ' 2>&1', $co1, $crc1);
+	exec('bash ' . escapeshellarg(__DIR__ . '/cron-check.sh') . ' --file ' . escapeshellarg($UT . '/ct-bash.txt') . ' --root ' . escapeshellarg($cr) . ' 2>&1', $co2, $crc2);
+	t_ok('cron-check.sh: a non-executable direct script exits 1 and says ERROR, "not executable", "fail silently" and the fix', $crc1 === 1 && strpos(implode("\n", $co1), 'ERROR') !== false && strpos(implode("\n", $co1), 'not executable') !== false
+		&& strpos(implode("\n", $co1), 'fail silently') !== false && strpos(implode("\n", $co1), 'chmod 755') !== false);
+	t_ok('cron-check.sh: the bash form of the same crontab exits 0', $crc2 === 0 && strpos(implode("\n", $co2), 'ERROR') === false, implode("\n", $co2));
+	exec('bash ' . escapeshellarg(__DIR__ . '/cron-check.sh') . ' --json --file ' . escapeshellarg($UT . '/ct-direct.txt') . ' --root ' . escapeshellarg($cr) . ' 2>&1', $co3);
+	$jr = json_decode(implode("\n", $co3), true);
+	t_ok('cron-check.sh --json reports state not_executable with the bash line to use (the panel reads this)', is_array($jr) && $jr['jobs'][0]['state'] === 'not_executable' && strpos($jr['jobs'][0]['install_line'], ' bash ') !== false);
+}
+putenv('GV_JOBSTATUS_DIR');
+
 unset($gp_upd_opcache_hook);
 putenv('GV_AUDIT');
 $gp_upd_root = '';

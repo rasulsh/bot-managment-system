@@ -42,6 +42,7 @@ analyzer/reports/
 analyzer/.jobstatus-*
 analyzer/.jobstate-*
 analyzer/.cron-check*
+analyzer/.perm-check*
 analyzer/.lastrun-*
 analyzer/.laststats-*
 analyzer/.rule-hits.json

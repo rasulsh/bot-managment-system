@@ -61,8 +61,8 @@ generates a session secret distinct from the guard's, and writes
 2. **Add two cron entries** next to the existing analyzer ones:
 
    ```
-   */15 * * * * /full/path/bot-guard/scripts/analyzer-cron.sh snapshot >/dev/null 2>&1
-   *    * * * * /full/path/bot-guard/scripts/analyzer-cron.sh worker   >/dev/null 2>&1
+   */15 * * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh snapshot >/dev/null 2>&1
+   *    * * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh worker   >/dev/null 2>&1
    ```
 
    `snapshot` writes `analyzer/snapshot.json`, which is the only thing the
@@ -278,6 +278,7 @@ who steals the session.
   effect, because the allow list is checked first: the page shows a warning with a link to the list, and so does the flash right after the deny
   is created.
 - **Audit** — the append-only trail, searchable (filters: event, user, text; each include or exclude).
+- **Jobs** also has a **File permissions** card: group- or world-writable files and directories, cron scripts without the execute bit and secret files readable by everybody, each with the exact commands (cached one hour, **Scan again**, recomputed after an update). The same findings are dashboard alerts.
 - **Update** — install a newer version from the GitHub ZIP, review it, apply it with your password, roll it back. See [Update from a ZIP](#update-from-a-zip).
 
 ## Dashboard, job health and alerts
@@ -404,6 +405,7 @@ analyzer/reports/
 analyzer/.jobstatus-*
 analyzer/.jobstate-*
 analyzer/.cron-check*
+analyzer/.perm-check*
 analyzer/.lastrun-*
 analyzer/.laststats-*
 analyzer/.rule-hits.json
@@ -431,6 +433,8 @@ update back automatically; the result page says so. If the browser closes before
 stored only as a hash in `updates/recovery.json`. Web: `<panel-address>/recover.php?token=<token>` (an empty 404 without a valid token).
 Shell: `php <install-dir>/updates/rollback.php` (`--list` shows the updates, a stamp rolls back that update and all newer ones).
 Both use the same script, `updates/rollback.php`, written from the old code before the update, with no dependency on the new code.
+
+**File modes.** The updater never relies on the modes in the ZIP: directories it creates are 0755, files 0644, `scripts/*.sh` 0755, nothing is group- or world-writable (the manifest counts the corrections). Files that did not change are corrected as well; the code directories lose group / world write; `logs/`, `lists/`, `geo/` and `updates/` keep their mode. Protected files are never touched. The result page runs the permission check (below).
 
 **After the update.** When `analyzer/requirements.txt` changed the panel queues the worker job `pip_sync`
 (`<python> -m pip install -r analyzer/requirements.txt`, 10 minute limit, output in the job log; a failure raises a dashboard warning).

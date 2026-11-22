@@ -77,6 +77,8 @@ analyzer/.cron-check-live.json
 analyzer/.cron-check-live.json.tmp*
 analyzer/.cron-check-refresh
 analyzer/.cron-check.json.tmp*
+analyzer/.perm-check.json
+analyzer/.perm-check.json.tmp*
 panel/jobs-seen.json
 panel/jobs-seen.json.tmp*
 logs/jobs.log

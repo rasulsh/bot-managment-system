@@ -50,6 +50,7 @@ SENSITIVE=(
 	"/analyzer/.jobstatus-verify.json"
 	"/analyzer/.cron-check.json"
 	"/analyzer/.cron-check-live.json"
+	"/analyzer/.perm-check.json"
 	"/logs/jobs.log"
 	"/logs/jobs-errors.log"
 	"/scripts/cron-check.sh"

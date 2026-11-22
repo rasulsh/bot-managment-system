@@ -19,6 +19,7 @@ if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 
 require_once __DIR__ . '/geo.php';              // gp_ini_bytes()
 require_once __DIR__ . '/jobs.php';             // gp_job_enqueue()
+require_once __DIR__ . '/health.php';           // gp_status_dir(), gp_perm_*()
 
 define('GP_UPD_MAX_ZIP', 30 * 1048576);         // the ZIP of this repository is well under 1 MB; 30 MB is generous
 define('GP_UPD_MAX_FILES', 3000);
@@ -51,6 +52,46 @@ function gp_upd_version($root = null) {
 	return preg_match('/^[0-9][0-9A-Za-z._-]{0,31}$/', $v) ? $v : '';
 }
 
+// The mode of every file the updater writes. GitHub ZIPs carry no reliable Unix modes and ZipArchive does not apply
+// them, so the mode is explicit: 0755 for scripts/*.sh (cron may call them directly), 0644 for everything else, never
+// group- or world-writable. Directories it creates are 0755.
+function gp_upd_file_mode($rel) {
+	return (strncmp($rel, 'scripts/', 8) === 0 && substr($rel, -3) === '.sh') ? 0755 : 0644;
+}
+
+// Create $dir (and any missing parent below the install root) with mode 0755, whatever the umask is.
+function gp_upd_mkdirs($dir, $root) {
+	if (is_dir($dir)) { return true; }
+	if (strlen($dir) <= strlen($root) || strncmp($dir, $root . '/', strlen($root) + 1) !== 0) { return false; }
+	if (!gp_upd_mkdirs(dirname($dir), $root)) { return false; }
+	if (!@mkdir($dir, 0755) && !is_dir($dir)) { return false; }
+	@chmod($dir, 0755);
+	return true;
+}
+
+// After the swap: put every file the ZIP delivers (also the unchanged ones, which are not written) on its mode, and
+// remove group / world write from the code directories they sit in. Data directories (logs, lists, geo, updates) keep
+// the mode the operator gave them. Returns array(files, dirs) = how many were corrected.
+function gp_upd_normalise($root, array $plan_files) {
+	$fixed = array('files' => 0, 'dirs' => 0);
+	$code = array('guard', 'panel', 'analyzer', 'scripts', 'docs');
+	$dirs = array();
+	foreach ($plan_files as $f) {
+		$p = $root . '/' . $f['path'];
+		if (!is_file($p) || is_link($p)) { continue; }
+		$want = gp_upd_file_mode($f['path']);
+		if (((int)fileperms($p) & 0777) !== $want && @chmod($p, $want)) { $fixed['files']++; }
+		$d = dirname($f['path']);
+		while ($d !== '.' && $d !== '' && in_array(explode('/', $d)[0], $code, true)) { $dirs[$d] = true; $d = dirname($d); }
+	}
+	foreach (array_keys($dirs) as $d) {
+		$p = $root . '/' . $d;
+		$m = (int)@fileperms($p) & 0777;
+		if (is_dir($p) && !is_link($p) && ($m & 0022) !== 0 && @chmod($p, $m & ~0022)) { $fixed['dirs']++; }
+	}
+	return $fixed;
+}
+
 function gp_upd_audit($event, $actor, $key, $old = null, $new = null) {
 	gp_audit_append(array('event' => $event, 'actor' => (string)$actor, 'ip' => gp_client_ip(), 'key' => (string)$key, 'old' => $old, 'new' => $new));
 }
@@ -66,6 +107,7 @@ function gp_upd_json_read($path) {
 function gp_upd_json_write($path, array $data) {
 	$tmp = $path . '.tmp' . bin2hex(random_bytes(4));
 	if (@file_put_contents($tmp, json_encode($data, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT)) === false) { return false; }
+	@chmod($tmp, 0600);                              // never group- or world-writable, whatever the umask
 	if (!@rename($tmp, $path)) { @unlink($tmp); return false; }
 	return true;
 }
@@ -388,6 +430,7 @@ function gp_upd_stage_open(array $zip, $root, $orig_name, $actor) {
 		$dest = $sdir . '/' . $rel;
 		if (!is_dir(dirname($dest)) && !@mkdir(dirname($dest), 0700, true)) { gp_upd_rmtree($pdir . '/' . $id); return gp_upd_fail('upd_err_nowrite', $pdir); }
 		if (@file_put_contents($dest, $data) === false) { gp_upd_rmtree($pdir . '/' . $id); return gp_upd_fail('upd_err_nowrite', $pdir); }
+		@chmod($dest, 0600);
 		$exec = ($e['mode'] & 0111) !== 0;
 		$plan_files[$rel] = array('path' => $rel, 'sha' => hash('sha256', $data), 'size' => strlen($data), 'exec' => $exec);
 	}
@@ -516,8 +559,9 @@ function gp_upd_apply($id, $actor, array $opts = array()) {
 	if (array_diff($need, $have)) { return gp_upd_fail('upd_err_confirm', implode(',', array_diff($need, $have))); }
 	$root = gp_upd_root();
 	$udir = gp_upd_dir();
-	if (!is_dir($udir) && !@mkdir($udir, 0755, true)) { return gp_upd_fail('upd_err_nowrite', $udir); }
+	if (!is_dir($udir)) { if (!@mkdir($udir, 0755, true)) { return gp_upd_fail('upd_err_nowrite', $udir); } @chmod($udir, 0755); }
 	$lock = @fopen($udir . '/.lock', 'c');
+	if ($lock) { @chmod($udir . '/.lock', 0600); }
 	if (!$lock || !@flock($lock, LOCK_EX | LOCK_NB)) { return gp_upd_fail('upd_err_busy'); }
 	$res = gp_upd_apply_locked($plan, $actor, $root, $udir);
 	@flock($lock, LOCK_UN);
@@ -557,6 +601,7 @@ function gp_upd_apply_locked(array $plan, $actor, $root, $udir) {
 		if (@copy(__DIR__ . '/' . $tpl, $tmp) === false || !@rename($tmp, $udir . '/' . $name . '.php')) {
 			@unlink($tmp); gp_upd_rmtree($sd); return gp_upd_fail('upd_err_nowrite', $udir);
 		}
+		@chmod($udir . '/' . $name . '.php', 0644);
 		gp_upd_opcache($udir . '/' . $name . '.php');
 	}
 
@@ -576,6 +621,7 @@ function gp_upd_apply_locked(array $plan, $actor, $root, $udir) {
 			$b = $sd . '/backup/' . $rel;
 			if (!is_dir(dirname($b)) && !@mkdir(dirname($b), 0700, true)) { gp_upd_rmtree($sd); return gp_upd_fail('upd_err_nowrite', $udir); }
 			if (!@copy($cur, $b) || hash_file('sha256', $b) !== $before) { gp_upd_rmtree($sd); return gp_upd_fail('upd_err_backup', $rel); }
+			@chmod($b, 0600);                       // a backup keeps the bytes, not the old (possibly 666) mode
 		}
 		$entries[] = array('path' => $rel, 'action' => $act, 'before' => $before, 'after' => $act === 'remove' ? null : $by_path[$rel]['sha'],
 			'mode_before' => $before !== null ? (int)(fileperms($cur) & 0777) : null, 'size' => $act === 'remove' ? 0 : $by_path[$rel]['size']);
@@ -593,6 +639,7 @@ function gp_upd_apply_locked(array $plan, $actor, $root, $udir) {
 	if (!gp_upd_json_write($sd . '/manifest.json', $manifest)) { gp_upd_rmtree($sd); return gp_upd_fail('upd_err_nowrite', $udir); }
 	// One-time recovery token: only its hash is kept in recovery.json; the plain value is shown once.
 	gp_upd_json_write($udir . '/recovery.json', array('hash' => hash('sha256', $token), 'expires' => time() + GP_UPD_TOKEN_TTL, 'stamp' => $stamp));
+	@chmod($udir . '/recovery.json', 0600);
 	@file_put_contents($sd . '/token.once', $token);
 	@chmod($sd . '/token.once', 0600);
 
@@ -600,13 +647,14 @@ function gp_upd_apply_locked(array $plan, $actor, $root, $udir) {
 	if ($guard_off_created && @file_put_contents($root . '/guard.off', "created by the updater " . $stamp . "\n") === false) {
 		gp_upd_rmtree($sd); @unlink($udir . '/recovery.json'); return gp_upd_fail('upd_err_notwritable', 'guard.off');
 	}
+	if ($guard_off_created) { @chmod($root . '/guard.off', 0644); }
 	$failed = '';
 	foreach ($entries as $en) {
 		$dest = $root . '/' . $en['path'];
 		if ($en['action'] === 'remove') { if (is_file($dest) && !@unlink($dest)) { $failed = $en['path']; break; } continue; }
-		if (!is_dir(dirname($dest)) && !@mkdir(dirname($dest), 0755, true)) { $failed = $en['path']; break; }
+		if (!gp_upd_mkdirs(dirname($dest), $root)) { $failed = $en['path']; break; }
 		$tmp = dirname($dest) . '/.' . basename($dest) . '.upd' . bin2hex(random_bytes(3));
-		$mode = $en['mode_before'] !== null ? $en['mode_before'] : ($by_path[$en['path']]['exec'] ? 0755 : 0644);
+		$mode = gp_upd_file_mode($en['path']);
 		if (!@copy($sdir . '/' . $en['path'], $tmp) || !@chmod($tmp, $mode) || !@rename($tmp, $dest)) { @unlink($tmp); $failed = $en['path']; break; }
 		if (preg_match('/\.(php|tpl)$/', $en['path'])) { gp_upd_opcache($dest); }
 	}
@@ -614,6 +662,8 @@ function gp_upd_apply_locked(array $plan, $actor, $root, $udir) {
 		$rb = gp_upd_load_rollback() ? gprb_run($root, $stamp) : array(false, array());
 		return gp_upd_fail($rb[0] ? 'upd_err_write_rolled' : 'upd_err_write_failed', $failed);
 	}
+	$manifest['modes_fixed'] = gp_upd_normalise($root, $plan['files']);
+	gp_perm_cache_clear();                       // the next health check scans again
 	// What this ZIP installed: the base for "removed upstream" next time.
 	$installed = array();
 	foreach ($plan['files'] as $f) { $installed[$f['path']] = $f['sha']; }
@@ -644,7 +694,7 @@ function gp_upd_history($limit = 10) {
 			'created' => (int)($m['created'] ?? 0), 'actor' => (string)($m['actor'] ?? ''), 'files' => count((array)($m['files'] ?? array())),
 			'verify_failed' => (string)($m['verify_failed'] ?? ''), 'verify_key' => (string)($m['verify_key'] ?? ''),
 			'requirements_changed' => !empty($m['requirements_changed']), 'cron_scripts_changed' => !empty($m['cron_scripts_changed']),
-			'pip_enqueued' => !empty($m['pip_enqueued']), 'changelog' => (array)($m['changelog'] ?? array()));
+			'pip_enqueued' => !empty($m['pip_enqueued']), 'modes_fixed' => (array)($m['modes_fixed'] ?? array()), 'changelog' => (array)($m['changelog'] ?? array()));
 	}
 	return $out;
 }
@@ -655,6 +705,7 @@ function gp_upd_rollback($stamp) {
 	if (!gp_upd_load_rollback()) { return array(false, array('updates/rollback.php is missing')); }
 	$r = gprb_run(gp_upd_root(), $stamp);
 	if ($r[0]) { @unlink(gp_upd_dir() . '/recovery.json'); }
+	gp_perm_cache_clear();
 	return $r;
 }
 

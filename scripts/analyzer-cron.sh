@@ -20,14 +20,14 @@
 # instead of writing partial verdicts on top of each other.
 #
 # Cron example:
-#   */10 * * * * /full/path/bot-guard/scripts/analyzer-cron.sh verify    >/dev/null 2>&1
-#   17 4   * * * /full/path/bot-guard/scripts/analyzer-cron.sh nightly   >/dev/null 2>&1
-#   41 5   * * 0 /full/path/bot-guard/scripts/analyzer-cron.sh train     >/dev/null 2>&1
-#   11 6   * * 0 /full/path/bot-guard/scripts/analyzer-cron.sh train-clf >/dev/null 2>&1
-#   30 7   * * 1 /full/path/bot-guard/scripts/analyzer-cron.sh report | mail -s "Bot Guard weekly" you@example.com
-#   */15 * * * * /full/path/bot-guard/scripts/analyzer-cron.sh snapshot  >/dev/null 2>&1
-#   *    * * * * /full/path/bot-guard/scripts/analyzer-cron.sh worker    >/dev/null 2>&1
-#   23 3   1 * * /full/path/bot-guard/scripts/analyzer-cron.sh geo       >/dev/null 2>&1   # only when GeoIP rules are used
+#   */10 * * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh verify    >/dev/null 2>&1
+#   17 4   * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh nightly   >/dev/null 2>&1
+#   41 5   * * 0 bash /full/path/bot-guard/scripts/analyzer-cron.sh train     >/dev/null 2>&1
+#   11 6   * * 0 bash /full/path/bot-guard/scripts/analyzer-cron.sh train-clf >/dev/null 2>&1
+#   30 7   * * 1 bash /full/path/bot-guard/scripts/analyzer-cron.sh report | mail -s "Bot Guard weekly" you@example.com
+#   */15 * * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh snapshot  >/dev/null 2>&1
+#   *    * * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh worker    >/dev/null 2>&1
+#   23 3   1 * * bash /full/path/bot-guard/scripts/analyzer-cron.sh geo       >/dev/null 2>&1   # only when GeoIP rules are used
 #
 # report writes to stdout on purpose so it can be piped or mailed. Pass
 # GV_REPORT_HTML=/path/to/file.html to also write the standalone HTML version.
@@ -107,6 +107,6 @@ fi
 # cannot run it itself. At most every 10 minutes, best effort, never part of the job's result.
 CC="${GV_JOBSTATUS_DIR:-$ROOT/analyzer}/.cron-check.json"
 if [ ! -f "$CC" ] || [ -n "$(find "$CC" -mmin +10 2>/dev/null)" ]; then
-	( "$ROOT/scripts/cron-check.sh" --json > "$CC.tmp$$" 2>/dev/null && mv -f "$CC.tmp$$" "$CC" ) >/dev/null 2>&1 || rm -f "$CC.tmp$$"
+	( bash "$ROOT/scripts/cron-check.sh" --json > "$CC.tmp$$" 2>/dev/null && mv -f "$CC.tmp$$" "$CC" ) >/dev/null 2>&1 || rm -f "$CC.tmp$$"
 fi
 exit "$status"
