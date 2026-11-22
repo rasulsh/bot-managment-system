@@ -154,7 +154,7 @@ else
 	failures=$((failures + 1))
 fi
 # Inside the panel directory only index.php and static assets may be served.
-for path in "$PANEL_PATH/panel.config.php" "$PANEL_PATH/audit.jsonl" "$PANEL_PATH/auth.php" "$PANEL_PATH/views/login.php" "$PANEL_PATH/users.json" "$PANEL_PATH/users.json.lock" "$PANEL_PATH/users.php" "$PANEL_PATH/acl.php" "$PANEL_PATH/update.php" "$PANEL_PATH/update-rollback.tpl" "$PANEL_PATH/recover.php"; do
+for path in "$PANEL_PATH/panel.config.php" "$PANEL_PATH/audit.jsonl" "$PANEL_PATH/auth.php" "$PANEL_PATH/views/login.php" "$PANEL_PATH/users.json" "$PANEL_PATH/users.json.lock" "$PANEL_PATH/users.php" "$PANEL_PATH/acl.php" "$PANEL_PATH/update.php" "$PANEL_PATH/update-rollback.tpl"; do
 	code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$BASE_URL$path" 2>/dev/null)"
 	if [ "$code" = "200" ] && [ "$soft404" = "0" ]; then
 		printf '%-34s | %s\n' "$path" "200  EXPOSED"
@@ -166,6 +166,22 @@ for path in "$PANEL_PATH/panel.config.php" "$PANEL_PATH/audit.jsonl" "$PANEL_PAT
 		printf '%-34s | %s\n' "$path" "$code ok"
 	fi
 done
+# panel/recover.php is the web path of the update health check and of the web recovery. WITHOUT a token it must answer the
+# APPLICATION's own bare 404 (text/plain, empty body): reachable (the file is allowed by BOTH mechanisms of panel/.htaccess) and
+# silent. A 403 here means the web server (an .htaccess rewrite rule, a proxy rule) blocks it, so the check after an update would
+# never run and the guard would stay switched off; 200 would mean it talks without a token.
+rc_head="$("${CURL[@]}" -D - -o /dev/null "$BASE_URL$PANEL_PATH/recover.php" 2>/dev/null | tr -d '\r')"
+rc_code="$(printf '%s' "$rc_head" | awk 'NR==1 {print $2}')"
+rc_body="$("${CURL[@]}" "$BASE_URL$PANEL_PATH/recover.php" 2>/dev/null)"
+if [ "$rc_code" = "404" ] && [ -z "$rc_body" ] && printf '%s' "$rc_head" | grep -qi '^content-type: *text/plain'; then
+	printf '%-34s | %s\n' "$PANEL_PATH/recover.php" "404 ok (the application's own bare 404)"
+elif [ "$rc_code" = "403" ]; then
+	printf '%-34s | %s\n' "$PANEL_PATH/recover.php" "403  BLOCKED BY THE SERVER: the update health check cannot run (panel/.htaccess must allow recover.php in BOTH the FilesMatch and the RewriteRule block; nginx: do not deny it)"
+	failures=$((failures + 1))
+else
+	printf '%-34s | %s\n' "$PANEL_PATH/recover.php" "${rc_code:-no response}  UNEXPECTED (want the application's bare 404: text/plain, empty body)"
+	failures=$((failures + 1))
+fi
 fi
 
 echo

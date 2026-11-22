@@ -474,8 +474,10 @@ Refused: `..`, absolute paths, backslashes, drive letters, symbolic links, encry
 
 **The health check.** `updates/verify.php` (written from the *old* code before the files change) loads the new guard and panel in a fresh
 request and runs one synthetic request in dry-run mode (no log row). Failure, including a fatal error that kills the request, rolls the
-update back automatically; the result page says so. If the browser closes before the check finishes, the page shows a red banner with
-**Run the check now** and the dashboard raises a critical alert (the guard may still be off).
+update back automatically; the result page says so. The check does not depend on one web path: if the browser never gets there (a web server rule blocks
+`recover.php`, the tab is closed), the Update page shows a red banner with **Run the check now**, which runs the same code inside the signed-in panel request, and
+`php <install-dir>/updates/verify.php <stamp>` does it from the shell. An update that waits for its check for more than 2 minutes raises a **critical alert** on the
+Update page and the dashboard that says the guard is OFF (while `guard.off` exists) and shows that command.
 
 **Recovery when the panel is broken.** After a good check the result page shows a **recovery token once**: valid 24 hours, single use,
 stored only as a hash in `updates/recovery.json`. Web: `<panel-address>/recover.php?token=<token>` (an empty 404 without a valid token).

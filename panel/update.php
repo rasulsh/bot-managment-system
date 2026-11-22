@@ -28,6 +28,7 @@ define('GP_UPD_MAX_UNPACKED', 100 * 1048576);
 define('GP_UPD_KEEP', 3);                       // updates kept for rollback
 define('GP_UPD_PENDING_TTL', 3600);             // a staged ZIP is discarded after an hour
 define('GP_UPD_TOKEN_TTL', 86400);              // recovery token validity
+define('GP_UPD_WAIT_ALERT', 120);               // seconds an update may wait for its health check before the alert
 
 // Top-level directories an update may write into. Anything else in the ZIP is refused (".github" is ignored).
 function gp_upd_tree() { return array('guard', 'panel', 'analyzer', 'scripts', 'docs', 'geo', 'lists', 'logs', 'updates'); }
@@ -691,7 +692,7 @@ function gp_upd_history($limit = 10) {
 		$m = gp_upd_json_read(gp_upd_dir() . '/' . $s . '/manifest.json');
 		if ($m === null) { continue; }
 		$out[] = array('stamp' => $s, 'from' => (string)($m['from'] ?? ''), 'to' => (string)($m['to'] ?? ''), 'status' => (string)($m['status'] ?? ''),
-			'created' => (int)($m['created'] ?? 0), 'actor' => (string)($m['actor'] ?? ''), 'files' => count((array)($m['files'] ?? array())),
+			'created' => (int)($m['created'] ?? 0), 'applied_at' => (int)($m['applied_at'] ?? 0), 'actor' => (string)($m['actor'] ?? ''), 'files' => count((array)($m['files'] ?? array())),
 			'verify_failed' => (string)($m['verify_failed'] ?? ''), 'verify_key' => (string)($m['verify_key'] ?? ''),
 			'requirements_changed' => !empty($m['requirements_changed']), 'cron_scripts_changed' => !empty($m['cron_scripts_changed']),
 			'pip_enqueued' => !empty($m['pip_enqueued']), 'modes_fixed' => (array)($m['modes_fixed'] ?? array()), 'changelog' => (array)($m['changelog'] ?? array()));
@@ -747,11 +748,19 @@ function gp_upd_post_verify($stamp, $actor) {
 // Dashboard alerts about updates: array of array(code, detail, level). Cheap: one manifest read, and the job list
 // only when the newest update asked for a pip_sync.
 function gp_upd_health($now = null) {
+	$now = $now === null ? time() : (int)$now;
 	$out = array();
 	$h = gp_upd_history(1);
 	if (!$h) { return $out; }
 	$h = $h[0];
-	if ($h['status'] === 'applied' || $h['status'] === 'applying') { $out[] = array('unverified', $h['stamp'], 'critical'); }
+	if ($h['status'] === 'applied' || $h['status'] === 'applying') {
+		// Waiting for its health check for more than GP_UPD_WAIT_ALERT seconds: critical. While it waits the guard is switched OFF
+		// when the updater created guard.off, so the alert says that and gives the shell command that finishes the check.
+		$since = $h['applied_at'] > 0 ? $h['applied_at'] : $h['created'];
+		if ($now - $since > GP_UPD_WAIT_ALERT) {
+			$out[] = array(is_file(gp_upd_root() . '/guard.off') ? 'unverified_off' : 'unverified', gp_upd_verify_command($h['stamp']), 'critical');
+		}
+	}
 	elseif ($h['status'] === 'rollback_failed') { $out[] = array('rollback_failed', $h['stamp'], 'critical'); }
 	if ($h['status'] === 'ok' && $h['pip_enqueued']) {
 		foreach (gp_job_list(30) as $j) {
@@ -761,6 +770,29 @@ function gp_upd_health($now = null) {
 		}
 	}
 	return $out;
+}
+
+// The shell command that runs the health check of an update (the script was written before the files changed).
+function gp_upd_verify_command($stamp) {
+	return 'php ' . gp_upd_dir() . '/verify.php ' . $stamp;
+}
+
+// "Run the check now" INSIDE the authenticated panel request: the same verify code as updates/verify.php, loaded from this
+// (current) panel's panel/update-verify.tpl, so it works when panel/recover.php cannot be reached (a web server rule, a
+// proxy). On every outcome it ends the request with a redirect to the Update page (it finishes in a shutdown function, like
+// the standalone script). Returns only when it could not start: array(false, lang key).
+function gp_upd_verify_inprocess($stamp, $actor) {
+	if (!is_string($stamp) || !preg_match('/^\d{8}-\d{6}(-\d+)?$/', $stamp)) { return array(false, 'upd_err_unknown_update'); }
+	$m = gp_upd_json_read(gp_upd_dir() . '/' . $stamp . '/manifest.json');
+	if ($m === null || ($m['status'] ?? '') !== 'applied') { return array(false, 'upd_err_not_waiting'); }
+	$tpl = __DIR__ . '/update-verify.tpl';
+	if (!is_file($tpl) || function_exists('gpv_main')) { return array(false, 'upd_err_notemplate'); }
+	gp_upd_audit('update_verify_panel', $actor, $stamp, null, array('stamp' => $stamp));
+	if (!defined('GP_VERIFY_INPROC')) { define('GP_VERIFY_INPROC', 1); }
+	$GLOBALS['gpv_dir'] = gp_upd_dir();
+	require $tpl;
+	gpv_main($stamp, '', true);                 // never returns (redirects), unless the template is broken
+	return array(false, 'upd_err_notemplate');
 }
 
 // What the Update page shows about this PHP: what the updater needs and whether the install is writable.

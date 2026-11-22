@@ -638,6 +638,13 @@ switch ($gp_route) {
 				if (!headers_sent()) { header('Location: recover.php?a=verify&ts=' . rawurlencode($r['stamp']) . '&k=' . rawurlencode($r['verify_key']), true, 303); }
 				exit;
 			}
+			if ($do === 'verify') {
+				// "Run the check now": the same verify code, inside this authenticated request (no extra URL needed). It ends the
+				// request with a redirect to the result page; it only returns when it could not start.
+				$vr = gp_upd_verify_inprocess(is_string($_POST['stamp'] ?? null) ? $_POST['stamp'] : '', $gp_user);
+				gp_flash('error', gp_t($vr[1]));
+				gp_redirect('update');
+			}
 			if ($do === 'rollback') {
 				$stamp = (string)($_POST['stamp'] ?? '');
 				$rb = gp_upd_rollback($stamp);

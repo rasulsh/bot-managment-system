@@ -4,6 +4,12 @@ Newest first. Each entry is one version, written as `## <version>` (the same str
 The Update page of the panel shows the entries between the installed version and the one in the ZIP.
 Older history and upgrade steps: [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md).
 
+## 2026.11.25
+
+- **Hotfix: the update health check was blocked by `panel/.htaccess`.** `recover.php` was allowed by the `FilesMatch` block but not by the `RewriteRule` allow-list, so mod_rewrite answered the web server's 403, the update stayed "Waiting for the check" and the guard stayed off. Fixed; an install that is stuck can be repaired with one `sed` line (docs/10-UPGRADE-NOTES.md).
+- The check no longer depends on one web path: **Run the check now** runs it inside the panel request; `php updates/verify.php <stamp>` from the shell. An update waiting more than 2 minutes raises a critical alert (the guard is OFF, with the command).
+- `exposure-check.sh` requires `recover.php` to answer the application's own bare 404. New `scripts/update-web-e2e.sh` runs the full update flow on real Apache and OpenLiteSpeed in CI.
+
 ## 2026.11.24
 
 - **Several panel users, three roles:** Administrator, Monitoring operator (every report except secrets and user management; changes nothing) and Demo (aggregate numbers only). New pages **Users** and **My account**; the updater is administrator only.

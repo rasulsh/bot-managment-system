@@ -2,6 +2,48 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Hotfix: the update health check was blocked by `panel/.htaccess` (stuck "Waiting for the check")
+
+**Symptom.** After a ZIP update on LiteSpeed / Apache the browser lands on the web server's own 403 page for
+`/<panel>/recover.php?a=verify&ts=...&k=...`, the update stays **Waiting for the check**, and the guard stays switched off (`guard.off` exists).
+
+**Cause.** `panel/.htaccess` has two independent mechanisms. The `FilesMatch` block allowed `recover.php`, but the second one, the `RewriteRule`
+allow-list (`^(|index\.php|assets/...)$ - [L]` followed by `RewriteRule ^ - [F,L]`), did not, so mod_rewrite answered 403. The files were updated correctly;
+only the web path of the check was blocked.
+
+**Fixed in this release.**
+
+* `panel/.htaccess` lists `recover.php` in the RewriteRule allow-list too; every other `.htaccess` of the repository is deny-all (checked, no other mismatch), and a
+  self-test fails when the two lists differ.
+* The check no longer depends on one web path: **Run the check now** on the Update page is a POST to the panel itself that runs the same verify code inside the
+  authenticated request (no `recover.php` needed); `php <install-dir>/updates/verify.php <stamp>` works from the shell.
+* An update that waits for its check for **more than 2 minutes** raises a **critical** alert on the Update page and the dashboard: it says the guard is OFF (when
+  `guard.off` exists) and shows the exact shell command.
+* `scripts/exposure-check.sh` now requires `recover.php` **without a token** to answer the application's own bare 404 (text/plain, empty body): a server 403 fails the
+  check (it used to pass any non-200). New `scripts/update-web-e2e.sh` runs the whole update flow (upload, apply, check through `recover.php`, token, in-panel check,
+  automatic rollback of a broken update, shell check and rollback) against **real Apache and OpenLiteSpeed** in the CI `webservers` job, in every layout (docroot, symlink,
+  alias). `update-e2e.sh` (PHP's built-in server) cannot see `.htaccess`, which is why CI missed this.
+
+**An install that is stuck right now** (an update applied, the page says *Waiting for the check*, `guard.off` exists, or the browser showed a 403 for `recover.php`):
+
+1. Fix the rewrite rule on the server, as the user that owns the install (this is the only line that changes):
+
+   ```bash
+   sed -i 's#RewriteRule ^(|index\\.php|assets#RewriteRule ^(|index\\.php|recover\\.php|assets#' <install-dir>/panel/.htaccess
+   grep -n 'recover' <install-dir>/panel/.htaccess      # both the FilesMatch line and the RewriteRule line must name recover
+   ```
+
+   OpenLiteSpeed reads `.htaccess` at start: restart it (`/usr/local/lsws/bin/lswsctrl restart`). LiteSpeed Enterprise and Apache read it on the next request.
+2. Finish the check, any one of these: open **Update** and press **Run the check now** (this release; older versions show the same button as a link to
+   `recover.php`, which works after step 1), or on the shell `php <install-dir>/updates/verify.php <stamp>` (the stamp is on the Update page, or the newest directory
+   name in `<install-dir>/updates/`). The script was written before the update and exists on every stuck install.
+3. A good check removes `guard.off` (only if the updater created it) and the update turns green. Verify: `bash scripts/exposure-check.sh <url> <panel-path>` must
+   show `recover.php ... 404 ok (the application's own bare 404)`. If the check fails it rolls the update back by itself.
+4. If you cannot do any of this: `php <install-dir>/updates/rollback.php` restores the previous version, and `rm <install-dir>/guard.off` switches the guard on
+   again (only if it exists and you do not want it off).
+
+**Rollback.** Restore the previous files (the fix is one rewrite rule, the Update page button and a shell-visible alert).
+
 ## Users and roles (panel)
 
 **New**

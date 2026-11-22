@@ -3619,6 +3619,89 @@ $gp_upd_root = '';
 
 
 // ==========================================================================
+t_section('Update health check: .htaccess allow-lists, in-panel run, overdue alert');
+// The two mechanisms in panel/.htaccess must list the same files: a name granted by FilesMatch but missing from the RewriteRule
+// allow-list is answered 403 by mod_rewrite (the production bug: recover.php).
+$ht = file_get_contents(__DIR__ . '/../panel/.htaccess');
+preg_match('/<FilesMatch "\^\(([^"]*)\)\?\$">\s*<IfModule mod_authz_core\.c>\s*Require all granted/', $ht, $fm);
+preg_match('/RewriteRule \^\(([^)]*?)\|assets/', $ht, $rw);
+$fm_names = isset($fm[1]) ? array_map(function ($n) { return str_replace('\\', '', $n); }, explode('|', $fm[1])) : array();
+$rw_names = isset($rw[1]) ? array_map(function ($n) { return str_replace('\\', '', $n); }, explode('|', $rw[1])) : array();
+t_ok('panel/.htaccess: every file the FilesMatch block grants (index.php, recover.php) is also in the RewriteRule allow-list', count($fm_names) >= 2 && in_array('recover.php', $fm_names, true) && in_array('index.php', $fm_names, true)
+	&& array_diff(array_filter($fm_names), $rw_names) === array() && in_array('recover.php', $rw_names, true));
+t_ok('panel/.htaccess: the allow-list RewriteRule comes before the forbidding one', strpos($ht, 'recover\\.php|assets') !== false && strpos($ht, 'recover\\.php|assets') < strpos($ht, 'RewriteRule ^ - [F,L]'));
+t_ok('every other .htaccess of the repository is deny-all (no grant that needs a matching rewrite exception)', (function () {
+	$bad = array();
+	foreach (array('.htaccess', 'analyzer', 'docs', 'geo', 'guard', 'lists', 'logs', 'scripts', 'updates') as $d) {
+		$f = __DIR__ . '/../' . ($d === '.htaccess' ? '' : $d . '/') . '.htaccess';
+		$t = is_file($f) ? file_get_contents($f) : '';
+		if ($t === '' || strpos($t, 'Require all granted') !== false || strpos($t, 'RewriteRule ^ - [F,L]') === false || preg_match('/RewriteRule \^\(/', $t)) { $bad[] = $d; }
+	}
+	return $bad === array();
+})());
+t_ok('exposure-check.sh asserts recover.php answers the APPLICATION\'s own bare 404, so a server 403 fails the check', (function () { $s = file_get_contents(__DIR__ . '/exposure-check.sh'); return strpos($s, 'recover.php') !== false && strpos($s, 'text/plain') !== false && strpos($s, 'SERVER') !== false; })());
+
+// the in-panel verify: same code, inside a panel process (a child process stands in for the web request)
+$hf = ut_install();
+$hz = gp_upd_stage(ut_make_zip($hf, '2027.05.05', array('docs/HOTFIX.md' => "h\n")), 'h.zip', 'a');
+$ha = gp_upd_apply($hz['plan']['id'], 'admin');
+$hm_before = gp_upd_json_read(gp_upd_dir() . '/' . $ha['stamp'] . '/manifest.json');
+$inproc = function ($root, $stamp) use ($UT_PHP) {
+	$code = 'define("GV_BOOT",1);define("GP_BOOT",1);define("GV_NO_AUTORUN",1);foreach(array("config_io","auth","data","jobs","health","filters","ui","rules","geo","iplists","replay","update") as $l){require_once '
+		. var_export($root . '/panel/', true) . '.$l.".php";}$GLOBALS["gp_upd_root"]=' . var_export($root, true) . ';$r=gp_upd_verify_inprocess(' . var_export($stamp, true) . ',"admin");echo "RETURNED:".$r[1]."\n";exit(3);';
+	$p = proc_open(array($UT_PHP, '-r', $code), array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $pipes, $root, array('PATH' => getenv('PATH'), 'GV_AUDIT' => $root . '/audit-inproc.jsonl'));
+	$o = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
+	fclose($pipes[1]); fclose($pipes[2]);
+	return array(proc_close($p), $o);
+};
+$ip = $inproc($hf, $ha['stamp']);
+$hm = gp_upd_json_read(gp_upd_dir() . '/' . $ha['stamp'] . '/manifest.json');
+t_ok('in-panel check: "Run the check now" runs the verify code inside a panel process: update becomes ok, guard.off is removed, no recover.php involved', $ip[0] === 0 && strpos($ip[1], 'OK') === 0 && $hm['status'] === 'ok' && !is_file($hf . '/guard.off') && $hm_before['status'] === 'applied');
+t_ok('in-panel check: the second press finds nothing waiting and does not run again', strpos($inproc($hf, $ha['stamp'])[1], 'RETURNED:upd_err_not_waiting') !== false && strpos($inproc($hf, '20200101-000000')[1], 'RETURNED:upd_err_not_waiting') !== false);
+$hf2 = ut_install();
+$hz2 = gp_upd_stage(ut_make_zip($hf2, '2027.06.06', array('guard/guard.php' => preg_replace('/function gv_run\(\$t0\) \{/', 'function gv_run($t0) { throw new RuntimeException("synthetic failure");', file_get_contents($hf2 . '/guard/guard.php'), 1))), 'h2.zip', 'a');
+$ha2 = gp_upd_apply($hz2['plan']['id'], 'admin');
+$ip2 = $inproc($hf2, $ha2['stamp']);
+$hm2 = gp_upd_json_read(gp_upd_dir() . '/' . $ha2['stamp'] . '/manifest.json');
+t_ok('in-panel check: a failing check rolls the update back from inside the panel request too (files restored, guard.off removed)', $ip2[0] === 1 && strpos($ip2[1], 'FAILED') !== false && $hm2['status'] === 'rolled_back' && !is_file($hf2 . '/guard.off')
+	&& strpos(file_get_contents($hf2 . '/guard/guard.php'), 'synthetic failure') === false);
+t_ok('in-panel check: the shell form works too (php updates/verify.php <stamp>) and the shown command is exactly that', (function () use ($UT_PHP, $ut_run) {
+	$r = ut_install();
+	$z = gp_upd_stage(ut_make_zip($r, '2027.07.07', array('docs/SHELL.md' => "s\n")), 's.zip', 'a');
+	$a = gp_upd_apply($z['plan']['id'], 'admin');
+	$run = $ut_run($r . '/updates/verify.php', array($a['stamp']));
+	return gp_upd_verify_command($a['stamp']) === 'php ' . $r . '/updates/verify.php ' . $a['stamp'] && $run[0] === 0 && strpos($run[1], 'OK') === 0 && gp_upd_json_read(gp_upd_dir() . '/' . $a['stamp'] . '/manifest.json')['status'] === 'ok';
+})());
+$ps = file_get_contents(__DIR__ . '/../panel/index.php');
+t_ok('the Update route has the in-panel verify action behind the admin-only POST (CSRF) gate', strpos($ps, "\$do === 'verify'") !== false && strpos($ps, 'gp_upd_verify_inprocess(') !== false && strpos($ps, "\$do === 'verify'") > strpos($ps, "case 'update':"));
+
+// the overdue alert (2 minutes) and the Update page banner
+$ow = ut_install();
+$oz = gp_upd_stage(ut_make_zip($ow, '2027.08.08', array('docs/WAIT.md' => "w\n")), 'w.zip', 'a');
+$oa = gp_upd_apply($oz['plan']['id'], 'admin');
+$cmd = 'php ' . $ow . '/updates/verify.php ' . $oa['stamp'];
+$mw = gp_upd_json_read(gp_upd_dir() . '/' . $oa['stamp'] . '/manifest.json');
+$t_applied = (int)$mw['applied_at'];
+t_ok('overdue alert: none while the update waits less than 2 minutes', gp_upd_health($t_applied + 60) === array() && gp_upd_health($t_applied + GP_UPD_WAIT_ALERT) === array());
+$al_h = gp_upd_health($t_applied + GP_UPD_WAIT_ALERT + 1);
+t_ok('overdue alert: after 2 minutes a CRITICAL alert says the guard is OFF (guard.off exists) and carries the shell command', count($al_h) === 1 && $al_h[0][0] === 'unverified_off' && $al_h[0][2] === 'critical' && $al_h[0][1] === $cmd
+	&& strpos(gp_t('al_update_unverified_off'), 'guard is switched OFF') !== false);
+unlink($ow . '/guard.off');
+t_ok('overdue alert: without guard.off the alert is the plain "check has not finished" one', gp_upd_health($t_applied + 500)[0][0] === 'unverified');
+file_put_contents($ow . '/guard.off', "x\n");
+$al_all = gp_health_alerts(array('now' => time(), 'redis_up' => true, 'update_warn' => $al_h));
+t_ok('overdue alert: the dashboard lists it as critical with the command in its detail and a link to the Update page', count(array_filter($al_all, function ($a) use ($cmd) { return $a['id'] === 'update_unverified_off' && $a['level'] === 'critical' && $a['detail'] === $cmd && $a['link'] === 'update' && $a['key'] === 'al_update_unverified_off'; })) === 1);
+$gp_user_vars = array('env' => gp_upd_environment(), 'version' => gp_upd_version(), 'plan' => null, 'history' => gp_upd_history(10), 'res' => '', 'ts' => '', 'm' => null, 'token' => '', 'cron_lines' => array(), 'perms' => null, 'web_url' => 'recover.php');
+$uview_h = function ($file, array $vars) { extract($vars); ob_start(); require $file; return ob_get_clean(); };
+$page_new = $uview_h(__DIR__ . '/../panel/views/update.php', $gp_user_vars);
+t_ok('Update page: a waiting update shows the alert with the "Run the check now" button (a POST to the panel itself) and the web path as a second choice, no shell command yet',
+	strpos($page_new, 'name="do" value="verify"') !== false && strpos($page_new, 'id="update-waiting"') !== false && strpos($page_new, 'recover.php?a=verify') !== false && strpos($page_new, $cmd) === false);
+$mw['applied_at'] = time() - 300; gp_upd_json_write(gp_upd_dir() . '/' . $oa['stamp'] . '/manifest.json', $mw);
+$gp_user_vars['history'] = gp_upd_history(10);
+$page_old = $uview_h(__DIR__ . '/../panel/views/update.php', $gp_user_vars);
+t_ok('Update page: after 2 minutes it says the guard is OFF, shows the shell command, and keeps the button', strpos($page_old, 'guard is switched OFF') !== false && strpos($page_old, htmlspecialchars($cmd, ENT_QUOTES)) !== false && strpos($page_old, 'name="do" value="verify"') !== false);
+
+// ==========================================================================
 t_section('Users and roles: ACL matrix, demo leakage, sessions, safety rules, migration, fail closed, concurrency, CLI recovery');
 require_once __DIR__ . '/../panel/acl.php';
 require_once __DIR__ . '/../panel/demo.php';

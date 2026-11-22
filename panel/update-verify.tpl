@@ -10,11 +10,16 @@
 // runs one synthetic request through gv_run() in dry-run mode (nothing is logged, no output is sent). Any
 // exception, parse error or fatal error - including one that kills this request - rolls the update back
 // automatically with updates/rollback.php. On success it removes guard.off only when the updater created it.
-if (!defined('GP_RECOVER_WEB') && PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+//
+// Three ways to run it, so the check never depends on one web path: (1) panel/recover.php?a=verify (the redirect right after an
+// update), (2) the shell, (3) INSIDE the authenticated panel request (the "Run the check now" button, GP_VERIFY_INPROC), which
+// needs no extra URL at all. In (3) the panel loads this file from panel/update-verify.tpl and calls gpv_main() itself.
+if (!defined('GP_RECOVER_WEB') && !defined('GP_VERIFY_INPROC') && PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
-$GPV = array('stamp' => '', 'stage' => 'start', 'done' => false);
+$GLOBALS['GPV'] = array('stamp' => '', 'stage' => 'start', 'done' => false);   // $GLOBALS: this file may be loaded inside a function (the in-panel run)
 
-function gpv_dir() { return __DIR__; }
+// $GLOBALS['gpv_dir'] points a copy loaded from panel/ (the in-panel run) at the updates/ directory.
+function gpv_dir() { return isset($GLOBALS['gpv_dir']) ? $GLOBALS['gpv_dir'] : __DIR__; }
 function gpv_root() { return dirname(__DIR__); }
 
 function gpv_manifest() {
@@ -116,13 +121,14 @@ function gpv_shutdown() {
 	gpv_fail('the check stopped at stage ' . $GPV['stage'] . ' without a result');
 }
 
-function gpv_main($stamp, $key) {
+// $trusted: the caller is the authenticated panel (no key needed).
+function gpv_main($stamp, $key, $trusted = false) {
 	global $GPV;
 	if (!preg_match('/^\d{8}-\d{6}(-\d+)?$/', (string)$stamp)) { http_response_code(404); exit; }
 	$GPV['stamp'] = $stamp;
 	$m = gpv_manifest();
 	// Web: the one-time key from the updater, and only while the update is waiting for its check.
-	if (PHP_SAPI !== 'cli') {
+	if (PHP_SAPI !== 'cli' && !$trusted) {
 		if ($m === null || ($m['status'] ?? '') !== 'applied' || !isset($m['verify_key']) || !is_string($key)
 			|| !hash_equals((string)$m['verify_key'], $key)) {
 			usleep(300000);
@@ -174,5 +180,6 @@ function gpv_main($stamp, $key) {
 	}
 }
 
-if (PHP_SAPI === 'cli') { gpv_main(isset($argv[1]) ? $argv[1] : '', ''); }
+if (defined('GP_VERIFY_INPROC')) { /* the panel calls gpv_main($stamp, '', true) */ }
+elseif (PHP_SAPI === 'cli') { gpv_main(isset($argv[1]) ? $argv[1] : '', ''); }
 else { gpv_main(isset($_GET['ts']) && is_string($_GET['ts']) ? $_GET['ts'] : '', isset($_GET['k']) ? $_GET['k'] : ''); }
