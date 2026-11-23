@@ -6,6 +6,7 @@
 
 <div>
 	<h1 class="gp-page-title"><?= gp_e(gp_t('ovr_title')) ?></h1>
+	<p class="gp-page-sub"><?= gp_e(gp_t('ovr_intro')) ?></p>
 </div>
 
 <div class="gp-grid-2">
@@ -14,6 +15,12 @@
 	</div>
 	<div class="gp-note gp-note-strong">
 		<strong><?= gp_e(gp_t('ovr_deny')) ?>:</strong> <?= gp_e(gp_t('ovr_rule_deny')) ?>
+	</div>
+	<div class="gp-note gp-note-strong">
+		<strong><?= gp_e(gp_t('ovr_k_challenge')) ?> / <?= gp_e(gp_t('ovr_k_captcha')) ?>:</strong> <?= gp_e(gp_t('ovr_rule_chal')) ?>
+	</div>
+	<div class="gp-note">
+		<strong><?= gp_e(gp_t('ovr_precedence_title')) ?>:</strong> <?= gp_e(gp_t('ovr_precedence')) ?>
 	</div>
 </div>
 
@@ -26,41 +33,31 @@
 	<a href="index.php?r=iplists&amp;list=<?= gp_u($slist) ?>#ipl-entries"><?= gp_e(gp_t('ovr_shadow_link')) ?></a></div>
 <?php endforeach; ?>
 
-<div class="gp-card">
+<div class="gp-card" id="override-add">
 	<div class="gp-card-title"><?= gp_e(gp_t('ovr_add')) ?></div>
+	<?php $new_identity = isset($new_identity) ? (string)$new_identity : ''; ?>
+	<?= $new_identity !== '' ? gp_override_shared_note($new_identity) : '' ?>
 	<form method="post" action="index.php?r=overrides" class="gp-form">
 		<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 		<div class="gp-grid-2">
 			<label class="gp-field">
-				<span class="gp-label"><?= gp_e(gp_t('ovr_identity')) ?></span>
-				<input class="gp-input gp-ltr" type="text" name="identity" required
+				<span class="gp-label"><?= gp_e(gp_t('ovr_identity')) ?><?= gp_tip('ovr_identity') ?></span>
+				<input class="gp-input gp-ltr" type="text" name="identity" required value="<?= gp_e($new_identity) ?>"
 					placeholder="device id / ip">
 				<span class="gp-help"><?= gp_e(gp_t('id_first_step')) ?></span>
 			</label>
-			<label class="gp-field">
-				<span class="gp-label"><?= gp_e(gp_t('id_ttl')) ?></span>
-				<select class="gp-input" name="ttl">
-					<option value="3600"><?= gp_e(gp_plural(1, 'hour')) ?></option>
-					<option value="21600"><?= gp_e(gp_plural(6, 'hour')) ?></option>
-					<option value="86400" selected><?= gp_e(gp_plural(1, 'day')) ?></option>
-					<option value="604800"><?= gp_e(gp_plural(7, 'day')) ?></option>
-					<option value="2592000"><?= gp_e(gp_plural(30, 'day')) ?></option>
-				</select>
+			<div class="gp-field">
+				<?= gp_override_ttl_fields(3600) ?>
 				<span class="gp-help"><?= gp_e(gp_t('ovr_max_ttl')) ?></span>
-			</label>
+			</div>
 		</div>
-		<div class="gp-row-head">
-			<button class="gp-btn gp-btn-primary" type="submit" name="override" value="allow">
-				<?= gp_e(gp_t('id_allow')) ?></button>
-			<button class="gp-btn gp-btn-danger" type="submit" name="override" value="deny">
-				<?= gp_e(gp_t('id_deny')) ?></button>
-		</div>
+		<div class="gp-row-head"><?= gp_override_buttons() ?></div>
 	</form>
 	<?= gp_msg('override-add') ?>
 </div>
 
 <?= gp_filter_form_html('overrides', array(
-	'kind' => array('ovr_kind', 'is', array('allow', 'deny'), 'flt_kind'),
+	'kind' => array('ovr_kind', 'is', gp_override_kinds(), 'flt_kind'),
 	'identity' => array('ovr_identity', 'is', array(), 'flt_ip')), $filter) ?>
 
 <div class="gp-card">
@@ -76,34 +73,30 @@
 		<?php foreach ($items as $item): ?>
 		<div class="gp-row">
 			<div class="gp-row-head">
-				<span class="gp-badge <?= $item['kind'] === 'allow' ? 'gp-badge-on' : 'gp-badge-bad' ?>">
-					<?= gp_e($item['kind'] === 'allow' ? gp_t('ovr_allow') : gp_t('ovr_deny')) ?>
-				</span>
+				<?= gp_override_badge($item['kind']) ?>
 				<span class="gp-mono gp-ltr gp-truncate"><?= gp_e($item['identity']) ?></span>
 				<span style="margin-inline-start:auto" class="gp-mono">
-					<?= gp_e(gp_t('ovr_remaining')) ?>:
-					<?= $item['ttl'] === null ? gp_e(gp_t('unknown'))
-						: gp_e(gp_age(time() - (int)$item['ttl'])) ?>
+					<?= gp_e(gp_t('ovr_remaining')) ?>: <?= gp_e(gp_override_expires_text($item['ttl'])) ?>
 				</span>
 			</div>
+			<?php $shared = gp_override_shared_note($item['identity']); echo $shared; ?>
 			<div class="gp-row-meta">
 				<a class="gp-btn gp-btn-ghost gp-btn-sm"
 					href="index.php?r=identity&amp;id=<?= gp_u($item['identity']) ?>">
 					<?= gp_e(gp_t('id_title')) ?></a>
-				<form method="post" action="index.php?r=overrides" style="display:inline">
+				<form method="post" action="index.php?r=overrides" class="gp-retime">
 					<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 					<input type="hidden" name="identity" value="<?= gp_e($item['identity']) ?>">
-					<?php // "Extend" must never shorten: keep what is left when that is more than a day. ?>
-					<input type="hidden" name="ttl" value="<?= (int)max(86400, (int)($item['ttl'] ?? 0)) ?>">
+					<input type="hidden" name="kind" value="<?= gp_e($item['kind']) ?>">
 					<input type="hidden" name="from" value="list">
-					<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit"
-						name="override" value="<?= gp_e($item['kind']) ?>">
-						<?= gp_e(gp_t('ovr_extend')) ?></button>
+					<?= gp_override_ttl_fields(3600, 'ttl', true) ?>
+					<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit" name="override" value="retime"><?= gp_e(gp_t('ovr_retime')) ?></button><?= gp_tip('ovr_retime') ?>
 				</form>
 				<form method="post" action="index.php?r=overrides" style="display:inline"
 					data-confirm="<?= gp_e(gp_t('ovr_clear')) ?>?">
 					<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 					<input type="hidden" name="identity" value="<?= gp_e($item['identity']) ?>">
+					<input type="hidden" name="from" value="list">
 					<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit"
 						name="override" value="clear"><?= gp_e(gp_t('ovr_clear')) ?></button>
 				</form>

@@ -209,9 +209,18 @@ who steals the session.
   `hold`, `cap`. The CSV keeps the short columns and adds `rs_names`. All codes: [14-REASON-CODES.md](14-REASON-CODES.md) (generated from `panel/reasons.php`).
 - **Identity drill-down** — every `gv:` verdict for one device or IP on one page:
   the `ctl.py show` output that answers "why was this customer blocked?".
-- **Overrides** — the `ctl.py allow` / `deny` five-second fix, with the same TTL
-  ceiling of 30 days and the same rule that allow is ungated and deny respects
-  `enforce.block`.
+- **Temporary blocks & allows** (route `overrides`) — the `ctl.py allow` / `deny` / `challenge` / `captcha` five-second fix
+  for ONE address or ONE device, with a time limit that ends by itself (ceiling 30 days). Allow is ungated, deny respects
+  `enforce.block`, a challenge or CAPTCHA acts at once (an operator action like an enforced rule). Precedence: allow > deny >
+  CAPTCHA > challenge; a device key and an address key count the same; a verified crawler keeps its pass; an enforced allow list is
+  checked first. The form has the presets 5 min, 15 min, 30 min, 1 h, 6 h, 24 h, 7 d, 30 d and a custom number of minutes (1 to 43200);
+  every entry shows the time left and the absolute expiry (UTC) and can be **extended, shortened** (*Set time left*) or removed. For an
+  address in `100.64.0.0/10` or in a known mobile network (ASN from the compiled GeoIP ASN database when there is one: MCI, Irancell,
+  Rightel and a few large carriers; a hint, not a complete list) the page and the result message warn that many users share the address.
+  **Quick actions** (*Block 15 min*, *Challenge 1 h*, *CAPTCHA 1 h*, *Allow 1 h*, *Custom...*) are in the details of every log row and
+  on the Identity page, for the address and for the device (admin only; the POST is the admin-only Overrides route, CSRF-checked and
+  audited with `via: quick`); they return to the page they were pressed on. Audit events: `override_allow`, `override_deny`,
+  `override_challenge`, `override_captcha`, `override_retime`, `override_clear`.
 - **Replay** — `replay.py` against real history before a threshold change, run
   natively in PHP through the guard's own `gv_effective_score()` and
   `gv_decide()`, so the preview and the live decision cannot drift.
@@ -260,7 +269,7 @@ who steals the session.
 - **IP feeds** (IP lists -> **Feeds** tab) — provider ranges (Google crawlers, UptimeRobot, ArvanCloud, Cloudflare presets) fetched from an HTTPS URL into a managed allow list or into the trusted CDN ranges; see [IP feeds](#ip-feeds) below.
 - **IP lists** — named allow / block lists of addresses and CIDRs, kept as files and compiled into one range file per type
   that the guard searches without Redis (see [02-ARCHITECTURE.md](02-ARCHITECTURE.md#ip-allow--block-lists)). The single-address
-  overrides on the Overrides page stay as they are. Tabs: **Lists** (table with type, mode, enabled, entry and address counts,
+  overrides on the Temporary blocks & allows page stay as they are. An entry may carry `# expires=2026-11-30` (end of that day, UTC) or `# expires=2026-11-30T14:30`: the compile (panel and `iplist.py`) ignores an expired entry and removes its line, the Entries tab shows the expiry, and the nightly job recompiles when one has expired. Tabs: **Lists** (table with type, mode, enabled, entry and address counts,
   hits 24 h / 7 d and last hit from the snapshot; filters name / type / mode / status, each include or exclude, as chips; enable /
   disable, switch monitor / enforce, edit, export, delete), **Editor** (name, type, mode, enabled, note; paste text or upload a
   file; the size is checked against `upload_max_filesize` / `post_max_size` and a bigger file is to be copied to `lists/` over SFTP),

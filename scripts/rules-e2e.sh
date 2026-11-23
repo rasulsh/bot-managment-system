@@ -658,6 +658,78 @@ NE7=$(printf '%s' "$page" | nonce_of); AE7=$("$PHP_BIN" "$ROOT/scripts/captcha-s
 eq "M74 solving it gives a CAPTCHA-level token" "$(curl -s -o /dev/null -w '%{http_code}' -D "$WORK/hdr.txt" -X POST -H 'User-Agent: x escbot' -H "X-GV: $NE7" -H "X-GV-A: $AE7" -H "X-GV-P: $PE7" -c "$WORK/e7.jar" "http://127.0.0.1:$PORT2/")" 204
 eq "M75 ...and the flag is gone" "$(nkeys)" 0
 eq "M76 ...the pages load with the token" "$(get2 'x escbot' /m76 -b "$WORK/e7.jar")" 200
+
+echo "== O. temporary challenge / CAPTCHA overrides (gv:chal:<ip>, '1' = challenge, 'c' = CAPTCHA). Server 1 has every enforce switch OFF: the override alone challenges"
+write_rules
+R flushall
+R set "gv:chal:127.0.0.1" 1 EX 60
+eq "O1 an override challenges this one client although enforce.challenge is OFF (a rule-like operator action): the check page (503)" "$(get 'x ovrbot' /o1)" 503
+has '"ovr":"challenge"'; ok "O2 ...the row: ovr challenge, act challenge, served (sh 0), OVR_CHALLENGE" "$([ $? -eq 0 ] && has '"act":"challenge"' && has '"sh":0' && has '"OVR_CHALLENGE"' && echo 1 || echo 0)"
+ok "O3 a client WITHOUT the override is untouched (another address through the trusted proxy)" "$([ "$(get 'x ovrbot' /o3 -H 'X-Forwarded-For: 9.9.9.9')" = 200 ] && echo 1 || echo 0)"
+page=$(body 'x ovrbot' /o4 -b "$WORK/o1.jar" -c "$WORK/o1.jar"); NO=$(printf '%s' "$page" | nonce_of); CO=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NO")
+eq "O5 solving the check page gives a token" "$(hpost "$PORT" "$NO" "$CO" 'w0.h0.l0.t900' "$WORK/o1.jar" 'x ovrbot')" 204
+eq "O6 with the token the override no longer challenges (no loop)" "$(get 'x ovrbot' /o6 -b "$WORK/o1.jar")" 200
+eq "O7 a POST (challenge.gate_post is off: not a gated page) is served, and only LOGGED as a shadow challenge" "$(get 'x ovrbot' /o7 -X POST)" 200
+has 'OVR_CHALLENGE'; ok "O7b ...the row carries OVR_CHALLENGE with sh 1" "$([ $? -eq 0 ] && has '"sh":1' && echo 1 || echo 0)"
+R del "gv:chal:127.0.0.1"
+eq "O8 removing the override: a token-less request is served again" "$(get 'x ovrbot' /o8)" 200
+
+echo "-- O: CAPTCHA override"
+R set "gv:chal:127.0.0.1" c EX 60
+page=$(body 'x ovrcap' /o10 -b "$WORK/o2.jar" -c "$WORK/o2.jar")
+ok "O10 a CAPTCHA override: the next page load is the image CAPTCHA" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
+has '"ovr":"captcha"'; ok "O11 ...logged with OVR_CAPTCHA and cap show" "$([ $? -eq 0 ] && has 'OVR_CAPTCHA' && has '"cap":"show"' && echo 1 || echo 0)"
+ok "O12 ...counted against the per-IP CAPTCHA budget (read in its own GET: no rule or flag read it)" "$([ "$(redis-cli -p "$RPORT" get gv:cpi:127.0.0.1 | tr -d '\r')" -ge 1 ] && echo 1 || echo 0)"
+page=$(body 'x ovrpow' /o12 -b "$WORK/o3.jar" -c "$WORK/o3.jar")
+NC=$(printf '%s' "$page" | nonce_of); AC=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$NC" 4 2>/dev/null); PC=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NC")
+eq "O13 solving it gives a CAPTCHA-level token" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: x ovrpow' -H "X-GV: $NC" -H "X-GV-A: $AC" -H "X-GV-P: $PC" -b "$WORK/o3.jar" -c "$WORK/o3.jar" "http://127.0.0.1:$PORT/")" 204
+eq "O14 with a CAPTCHA-level token the override lets the pages through" "$(get 'x ovrpow' /o14 -b "$WORK/o3.jar")" 200
+R set "gv:chal:127.0.0.1" 1 EX 60
+page=$(body 'x ovrpow2' /o15 -b "$WORK/o4.jar" -c "$WORK/o4.jar"); NP2=$(printf '%s' "$page" | nonce_of); CP2=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NP2")
+eq "O15 a proof-of-work handshake gives a (PoW-level) token under a challenge override" "$(hpost "$PORT" "$NP2" "$CP2" 'w0.h0.l0.t900' "$WORK/o4.jar" 'x ovrpow2')" 204
+R set "gv:chal:127.0.0.1" c EX 60
+eq "O16 a PROOF-OF-WORK token does not satisfy a CAPTCHA override: the CAPTCHA is shown (503)" "$(get 'x ovrpow2' /o16 -b "$WORK/o4.jar")" 503
+R del "gv:chal:127.0.0.1"
+
+echo "-- O: precedence"
+R set "gv:chal:127.0.0.1" 1 EX 60
+R set "gv:allow:127.0.0.1" 1 EX 60
+eq "O20 an ALLOW override beats a challenge override" "$(get 'x ovrbot' /o20)" 200
+has '"act":"allow_override"'; ok "O21 ...logged as allow_override" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+R del "gv:allow:127.0.0.1"
+ilist partners 1 allow enforce true 127.0.0.1
+lists_compile
+eq "O22 an enforced ALLOW LIST beats a challenge override (the list is checked first, as for a deny)" "$(get 'x ovrbot' /o22)" 200
+ilist none 1 block enforce false 1.2.3.4
+lists_compile
+write_rules "$(rule r-blk Blk enforce block '["ovrbot"]')"
+eq "O23 an enforced BLOCK rule keeps priority over a challenge override" "$(get 'x ovrbot' /o23)" 403
+write_rules "$(rule r-chl Chl enforce challenge '["ovrbot"]')"
+eq "O24 a challenge rule and a challenge override together: one check page" "$(get 'x ovrbot' /o24)" 503
+R set "gv:chal:127.0.0.1" c EX 60
+page=$(body 'x ovrbot' /o25)
+ok "O25 a CAPTCHA override upgrades a rule's plain challenge to the CAPTCHA" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
+write_rules
+R set "gv:chal:127.0.0.1" 1 EX 60
+R set "gv:botok:127.0.0.1" 1 EX 60
+eq "O26 a VERIFIED crawler keeps its pass (it cannot solve a challenge)" "$(get "$GBOT" /o26)" 200
+has '"act":"allow_bot"'; ok "O27 ...logged as allow_bot" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+R del "gv:botok:127.0.0.1"
+eq "O28 an EXEMPT path is never challenged" "$(get 'x ovrbot' /exempt-me)" 200
+R del "gv:cpi:127.0.0.1"; R set "gv:chal:127.0.0.1" c EX 60
+eq "O29 enforced (server 2) the override acts the same: a CAPTCHA override shows the image test there too" "$(body2 'x ovrbot' /o29 | grep -c 'data:image/png;base64,' | tr -d ' ')" 1
+R del "gv:chal:127.0.0.1"
+
+echo "-- O: expiry and cost"
+R set "gv:chal:127.0.0.1" 1 PX 400
+eq "O30 a challenge override with a TTL acts while it lives" "$(get 'x ovrttl' /o30)" 503
+sleep 0.7
+eq "O31 ...and the request is back to normal when the TTL has passed" "$(get 'x ovrttl' /o31)" 200
+ca=$(conns); get 'x ovrcost' /o32 >/dev/null; cb=$(conns)
+R set "gv:chal:127.0.0.1" 1 EX 60
+cc=$(conns); get 'x ovrcost' /o33 >/dev/null; cd2=$(conns)
+eq "O33 reading the override costs no extra round trip: the same number of connections with and without it (the keys ride in the existing pipeline)" "$(( cd2 - cc ))" "$(( cb - ca ))"
+R del "gv:chal:127.0.0.1"
 # the cookie as the second signal: an escalated client whose flag is NOT in Redis (written by a handshake while Redis was down, or evicted) still gets the CAPTCHA
 code8=$(hpost "$PORT2" "$NE8" "$CE8" 'w1.h1.t900' "$WORK/e8.jar"); R flushall
 eq "M77 e8 escalates (202) and its Redis flag is removed again (flushall)" "$code8.$(nkeys)" "202.0"

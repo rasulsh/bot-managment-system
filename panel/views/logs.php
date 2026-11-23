@@ -313,6 +313,13 @@ $chips = gp_filter_chips($f, array_map(function ($d) { return gp_t($d[0]); }, $f
 			</section>
 			<?php endforeach; ?>
 
+			<?php $qa_back = gp_logs_qs($f); $qa_ip = gp_quick_actions_html((string)($row['ip'] ?? ''), $qa_back, $role ?? ''); $qa_dev = gp_quick_actions_html((string)($row['dev'] ?? ''), $qa_back, $role ?? ''); ?>
+			<?php if ($qa_ip !== '' || $qa_dev !== ''): ?>
+			<section class="gp-log-sec gp-log-sec-wide">
+				<h3 class="gp-log-sec-title"><?= gp_e(gp_t('ovr_quick_title')) ?></h3>
+				<div class="gp-quick-list"><?= $qa_ip ?><?= $qa_dev ?></div>
+			</section>
+			<?php endif; ?>
 			<section class="gp-log-sec">
 				<h3 class="gp-log-sec-title"><?= gp_e(gp_t('logs_outcome')) ?></h3>
 				<?php if ($out !== null): ?>

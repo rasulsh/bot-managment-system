@@ -25,6 +25,7 @@ require_once __DIR__ . '/replay.php';
 require_once __DIR__ . '/filters.php';
 require_once __DIR__ . '/ui.php';
 require_once __DIR__ . '/reasons.php';
+require_once __DIR__ . '/overrides.php';
 require_once __DIR__ . '/health.php';
 require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/rules.php';
@@ -319,10 +320,15 @@ switch ($gp_route) {
 	case 'overrides':
 		if ($gp_post) {
 			gp_handle_override_post($gp_user, $gp_ip);
+			// A quick action returns to the page it was pressed on (Logs, Identity, Live).
+			$qb = (($_POST['from'] ?? '') === 'quick') ? gp_quick_back($_POST['back'] ?? '') : null;
+			if ($qb !== null) { gp_redirect($qb[0], $qb[1]); }
 			gp_redirect('overrides');
 		}
 		$ofilter = gp_filter_parse($_GET, array('kind' => 'choice', 'identity' => 'ident'));
+		$onew = is_string($_GET['new'] ?? null) ? substr(trim($_GET['new']), 0, 128) : '';
 		gp_render('overrides', array(
+			'new_identity' => preg_match('/^[A-Za-z0-9._:-]*$/', $onew) ? $onew : '',
 			'filter'   => $ofilter,
 			'items_all' => $oall = gp_overrides_list(),
 			'items'    => gp_overrides_filter($oall, $ofilter),
@@ -838,8 +844,17 @@ function gp_logs_export_csv(array $rows) {
 function gp_handle_override_post($user, $ip) {
 	$action = (string)($_POST['override'] ?? '');
 	$identity = trim((string)($_POST['identity'] ?? ''));
-	$ttl = (int)($_POST['ttl'] ?? 3600);
+	$ttl = gp_override_ttl_from_post($_POST);
 	if ($identity === '') { return; }
+	// A quick action (a log row, the identity page): one button = one kind and one time.
+	$quick = isset($_POST['quick']) && is_string($_POST['quick']) ? $_POST['quick'] : '';
+	if ($quick !== '') {
+		$specs = gp_quick_specs();
+		if (!isset($specs[$quick])) { gp_flash('error', gp_t('err_generic')); return; }
+		$action = $specs[$quick][0];
+		$ttl = $specs[$quick][1];
+	}
+	$via = $quick !== '' ? 'quick' : (string)($_POST['from'] ?? '');
 
 	if ($action === 'clear') {
 		if (gp_override_clear($identity)) {
@@ -849,17 +864,33 @@ function gp_handle_override_post($user, $ip) {
 		}
 		return;
 	}
-	if ($action === 'allow' || $action === 'deny') {
+	// Change the time left of one that exists (extend or shorten).
+	if ($action === 'retime') {
+		$kind = (string)($_POST['kind'] ?? '');
+		if ($ttl > 0 && gp_override_retime($kind, $identity, $ttl)) {
+			gp_audit_append(array('event' => 'override_retime', 'actor' => $user, 'ip' => $ip, 'key' => $identity,
+				'old' => array('kind' => $kind), 'new' => array('ttl' => $ttl)));
+			gp_flash('ok', gp_t('ovr_retimed'));
+		} else {
+			gp_flash('error', gp_t($ttl > 0 ? 'ovr_gone' : 'ovr_bad_ttl'));
+		}
+		return;
+	}
+	if (in_array($action, gp_override_kinds(), true)) {
+		if ($ttl <= 0) { gp_flash('error', gp_t('ovr_bad_ttl')); return; }
 		if (gp_override_set($action, $identity, $ttl)) {
 			gp_audit_append(array('event' => 'override_' . $action, 'actor' => $user,
 				'ip' => $ip, 'key' => $identity, 'old' => null,
-				'new' => array('ttl' => $ttl)));
+				'new' => array('ttl' => $ttl, 'via' => $via)));
 			gp_flash('ok', gp_t('ovr_added'));
 			// A deny under an ENFORCED allow list does nothing: the allow list is checked first.
-			if ($action === 'deny') {
+			if ($action === 'deny' || $action === 'challenge' || $action === 'captcha') {
 				$sh = gp_iplists_deny_shadow(array(gp_identity_canon($identity)));
 				if ($sh) { gp_flash('warn', str_replace('%s', (string)reset($sh), gp_t('ovr_deny_shadowed'))); }
 			}
+			// An address many people share (a mobile network, carrier-grade NAT): say so while the operator can still change it.
+			$shared = $action === 'allow' ? null : gp_override_shared_ip(gp_identity_canon($identity));
+			if ($shared !== null) { gp_flash('warn', str_replace('%s', $shared[1], gp_t('ovr_shared_' . $shared[0])) . ' ' . gp_t('ovr_shared_advice')); }
 		} else {
 			gp_flash('error', gp_t('err_generic'));
 		}

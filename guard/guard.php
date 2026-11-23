@@ -1145,12 +1145,28 @@ function gv_effective_score($sc, $rep, $ml, $clf, array $cfg) {
 // device allow still overrides an IP deny for the same client, and the IP allow
 // is checked before the IP deny so allow-wins holds for IP identities too.
 // A key that was not read (no device id) is passed as null.
-function gv_override_from($allow_dev, $allow_ip, $deny_dev, $deny_ip) {
+//
+// Temporary challenge (chal:<identity>, value '1' = the proof-of-work challenge, 'c' = the CAPTCHA): below allow and deny,
+// above nothing. Precedence, strictest restriction last: allow > deny > captcha > challenge. A device key and an IP key
+// count the same; when both are set the CAPTCHA wins.
+function gv_override_from($allow_dev, $allow_ip, $deny_dev, $deny_ip, $chal_dev = null, $chal_ip = null) {
 	if ($allow_dev === '1') { return 'allow'; }
 	if ($allow_ip  === '1') { return 'allow'; }
 	if ($deny_dev  === '1') { return 'deny'; }
 	if ($deny_ip   === '1') { return 'deny'; }
+	if ($chal_dev === 'c' || $chal_ip === 'c') { return 'captcha'; }
+	if ($chal_dev === '1' || $chal_ip === '1') { return 'challenge'; }
 	return '';
+}
+
+// What a temporary challenge / CAPTCHA override asks of this request: array(intended, served) like gv_rule_act. It is an operator
+// action like an ENFORCED RULE, so it does not depend on enforce.challenge (that switch is the guard's own challenge; an override
+// exists to challenge ONE client while the rest is in monitor mode). The client is challenged until it holds a valid token (a
+// CAPTCHA override: a CAPTCHA-level token); only gated requests are asked, a CAPTCHA only for a page request when it can be drawn.
+// A deny override, by contrast, still follows enforce.block.
+function gv_override_act($ovr, $tok, $gate, $page, $level, $nav, $cap_ok) {
+	if ($ovr !== 'challenge' && $ovr !== 'captcha') { return array('', ''); }
+	return gv_rule_act(array('mode' => 'enforce', 'action' => $ovr), $tok, $gate, $page, $level, $nav, $cap_ok);
 }
 
 // Read an operator override (one round trip). Returns 'allow', 'deny' or ''.
@@ -1161,6 +1177,8 @@ function gv_override($conn, $ip, $dev) {
 		'allow_ip'  => ($ip  !== '') ? array('GET', gv_key('allow:' . $ip))  : null,
 		'deny_dev'  => ($dev !== '') ? array('GET', gv_key('deny:' . $dev))  : null,
 		'deny_ip'   => array('GET', gv_key('deny:' . $ip)),
+		'chal_dev'  => ($dev !== '') ? array('GET', gv_key('chal:' . $dev))  : null,
+		'chal_ip'   => ($ip  !== '') ? array('GET', gv_key('chal:' . $ip))   : null,
 	);
 	$send = array_values(array_filter($cmds));
 	$r = gv_redis_pipeline($conn, $send);
@@ -1168,7 +1186,7 @@ function gv_override($conn, $ip, $dev) {
 	$v = array();
 	$i = 0;
 	foreach ($cmds as $label => $cmd) { $v[$label] = ($cmd === null) ? null : $r[$i++]; }
-	return gv_override_from($v['allow_dev'], $v['allow_ip'], $v['deny_dev'], $v['deny_ip']);
+	return gv_override_from($v['allow_dev'], $v['allow_ip'], $v['deny_dev'], $v['deny_ip'], $v['chal_dev'], $v['chal_ip']);
 }
 
 // The Phase 1 decision, unchanged except that it now judges the effective
@@ -1581,9 +1599,11 @@ function gv_run($t0) {
 			$reads['clf']       = array('GET', gv_key('clf:' . $dev));
 			$reads['allow_dev'] = array('GET', gv_key('allow:' . $dev));
 			$reads['deny_dev']  = array('GET', gv_key('deny:' . $dev));
+			$reads['chal_dev']  = array('GET', gv_key('chal:' . $dev));
 		}
 		if ($f['ip'] !== '') { $reads['allow_ip'] = array('GET', gv_key('allow:' . $f['ip'])); }
 		$reads['deny_ip'] = array('GET', gv_key('deny:' . $f['ip']));
+		if ($f['ip'] !== '') { $reads['chal_ip'] = array('GET', gv_key('chal:' . $f['ip'])); }       // temporary challenge: the same pipeline
 		$reads['hp']      = array('GET', gv_key('hp:' . $f['ip']));
 		// A CAPTCHA may be needed (a captcha rule matched, an escalation flag is set, or CAPTCHA instead of a device 429 is on):
 		// the per-IP CAPTCHA budget is READ in this same pipeline, never in a round trip of its own. Every other request
@@ -1727,7 +1747,8 @@ function gv_run($t0) {
 	// guard less strict and must work the instant it is set.
 	$st['ovr'] = gv_override_from(
 		($st['dev'] !== '') ? $rv('allow_dev') : null, $rv('allow_ip'),
-		($st['dev'] !== '') ? $rv('deny_dev') : null, $rv('deny_ip'));
+		($st['dev'] !== '') ? $rv('deny_dev') : null, $rv('deny_ip'),
+		($st['dev'] !== '') ? $rv('chal_dev') : null, $rv('chal_ip'));
 	if ($st['ovr'] === 'allow') {
 		gv_finish($conn, $st);
 		gv_emit($f, $st, 'allow_override', 0, $t0, $log);
@@ -1767,6 +1788,20 @@ function gv_run($t0) {
 		$ra = array('captcha', 'captcha');
 		$st['rs'][] = 'CAPT_ESC';
 	}
+	// A temporary challenge / CAPTCHA override (Temporary blocks page). Read in the pipeline above, decided here exactly like an
+	// enforced rule of that action; a rule that asks for more (a block, or a CAPTCHA over a challenge) keeps priority.
+	$capb_x = false;                              // the CAPTCHA budget, read on its own only for an override (no rule or flag read it)
+	if ($st['ovr'] === 'challenge' || $st['ovr'] === 'captcha') {
+		if ($st['ovr'] === 'captcha' && !$cap_cand) { $is_nav = gv_is_nav($f); $cap_ok = gv_captcha_available(); }
+		$oa = gv_override_act($st['ovr'], $st['tok'], $gate, $page, $tl, $is_nav, $cap_ok);
+		if ($oa[0] !== '') {
+			$st['rs'][] = ($st['ovr'] === 'captcha' ? 'OVR_CAPTCHA' : 'OVR_CHALLENGE');
+			if ($ra[0] === '' || ($ra[1] === 'challenge' && $oa[1] === 'captcha')) { $ra = $oa; }
+			if ($ra[1] === 'captcha' && !$cap_cand && gv_redis_alive($conn)) {
+				$capb_x = gv_redis_cmd($conn, array('GET', gv_key('cpi:' . $f['ipn'])));
+			}
+		}
+	}
 	$cap_over = false;                            // the client is over its per-IP CAPTCHA budget
 	$cap_dev = false;                             // CAPTCHA instead of the device-budget 429
 	$cap_count = ($ra[1] === 'captcha') ? 'pipe' : '';
@@ -1796,6 +1831,7 @@ function gv_run($t0) {
 		// its budget adds NOTHING (no key, no write): it gets a 429 below.
 		if ($cap_count === 'pipe') {
 			$cb = $rv('capb');
+			if ($cb === false) { $cb = $capb_x; }
 			if (is_numeric($cb) && (int)$cb >= (int)$cfg['captcha']['ip_budget']) { $cap_over = true; }
 			else { $items[] = array(gv_key('cpi:' . $f['ipn']), (int)$cfg['captcha']['ip_window']); }
 		}
@@ -1897,7 +1933,7 @@ function gv_run($t0) {
 		exit;
 	}
 	$bits  = max(0, min(24, (int)$cfg['challenge']['pow_bits']));
-	if ($ra[1] === 'challenge' && (int)$rule['pow_bits'] > 0) { $bits = (int)$rule['pow_bits']; }
+	if ($ra[1] === 'challenge' && $rule !== null && (int)$rule['pow_bits'] > 0) { $bits = (int)$rule['pow_bits']; }
 	$nonce = gv_nonce_make($cfg['secret'], $f['ua'], !empty($cfg['challenge']['bind_ip']) ? $f['ip'] : '', $bits);
 	gv_challenge_render($nonce, $cfg['strings'], $bits);
 	exit;

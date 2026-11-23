@@ -183,7 +183,9 @@ Changing `holdout_salt` reshuffles who is in the holdout, so change it rarely.
 python3 analyzer/ctl.py show  <device_id|ip>     # run this FIRST
 python3 analyzer/ctl.py allow <device_id> --ttl 3600
 python3 analyzer/ctl.py deny  <device_id|ip> --ttl 86400
-python3 analyzer/ctl.py list  [--kind allow|deny]
+python3 analyzer/ctl.py challenge <device_id|ip> --ttl 3600    # the check page until the client holds a token
+python3 analyzer/ctl.py captcha   <device_id|ip> --ttl 3600    # the image CAPTCHA until the client solved one
+python3 analyzer/ctl.py list  [--kind allow|deny|challenge|captcha]
 python3 analyzer/ctl.py clear <device_id|ip>
 ```
 

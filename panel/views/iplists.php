@@ -183,6 +183,7 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 			<span class="gp-label"><?= gp_e(gp_t('ipl_f_text')) ?><?= gp_tip('ipl_text') ?></span>
 			<textarea class="gp-textarea gp-ltr" name="text" rows="8" spellcheck="false" placeholder="203.0.113.0/24&#10;2001:db8::/32&#10;198.51.100.7"></textarea>
 			<?php if ($form['id'] !== ''): ?><span class="gp-help"><?= gp_e(gp_t('ipl_h_text_edit')) ?></span><?php endif; ?>
+			<span class="gp-help"><?= gp_e(gp_t('ipl_h_expires')) ?></span>
 			<?php if (isset($errors['text'])): ?><span class="gp-error" role="alert"><?= gp_e(gp_t('ipl_err_' . $errors['text'])) ?></span><?php endif; ?>
 		</label>
 		<label class="gp-field">
@@ -241,6 +242,9 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 	<p class="gp-help"><?= gp_num($entries[1]) ?> / <?= gp_num($entries[2]) ?> <?= gp_e(gp_t('ipl_c_entries')) ?><?= $entries[3] ? ', ' . gp_num($entries[3]) . ' ' . gp_e(gp_t('ipl_invalid_short')) : '' ?>
 		<?= $entries[1] > GP_IPL_SHOW_MAX ? '— ' . gp_e(gp_t('ipl_first')) . ' ' . gp_num(GP_IPL_SHOW_MAX) : '' ?></p>
 	<?php $ec = ($status && isset($status['lists'][$eid]) && is_array($status['lists'][$eid])) ? $status['lists'][$eid] : array(); ?>
+	<?php if ($ec && (int)($ec['expired'] ?? 0) > 0): ?>
+	<div class="gp-note" role="status"><?= gp_e(str_replace('%d', (string)(int)$ec['expired'], gp_t('ipl_expired_removed'))) ?></div>
+	<?php endif; ?>
 	<?php if ($ec && ((int)($ec['dropped_n'] ?? 0) > 0 || (int)($ec['invalid'] ?? 0) > 0)): ?>
 	<div class="gp-note gp-note-strong" role="status"><strong><?= gp_e(gp_t('ipl_dropped_title')) ?>:</strong>
 		<?php foreach ((array)($ec['dropped'] ?? array()) as $why => $n): if ((int)$n > 0): ?><span class="gp-badge gp-badge-warn"><?= gp_e(gp_t('ipl_why_' . $why)) ?>: <?= gp_e(gp_num((int)$n)) ?></span> <?php endif; endforeach; ?>
@@ -248,8 +252,9 @@ gp_tab_begin('ipl', 'lists', $it['lists']);
 		<?php foreach ((array)($ec['invalid_samples'] ?? array()) as $sm): ?><br><?= gp_e(gp_t('ipl_c_line') . ' ' . (string)$sm[0] . ': ' . (string)$sm[1]) ?><?php endforeach; ?></span></div>
 	<?php endif; ?>
 	<?php if ($entries[0]): ?>
-	<div class="gp-table-wrap"><table class="gp-table"><thead><tr><th><?= gp_e(gp_t('ipl_c_line')) ?></th><th><?= gp_e(gp_t('ipl_c_text')) ?></th><th><?= gp_e(gp_t('ipl_c_family')) ?></th></tr></thead><tbody>
-		<?php foreach ($entries[0] as $en): ?><tr><td class="gp-mono"><?= gp_e((string)$en['line']) ?></td><td class="gp-mono gp-ltr"><?= gp_e($en['text']) ?></td><td class="gp-mono">IPv<?= gp_e((string)$en['v']) ?></td></tr><?php endforeach; ?>
+	<div class="gp-table-wrap"><table class="gp-table"><thead><tr><th><?= gp_e(gp_t('ipl_c_line')) ?></th><th><?= gp_e(gp_t('ipl_c_text')) ?></th><th><?= gp_e(gp_t('ipl_c_family')) ?></th><th><?= gp_e(gp_t('ipl_c_expires')) ?></th></tr></thead><tbody>
+		<?php foreach ($entries[0] as $en): ?><tr><td class="gp-mono"><?= gp_e((string)$en['line']) ?></td><td class="gp-mono gp-ltr"><?= gp_e($en['text']) ?></td><td class="gp-mono">IPv<?= gp_e((string)$en['v']) ?></td>
+			<td class="gp-mono"><?php if (!empty($en['exp'])): ?><span class="gp-badge <?= (int)$en['exp'] <= time() ? 'gp-badge-warn' : 'gp-badge-off' ?>"><?= gp_e(gmdate('Y-m-d H:i', (int)$en['exp'])) ?> UTC<?= (int)$en['exp'] <= time() ? ' (' . gp_e(gp_t('ipl_expired_word')) . ')' : '' ?></span><?php else: ?>&mdash;<?php endif; ?></td></tr><?php endforeach; ?>
 	</tbody></table></div>
 	<?php endif; endif; ?>
 </div>

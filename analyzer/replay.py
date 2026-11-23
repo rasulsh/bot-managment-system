@@ -40,6 +40,7 @@ ACTIONS = ('allow', 'challenge', '403', '429')
 
 # Rows whose outcome the decision engine never produced: they short-circuit
 # before the decision step, so replaying them would be meaningless.
+OPERATOR_CHALLENGE = ('challenge', 'captcha')
 NON_DECISION_ACTS = ('exempt', 'allow_bot', '404_hp', 'token_issued',
                      'nonce_bad', 'nonce_replay', 'pow_bad', 'mint_limited',
                      'allow_override', 'allow_preview')
@@ -126,6 +127,11 @@ def replay_rows(rows, base_cfg, cand_cfg, identity_labels=None):
             result['skipped_non_decision'] += 1
             continue
         if act not in ACTIONS:
+            result['skipped_non_decision'] += 1
+            continue
+        # A temporary challenge / CAPTCHA override (ovr = challenge | captcha) is an operator action, not a decision of the
+        # scoring being replayed: skipped like an allow override.
+        if str(row.get('ovr') or '') in OPERATOR_CHALLENGE:
             result['skipped_non_decision'] += 1
             continue
 

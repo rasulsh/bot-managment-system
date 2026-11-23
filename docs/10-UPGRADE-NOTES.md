@@ -2,6 +2,16 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Temporary blocks & allows (2026.11.32)
+
+* **New:** the Overrides page is now **Temporary blocks & allows** (route unchanged): presets from 5 minutes, a custom number of minutes, the time left and the exact expiry, extend / shorten / remove, and a new kind **Challenge** / **CAPTCHA** (`gv:chal:<id>`, value `1` / `c`). Precedence allow > deny > CAPTCHA > challenge; it needs no enforce switch. The guard reads the two new keys in its existing Redis pipeline (no round trip added). An older guard ignores the `gv:chal:` keys, so a rollback only loses the challenges.
+* **Quick actions** on every log row and the Identity page; a warning for carrier-grade NAT and known mobile-network addresses.
+* **IP lists:** `# expires=2026-11-30` after an entry; the compile ignores and removes expired entries, the nightly job recompiles when one has expired. Lines with a malformed `expires=` are refused (they show as invalid lines).
+* `ctl.py challenge` / `captcha`; log rows decided by such an override carry `ovr` = `challenge` / `captcha` and are skipped by replay.
+* Nothing to do on upgrade.
+
+**Rollback.** Update page *Roll back* or `php updates/rollback.php`; entries with `# expires=` are then plain comments (the entry never expires), so remove those lines first if that matters.
+
 ## Readable reason codes, GeoIP page fixes (2026.11.31)
 
 * **Reason codes in words.** The log rows are unchanged (short codes stay: `SH_RULE:<id>`, `IPL_BLOCK:<id>`, `UA_SCRIPT`, ...). The panel now shows the full name, the code, a tooltip

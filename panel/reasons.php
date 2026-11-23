@@ -51,6 +51,8 @@ function gp_reason_registry() {
 		'NO_SF'              => 'signal',
 		'FEW_HDR'            => 'signal',
 		'HP_HIST'            => 'signal',
+		'OVR_CHALLENGE'      => 'override',
+		'OVR_CAPTCHA'        => 'override',
 		'TEST'               => 'other',
 		'403'                => 'rule',        // SH_403: a monitor-only rule would have blocked
 		'429'                => 'rule',        // SH_429
@@ -187,7 +189,7 @@ function gp_field_registry() {
 			'nonce_bad' => 'fv_act_nonce_bad', 'nonce_replay' => 'fv_act_nonce_replay', 'pow_bad' => 'fv_act_pow_bad',
 			'mint_limited' => 'fv_act_mint_limited')),
 		'tok'  => array('fld_tok', array('v' => 'fv_tok_v', 'm' => 'fv_tok_m', 'b' => 'fv_tok_b')),
-		'ovr'  => array('fld_ovr', array('' => 'fv_ovr_none', 'allow' => 'fv_ovr_allow', 'deny' => 'fv_ovr_deny')),
+		'ovr'  => array('fld_ovr', array('' => 'fv_ovr_none', 'allow' => 'fv_ovr_allow', 'deny' => 'fv_ovr_deny', 'challenge' => 'fv_ovr_challenge', 'captcha' => 'fv_ovr_captcha')),
 		'botv' => array('fld_botv', array('' => 'fv_botv_none', 'ok' => 'fv_botv_ok', 'bad' => 'fv_botv_bad')),
 		'sh'   => array('fld_sh', array('0' => 'fv_sh_0', '1' => 'fv_sh_1')),
 		'hold' => array('fld_hold', array('0' => 'fv_hold_0', '1' => 'fv_hold_1')),

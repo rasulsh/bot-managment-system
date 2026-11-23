@@ -1390,6 +1390,27 @@ t_ok('config: geo.log defaults to off and is a whitelisted bool',
 	gv_cfg_defaults(array())['geo'] === array('log' => false, 'upload_max_mb' => 32) && gv_overlay_validate('geo.log', true)[0] === true && gv_overlay_validate('geo.log', 'yes')[0] === false);
 t_ok('config: "off" / "false" in a hand-edited geo block read as off', gv_cfg_defaults(array('geo' => array('log' => 'off')))['geo']['log'] === false && gv_cfg_defaults(array('geo' => array('log' => 'true')))['geo']['log'] === true);
 t_ok('config: a damaged geo value falls back to the default', gv_cfg_defaults(array('geo' => 'x'))['geo'] === array('log' => false, 'upload_max_mb' => 32));
+// Temporary challenge overrides, pure.
+t_ok('chal: gv_override_from keeps allow > deny > captcha > challenge, device and ip alike',
+	gv_override_from('1', null, '1', null, 'c', '1') === 'allow' && gv_override_from(null, null, null, '1', 'c', '1') === 'deny'
+	&& gv_override_from(null, null, null, null, '1', 'c') === 'captcha' && gv_override_from(null, null, null, null, null, '1') === 'challenge'
+	&& gv_override_from(null, null, null, null, '1', null) === 'challenge' && gv_override_from(null, null, null, null, 'x', false) === ''
+	&& gv_override_from('1', '1', '1', '1') === 'allow' && gv_override_from(null, null, null, null) === '');
+t_ok('chal: a challenge override asks the check page of a gated request without a token, never of one holding a token, and only logs on a page the rules do not enforce (a POST)',
+	gv_override_act('challenge', 'm', true, true, '', true, true) === array('challenge', 'challenge')
+	&& gv_override_act('challenge', 'v', true, true, '', true, true) === array('', '')
+	&& gv_override_act('challenge', 'm', false, true, '', true, true) === array('', '')
+	&& gv_override_act('challenge', 'm', true, false, '', true, true) === array('challenge', ''));
+t_ok('chal: a CAPTCHA override needs a CAPTCHA-level token, asks only a page request, and falls back to the check page without GD',
+	gv_override_act('captcha', 'm', true, true, '', true, true) === array('captcha', 'captcha')
+	&& gv_override_act('captcha', 'v', true, true, '', true, true) === array('captcha', 'captcha')
+	&& gv_override_act('captcha', 'v', true, true, 'c', true, true) === array('', '')
+	&& gv_override_act('captcha', 'm', true, true, '', false, true) === array('', '')
+	&& gv_override_act('captcha', 'm', true, true, '', true, false) === array('challenge', 'challenge'));
+t_ok('chal: it takes no enforce switch (the function has no such argument), and allow / deny / empty ask nothing',
+	(new ReflectionFunction('gv_override_act'))->getNumberOfParameters() === 7
+	&& gv_override_act('', 'm', true, true, '', true, true) === array('', '') && gv_override_act('deny', 'm', true, true, '', true, true) === array('', '')
+	&& gv_override_act('allow', 'm', true, true, '', true, true) === array('', ''));
 t_ok('config: geo.upload_max_mb is a number, not a switch: "64" stays 64, junk falls back to 32, the range is clamped',
 	gv_cfg_defaults(array('geo' => array('upload_max_mb' => '64')))['geo']['upload_max_mb'] === 64 && gv_cfg_defaults(array('geo' => array('upload_max_mb' => 'x')))['geo']['upload_max_mb'] === 32
 	&& gv_cfg_defaults(array('geo' => array('upload_max_mb' => 99999)))['geo']['upload_max_mb'] === 2048 && gv_cfg_defaults(array('geo' => array('upload_max_mb' => 0)))['geo']['upload_max_mb'] === 1);
@@ -1511,6 +1532,26 @@ if ($redis_bin === '') {
 		t_ok('an ip allow still applies when a device id is present',
 			gv_override($conn, $oip, $odev) === 'allow');
 		gv_redis_cmd($conn, array('DEL', 'gv:allow:' . $oip, 'gv:deny:' . $oip));
+
+		// --- temporary challenge / CAPTCHA overrides (chal:<id>, '1' = challenge, 'c' = CAPTCHA) ---------------------------
+		gv_r_setex($conn, 'gv:chal:' . $oip, 60, '1');
+		t_ok('chal: an ip challenge key is read as a challenge override, with no device', gv_override($conn, $oip, '') === 'challenge');
+		gv_r_setex($conn, 'gv:chal:' . $odev, 60, 'c');
+		t_ok('chal: a device CAPTCHA key beats an ip challenge key (the CAPTCHA is the stricter)', gv_override($conn, $oip, $odev) === 'captcha');
+		gv_r_setex($conn, 'gv:deny:' . $oip, 60, '1');
+		t_ok('chal: a deny beats a CAPTCHA and a challenge', gv_override($conn, $oip, $odev) === 'deny');
+		gv_r_setex($conn, 'gv:allow:' . $oip, 60, '1');
+		t_ok('chal: an allow beats a deny, a CAPTCHA and a challenge (the rescue always works)', gv_override($conn, $oip, $odev) === 'allow');
+		gv_redis_cmd($conn, array('DEL', 'gv:allow:' . $oip, 'gv:deny:' . $oip, 'gv:chal:' . $odev));
+		t_ok('chal: the ip challenge is left in force', gv_override($conn, $oip, $odev) === 'challenge');
+		gv_redis_cmd($conn, array('DEL', 'gv:chal:' . $oip));
+		gv_redis_cmd($conn, array('SET', 'gv:chal:' . $oip, '1', 'PX', '150'));
+		t_ok('chal: it is read while it lives', gv_override($conn, $oip, '') === 'challenge');
+		usleep(300000);
+		t_ok('chal: it expires by itself (TTL) and the request is back to normal', gv_override($conn, $oip, '') === '');
+		gv_r_setex($conn, 'gv:chal:' . $oip, 60, 'zz');
+		t_ok('chal: any other value is no signal (a failed or foreign read never restricts)', gv_override($conn, $oip, '') === '');
+		gv_redis_cmd($conn, array('DEL', 'gv:chal:' . $oip));
 
 		$vdev = 'selftestdev';
 		gv_r_setex($conn, 'gv:rep:' . $vdev, 60, '-20');

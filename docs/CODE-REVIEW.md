@@ -69,7 +69,7 @@ This is the big one. Trace a normal logged-in visitor loading an HTML page
 (`gv_run()` in `guard/guard.php`, steps 7b–9):
 
 - step 7b: `GET gv:rep:{dev}`, `GET gv:ml:{dev}`, `GET gv:clf:{dev}` — 3 reads
-- step 7c: `GET gv:allow:{dev}`, `GET gv:deny:{dev}`, `GET gv:deny:{ip}` — up to 3 reads
+- step 7c: `GET gv:allow:{dev}`, `GET gv:deny:{dev}`, `GET gv:deny:{ip}` — up to 3 reads (2026.11.32: plus `GET gv:chal:{dev}` and `GET gv:chal:{ip}` in the same pipeline, so a temporary challenge costs no round trip; a CAPTCHA override adds one `GET gv:cpi:{ip}` only while it applies)
 - step 8: `GET gv:hp:{ip}` — 1 read
 - step 9: `INCR gv:rd:{dev}`, `INCR gv:riu:{…}`, `INCR gv:ri:{ip}` — 3 writes, plus an `EXPIRE` on each key's first hit
 

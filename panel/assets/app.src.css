@@ -314,6 +314,11 @@
 .gp-reason-mon { @apply rounded border border-current px-1 text-[10px] font-bold uppercase tracking-wide; }
 .gp-reason-link { @apply underline; }
 .gp-reason-gone { @apply line-through; }
+.gp-quick { @apply flex flex-wrap items-center gap-2; }
+.gp-quick-who { @apply me-1 text-xs; }
+.gp-quick-list { @apply space-y-2; }
+.gp-retime { @apply flex flex-wrap items-center gap-2; }
+.gp-retime .gp-fgroup { @apply grid-cols-[8rem_6rem]; }
 .gp-col-name { min-width: 11rem; overflow-wrap: anywhere; }
 .gp-upload-msg { @apply rounded-lg border border-bad-line bg-bad-bg p-3 text-xs font-bold text-bad-fg; }
 .gp-upload-msg[hidden] { display: none; }

@@ -2005,6 +2005,14 @@ else:
     ok('identity_verdicts reads overrides and verdicts back under the prefix',
        iv['reputation'] == 7 and iv['overrides']['allow'] is not None and iv['overrides']['deny'] is None)
     ok('get_override reports the remaining ttl', 0 < redis_io.get_override(a, 'ident9')['allow'] <= 600)
+    # Temporary challenge overrides: one key family (chal:), '1' = challenge, 'c' = CAPTCHA, the same as the guard and the panel.
+    ok('set_override challenge / captcha writes gv:chal:<id> with value 1 / c and a TTL', redis_io.set_override(a, 'challenge', 'ident9', 600) and admin.get('shop1:gv:chal:ident9') == '1'
+       and 0 < admin.ttl('shop1:gv:chal:ident9') <= 600 and redis_io.set_override(a, 'captcha', 'ident9', 600) and admin.get('shop1:gv:chal:ident9') == 'c')
+    gov = redis_io.get_override(a, 'ident9')
+    ok('get_override reports captcha (not challenge) for value c, and allow alongside', gov['captcha'] is not None and gov['challenge'] is None and gov['allow'] is not None and gov['deny'] is None)
+    ok('list_overrides lists it by kind and filters by kind', ('captcha', 'ident9') in [x[:2] for x in redis_io.list_overrides(a)] and [x[:2] for x in redis_io.list_overrides(a, 'captcha')] == [('captcha', 'ident9')]
+       and redis_io.list_overrides(a, 'challenge') == [])
+    ok('clear_override removes the chal key too', redis_io.clear_override(a, 'ident9') == 2 and admin.get('shop1:gv:chal:ident9') is None)
 
     # PHP guard <-> Python analyzer under one non-empty prefix.
     php_bin_x = shutil.which('php')
@@ -3557,6 +3565,51 @@ ok('nightly with Redis unavailable: the warnings stay (nothing was written), no 
 shutil.rmtree(nt_dir, ignore_errors=True)
 
 ok('the worker records exit, warnings and the result of a job it ran', (lambda w: ('warnings' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read() and 'jobreport.parse' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read()))(0))
+
+
+# --- Temporary blocks (PR G): IP list entry expiry, overrides in redis_io / ctl, replay skip, the nightly recompile ---------------
+ok('expiry: `# expires=DATE` is valid through the END of that day (UTC), `T14:30` or a space time to the minute; the same numbers as the panel (gp_ipl_expiry)',
+   il_mod.expiry(' expires=2026-11-30') == (1796083200, True) and il_mod.expiry(' expires=2026-11-30T14:30') == (1796049000, True)
+   and il_mod.expiry(' expires=2026-11-30 14:30') == (1796049000, True) and il_mod.expiry(' note') == (0, True) and il_mod.expiry('') == (0, True))
+ok('expiry: a date that is not real, hour 24, minute 60 or a bare `expires=` refuses the line', all(il_mod.expiry(c)[1] is False for c in
+   (' expires=2026-13-40', ' expires=2026-11-30T24:00', ' expires=2026-11-30T12:60', ' expires=', ' expires=junk', ' expires=2026-02-30')))
+ee, eb = il_mod.parse_text('203.0.113.7 # expires=2026-11-30\n198.51.100.1\n192.0.2.9 # expires=nope\n', True)
+ok('parse_text(with_expiry): the entry carries its timestamp (0 = none) and a typo is a bad line, not a permanent entry',
+   [e[4] for e in ee] == [1796083200, 0] and eb == [(3, '192.0.2.9')] and len(il_mod.parse_text('203.0.113.7 # expires=2026-11-30\n')[0][0]) == 4)
+ex_text = '# my list\n203.0.113.7 # expires=2026-01-01\n203.0.113.8 # keep this one, expires=2999-01-01\n203.0.113.9\n203.0.113.10 # expires=2026-01-02 note\n'
+dx = il_dir('exp1', [il_list(1, 'block')], {'l1': ex_text})
+now_x = 1780000000                                  # 2026-05-28
+ok('has_expired: true while a past entry is still in an enabled source', il_mod.has_expired(dx, now_x) is True and il_mod.has_expired(dx, 1700000000) is False)
+stx = il_mod.compile_lists(dx, now=now_x)
+blx = open(os.path.join(dx, 'block.bin'), 'rb').read()
+ok('compile: expired entries are ignored (counted), the live ones compiled', stx['lists']['l1']['expired'] == 2 and stx['lists']['l1']['entries'] == 2
+   and geo_mod.lookup(blx, '203.0.113.7') is None and geo_mod.lookup(blx, '203.0.113.10') is None and geo_mod.lookup(blx, '203.0.113.8') == 1 and geo_mod.lookup(blx, '203.0.113.9') == 1)
+ok('compile: the expired LINES are removed from the source; comments and the other lines stay',
+   open(os.path.join(dx, 'l1.txt')).read() == '# my list\n203.0.113.8 # keep this one, expires=2999-01-01\n203.0.113.9\n')
+ok('compile: nothing is left to expire, has_expired is false and a second compile removes nothing',
+   il_mod.has_expired(dx, now_x) is False and il_mod.compile_lists(dx, now=now_x)['lists']['l1']['expired'] == 0)
+raw_x = '1.1.1.1 # expires=2026-01-01\n2.2.2.2\n'
+with open(os.path.join(dx, 'l1.txt'), 'w') as handle: handle.write('9.9.9.9\n')
+ok('prune: a source that changed since the compile read it is left alone', il_mod.prune_expired(os.path.join(dx, 'l1.txt'), raw_x, now_x) == 0 and open(os.path.join(dx, 'l1.txt')).read() == '9.9.9.9\n')
+with open(os.path.join(dx, 'l1.txt'), 'w') as handle: handle.write('1.1.1.1 # expires=2026-01-01\r\n2.2.2.2\r\n3.3.3.3 # expires=2999-01-01\r')
+raw_c = open(os.path.join(dx, 'l1.txt'), newline='').read()
+ok('prune: CRLF and a bare CR line end are kept as they were', il_mod.prune_expired(os.path.join(dx, 'l1.txt'), raw_c, now_x) == 1
+   and open(os.path.join(dx, 'l1.txt'), newline='').read() == '2.2.2.2\r\n3.3.3.3 # expires=2999-01-01\r')
+# The nightly hook.
+os.environ['GV_LISTS_DIR'] = dx
+with open(os.path.join(dx, 'l1.txt'), 'w') as handle: handle.write('1.1.1.1 # expires=2026-01-01\n2.2.2.2\n')
+ok('nightly: recompile_expired_lists recompiles when an entry is due and reports how many it removed (never fatal)',
+   run_nightly_mod.recompile_expired_lists(False) == 1 and open(os.path.join(dx, 'l1.txt')).read() == '2.2.2.2\n' and run_nightly_mod.recompile_expired_lists(False) == 0)
+with open(os.path.join(dx, 'l1.txt'), 'w') as handle: handle.write('1.1.1.1 # expires=2026-01-01\n')
+ok('nightly: a dry run changes nothing', run_nightly_mod.recompile_expired_lists(True) == 0 and open(os.path.join(dx, 'l1.txt')).read() == '1.1.1.1 # expires=2026-01-01\n')
+os.environ.pop('GV_LISTS_DIR', None)
+shutil.rmtree(dx, ignore_errors=True)
+
+# Replay: an operator challenge / CAPTCHA override is not a scoring decision.
+rp_ovr = [{'act': 'challenge', 'sc': 0, 'tok': 'm', 'gate': 1, 'ovr': 'challenge'}, {'act': 'challenge', 'sc': 0, 'tok': 'm', 'gate': 1, 'ovr': 'captcha'},
+          {'act': 'challenge', 'sc': 0, 'tok': 'm', 'gate': 1, 'ovr': ''}]
+rp_o = replay_mod.replay_rows(rp_ovr, {'hard_block_score': 60, 'signals': {}}, {'hard_block_score': 40, 'signals': {}})
+ok('replay: rows decided by a challenge / CAPTCHA override are skipped (an operator action), the normal row is considered', rp_o['considered'] == 1 and rp_o['skipped_non_decision'] == 2)
 
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)

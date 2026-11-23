@@ -221,7 +221,14 @@ def get_clf(client, dev):
 # an override without an expiry is a config change in disguise, and it will be
 # forgotten.
 
+# Temporary challenge overrides live in ONE key family, chal:<identity>; the value says which: '1' = the proof-of-work challenge,
+# 'c' = the CAPTCHA. The guard reads it in its existing pipeline (guard/guard.php gv_override_from).
+CHAL_VALUES = {'challenge': '1', 'captcha': 'c'}
+
+
 def set_override(client, kind, identity, ttl):
+    if kind in CHAL_VALUES:
+        return _setex(client, key('chal:%s' % identity), ttl, CHAL_VALUES[kind])
     if kind not in ('allow', 'deny'):
         warn('ignoring unknown override kind: %r' % (kind,))
         return False
@@ -229,7 +236,7 @@ def set_override(client, kind, identity, ttl):
 
 
 def get_override(client, identity):
-    """Return {'allow': ttl|None, 'deny': ttl|None} for one identity."""
+    """Return {'allow': ttl|None, 'deny': ttl|None, 'challenge': ttl|None, 'captcha': ttl|None} for one identity."""
     out = {}
     for kind in ('allow', 'deny'):
         full = key('%s:%s' % (kind, identity))
@@ -237,6 +244,10 @@ def get_override(client, identity):
             out[kind] = ttl_of(client, full)
         else:
             out[kind] = None
+    full = key('chal:%s' % identity)
+    value = _get(client, full)
+    for kind, want in CHAL_VALUES.items():
+        out[kind] = ttl_of(client, full) if value == want else None
     return out
 
 
@@ -245,7 +256,7 @@ def clear_override(client, identity):
     if client is None:
         return 0
     removed = 0
-    for kind in ('allow', 'deny'):
+    for kind in ('allow', 'deny', 'chal'):
         try:
             removed += int(client.delete(key('%s:%s' % (kind, identity))) or 0)
         except Exception as exc:
@@ -267,7 +278,7 @@ def list_overrides(client, kind=None, limit=500):
     """Return [(kind, identity, ttl)] for the override keys currently set."""
     if client is None:
         return []
-    kinds = ('allow', 'deny') if kind is None else (kind,)
+    kinds = ('allow', 'deny', 'chal') if kind is None else (('chal',) if kind in CHAL_VALUES else (kind,))
     out = []
     for one in kinds:
         head = key('%s:' % one)                   # prefix + family, e.g. shop1:gv:allow:
@@ -275,7 +286,12 @@ def list_overrides(client, kind=None, limit=500):
             # The prefix contains no glob characters (see PREFIX_RE), so it can
             # go into the MATCH pattern as is.
             for full in client.scan_iter(match=head + '*', count=100):
-                out.append((one, str(full)[len(head):], ttl_of(client, full)))
+                name = one
+                if one == 'chal':
+                    name = 'captcha' if _get(client, full) == 'c' else 'challenge'
+                    if kind in CHAL_VALUES and name != kind:
+                        continue
+                out.append((name, str(full)[len(head):], ttl_of(client, full)))
                 if len(out) >= limit:
                     return out
         except Exception as exc:

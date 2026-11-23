@@ -803,7 +803,8 @@ function gp_redis_up() {
 // the first thing to open when a customer reports being blocked.
 function gp_identity_verdicts($identity) {
 	$out = array('rep' => null, 'ml' => null, 'clf' => null, 'botok' => false,
-		'botbad' => false, 'honeypot' => false, 'allow_ttl' => null, 'deny_ttl' => null);
+		'botbad' => false, 'honeypot' => false, 'allow_ttl' => null, 'deny_ttl' => null,
+		'challenge_ttl' => null, 'captcha_ttl' => null);
 	$conn = gp_redis();
 	if (!$conn) { return $out; }
 	$rep = gv_r_get($conn, gv_key('rep:' . $identity));
@@ -821,6 +822,8 @@ function gp_identity_verdicts($identity) {
 	if (gv_r_get($conn, gv_key('deny:' . $identity)) === '1') {
 		$out['deny_ttl'] = gp_ttl(gv_key('deny:' . $identity));
 	}
+	$chal = gv_r_get($conn, gv_key('chal:' . $identity));
+	if ($chal === '1' || $chal === 'c') { $out[$chal === 'c' ? 'captcha_ttl' : 'challenge_ttl'] = gp_ttl(gv_key('chal:' . $identity)); }
 	return $out;
 }
 
@@ -844,7 +847,7 @@ function gp_overrides_list($limit = 200) {
 	// thousand counter keys in Redis the old 64-step limit ended before it had
 	// seen the overrides at all, and the page showed none.
 	$deadline = microtime(true) + 2.0;
-	foreach (array('deny', 'allow') as $kind) {
+	foreach (array('deny', 'chal', 'allow') as $kind) {
 		$cursor = '0';
 		$guard = 0;
 		do {
@@ -853,7 +856,9 @@ function gp_overrides_list($limit = 200) {
 			list($cursor, $keys) = $reply;
 			foreach ($keys as $key) {
 				$identity = substr($key, strlen(gv_key($kind . ':')));
-				$out[] = array('kind' => $kind, 'identity' => $identity,
+				$name = $kind;
+				if ($kind === 'chal') { $name = (gv_r_get($conn, $key) === 'c') ? 'captcha' : 'challenge'; }
+				$out[] = array('kind' => $name, 'identity' => $identity,
 					'ttl' => gp_ttl($key));
 				if (count($out) >= $limit) { return $out; }
 			}
@@ -890,8 +895,13 @@ function gp_scan($conn, $cursor, $pattern) {
 // 30-day ceiling: an override without an expiry is a config change in disguise.
 define('GP_OVERRIDE_MAX_TTL', 2592000);
 
+// The Redis key and value of an override kind for an identity.
+function gp_override_key($kind, $identity) {
+	return array(gv_key(($kind === 'challenge' || $kind === 'captcha' ? 'chal' : $kind) . ':' . $identity), $kind === 'captcha' ? 'c' : '1');
+}
+
 function gp_override_set($kind, $identity, $ttl) {
-	if (!in_array($kind, array('allow', 'deny'), true)) { return false; }
+	if (!in_array($kind, array('allow', 'deny', 'challenge', 'captcha'), true)) { return false; }
 	$identity = gp_identity_canon(is_string($identity) ? $identity : '');
 	if ($identity === '' || strlen($identity) > 128) { return false; }
 	if (!preg_match('/^[A-Za-z0-9._:-]+$/', $identity)) { return false; }
@@ -899,7 +909,21 @@ function gp_override_set($kind, $identity, $ttl) {
 	if ($ttl < 60 || $ttl > GP_OVERRIDE_MAX_TTL) { return false; }
 	$conn = gp_redis();
 	if (!$conn) { return false; }
-	return gv_r_setex($conn, gv_key($kind . ':' . $identity), $ttl, '1') === 'OK';
+	$kv = gp_override_key($kind, $identity);
+	return gv_r_setex($conn, $kv[0], $ttl, $kv[1]) === 'OK';
+}
+
+// Change the time left of an override that exists (extend or shorten). Returns true when the key was there and was changed.
+function gp_override_retime($kind, $identity, $ttl) {
+	if (!in_array($kind, array('allow', 'deny', 'challenge', 'captcha'), true)) { return false; }
+	$identity = gp_identity_canon(is_string($identity) ? $identity : '');
+	$ttl = (int)$ttl;
+	if ($identity === '' || !preg_match('/^[A-Za-z0-9._:-]+$/', $identity) || $ttl < GP_OVERRIDE_MIN_TTL || $ttl > GP_OVERRIDE_MAX_TTL) { return false; }
+	$conn = gp_redis();
+	if (!$conn) { return false; }
+	$kv = gp_override_key($kind, $identity);
+	if (gv_r_get($conn, $kv[0]) !== $kv[1]) { return false; }          // gone or another kind: nothing to change
+	return (int)gv_redis_cmd($conn, array('EXPIRE', $kv[0], (string)$ttl)) === 1;
 }
 
 function gp_override_clear($identity) {
@@ -908,6 +932,7 @@ function gp_override_clear($identity) {
 	if (!is_string($identity) || !preg_match('/^[A-Za-z0-9._:-]+$/', $identity)) { return false; }
 	gv_redis_cmd($conn, array('DEL', gv_key('allow:' . $identity)));
 	gv_redis_cmd($conn, array('DEL', gv_key('deny:' . $identity)));
+	gv_redis_cmd($conn, array('DEL', gv_key('chal:' . $identity)));
 	return true;
 }
 
