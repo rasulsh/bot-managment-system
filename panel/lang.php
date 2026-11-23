@@ -2051,7 +2051,7 @@ return array(
 	'dash_rd_hits' => 'Hits',
 	'dash_rd_addr' => 'Addresses / devices',
 	'nav_overrides_short' => 'Blocks',
-	'dash_rd_allow' => 'Allow list: no enforce hint',
+	'dash_rd_allow' => 'No enforce hint',
 	'dash_rd_quiet' => '%s rules or lists with no hits in 7 d',
 	'dash_rd_quiet_one' => '%s rule or list with no hits in 7 d',
 	'dash_rd_show' => 'show',
