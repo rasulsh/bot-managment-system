@@ -21,9 +21,9 @@
 	Header set Cache-Control "no-cache" env=!GP_ASSET_V
 </IfModule>
 
-# LiteSpeed / OpenLiteSpeed do not evaluate env= on Header: there the rule is by file type only, so an UNversioned request is cached for a
-# year as well. The panel itself never emits one (gp_asset_url()), so only a stale cached page could ask for it; that page is never cached
-# (no-store, X-LiteSpeed-Cache-Control: no-cache).
+# LiteSpeed does not evaluate env= on Header, so for LiteSpeed (Enterprise) the rule is by file type only. OpenLiteSpeed answers static files
+# itself and ignores both Header and Expires from .htaccess here (verified in CI: it sends its own `max-age=604800`, the "Expires Default" of its
+# virtual host / context; raise that setting in its admin if a year is wanted). The versioned URL already makes that safe: a changed file has a new URL.
 <IfModule LiteSpeed>
 	<FilesMatch "\.(css|woff2)$">
 		Header set Cache-Control "public, max-age=31536000, immutable"

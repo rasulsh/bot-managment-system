@@ -40,9 +40,11 @@ if [ -n "$css_href" ]; then
 	ah="$(curl -sk -D - -o /dev/null "$BASE$PANEL/$css_href")"
 	check "the versioned stylesheet is served (200, text/css)" "$(head -1 <<<"$ah" | grep -q ' 200' && grep -qi '^content-type: text/css' <<<"$ah" && echo 1 || echo 0)"
 	if [ "${GP_EXPECT_ASSET_CACHE:-0}" = 1 ]; then
-		# Apache: the .htaccess header, exactly. OpenLiteSpeed answers static files itself and only honours Expires: a year (max-age=31536000).
-		year='public, max-age=31536000, immutable'; [ "${GP_SERVER:-}" = ols ] && year='(public, )?max-age=31536000'
-		check "a versioned asset is cacheable for a year: Cache-Control $year" "$(grep -Eqi "^cache-control: $year" <<<"$ah" && echo 1 || echo 0)"
+		# Apache: the .htaccess header, exactly. OpenLiteSpeed answers static files itself with its own Expires setting (default 7 days) and ignores
+		# Header / Expires in .htaccess there: all that is asserted is that it IS cacheable (max-age >= 1 day, never no-store / no-cache); the
+		# versioned URL is what makes that safe.
+		year='public, max-age=31536000, immutable'; [ "${GP_SERVER:-}" = ols ] && year='(public, )?max-age=([1-9][0-9]{5,})'
+		check "a versioned asset is cacheable: Cache-Control $year" "$(grep -Eqi "^cache-control: $year" <<<"$ah" && echo 1 || echo 0)"
 		grep -Eqi "^cache-control: $year" <<<"$ah" || { echo "  (headers seen: $(tr -d '\r' <<<"$ah" | tr '\n' '|'))"; }
 		uh="$(curl -sk -D - -o /dev/null "$BASE$PANEL/assets/app.css")"
 		if [ "${GP_SERVER:-}" = ols ]; then
@@ -51,7 +53,7 @@ if [ -n "$css_href" ]; then
 			check "an UNversioned asset request must revalidate (no immutable, never a year)" "$(grep -qi '^cache-control: no-cache' <<<"$uh" && ! grep -qi 'immutable' <<<"$uh" && echo 1 || echo 0)"
 		fi
 		fh="$(curl -sk -D - -o /dev/null "$BASE$PANEL/$font_url")"
-		check "a versioned font is cacheable for a year too" "$(grep -Eqi "^cache-control: $year" <<<"$fh" && echo 1 || echo 0)"
+		check "a versioned font is cacheable too" "$(grep -Eqi "^cache-control: $year" <<<"$fh" && echo 1 || echo 0)"
 	fi
 fi
 
