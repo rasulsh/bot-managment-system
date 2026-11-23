@@ -292,6 +292,9 @@ directory must be writable only by the user the cron jobs run as.
 - **Allowed top-level folders and file types are a fixed list.** A release that adds a new top-level folder or a new file type needs
   the updater itself to be updated first (one manual copy).
 - **A web recovery token that is lost is gone** (only its hash is stored); use the shell command `php <install-dir>/updates/rollback.php`.
+- **IP feeds** are IPv4 only (IPv6 entries are dropped and counted). A feed is fetched by the panel / cron PHP, so the server must reach the provider over HTTPS; a host that
+  resolves to a private address is refused on purpose. CDN ranges at most 100 in total (`cidrs4` limit), /8 or narrower. A provider that republishes a stub list triggers the
+  50 % hold rather than an automatic change; a provider that is down leaves the last good entries in force (and so gets stale).
 - **OPcache with `validate_timestamps=0`** keeps old code until PHP restarts; the updater calls `opcache_invalidate()` for every
   changed file, but a restart (or `opcache_reset()` from a web request) is the sure way. `scripts/` and `analyzer/` changes take effect
   at the next cron run.

@@ -2,6 +2,20 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## IP range feeds (2026.11.28)
+
+**New.** IP lists -> **Feeds**: provider IPv4 ranges (Google common crawlers, UptimeRobot, ArvanCloud, Cloudflare presets or your own URL) kept up to date into a managed allow list
+or into the trusted CDN ranges. New cron mode `analyzer-cron.sh feeds` (recommended only when an enabled feed has a daily / weekly schedule; add
+`27 3 * * * bash <install-dir>/scripts/analyzer-cron.sh feeds >/dev/null 2>&1`). New overlay key `cdn_ranges_feed`, new setting `analyzer.interval_feeds`, new files
+`lists/feeds.json`, `lists/feed-<id>.txt`, `panel/feeds.php`, `scripts/feeds-sync.php`, `scripts/feeds-cron.sh`.
+
+**Nothing to do on upgrade**: with no feed configured nothing changes. **Read the CDN warning before adding a CDN feed**: ArvanCloud and Cloudflare ranges belong in *Trusted CDN
+ranges*, never in an allow list, and only if the site is behind that CDN.
+
+**Rollback.** Update page *Roll back* or `php updates/rollback.php`. The older code ignores `lists/feeds.json` and `cdn_ranges_feed` (an unknown overlay key is dropped when the old panel next
+saves settings, so CDN ranges a feed wrote stop being trusted: re-add them to `cdn_ranges` by hand if the site is behind that CDN). The managed `feed-<id>` lists stay as ordinary allow lists:
+delete them if you no longer want them.
+
 ## Panel round 3: messages in context, IP list colours, pick lists, Logs filters, lockout resistance, cron PHP (2026.11.26)
 
 **Nothing to do for a normal upgrade** (no configuration change; the Update page is enough). What is new:

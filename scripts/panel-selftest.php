@@ -14,6 +14,15 @@ require __DIR__ . '/../panel/acl.php';          // the views ask it which links 
 
 // Nothing this suite does may write into the repository tree, also when no Redis is running (a refused connect logs a line):
 // every error log the guard's helpers fall back to goes to a temp directory, removed at exit.
+// The login limiter's file counters (used when Redis is down, as here) are private to this process: a shared panel/.ratelimit made
+// parallel runs fail each other's "password asked again" checks, and wrote into the working tree.
+$GP_RL_DIR = sys_get_temp_dir() . '/gp-selftest-rl-' . getmypid();
+$GP_RL_REPO_BEFORE = is_dir(__DIR__ . '/../panel/.ratelimit') ? count(glob(__DIR__ . '/../panel/.ratelimit/*')) : 0;
+putenv('GV_RATELIMIT_DIR=' . $GP_RL_DIR);
+register_shutdown_function(function () use ($GP_RL_DIR) {
+	foreach ((array)glob($GP_RL_DIR . '/*') as $f) { if (is_file($f)) { @unlink($f); } }
+	@rmdir($GP_RL_DIR);
+});
 $GP_TMP_LOGS = sys_get_temp_dir() . '/gp-selftest-logs-' . getmypid();
 @mkdir($GP_TMP_LOGS, 0775, true);
 gv_redis_ctx(array('log_dir' => $GP_TMP_LOGS));
@@ -2272,7 +2281,7 @@ t_ok('status files: missing = null, garbage = false, valid = array', gp_job_stat
 })());
 @unlink($jh_tmp . '/status/.jobstatus-verify.json');
 t_ok('intervals: the documented crontab by default, editable in Settings > Analyzer, never below one minute', gp_job_intervals() === array('verify' => 600, 'worker' => 60, 'snapshot' => 900, 'nightly' => 86400, 'logrotate' => 86400,
-	'train' => 604800, 'train-clf' => 604800, 'geo' => 2592000, 'report' => 604800)
+	'train' => 604800, 'train-clf' => 604800, 'geo' => 2592000, 'feeds' => 86400, 'report' => 604800)
 	&& gp_job_intervals(array('analyzer' => array_merge(gp_analyzer_defaults(), array('interval_verify' => 30, 'interval_geo' => 0))))['verify'] === 1800
 	&& gp_job_intervals(array('analyzer' => array_merge(gp_analyzer_defaults(), array('interval_geo' => 0))))['geo'] === 60);
 t_ok('every interval is a whitelisted Settings key with a bound', (function () {
@@ -2287,7 +2296,7 @@ file_put_contents($jh_tmp . '/status/.jobstatus-nightly.json', json_encode($st(a
 file_put_contents($jh_tmp . '/status/.lastrun-worker', (string)($jh_now - 30));
 $jall = gp_job_health($jh_now, $jh_tmp . '/status', gp_job_intervals(), array());
 t_ok('gp_job_health reads every job: snapshot late, nightly failing, worker from its old marker, the rest never', $jall['snapshot']['state'] === 'late' && $jall['nightly']['state'] === 'failing' && $jall['worker']['state'] === 'ok'
-	&& $jall['verify']['state'] === 'never' && $jall['logrotate']['state'] === 'never' && count($jall) === 9);
+	&& $jall['verify']['state'] === 'never' && $jall['logrotate']['state'] === 'never' && count($jall) === 10);
 
 // Marking an error as seen.
 t_ok('mark seen: writes the file, is audited, silences THIS failure only', (function () use ($jh_tmp, $jh_now) {
@@ -2552,6 +2561,7 @@ if ($jh_audit_backup !== null) { file_put_contents(gp_audit_path(), $jh_audit_ba
 t_section('IP lists page: parser, compile, save flow, warnings, alerts');
 
 require_once __DIR__ . '/../panel/iplists.php';
+require_once __DIR__ . '/../panel/feeds.php';
 require_once __DIR__ . '/geo-fixture.php';
 $il_tmp = sys_get_temp_dir() . '/gp-iplist-selftest-' . getmypid();
 @mkdir($il_tmp . '/lists', 0775, true);
@@ -2961,7 +2971,7 @@ $il_render = function (array $extra) {
 	return array($html, $errs);
 };
 list($h0, $e0) = $il_render(array());
-t_ok('page, no lists: renders without a PHP warning, five tabs, an empty-state text', !$e0 && substr_count($h0, 'role="tab"') === 5 && strpos($h0, 'No list yet') !== false && strpos($h0, 'role="tabpanel"') !== false);
+t_ok('page, no lists: renders without a PHP warning, six tabs (Lists, Editor, Entries, Feeds, Tester, Compile), an empty-state text', !$e0 && substr_count($h0, 'role="tab"') === 6 && strpos($h0, 'No list yet') !== false && strpos($h0, 'role="tabpanel"') !== false);
 $sv(array('name' => 'Evil <script>alert(1)</script>', 'note' => '"><img src=x>', 'text' => "203.0.113.0/24\nbogus<b>\n"));
 $sv(array('name' => 'Evil <script>alert(1)</script>', 'note' => '"><img src=x>', 'text' => "203.0.113.0/24\n", 'accept' => '1'));
 $gp_post_bak = $_POST;
@@ -2999,6 +3009,206 @@ t_ok('every IP list field and filter has a tooltip with what it does, a safe val
 preg_match_all("/gp_tip\\('([a-z_]+)'\\)/", file_get_contents(__DIR__ . '/../panel/views/iplists.php'), $il_mm);
 t_ok('every literal gp_tip() key in the IP lists view has a text', !array_filter($il_mm[1], function ($k) use ($il_lang) { return !isset($il_lang['tip_' . $k]); }));
 t_ok('the IP lists view loads nothing from outside', preg_match('#https?://#', file_get_contents(__DIR__ . '/../panel/views/iplists.php') . file_get_contents(__DIR__ . '/../panel/iplists.php')) === 0);
+
+// ============================================================================================================================
+// PR E: IP range feeds (no network: fixtures, a resolver hook and a transport hook)
+// ============================================================================================================================
+t_section('IP feeds: parsers, SSRF guard, redirects, size cap');
+$fx_arvan = "# ArvanCloud\n185.143.232.0/22\n\n  188.229.116.16/29  # edge\n185.143.232.0/22\n2a01:5ec0::/32\nnot-an-ip\n";
+$fx_cf = "173.245.48.0/20\n103.21.244.0/22\n103.22.200.0/22\r\n";
+$fx_up = "69.162.124.224\n63.143.42.240\n2607:ff68:107::/48\n";
+$fx_google = json_encode(array('creationTime' => 'x', 'prefixes' => array(array('ipv4Prefix' => '66.249.64.0/27'), array('ipv6Prefix' => '2001:4860:4801:10::/64'), array('ipv4Prefix' => '66.249.64.32/27'), array('other' => 'x'), array('ipv4Prefix' => '0.0.0.0/0'))));
+$fx_json = json_encode(array('result' => array('ipv4_cidrs' => array('10.20.30.0/24', '1.1.1.1', 'junk'), 'ipv6_cidrs' => array('2400:cb00::/32')), 'note' => 'see 8.8.8.0/24 for details', 'deep' => array(array('x' => '192.0.2.0/24'))));
+$pa = gp_feed_parse($fx_arvan);
+t_ok('text feed (ArvanCloud ips.txt): comments, blank lines and duplicates dropped, IPv6 counted, one invalid line', $pa['ok'] && $pa['format'] === 'text' && $pa['entries'] === array('185.143.232.0/22', '188.229.116.16/29') && $pa['v6'] === 1 && $pa['invalid'] === 1);
+$pc = gp_feed_parse($fx_cf);
+t_ok('text feed (Cloudflare ips-v4, CRLF)', $pc['entries'] === array('103.21.244.0/22', '103.22.200.0/22', '173.245.48.0/20') && $pc['v6'] === 0);
+$pu = gp_feed_parse($fx_up);
+t_ok('text feed (UptimeRobot IPv4.txt: bare addresses become /32), IPv6 dropped and counted', $pu['entries'] === array('63.143.42.240', '69.162.124.224') && $pu['v6'] === 1);
+$pg = gp_feed_parse($fx_google);
+t_ok('Google JSON (prefixes[].ipv4Prefix): auto-detected, IPv6 counted, 0.0.0.0/0 always dropped', $pg['format'] === 'json' && gp_feed_parse($fx_google, 'google')['format'] === 'google'
+	&& $pg['entries'] === array('66.249.64.0/27', '66.249.64.32/27') && $pg['v6'] === 1 && gp_feed_parse($fx_google, 'google')['v6'] === 1 && gp_feed_parse($fx_google, 'google')['dropped_all'] === 1);
+$pj = gp_feed_parse($fx_json, 'json');
+t_ok('generic JSON: every string that is an IPv4 CIDR, bare addresses and prose ignored, IPv6 counted', $pj['entries'] === array('10.20.30.0/24', '192.0.2.0/24') && $pj['v6'] === 1);
+t_ok('parse: a wrong format is an error, an unparseable body gives no entries, a BOM and an empty body are handled', gp_feed_parse('<html>', 'google')['ok'] === false && gp_feed_parse('<html>')['entries'] === array()
+	&& gp_feed_parse("\xEF\xBB\xBF1.2.3.0/24\n")['entries'] === array('1.2.3.0/24') && gp_feed_parse('')['entries'] === array());
+t_ok('parse: IPv6 only and 0.0.0.0/0 only leave no entries (the sync treats that as a failure)', gp_feed_parse("2001:db8::/32\n")['entries'] === array() && gp_feed_parse("0.0.0.0/0\n")['entries'] === array() && gp_feed_parse("0.0.0.0/0\n")['dropped_all'] === 1);
+
+$pub = array('93.184.216.34', '8.8.8.8', '2606:4700:4700::1111', '2a00:1450:4001::1');
+$priv = array('10.0.0.1', '172.16.5.5', '192.168.1.1', '127.0.0.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '224.0.0.1', '255.255.255.255', '192.0.2.5', '198.18.0.1', '203.0.113.9', '::1', '::', 'fe80::1', 'fd00::1', 'ff02::1', '::ffff:10.0.0.1', '::ffff:127.0.0.1', '2001:db8::1', 'not-an-ip');
+t_ok('SSRF guard: public addresses pass, private / loopback / link-local / CGNAT / documentation / multicast / reserved (IPv4, IPv6, mapped) are refused',
+	!array_filter($pub, function ($a) { return !gp_feed_ip_public($a); }) && !array_filter($priv, 'gp_feed_ip_public'));
+$GLOBALS['gp_feed_calls'] = array();
+$GLOBALS['gp_feed_resolver'] = function ($h) { if (filter_var($h, FILTER_VALIDATE_IP) !== false) { return array($h); } $map = array('good.test' => array('93.184.216.34'), 'bad.test' => array('10.1.1.1'), 'mixed.test' => array('93.184.216.34', '192.168.0.9'), 'nx.test' => array()); return isset($map[$h]) ? $map[$h] : array('93.184.216.34'); };
+$GLOBALS['gp_feed_transport'] = function ($ip, $port, $host, $path) { $GLOBALS['gp_feed_calls'][] = $host . $path . '@' . $ip . ':' . $port; return array(200, '', "1.1.1.0/24\n", ''); };
+$f1 = gp_feed_fetch('https://good.test/a.txt');
+t_ok('fetch: HTTPS to a public host works, connects to the checked address, records status / bytes / duration', $f1['ok'] && $f1['http'] === 200 && $f1['bytes'] === 11 && $f1['ms'] >= 0 && $GLOBALS['gp_feed_calls'] === array('good.test/a.txt@93.184.216.34:443'));
+$GLOBALS['gp_feed_calls'] = array();
+t_ok('fetch: a host resolving to a private address, one of several answers private, an IP literal in private space: refused before any connection',
+	gp_feed_fetch('https://bad.test/x')['error'] === 'ssrf' && gp_feed_fetch('https://mixed.test/x')['error'] === 'ssrf' && gp_feed_fetch('https://127.0.0.1/x')['error'] === 'ssrf'
+	&& gp_feed_fetch('https://169.254.169.254/latest')['error'] === 'ssrf' && gp_feed_fetch('https://nx.test/x')['error'] === 'dns' && $GLOBALS['gp_feed_calls'] === array());
+t_ok('fetch: http://, userinfo, ftp, a bad port and an over-long URL are refused', gp_feed_fetch('http://good.test/x')['error'] === 'scheme' && gp_feed_fetch('https://user:pw@good.test/x')['error'] === 'url'
+	&& gp_feed_fetch('ftp://good.test/x')['error'] === 'scheme' && gp_feed_fetch('https://good.test:99999/x')['error'] === 'url' && gp_feed_fetch('https://good.test/' . str_repeat('a', 600))['error'] === 'url' && gp_feed_fetch('')['error'] === 'url');
+$hops = 0;
+$GLOBALS['gp_feed_transport'] = function ($ip, $port, $host, $path) use (&$hops) { $hops++; return $hops <= 3 ? array(302, 'https://good.test/r' . $hops, '', '') : array(200, '', "1.1.1.0/24\n", ''); };
+$f3 = gp_feed_fetch('https://good.test/start');
+t_ok('redirects: three are followed (and counted), the answer arrives', $f3['ok'] && $f3['redirects'] === 3 && $hops === 4);
+$hops = -10;
+$f4 = gp_feed_fetch('https://good.test/start');
+t_ok('redirects: a fourth is refused', !$f4['ok'] && $f4['error'] === 'redirects');
+$GLOBALS['gp_feed_transport'] = function () { return array(302, 'http://good.test/plain', '', ''); };
+t_ok('redirects: to http:// is refused', gp_feed_fetch('https://good.test/a')['error'] === 'scheme');
+$GLOBALS['gp_feed_transport'] = function () { return array(301, 'https://bad.test/internal', '', ''); };
+t_ok('redirects: to a host that resolves to private space is refused (the check runs on every hop)', gp_feed_fetch('https://good.test/a')['error'] === 'ssrf');
+$GLOBALS['gp_feed_transport'] = function () { return array(302, '/relative', '', ''); };
+$hops2 = 0;
+$GLOBALS['gp_feed_transport'] = function ($ip, $port, $host, $path) use (&$hops2) { $hops2++; return $hops2 === 1 ? array(302, '/relative/path?x=1', '', '') : array(200, '', "2.2.2.0/24\n", ''); };
+t_ok('redirects: a relative Location stays on the same https host', gp_feed_fetch('https://good.test/a')['ok'] && gp_feed_redirect_url('https://good.test:8443/a/b', '../c') === 'https://good.test:8443/a/../c' && gp_feed_redirect_url('https://good.test/a', '//other.test/x') === 'https://other.test/x');
+$GLOBALS['gp_feed_transport'] = function () { return array(200, '', str_repeat('1.2.3.0/24' . "\n", 600000), ''); };
+t_ok('size cap: a body over 5 MB is refused', gp_feed_fetch('https://good.test/a')['error'] === 'too_big');
+$GLOBALS['gp_feed_transport'] = function () { return array(0, '', '', 'timeout'); };
+t_ok('timeouts and connection errors are failures with a code; an HTTP error status is "http"', gp_feed_fetch('https://good.test/a')['error'] === 'timeout' && (function () { $GLOBALS['gp_feed_transport'] = function () { return array(503, '', 'x', ''); }; $r = gp_feed_fetch('https://good.test/a'); return $r['error'] === 'http' && $r['detail'] === '503'; })());
+
+t_section('IP feeds: sync, diff, hold, keep-last-good, caps, cdn_ranges merge, schedule, ACL');
+$fe_tmp = sys_get_temp_dir() . '/gvfeed' . getmypid();
+@mkdir($fe_tmp . '/lists', 0775, true);
+putenv('GV_LISTS_DIR=' . $fe_tmp . '/lists');
+putenv('GV_OVERLAY=' . $fe_tmp . '/config.local.json');
+putenv('GV_AUDIT=' . $fe_tmp . '/audit.jsonl');
+register_shutdown_function(function () use ($fe_tmp) {
+	foreach ((array)glob($fe_tmp . '/{,lists/}{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+	@rmdir($fe_tmp . '/lists'); @rmdir($fe_tmp);
+});
+$fe_body = "1.1.1.0/24\n2.2.2.0/24\n3.3.3.0/24\n4.4.4.0/24\n2001:db8::/32\n";
+$GLOBALS['gp_feed_transport'] = function () use (&$fe_body) { return array(200, '', $fe_body, ''); };
+$sv = gp_feed_save(array('name' => 'Monitor X', 'url' => 'https://good.test/ips.txt', 'dest' => 'allow', 'schedule' => 'daily', 'enabled' => '1', 'mode' => 'enforce'), 'admin', '203.0.113.1');
+t_ok('feed: created (id from the name), the managed list exists as an allow list named "Feed: ...", audited', $sv['ok'] && $sv['msg'] === 'feed_created'
+	&& (function () { $l = gp_ipl_find(gp_iplists_state()['lists'], 'feed-monitor-x'); return $l && $l['type'] === 'allow' && $l['mode'] === 'enforce' && strpos($l['name'], 'Feed: ') === 0; })()
+	&& (function () { $a = gp_audit_read(5); return $a && ($a[0]['key'] ?? '') === 'feed:monitor-x'; })());
+$s1 = gp_feed_sync('monitor-x', 'admin', '203.0.113.1');
+$src = gp_ipl_source_path('feed-monitor-x');
+t_ok('sync: first fetch applies, IPv4 only (the IPv6 line is dropped and counted), diff = 4 added', $s1['ok'] && $s1['status'] === 'applied' && $s1['added'] === 4 && $s1['removed'] === 0
+	&& file_get_contents($src) === "1.1.1.0/24\n2.2.2.0/24\n3.3.3.0/24\n4.4.4.0/24\n" && gp_feed_find(gp_feeds_state()['feeds'], 'monitor-x')['st']['v6'] === 1);
+t_ok('sync: the guard compiled it (allow.bin exists) and the state records http / bytes / format / last good', is_file(gv_iplist_file('allow')) && (function () { $st = gp_feed_find(gp_feeds_state()['feeds'], 'monitor-x')['st']; return $st['http'] === 200 && $st['bytes'] > 0 && $st['format'] === 'text' && $st['last_ok'] > 0 && $st['fail_streak'] === 0 && $st['applied'] === 4; })());
+$fe_body = "1.1.1.0/24\n2.2.2.0/24\n3.3.3.0/24\n9.9.9.0/24\n";
+$s2 = gp_feed_sync('monitor-x', 'admin', '');
+t_ok('diff: one added, one removed, three unchanged; the list now has the new entries', $s2['status'] === 'applied' && $s2['added'] === 1 && $s2['removed'] === 1 && $s2['unchanged'] === 3 && file_get_contents($src) === "1.1.1.0/24\n2.2.2.0/24\n3.3.3.0/24\n9.9.9.0/24\n");
+$s2b = gp_feed_sync('monitor-x', 'admin', '');
+t_ok('an identical fetch reports "nochange"', $s2b['ok'] && $s2b['status'] === 'nochange' && $s2b['added'] === 0 && $s2b['removed'] === 0);
+// a manual list is never touched
+gp_iplists_save(array('name' => 'Manual one', 'type' => 'block', 'mode' => 'monitor', 'enabled' => '1', 'text' => "7.7.7.0/24\n"), null, 'admin', '203.0.113.1');
+$manual_before = file_get_contents(gp_ipl_source_path('manual-one'));
+$fe_body = "20.0.0.0/24\n";
+$s3 = gp_feed_sync('monitor-x', 'admin', '');
+t_ok('hold: a fetch that removes more than half of the current entries is HELD, nothing is applied, the held set waits in a file', $s3['ok'] && $s3['status'] === 'held'
+	&& file_get_contents($src) === "1.1.1.0/24\n2.2.2.0/24\n3.3.3.0/24\n9.9.9.0/24\n" && gp_feed_find(gp_feeds_state()['feeds'], 'monitor-x')['st']['held'] === 'shrink' && is_file(gp_feed_hold_path('monitor-x')));
+t_ok('hold: a held feed is not "due" again until an admin decides, and the dashboard says so', !in_array('monitor-x', gp_feeds_due(time() + 10 * 86400), true) && count(gp_feeds_health()['held']) === 1);
+$s3b = gp_feed_sync('monitor-x', 'admin', '203.0.113.1', array('accept_hold' => true));
+t_ok('hold: "apply the held update" applies it (audited with accepted_hold)', $s3b['ok'] && file_get_contents($src) === "20.0.0.0/24\n" && gp_feed_find(gp_feeds_state()['feeds'], 'monitor-x')['st']['held'] === '' && !is_file(gp_feed_hold_path('monitor-x'))
+	&& (function () { $a = gp_audit_read(3); return $a && !empty($a[0]['new']['accepted_hold']); })());
+$fe_body = "20.0.0.0/24\n21.0.0.0/24\n22.0.0.0/24\n23.0.0.0/24\n";
+gp_feed_sync('monitor-x', 'admin', '');
+$fe_body = "20.0.0.0/24\n99.0.0.0/24\n";
+gp_feed_sync('monitor-x', 'admin', '');          // 3 of 5 removed = held
+$d = gp_feed_discard_hold('monitor-x', 'admin', '');
+t_ok('hold: "discard" drops it and keeps the entries in force; exactly half is not "more than half"', $d[0] && gp_feed_read_lines($src) === array('20.0.0.0/24', '21.0.0.0/24', '22.0.0.0/24', '23.0.0.0/24')
+	&& (function () use ($src) { $GLOBALS['fe_body'] = "20.0.0.0/24\n21.0.0.0/24\n30.0.0.0/24\n31.0.0.0/24\n"; $r = gp_feed_sync('monitor-x', 'admin', ''); return $r['status'] === 'applied' && $r['removed'] === 2; })());
+$fe_body = "20.0.0.0/24\n21.0.0.0/24\n30.0.0.0/24\n31.0.0.0/24\n";
+$good = file_get_contents($src);
+foreach (array('failhttp' => array(500, '', 'oops', ''), 'failconn' => array(0, '', '', 'connect'), 'failzero' => array(200, '', "2001:db8::/32\n# nothing\n", ''), 'failparse' => array(200, '', '', '')) as $k => $resp) {
+	$GLOBALS['gp_feed_transport'] = function () use ($resp) { return $resp; };
+	$fr = gp_feed_sync('monitor-x', 'admin', '');
+	$fails[$k] = !$fr['ok'] && file_get_contents($src) === $good;
+}
+t_ok('failure (HTTP error, network error, no IPv4 entry, empty answer): the last good entries are kept, the error and the streak are recorded', !in_array(false, $fails, true)
+	&& gp_feed_find(gp_feeds_state()['feeds'], 'monitor-x')['st']['fail_streak'] === 4 && gp_feed_find(gp_feeds_state()['feeds'], 'monitor-x')['st']['error'] !== '' && gp_feed_find(gp_feeds_state()['feeds'], 'monitor-x')['st']['last_ok'] > 0);
+$al = gp_health_alerts(array('feeds' => gp_feeds_health()));
+$al_f = array_values(array_filter($al, function ($x) { return strpos($x['id'], 'feed_failing_') === 0; }));
+t_ok('dashboard: an alert after 2 consecutive failures (not after 1), linking to the IP lists page; none once it succeeds again', $al_f && $al_f[0]['link'] === 'iplists' && $al_f[0]['level'] === 'warning'
+	&& !array_filter(gp_health_alerts(array('feeds' => gp_feeds_health(array(array_replace_recursive(gp_feed_find(gp_feeds_state()['feeds'], 'monitor-x'), array('st' => array('fail_streak' => 1))))))), function ($x) { return strpos($x['id'], 'feed_failing_') === 0; })
+	&& (function () { $GLOBALS['gp_feed_transport'] = function () { return array(200, '', "20.0.0.0/24\n21.0.0.0/24\n30.0.0.0/24\n31.0.0.0/24\n32.0.0.0/24\n", ''); }; gp_feed_sync('monitor-x', 'admin', ''); return gp_feed_find(gp_feeds_state()['feeds'], 'monitor-x')['st']['fail_streak'] === 0 && !gp_feeds_health()['failing']; })());
+t_ok('a manual list is never touched by a feed update', file_get_contents(gp_ipl_source_path('manual-one')) === $manual_before && gp_ipl_find(gp_iplists_state()['lists'], 'manual-one') !== null);
+t_ok('a feed\'s list cannot be edited, switched or deleted from the lists table (it is managed in the Feeds tab)', gp_iplists_delete('feed-monitor-x', 'a', '')[1] === 'ipl_feed_owned' && gp_iplists_set(array('id' => 'feed-monitor-x', 'enabled' => '0'), 'a', '')[1] === 'ipl_feed_owned'
+	&& gp_iplists_save(array('id' => 'feed-monitor-x', 'name' => 'x', 'mode' => 'enforce', 'text' => "1.1.1.1\n"), null, 'a', '')['msg'] === 'ipl_feed_owned');
+
+// compile caps: an allow entry wider than /16 is "held by the cap" until accepted for THIS feed; 0.0.0.0/0 is never accepted
+$GLOBALS['gp_feed_transport'] = function () { return array(200, '', "20.0.0.0/24\n21.0.0.0/24\n30.0.0.0/24\n31.0.0.0/24\n32.0.0.0/24\n40.0.0.0/12\n0.0.0.0/0\n", ''); };
+$sc = gp_feed_sync('monitor-x', 'admin', '');
+$st = gp_feed_find(gp_feeds_state()['feeds'], 'monitor-x')['st'];
+$stat = gp_iplists_status();
+t_ok('cap: an allow entry wider than /16 is shown as "held by the cap" and is not in the compiled file; 0.0.0.0/0 is dropped and counted', $sc['ok'] && $st['cap_held'] === 1 && $st['cap_samples'] === array('40.0.0.0/12') && $st['dropped_all'] === 1
+	&& isset($stat['lists']['feed-monitor-x']) && $stat['lists']['feed-monitor-x']['dropped']['allow_wide'] === 1);
+$ac = gp_feed_accept_cap('monitor-x', 'admin', '203.0.113.1');
+$stat2 = gp_iplists_status();
+t_ok('cap: "accept for this feed" sets the force flag on this feed and its list only, audit-logged; the wide entry is then compiled', $ac[0] && gp_ipl_find(gp_iplists_state()['lists'], 'feed-monitor-x')['force'] === true
+	&& gp_ipl_find(gp_iplists_state()['lists'], 'manual-one')['force'] === false && $stat2['lists']['feed-monitor-x']['dropped_n'] === 0 && (function () { $a = gp_audit_read(3); return $a && !empty($a[0]['new']['accepted_wide_entries']); })());
+t_ok('cap: even a forced feed never gets 0.0.0.0/0', (function () { $l = file_get_contents(gp_ipl_source_path('feed-monitor-x')); return strpos($l, '0.0.0.0/0') === false && strpos($l, '40.0.0.0/12') !== false; })());
+
+// destination cdn_ranges: merged with the manual ranges, never removing them
+file_put_contents(gv_overlay_path(), json_encode(array('cdn_ranges' => array('198.51.100.0/24'))));
+$GLOBALS['gp_feed_transport'] = function () { return array(200, '', "173.245.48.0/20\n103.21.244.0/22\n103.22.200.0/22\n2400:cb00::/32\n8.0.0.0/6\n", ''); };
+$cv = gp_feed_save(array('name' => 'Cloudflare', 'url' => 'https://good.test/ips-v4', 'dest' => 'cdn', 'schedule' => 'weekly', 'enabled' => '1'), 'admin', '');
+$cs = gp_feed_sync('cloudflare', 'admin', '203.0.113.1');
+$ov = json_decode(file_get_contents(gv_overlay_path()), true);
+t_ok('cdn: the ranges go to cdn_ranges_feed, the manual cdn_ranges stay exactly as typed, a /6 is held by the cap (cidrs4 allows /8 to /32)', $cv['ok'] && $cs['ok'] && $ov['cdn_ranges'] === array('198.51.100.0/24')
+	&& $ov['cdn_ranges_feed'] === array('103.21.244.0/22', '103.22.200.0/22', '173.245.48.0/20') && gp_feed_find(gp_feeds_state()['feeds'], 'cloudflare')['st']['cap_held'] === 1);
+t_ok('cdn: the guard trusts the union of both lists', (function () use ($ov) { $c = gv_cfg_load(); return in_array('198.51.100.0/24', $c['cdn_ranges'], true) && in_array('173.245.48.0/20', $c['cdn_ranges_feed'], true)
+	&& gv_client_ip(array('REMOTE_ADDR' => '173.245.48.9', 'HTTP_X_FORWARDED_FOR' => '9.9.9.9'), array_merge($c['cdn_ranges'], $c['cdn_ranges_feed'])) === '9.9.9.9'
+	&& gv_client_ip(array('REMOTE_ADDR' => '198.51.100.7', 'HTTP_X_FORWARDED_FOR' => '9.9.9.9'), array_merge($c['cdn_ranges'], $c['cdn_ranges_feed'])) === '9.9.9.9'
+	&& gv_client_ip(array('REMOTE_ADDR' => '192.0.2.7', 'HTTP_X_FORWARDED_FOR' => '9.9.9.9'), array_merge($c['cdn_ranges'], $c['cdn_ranges_feed'])) === '192.0.2.7'; })());
+$GLOBALS['gp_feed_transport'] = function () { return array(200, '', "34.0.0.0/20\n35.0.0.0/20\n", ''); };
+gp_feed_save(array('name' => 'ArvanCloud', 'url' => 'https://good.test/ips.txt', 'dest' => 'cdn', 'schedule' => 'daily', 'enabled' => '1'), 'admin', '');
+gp_feed_sync('arvancloud', 'admin', '');
+$ov = json_decode(file_get_contents(gv_overlay_path()), true);
+t_ok('cdn: two cdn feeds share cdn_ranges_feed (union, sorted); disabling one removes only its share; deleting the other leaves the manual ranges alone',
+	count($ov['cdn_ranges_feed']) === 5 && (function () {
+		gp_feed_save(array('id' => 'arvancloud', 'name' => 'ArvanCloud', 'url' => 'https://good.test/ips.txt', 'schedule' => 'daily', 'format' => 'auto', 'mode' => 'monitor'), 'admin', '');    // enabled unticked
+		$o = json_decode(file_get_contents(gv_overlay_path()), true);
+		if ($o['cdn_ranges_feed'] !== array('103.21.244.0/22', '103.22.200.0/22', '173.245.48.0/20')) { return false; }
+		gp_feed_delete('cloudflare', 'admin', '');
+		gp_feed_delete('arvancloud', 'admin', '');
+		$o = json_decode(file_get_contents(gv_overlay_path()), true);
+		return (isset($o['cdn_ranges_feed']) ? $o['cdn_ranges_feed'] === array() : true) && $o['cdn_ranges'] === array('198.51.100.0/24') && !is_file(gp_feed_src_path('cloudflare'));
+	})());
+$GLOBALS['gp_feed_transport'] = function () { $b = ''; for ($i = 1; $i <= 120; $i++) { $b .= '11.' . $i . '.0.0/16' . "\n"; } return array(200, '', $b, ''); };
+gp_feed_save(array('name' => 'Big', 'url' => 'https://good.test/big.txt', 'dest' => 'cdn', 'schedule' => 'manual', 'enabled' => '1'), 'admin', '');
+$big = gp_feed_sync('big', 'admin', '');
+t_ok('cdn: more than 100 ranges in total cannot be applied (the cidrs4 limit): a failure, nothing written', !$big['ok'] && $big['error'] === 'cdn_too_many' && !is_file(gp_feed_src_path('big')));
+gp_feed_delete('big', 'admin', '');
+
+// schedule: manual never, daily after ~20 h, weekly after ~6.8 days; disabled never
+$sch = array('manual' => 'manual', 'daily' => 'daily', 'weekly' => 'weekly');
+$GLOBALS['gp_feed_transport'] = function () { return array(200, '', "50.0.0.0/24\n", ''); };
+foreach ($sch as $k => $v) { gp_feed_save(array('name' => 'S ' . $k, 'url' => 'https://good.test/' . $k, 'dest' => 'allow', 'schedule' => $v, 'enabled' => '1'), 'admin', ''); }
+$due0 = gp_feeds_due(1000000000);
+t_ok('schedule: never-run daily and weekly feeds are due, a manual one never is', in_array('s-daily', $due0, true) && in_array('s-weekly', $due0, true) && !in_array('s-manual', $due0, true));
+$run = gp_feeds_run_due('feeds-cron', '', time());
+t_ok('schedule: the cron run fetches what is due and reports one line per feed', $run['ran'] >= 2 && $run['failed'] === 0 && count($run['lines']) === $run['ran'] && gp_feeds_due(time() + 3600) === array()
+	&& in_array('s-daily', gp_feeds_due(time() + 21 * 3600), true) && !in_array('s-weekly', gp_feeds_due(time() + 3 * 86400), true) && in_array('s-weekly', gp_feeds_due(time() + 7 * 86400), true) && !in_array('s-manual', gp_feeds_due(time() + 30 * 86400), true));
+// the CLI and the cron wrapper, the cron-check entry, the job definition
+$cli_env = 'GV_LISTS_DIR=' . escapeshellarg($fe_tmp . '/lists') . ' GV_OVERLAY=' . escapeshellarg($fe_tmp . '/config.local.json') . ' GV_AUDIT=' . escapeshellarg($fe_tmp . '/audit.jsonl');
+$cli = shell_exec($cli_env . ' ' . escapeshellarg(PHP_BINARY) . ' -q ' . escapeshellarg(__DIR__ . '/feeds-sync.php') . ' --list 2>&1');
+t_ok('scripts/feeds-sync.php --list shows the feeds (CLI only), a web request gets nothing', strpos((string)$cli, 's-daily') !== false && strpos((string)file_get_contents(__DIR__ . '/feeds-sync.php'), "PHP_SAPI === 'cli'") !== false);
+t_ok('the "feeds" job is defined (optional), has an interval setting and a documented crontab line', isset(gp_job_defs()['feeds']) && gp_job_defs()['feeds']['required'] === false && gp_job_intervals()['feeds'] === 86400 && gp_cron_defaults()['feeds'][2] === 'feeds');
+$fcron = (string)file_get_contents(__DIR__ . '/analyzer-cron.sh');
+t_ok('analyzer-cron.sh feeds hands over to feeds-cron.sh (PHP only, own job status), and feeds-cron.sh records the job like the others', strpos($fcron, '|feeds}') !== false && strpos($fcron, 'feeds-cron.sh') !== false
+	&& strpos((string)file_get_contents(__DIR__ . '/feeds-cron.sh'), 'js_begin feeds') !== false && strpos((string)file_get_contents(__DIR__ . '/feeds-cron.sh'), 'js_exec') !== false);
+// ACL: IP list POSTs (feeds included) are admin only
+t_ok('ACL: every feed action is a POST of the iplists route, admin only; the operator and demo get 403 (GET of the tab is a read)', gp_acl_required('iplists', 'POST', '') === 'admin' && !gp_acl_allows('operator', 'iplists', 'POST') && !gp_acl_allows('demo', 'iplists', 'GET') && gp_acl_allows('operator', 'iplists', 'GET'));
+t_ok('feed validation: https only, bounded name / note, unknown format / destination refused, a feed id cannot collide with a manual list', (function () {
+	$b = array('id' => 'x', 'name' => 'N', 'url' => 'https://good.test/a', 'format' => 'auto', 'dest' => 'allow', 'mode' => 'monitor', 'enabled' => true, 'schedule' => 'daily', 'note' => '');
+	$bad = array(array('url' => 'http://good.test/a'), array('name' => ''), array('name' => str_repeat('a', 61)), array('format' => 'xml'), array('dest' => 'block'), array('schedule' => 'hourly'), array('mode' => 'x'), array('id' => '../x'), array('url' => 'https://good.test/' . "a\nb"));
+	foreach ($bad as $d) { if (gp_feed_validate(array_merge($b, $d))[0]) { return false; } }
+	gp_iplists_save(array('name' => 'Feed Clash', 'type' => 'block', 'mode' => 'monitor', 'enabled' => '1', 'text' => "7.7.7.0/24\n"), null, 'a', '');
+	$r = gp_feed_save(array('name' => 'Clash', 'url' => 'https://good.test/c', 'dest' => 'allow'), 'a', '');
+	return gp_feed_validate($b)[0] && $r['ok'] === false && $r['msg'] === 'feed_id_taken';
+})());
+t_ok('presets: the four examples with their destinations (Google and UptimeRobot allow, ArvanCloud and Cloudflare cdn), all HTTPS', array_map(function ($p) { return $p['dest']; }, gp_feed_presets()) === array('google' => 'allow', 'uptimerobot' => 'allow', 'arvancloud' => 'cdn', 'cloudflare' => 'cdn')
+	&& !array_filter(gp_feed_presets(), function ($p) { return gp_feed_url_check($p['url']) !== ''; }) && gp_feed_cdn_host('https://www.cloudflare.com/ips-v4') && !gp_feed_cdn_host('https://uptimerobot.com/inc/files/ips/IPv4.txt'));
+unset($GLOBALS['gp_feed_resolver'], $GLOBALS['gp_feed_transport']);
+t_ok('the feeds tests left nothing in the repository (no lists/feeds.json, no config.local.json change)', !is_file(__DIR__ . '/../lists/feeds.json') && !is_file(__DIR__ . '/../lists/feed-monitor-x.txt'));
+putenv('GV_LISTS_DIR=' . $il_tmp . '/lists'); putenv('GV_OVERLAY'); putenv('GV_AUDIT=' . $il_tmp . '/audit.jsonl');
+
 t_ok('the selftest left nothing in the repository: no lists/ files, no audit line for it', glob(__DIR__ . '/../lists/*.{txt,bin,json}', GLOB_BRACE) === array());
 putenv('GV_LISTS_DIR'); putenv('GV_GEO_DIR'); putenv('GV_AUDIT');
 gv_geo_state(true);
@@ -3174,7 +3384,31 @@ $UT_REPO = realpath(__DIR__ . '/..');
 $UT_PHP = PHP_BINARY;
 
 // Copy the repository (code only) into $dst. Local data files are created by the callers.
+// The files a commit of $dir would contain (tracked + untracked-but-not-ignored), as relative paths, or null when $dir is not a git
+// checkout or git is unavailable. This is what the upstream ZIP of the repository holds. Copying the WORKING TREE instead let any stray,
+// ignored runtime file (a cron lock such as analyzer/.feeds.lock, left by a manual job run) into the test ZIP; the updater refuses a file
+// type it does not know ("upd_err_ext"), so EVERY staging in this section failed and the section ended in an uncaught "Call to undefined
+// function gprb_token_ok()" (the update it expected to have applied never ran).
+function ut_repo_files($dir) {
+	$p = @proc_open(array('git', '-C', $dir, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'), array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'), 2 => array('file', '/dev/null', 'w')), $pipes);
+	if (!is_resource($p)) { return null; }
+	$out = stream_get_contents($pipes[1]);
+	fclose($pipes[1]);
+	if (proc_close($p) !== 0 || $out === '') { return null; }
+	return array_values(array_filter(explode("\0", $out), 'strlen'));
+}
 function ut_copy_tree($src, $dst) {
+	global $UT_REPO;
+	if ($src === $UT_REPO && ($files = ut_repo_files($src)) !== null) {
+		foreach ($files as $rel) {
+			$n = basename($rel);
+			if (!is_file($src . '/' . $rel) || preg_match('/\.(pyc|jsonl|log|joblib|candidate|csv)$/', $n) || $n === 'panel.config.php' || $n === 'guard.off' || strpos($rel, '.github/') === 0) { continue; }
+			@mkdir(dirname($dst . '/' . $rel), 0775, true);
+			copy($src . '/' . $rel, $dst . '/' . $rel);
+			chmod($dst . '/' . $rel, fileperms($src . '/' . $rel) & 0777);
+		}
+		return;
+	}
 	@mkdir($dst, 0775, true);
 	foreach ((array)scandir($src) as $n) {
 		if ($n === '.' || $n === '..' || $n === '.git' || $n === '__pycache__' || $n === 'node_modules' || $n === '.ratelimit' || $n === '.github') { continue; }
@@ -3446,6 +3680,30 @@ foreach ($bad_cases as $label => $over) {
 $wk = $ut_run($root_k . '/updates/verify.php', array('20260101-000000'));
 t_ok('verify.php refuses an unknown update stamp', $wk[0] === 2);
 
+// Regression: a stray ignored runtime file in the working tree must not reach the test install (and so the test ZIP).
+$rg = sys_get_temp_dir() . '/gp-rg-' . bin2hex(random_bytes(4));
+@mkdir($rg . '/analyzer', 0775, true);
+$rg_git = function (array $a) use ($rg) { $p = @proc_open(array_merge(array('git', '-C', $rg), $a), array(0 => array('file', '/dev/null', 'r'), 1 => array('file', '/dev/null', 'w'), 2 => array('file', '/dev/null', 'w')), $pp); return is_resource($p) ? proc_close($p) : 1; };
+if ($rg_git(array('init', '-q')) !== 0) { t_skip('the test install holds only what a commit would hold (stray runtime files are left out)', 'git is not available'); }
+else {
+	file_put_contents($rg . '/.gitignore', "analyzer/.*.lock\n");
+	file_put_contents($rg . '/tracked.php', "<?php\n");
+	$rg_git(array('add', '.gitignore', 'tracked.php'));
+	file_put_contents($rg . '/new-untracked.php', "<?php\n");          // a new file not added yet: part of the next commit
+	file_put_contents($rg . '/analyzer/.feeds.lock', '');              // ignored runtime lock
+	$rgf = ut_repo_files($rg);
+	t_ok('the test install holds only what a commit would hold: tracked and new files yes, an ignored runtime lock (analyzer/.feeds.lock) no', $rgf !== null
+		&& in_array('tracked.php', $rgf, true) && in_array('new-untracked.php', $rgf, true) && !in_array('analyzer/.feeds.lock', $rgf, true));
+	$UT_REPO_SAVED = $UT_REPO;
+	$UT_REPO = $rg;                                                    // copy THIS scratch repository the way ut_install copies the real one
+	ut_copy_tree($rg, $rg . '-copy');
+	$UT_REPO = $UT_REPO_SAVED;
+	t_ok('ut_copy_tree leaves the ignored runtime lock out of the install copy (staging used to fail with upd_err_ext because of it)', is_file($rg . '-copy/tracked.php')
+		&& is_file($rg . '-copy/new-untracked.php') && !file_exists($rg . '-copy/analyzer/.feeds.lock') && is_file($rg . '/analyzer/.feeds.lock'));
+	gp_upd_rmtree($rg . '-copy');
+}
+gp_upd_rmtree($rg);
+
 // ---- rollback.php with the panel code broken
 $root_b = ut_install();
 $hb = ut_hashes($root_b);
@@ -3477,10 +3735,11 @@ t_ok('a damaged backup makes the rollback refuse and change nothing', $rd[0] ===
 $root_t = ut_install();
 $stt = gp_upd_stage(ut_make_zip($root_t, '2026.07.07', array('docs/T.md' => "t\n")), 't.zip', 'a');
 $att = gp_upd_apply($stt['plan']['id'], 'admin');
-$ttok = gp_upd_token_take($att['stamp']);
+t_ok('the update for the recovery-token tests applied' . ($att['ok'] ? '' : ' (refused: ' . ($att['error'] ?? '?') . ' ' . ($att['detail'] ?? '') . ')'), !empty($att['ok']));
+$ttok = gp_upd_token_take((string)($att['stamp'] ?? ''));
 t_ok('the token is shown once: the second read finds nothing', strlen($ttok) === 32 && gp_upd_token_take($att['stamp']) === '');
 gp_upd_load_rollback();
-t_ok('the web recovery refuses a wrong token and an empty one', !gprb_token_ok('0123456789abcdef0123456789abcdef') && !gprb_token_ok('') && gprb_token_ok($ttok));
+t_ok('the web recovery refuses a wrong token and an empty one', function_exists('gprb_token_ok') && !gprb_token_ok('0123456789abcdef0123456789abcdef') && !gprb_token_ok('') && gprb_token_ok($ttok));
 $rj = gp_upd_json_read(gp_upd_dir() . '/recovery.json'); $rj['expires'] = time() - 5; gp_upd_json_write(gp_upd_dir() . '/recovery.json', $rj);
 t_ok('an expired token is refused', !gprb_token_ok($ttok));
 $rj['expires'] = time() + 3600; gp_upd_json_write(gp_upd_dir() . '/recovery.json', $rj);
@@ -4237,7 +4496,7 @@ $d6_clean();
 // from the shell: php panel/setpass.php --unlock-user / --unlock-ip / --unlock-all (the same counters; Redis or the files of this panel directory)
 $sh = function (array $args) use ($UT_PHP, $UT) {
 	$p = proc_open(array_merge(array($UT_PHP, __DIR__ . '/../panel/setpass.php'), $args), array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $pipes, null,
-		array('PATH' => getenv('PATH'), 'GV_AUDIT' => $UT . '/audit-d6.jsonl', 'GV_USERS' => $UT . '/users-d6.json'));
+		array('PATH' => getenv('PATH'), 'GV_AUDIT' => $UT . '/audit-d6.jsonl', 'GV_USERS' => $UT . '/users-d6.json', 'GV_RATELIMIT_DIR' => (string)getenv('GV_RATELIMIT_DIR')));
 	$o = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
 	fclose($pipes[1]); fclose($pipes[2]);
 	return array(proc_close($p), $o);
@@ -4262,6 +4521,8 @@ $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
 echo "\n";
 // Say so out loud. A green run on a host missing the extension must never be
 // mistakable for full coverage.
+t_ok('the suite wrote no sign-in counters into the repository (panel/.ratelimit): they are private to this process',
+	getenv('GV_RATELIMIT_DIR') === $GP_RL_DIR && (is_dir(__DIR__ . '/../panel/.ratelimit') ? count(glob(__DIR__ . '/../panel/.ratelimit/*')) : 0) === $GP_RL_REPO_BEFORE);
 if (!$GP_HAS_DOM) {
 	echo "NOTE: ext-dom was unavailable; the DOM-level XSS assertions did not run.\n";
 }

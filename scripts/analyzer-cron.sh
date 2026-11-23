@@ -15,6 +15,7 @@
 #   scripts/analyzer-cron.sh snapshot   dashboard snapshot for the admin panel
 #   scripts/analyzer-cron.sh worker     drain the panel's job queue
 #   scripts/analyzer-cron.sh geo        compile geo/*.mmdb / geoip.dat into country.bin / asn.bin
+#   scripts/analyzer-cron.sh feeds      fetch the IP range feeds that are due (panel: IP lists -> Feeds; PHP only, hands over to feeds-cron.sh)
 #
 # Each mode takes its own flock, so overlapping cron firings queue-and-skip
 # instead of writing partial verdicts on top of each other.
@@ -29,6 +30,7 @@
 #   */15 * * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh snapshot  >/dev/null 2>&1
 #   *    * * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh worker    >/dev/null 2>&1
 #   23 3   1 * * bash /full/path/bot-guard/scripts/analyzer-cron.sh geo       >/dev/null 2>&1   # only when GeoIP rules are used
+#   27 3   * * * bash /full/path/bot-guard/scripts/analyzer-cron.sh feeds     >/dev/null 2>&1   # only when an IP feed has a schedule
 #
 # report writes to stdout on purpose so it can be piped or mailed. Pass
 # GV_REPORT_HTML=/path/to/file.html to also write the standalone HTML version.
@@ -37,6 +39,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${GV_PYTHON:-python3}"
 MODE="${1:-}"
+
+# feeds is a PHP job (it needs no Python): hand over before anything Python-specific runs.
+if [ "$MODE" = feeds ]; then exec bash "$ROOT/scripts/feeds-cron.sh"; fi
 
 case "$MODE" in
 	verify)    SCRIPT="analyzer/run_verify.py";  ARGS=() ;;
@@ -54,7 +59,7 @@ case "$MODE" in
 		fi
 		;;
 	*)
-		echo "Usage: $(basename "$0") {verify|nightly|train|train-clf|report|snapshot|worker|geo}"
+		echo "Usage: $(basename "$0") {verify|nightly|train|train-clf|report|snapshot|worker|geo|feeds}"
 		exit 1
 		;;
 esac

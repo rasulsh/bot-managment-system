@@ -222,6 +222,8 @@ PATH=/usr/local/bin:/usr/bin:/bin
 30 7   * * 1 bash /home/youruser/bot-guard/scripts/analyzer-cron.sh report | mail -s "Bot Guard weekly" you@example.com
 # only when you use country / ASN rules: recompile the GeoIP databases monthly (see docs/09-ADMIN-PANEL.md, GeoIP)
 23 3   1 * * bash /home/youruser/bot-guard/scripts/analyzer-cron.sh geo       >/dev/null 2>&1
+# only when an IP feed has a daily / weekly schedule (panel: IP lists -> Feeds)
+27 3   * * * bash /home/youruser/bot-guard/scripts/analyzer-cron.sh feeds     >/dev/null 2>&1
 ```
 
 The `geo` line only recompiles what is already in `geo/`: download a fresh database yourself (GeoLite2,

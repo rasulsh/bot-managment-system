@@ -231,10 +231,21 @@ compiling and the lookup tester are safe. Country guesses are wrong for VPN user
 
 ### IP lists
 *What it is for:* named **allow** and **block** lists of addresses and address ranges, pasted
-or uploaded as a file. Five tabs: **Lists**, **Editor**, **Entries**, **Lookup tester**,
+or uploaded as a file. Six tabs: **Lists**, **Editor**, **Entries**, **Feeds**, **Lookup tester**,
 **Compile**. *Look at first:* the **Lookup tester** (type an address, see which list holds it).
 *Safe to change:* start a list in Monitor mode; an Allow list is a hole by design, so keep it
 short ([recipe](#allow-a-partner-or-payment-gateway-server)).
+
+**IP feeds (Feeds tab).** A feed keeps a provider's published IPv4 ranges up to date from an HTTPS URL
+(daily, weekly or by pressing *Update now*). Four presets are offered: **Google common crawlers** and
+**UptimeRobot** go to an **allow list** (reasonable: verified crawlers and your own uptime monitor);
+**ArvanCloud** and **Cloudflare** go to **Trusted CDN ranges** (`cdn_ranges`), and only if your site is
+behind that CDN. **Never put a CDN's ranges in an allow list:** if your site is behind it, every visitor
+arrives from those addresses and the whole site would be allowed; even if it is not, anyone can send
+requests from those networks (Cloudflare Workers, WARP) and skip the guard. A feed that fails keeps
+its last good entries; an update that would remove more than half of them waits for your confirmation;
+ranges wider than /16 in an allow list wait for you to accept them for that feed. Details:
+[Part 2, IP feeds](#ip-range-feeds).
 
 ### Replay
 *What it is for:* "what would have happened last week if I changed the score threshold or the
@@ -822,6 +833,7 @@ packages it needs.
 | `logrotate` | `guard-logrotate.sh` | `10 3 * * *` | yes | Logs are never compressed or deleted; disk fills; logging stops at the floor. |
 | `train`, `train-clf` | `analyzer-cron.sh train` / `train-clf` | `41 5 * * 0` / `11 6 * * 0` | recommended | No new **candidate** model (cron never promotes). |
 | `geo` | `analyzer-cron.sh geo` | `23 3 1 * *` | only with GeoIP rules | The database ages (panel warns at 45 days). |
+| `feeds` | `analyzer-cron.sh feeds` | `27 3 * * *` | only when an enabled IP feed has a schedule | Scheduled feeds are not refreshed (warning only; **Update now** still works). |
 | `report` | `analyzer-cron.sh report` | `30 7 * * 1` | optional | No periodic report (stdout; `GV_REPORT_HTML=<file>` also writes HTML). |
 
 A generic crontab (use full paths; cron's `PATH` is minimal):
@@ -841,6 +853,8 @@ GV_PYTHON=<python-binary>
 10 3   * * * bash <install-dir>/scripts/guard-logrotate.sh
 # Only with GeoIP rules:
 23 3   1 * * bash <install-dir>/scripts/analyzer-cron.sh geo       >/dev/null 2>&1
+# Only when an IP feed has a daily or weekly schedule (PHP only, no Python needed):
+27 3   * * * bash <install-dir>/scripts/analyzer-cron.sh feeds     >/dev/null 2>&1
 ```
 
 - **`GV_PYTHON`** selects the interpreter (default `python3`). Set `php_bin` (full path) in the analyzer config, or `GV_PHP` for the wrappers, when `php` is not on cron's `PATH`: the analyzer reads Redis credentials and the key prefix through `php scripts/config-dump.php --redis-credentials`, and refuses to write if that bridge fails.
@@ -923,6 +937,35 @@ Outcome rows (`capture_outcomes`): `{"o":1,"rid":...,"st":<status>,"by":<declare
 Full field notes: [docs/08-ANALYZER-PHASES.md](docs/08-ANALYZER-PHASES.md).
 
 **Token levels.** The `_gv` cookie is `device.issued.signature` (**level `p`**, from the proof-of-work check) or `device.issued.c.signature` (**level `c`**, from a solved CAPTCHA); the signature is HMAC-SHA256 over the preceding parts. A nonce is `time.random.bits.signature` (HMAC over the nonce and a hash of UA and, with `bind_ip`, IP). A CAPTCHA nonce has six dot-separated parts.
+
+### IP range feeds
+
+`panel/feeds.php` (logic), `panel/views/iplists_feeds.php` (the **Feeds** tab), `scripts/feeds-sync.php` and `scripts/feeds-cron.sh` (the job).
+A feed = name, HTTPS URL, format, destination, mode, schedule, enabled, note. Feeds live in `lists/feeds.json` (written only by the panel code: temp file +
+rename under a lock; the state of the last run is stored in the same record). Limit: 20 feeds.
+
+- **Fetch.** HTTPS only, at most 3 redirects (each HTTPS and re-checked), 5 MB, connect 8 s / total 25 s, User-Agent `BotGuard-IP-feed/<version>`, no
+  compression. Every address the host name resolves to must be public (private, loopback, link-local, carrier-grade NAT, documentation, benchmarking,
+  multicast and reserved IPv4 / IPv6 are refused, mapped addresses included); the connection goes to the address that passed the check (no second DNS
+  lookup to rebind). Plain PHP streams over TLS with certificate and host-name verification: no cURL and no `allow_url_fopen` needed. Recorded per run: HTTP
+  status, bytes, duration, redirects, entries found, IPv6 dropped, invalid lines.
+- **Parse (IPv4 only).** `auto` detects: a body starting with `{` or `[` is JSON (Google's `prefixes[].ipv4Prefix` when present, otherwise every string
+  that is an IPv4 CIDR), anything else is text (one address or CIDR per line, `#` comments, blank lines, bare addresses become /32). IPv6 entries are dropped
+  silently and counted. `0.0.0.0/0` is always dropped. A body with no IPv4 entry is a failure.
+- **Sync.** Each feed owns exactly one destination and **Update** replaces its entries with the fetched set, showing added / removed / unchanged. A failure
+  (network, HTTP, parse, zero entries) keeps the last good entries, records the error, and raises a dashboard warning after 2 failures in a row. A fetch that
+  removes **more than 50 %** of the current entries is **held** (`lists/.feedhold-<id>.txt`) until an admin applies or discards it. Manual lists are never touched.
+- **Destination "allow list".** The feed owns the IP list `feed-<id>` (type allow, named "Feed: <name>", logged as `IPL_ALLOW:feed-<id>`); it cannot be edited or
+  deleted from the lists table. The compile caps of the IP lists apply: an allow entry wider than /16 is **held by the cap** (shown with samples) until an admin
+  accepts it for this feed (the list's `force` flag, audit-logged). Start in monitor mode like any allow list.
+- **Destination "trusted CDN ranges".** The ranges are merged into the overlay key `cdn_ranges_feed` (whitelisted `cidrs4`: /8 to /32, at most 100 in total
+  across all CDN feeds). The guard trusts `cdn_ranges` plus `cdn_ranges_feed` for `X-Forwarded-For`; the manual `cdn_ranges` are never read or written by a feed.
+  Disabling or deleting a feed removes only its share.
+- **Schedule.** Manual, daily or weekly. `analyzer-cron.sh feeds` (hands over to `feeds-cron.sh`, PHP only, own job status `analyzer/.jobstatus-feeds.json`) fetches
+  what is due (a daily feed about 20 h after its last run, a weekly one about 6.8 days); `php scripts/feeds-sync.php --id <feed>` runs one now, `--list` shows
+  them. The job exits 1 when a feed failed. `cron-check.sh` recommends the entry (a warning, never an error) only when an enabled feed has a schedule; the expected
+  interval is the Settings key `analyzer.interval_feeds` (default 1440 minutes).
+- **Access.** Admin only (every IP list POST is). Audited as `iplist` events with the key `feed:<id>`.
 
 **Compiled range files** (`geo/country.bin`, `geo/asn.bin`, `lists/allow.bin`, `lists/block.bin`): a 128-byte big-endian header (`"GVRG"`, version 1, kind 1 country / 2 ASN / 3 IP list, value size, build time, IPv4 and IPv6 range counts, sha256 of the source, source name), then the IPv4 section (`start 4 | end 4 | value`, sorted, non-overlapping) and the IPv6 section (`start 16 | end 16 | value`). Country values are two letters, ASN a `uint32`, IP-list values a `uint16` (bit 15 = monitor, bits 0–14 = list index). A wrong file means *unknown*, never an exception. Writers: `analyzer/geo.py`, `analyzer/iplist.py`; readers: `guard/geo.php`, `guard/iplist.php`.
 

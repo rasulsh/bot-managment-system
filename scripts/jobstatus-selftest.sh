@@ -148,6 +148,18 @@ ok "when quota does not exist it is skipped silently" "$(if [ -n "$(PATH=/usr/bi
 GV_PHP=/nonexistent GV_LOG_DIR="$WORK/nodir" GV_JOBLOG_DIR="$L" bash "$ROOT/scripts/guard-logrotate.sh" > /dev/null 2>&1
 ok "a missing log directory is a warning, not a silent success" "$(yes_if [ "$(status logrotate status)" = warning ])"
 
+echo "== feeds (PHP job behind analyzer-cron.sh feeds)"
+FD="$WORK/feeds"; mkdir -p "$FD/lists" "$FD/logs"
+unset GV_PHP
+export GV_LISTS_DIR="$FD/lists" GV_OVERLAY="$FD/ov.json" GV_AUDIT="$FD/audit.jsonl"
+bash "$CRON" feeds > "$WORK/f0" 2>&1; rc=$?
+ok "analyzer-cron.sh feeds with no feed configured exits 0 and records an ok run (no Python needed: the fake Python is never asked)" "$(yes_if [ $rc -eq 0 ] && [ "$(status feeds status)" = ok ] && grep -q 'No feed is due' "$WORK/f0")"
+printf '%s\n' '{"v":1,"feeds":[{"id":"t1","name":"T1","url":"https://127.0.0.1/x","format":"auto","dest":"allow","mode":"monitor","enabled":true,"schedule":"daily","note":"","force":false}]}' > "$FD/lists/feeds.json"
+bash "$CRON" feeds > "$WORK/f1" 2>&1; rc=$?
+ok "a feed that fails (here: refused by the SSRF guard) makes the run failed, exit 1, with the reason in the error text" "$(yes_if [ $rc -eq 1 ] && [ "$(status feeds status)" = failed ] && [ "$(status feeds last_error | grep -c ssrf)" = 1 ])"
+ok "...and the feed keeps its error and streak in lists/feeds.json (last good entries untouched)" "$(yes_if python3 -c 'import json,sys; f=json.load(open(sys.argv[1]))["feeds"][0]["st"]; sys.exit(0 if f["fail_streak"]==1 and "ssrf" in f["error"] else 1)' "$FD/lists/feeds.json")"
+unset GV_LISTS_DIR GV_OVERLAY GV_AUDIT
+
 echo
 echo "PASS $PASS  FAIL $FAIL"
 [ "$FAIL" -eq 0 ]

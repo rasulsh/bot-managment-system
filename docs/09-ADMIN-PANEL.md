@@ -249,6 +249,7 @@ who steals the session.
   it says so and resolves the logged addresses in the current database, or says it cannot evaluate when there is
   no database - it never shows a bare zero. The Logs page filters by country (`cc`) and ASN (`asn`) and the CSV
   export has both columns.
+- **IP feeds** (IP lists -> **Feeds** tab) — provider ranges (Google crawlers, UptimeRobot, ArvanCloud, Cloudflare presets) fetched from an HTTPS URL into a managed allow list or into the trusted CDN ranges; see [IP feeds](#ip-feeds) below.
 - **IP lists** — named allow / block lists of addresses and CIDRs, kept as files and compiled into one range file per type
   that the guard searches without Redis (see [02-ARCHITECTURE.md](02-ARCHITECTURE.md#ip-allow--block-lists)). The single-address
   overrides on the Overrides page stay as they are. Tabs: **Lists** (table with type, mode, enabled, entry and address counts,
@@ -284,6 +285,24 @@ who steals the session.
 - **Jobs** also has a **File permissions** card: group- or world-writable files and directories, cron scripts without the execute bit and secret files readable by everybody, each with the exact commands (cached one hour, **Scan again**, recomputed after an update). The same findings are dashboard alerts.
 - **Users** (administrators) and **My account** (everybody) — see [Users and roles](#users-and-roles).
 - **Update** — install a newer version from the GitHub ZIP, review it, apply it with your password, roll it back. See [Update from a ZIP](#update-from-a-zip).
+
+## IP feeds
+
+IP lists -> **Feeds** (admin only). A feed has a name, an HTTPS URL, a format (auto-detect, plain text, Google JSON, any JSON), a **destination**, a mode (for an
+allow list), a schedule (manual, daily, weekly), enabled, a note and, for an allow list, "accept entries wider than /16 (this feed only)". Every field has a `?` tooltip.
+The four presets fill the form with the recommended destination: Google common crawlers and UptimeRobot -> allow list; ArvanCloud and Cloudflare -> trusted CDN ranges.
+
+**Warning, shown on the tab and next to a CDN feed that points at an allow list: CDN ranges do not belong in an allow list.** If the site is behind that CDN every visitor arrives
+from those addresses, so an allow list would allow the whole site; even if it is not, anyone can send requests from those networks (Cloudflare Workers, WARP) and bypass the guard.
+For a CDN the site sits behind use *Trusted CDN ranges* (it only decides whose `X-Forwarded-For` is believed); for a CDN the site does not use, usually add no feed.
+
+The table shows per feed: destination (and the managed list `feed-<id>`), schedule, last run and last good run, the result (added / removed / unchanged, entries, IPv6 dropped,
+invalid lines, HTTP status, bytes, duration, format), the error and the number of failures in a row, a **held** update (with *Apply the held update* / *Discard it*) and entries
+**held by the cap** (with samples and *Accept them for this feed*). *Update now* fetches in the request (up to about 25 s). Results appear in the row's own section.
+A failed fetch keeps the last good entries; the dashboard warns after 2 failures in a row, and while an update is held. The destination cannot be changed after creation.
+The managed allow list is shown in the Lists tab with its own name and cannot be edited there. The Settings -> Network group shows `cdn_ranges_feed` (filled by feeds; the next update replaces a hand edit).
+
+Crontab: `27 3 * * * bash <install-dir>/scripts/analyzer-cron.sh feeds` (PHP only). Without it only **Update now** fetches. See README Part 2, *IP range feeds*, for the fetch rules (SSRF guard, redirects, size cap), parsing and the hold / cap semantics.
 
 ## Dashboard, job health and alerts
 

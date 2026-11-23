@@ -34,6 +34,7 @@ function gp_job_defs() {
 		'train'     => array('label' => 'job_n_train', 'marker' => '', 'required' => false),
 		'train-clf' => array('label' => 'job_n_train_clf', 'marker' => '', 'required' => false),
 		'geo'       => array('label' => 'job_n_geo', 'marker' => '', 'required' => false),
+		'feeds'     => array('label' => 'job_n_feeds', 'marker' => '', 'required' => false),
 		'report'    => array('label' => 'job_n_report', 'marker' => '', 'required' => false),
 	);
 }
@@ -379,6 +380,7 @@ function gp_health_inputs($now = null) {
 		'perms' => gp_perm_scan(false, $now),
 		'php_env' => gp_php_env(),
 		'login_global' => gp_login_global_state(),
+		'feeds' => function_exists('gp_feeds_health') ? gp_feeds_health() : array('failing' => array(), 'held' => array(), 'scheduled' => 0),
 		'captcha_gd_needed' => gp_captcha_needed($cfg, $rs['rules']),
 		'captcha_gd' => gv_captcha_available(),
 	);
@@ -435,6 +437,10 @@ function gp_health_alerts(array $in) {
 	// runs in the web server's PHP, like the guard (a CLI PHP can differ: check the web server's phpinfo if this looks wrong).
 	if (!empty($in['captcha_gd_needed']) && empty($in['captcha_gd'])) { $add('captcha_gd', 'warning', 'al_captcha_gd', '', 'settings'); }
 	foreach (gp_php_env_warnings(isset($in['php_env']) && is_array($in['php_env']) ? $in['php_env'] : array()) as $code) { $add($code, 'warning', 'al_' . $code, '', 'jobs'); }
+	// IP feeds: a feed that failed twice in a row keeps its last good entries but is going stale; a held update waits for an admin.
+	$fh = isset($in['feeds']) && is_array($in['feeds']) ? $in['feeds'] : array();
+	foreach ((array)($fh['failing'] ?? array()) as $x) { $add('feed_failing_' . $x['id'], 'warning', 'al_feed_failing', $x['name'] . ' (' . (int)$x['n'] . 'x)', 'iplists'); }
+	foreach ((array)($fh['held'] ?? array()) as $x) { $add('feed_held_' . $x['id'], 'warning', 'al_feed_held', $x['name'], 'iplists'); }
 	// The panel-wide sign-in limit is reached: nobody on an unknown device can sign in until it expires or an administrator clears it.
 	if (!empty($in['login_global']['locked'])) { $add('login_global', 'warning', 'al_login_global', (string)(int)ceil(((int)($in['login_global']['ttl'] ?? 0)) / 60), 'users'); }
 	$pm = isset($in['perms']) && is_array($in['perms']) ? $in['perms'] : null;
@@ -528,6 +534,7 @@ function gp_cron_defaults() {
 		'snapshot' => array('*/15 * * * *', 'analyzer-cron.sh', 'snapshot'), 'nightly' => array('17 4 * * *', 'analyzer-cron.sh', 'nightly'),
 		'logrotate' => array('10 3 * * *', 'guard-logrotate.sh', ''), 'train' => array('41 5 * * 0', 'analyzer-cron.sh', 'train'),
 		'train-clf' => array('11 6 * * 0', 'analyzer-cron.sh', 'train-clf'), 'geo' => array('23 3 1 * *', 'analyzer-cron.sh', 'geo'),
+		'feeds' => array('27 3 * * *', 'analyzer-cron.sh', 'feeds'),
 	);
 }
 

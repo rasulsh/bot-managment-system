@@ -501,6 +501,9 @@ function gp_flash_decode($raw, $secret) {
 // --------------------------------------------------------------------------
 
 function gp_ratelimit_file_dir() {
+	// GV_RATELIMIT_DIR lets the test harness keep the counters out of the working tree (and apart from other processes), like GV_AUDIT.
+	$env = getenv('GV_RATELIMIT_DIR');
+	if (is_string($env) && $env !== '') { return rtrim($env, '/\\'); }
 	return __DIR__ . '/.ratelimit';
 }
 

@@ -37,6 +37,9 @@ function gv_cfg_defaults(array $cfg) {
 		// any other path (an SEO URL) the parameter is something the client added.
 		'exempt_params_paths' => array('/', '/index.php'),
 		'cdn_ranges'       => array(),
+		// Ranges written by an IP feed (panel: IP lists -> Feeds, destination "trusted CDN ranges"). Kept apart from cdn_ranges so a
+		// feed never touches what the operator typed; the request path trusts the union of both.
+		'cdn_ranges_feed'  => array(),
 		'log_dir'          => dirname(__DIR__) . '/logs',
 		// Log storage. log_skip_paths: path prefixes never written to the log
 		// (the guard still decides for them). The rest is read by
@@ -158,7 +161,7 @@ function gv_cfg_defaults(array $cfg) {
 			if (!is_bool($v)) { $cfg[$grp][$k] = (bool)filter_var($v, FILTER_VALIDATE_BOOLEAN); }
 		}
 	}
-	foreach (array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'known_bots', 'preview_bots', 'cdn_ranges', 'bot_suffixes', 'log_skip_paths') as $k) {
+	foreach (array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'known_bots', 'preview_bots', 'cdn_ranges', 'cdn_ranges_feed', 'bot_suffixes', 'log_skip_paths') as $k) {
 		if (!is_array($cfg[$k])) { $cfg[$k] = array(); }
 	}
 	return $cfg;
@@ -227,6 +230,7 @@ function gv_overlay_whitelist() {
 		'log_floor_delete'   => array('bool'),
 		'log_floor_keep_days' => array('int', 1, 3650),
 		'cdn_ranges'         => array('cidrs4'),
+		'cdn_ranges_feed'    => array('cidrs4'),
 		'bot_suffixes'       => array('suffixes'),
 		// GeoIP: put the country / ASN of every request into its log row.
 		'geo.log'            => array('bool'),
@@ -305,6 +309,7 @@ function gv_overlay_whitelist() {
 		'analyzer.interval_train' => array('int', 60, 43200),
 		'analyzer.interval_train_clf' => array('int', 60, 43200),
 		'analyzer.interval_geo' => array('int', 60, 129600),
+		'analyzer.interval_feeds' => array('int', 60, 129600),
 		'analyzer.interval_report' => array('int', 60, 129600),
 	);
 }
@@ -542,6 +547,9 @@ function gv_overlay_apply(array $cfg, array $flat) {
 }
 
 function gv_overlay_path() {
+	// GV_OVERLAY lets the test harness keep the overlay out of the working tree, like GV_CONFIG.
+	$env = getenv('GV_OVERLAY');
+	if (is_string($env) && $env !== '') { return $env; }
 	return __DIR__ . '/config.local.json';
 }
 
@@ -669,7 +677,7 @@ function gv_facts(array $server, array $get, array $cookie, array $cfg) {
 	if (!empty($server['HTTPS']) && strtolower((string)$server['HTTPS']) !== 'off') { $https = true; }
 	if (isset($server['HTTP_X_FORWARDED_PROTO']) && strtolower((string)$server['HTTP_X_FORWARDED_PROTO']) === 'https') { $https = true; }
 	$name = (string)$cfg['cookie_name'];
-	$ip   = gv_ip_canon(gv_client_ip($server, $cfg['cdn_ranges']));
+	$ip   = gv_ip_canon(gv_client_ip($server, array_merge($cfg['cdn_ranges'], $cfg['cdn_ranges_feed'])));
 	$cookies = gv_cookie_values($name, $cookie, isset($server['HTTP_COOKIE']) ? $server['HTTP_COOKIE'] : '');
 	return array(
 		'rid'     => gv_rid(),

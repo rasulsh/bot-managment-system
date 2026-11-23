@@ -28,6 +28,7 @@ require_once __DIR__ . '/health.php';
 require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/rules.php';
 require_once __DIR__ . '/iplists.php';
+require_once __DIR__ . '/feeds.php';
 
 $GP_LANG = require __DIR__ . '/lang.php';
 
@@ -418,7 +419,30 @@ switch ($gp_route) {
 		if ($gp_post && isset($_POST['do']) && is_string($_POST['do'])) {
 			$do = $_POST['do'];
 			$r = array(false, 'err_generic', '');
-			if ($do === 'save') {
+			if (strncmp($do, 'feed_', 5) === 0) {
+				// IP range feeds (panel/feeds.php). Fetching is a network call: allow it a minute.
+				@set_time_limit(90);
+				$fid = is_string($_POST['id'] ?? null) ? $_POST['id'] : '';
+				if ($do === 'feed_save') {
+					$fsv = gp_feed_save($_POST, $gp_user, $gp_ip);
+					if ($fsv['ok']) { gp_flash('ok', gp_t($fsv['msg']) . ($fsv['detail'] !== '' ? ': ' . $fsv['detail'] : ''), 'feeds-list'); gp_redirect('iplists'); }
+					gp_flash('error', gp_t($fsv['msg']));
+					$feed_save = $fsv;
+				} else {
+					if ($do === 'feed_delete') { $r = gp_feed_delete($fid, $gp_user, $gp_ip); $r[0] && ($sec_override = 'feeds-list'); }
+					elseif ($do === 'feed_accept_cap') { $r = gp_feed_accept_cap($fid, $gp_user, $gp_ip); }
+					elseif ($do === 'feed_discard_hold') { $r = gp_feed_discard_hold($fid, $gp_user, $gp_ip); }
+					elseif ($do === 'feed_update' || $do === 'feed_accept_hold') {
+						$sr = gp_feed_sync($fid, $gp_user, $gp_ip, $do === 'feed_accept_hold' ? array('accept_hold' => true) : array());
+						if ($sr['ok']) {
+							$r = array(true, $sr['status'] === 'held' ? 'feed_upd_held' : ($sr['status'] === 'nochange' ? 'feed_upd_nochange' : 'feed_upd_applied'),
+								sprintf(gp_t('feed_diff_line'), gp_num($sr['added']), gp_num($sr['removed']), gp_num($sr['unchanged'])));
+						} else { $r = array(false, 'feed_upd_failed', gp_feed_error_text($sr['error'] . ($sr['detail'] !== '' ? ': ' . $sr['detail'] : ''))); }
+					}
+					gp_flash($r[0] ? ($r[1] === 'feed_upd_held' ? 'warn' : 'ok') : 'error', gp_t($r[1]) . ($r[2] !== '' ? ': ' . $r[2] : ''), isset($sec_override) ? $sec_override : null);
+					gp_redirect('iplists');
+				}
+			} elseif ($do === 'save') {
 				$sv = gp_iplists_save($_POST, isset($_FILES['file']) && is_array($_FILES['file']) ? $_FILES['file'] : null, $gp_user, $gp_ip);
 				if ($sv['ok']) { gp_flash('ok', gp_t($sv['msg']) . ($sv['detail'] !== '' ? ': ' . $sv['detail'] : ''), 'ipl-lists'); gp_redirect('iplists'); }
 				gp_flash($sv['msg'] === 'ipl_confirm' ? 'warn' : 'error', gp_t($sv['msg']) . ($sv['detail'] !== '' ? ': ' . $sv['detail'] : ''));
@@ -459,7 +483,16 @@ switch ($gp_route) {
 		$eid = isset($_GET['list']) && is_string($_GET['list']) ? $_GET['list'] : '';
 		$efilter = gp_filter_parse($_GET, array('entry' => 'text', 'family' => 'choice'));
 		$itest_ip = is_string($_GET['ip'] ?? null) ? substr($_GET['ip'], 0, 45) : '';
+		$feed_draft = null;
+		if (isset($feed_save)) { $feed_draft = $feed_save['draft']; }
+		elseif (isset($_GET['edit_feed']) && is_string($_GET['edit_feed'])) { $feed_draft = gp_feed_find(gp_feeds_state()['feeds'], $_GET['edit_feed']); }
+		elseif (isset($_GET['new_feed'])) {
+			$feed_draft = gp_feed_blank();
+			$pre = gp_feed_presets();
+			if (is_string($_GET['preset'] ?? null) && isset($pre[$_GET['preset']])) { $feed_draft = array_merge($feed_draft, $pre[$_GET['preset']]); }
+		}
 		gp_render('iplists', array(
+			'feeds_state' => gp_feeds_state(), 'feed_edit' => $feed_draft, 'feed_save' => isset($feed_save) ? $feed_save : null,
 			'state' => $istate, 'status' => $istatus, 'all' => $irows, 'visible' => gp_iplists_filter_rows($irows, $ifilter), 'filter' => $ifilter,
 			'edit' => $iedit, 'save' => isset($ipl_save) ? $ipl_save : null,
 			'warnings' => gp_iplists_warnings($istate['lists'], gp_iplists_verified_ips()),

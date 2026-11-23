@@ -114,7 +114,7 @@ DEFAULTS = {
     'worker_max_jobs': 4,
     # Expected run interval of each job in minutes: read by the panel's job health, ignored here.
     'interval_verify': 10, 'interval_worker': 1, 'interval_snapshot': 15, 'interval_nightly': 1440,
-    'interval_logrotate': 1440, 'interval_train': 10080, 'interval_train_clf': 10080, 'interval_geo': 43200,
+    'interval_logrotate': 1440, 'interval_train': 10080, 'interval_train_clf': 10080, 'interval_geo': 43200, 'interval_feeds': 1440,
     'interval_report': 10080,
 }
 
@@ -272,7 +272,7 @@ PANEL_KEYS = {
     'challenge_success_target': float, 'snapshot_days': int, 'job_ttl': int,
     'worker_max_jobs': int,
     'interval_verify': int, 'interval_worker': int, 'interval_snapshot': int, 'interval_nightly': int,
-    'interval_logrotate': int, 'interval_train': int, 'interval_train_clf': int, 'interval_geo': int,
+    'interval_logrotate': int, 'interval_train': int, 'interval_train_clf': int, 'interval_geo': int, 'interval_feeds': int,
     'interval_report': int,
 }
 
