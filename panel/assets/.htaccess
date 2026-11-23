@@ -20,3 +20,12 @@
 	Header set Cache-Control "public, max-age=31536000, immutable" env=GP_ASSET_V
 	Header set Cache-Control "no-cache" env=!GP_ASSET_V
 </IfModule>
+
+# LiteSpeed / OpenLiteSpeed do not evaluate env= on Header: there the rule is by file type only, so an UNversioned request is cached for a
+# year as well. The panel itself never emits one (gp_asset_url()), so only a stale cached page could ask for it; that page is never cached
+# (no-store, X-LiteSpeed-Cache-Control: no-cache).
+<IfModule LiteSpeed>
+	<FilesMatch "\.(css|woff2)$">
+		Header set Cache-Control "public, max-age=31536000, immutable"
+	</FilesMatch>
+</IfModule>
