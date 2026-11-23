@@ -36,11 +36,14 @@ Writes lists/lists-status.json (what was built, per-list counts, errors).
 from __future__ import print_function
 
 import argparse
+import calendar
+import datetime
 import hashlib
 import heapq
 import ipaddress
 import json
 import os
+import re
 import sys
 import time
 
@@ -107,24 +110,127 @@ def parse_entry(token):
     return (ip.version, start, start + (1 << host) - 1, prefix)
 
 
-def parse_text(text):
-    """([(version, start, end, prefix)], [(line number, text)]) from a source text. Pure."""
+EXPIRES_RE = re.compile(r'\bexpires\s*=\s*(\S*)(?:[ T](\d{2}:\d{2}))?', re.I)
+EXPIRES_VALUE_RE = re.compile(r'^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?$')
+
+
+def expiry(comment):
+    """(timestamp, ok) for a `# expires=2026-11-30` comment (valid through the END of that day, UTC) or
+    `# expires=2026-11-30T14:30` / `2026-11-30 14:30` (UTC, to the minute). 0 = no expiry; ok False = an `expires=` that is not a
+    real date (the line is refused: a typo must not make a temporary entry permanent). Mirrors gp_ipl_expiry() in panel/iplists.php."""
+    m = EXPIRES_RE.search(comment or '')
+    if not m:
+        return 0, True
+    d = EXPIRES_VALUE_RE.match(m.group(1))
+    if not d:
+        return 0, False
+    try:
+        day = datetime.datetime(int(d.group(1)), int(d.group(2)), int(d.group(3)))
+    except ValueError:
+        return 0, False
+    hh, mm = d.group(4), d.group(5)
+    if hh is None and m.group(2):
+        hh, mm = m.group(2)[:2], m.group(2)[3:5]
+    base = calendar.timegm(day.timetuple())
+    if hh is None:
+        return base + 86400, True
+    if int(hh) > 23 or int(mm) > 59:
+        return 0, False
+    return base + int(hh) * 3600 + int(mm) * 60, True
+
+
+def parse_text(text, with_expiry=False):
+    """([(version, start, end, prefix)], [(line number, text)]) from a source text. Pure.
+
+    with_expiry=True: each entry is (version, start, end, prefix, expires) with the `# expires=` timestamp (0 = none)."""
     if text.startswith('﻿'):
         text = text[1:]
     entries, bad = [], []
     for number, line in enumerate(text.replace('\r\n', '\n').replace('\r', '\n').split('\n'), 1):
+        comment = line.split('#', 1)[1] if '#' in line else ''
         line = line.split('#', 1)[0].strip()
         if not line:
             continue
         token = line.split(',', 1)[0].strip().strip('"\'').strip()
         parsed = parse_entry(token)
-        if parsed is None:
+        exp = expiry(comment)
+        if parsed is None or not exp[1]:
             bad.append((number, line[:80]))
         else:
-            entries.append(parsed)
+            entries.append(parsed + (exp[0],) if with_expiry else parsed)
         if number >= MAX_LINES:
             break
     return entries, bad
+
+
+def has_expired(lists_dir, now=None):
+    """Whether an enabled list source still holds an entry whose `# expires=` time has passed (the nightly job recompiles then)."""
+    now = int(time.time() if now is None else now)
+    try:
+        meta = read_meta(lists_dir)
+    except Exception:
+        return False
+    for item in meta:
+        if not item.get('enabled'):
+            continue
+        try:
+            with open(os.path.join(lists_dir, item['id'] + '.txt'), 'rb') as handle:
+                text = handle.read().decode('utf-8', 'replace')
+        except OSError:
+            continue
+        if any(e[4] and e[4] <= now for e in parse_text(text, True)[0]):
+            return True
+    return False
+
+
+def expiry_due(lists_dir, now=None):
+    """Whether the last compile saw an entry whose `# expires=` time has now passed. ONE small file read (lists-status.json) and no
+    parsing of any source: this runs every minute from the worker. False when nothing is pending, the file is missing or unreadable."""
+    now = int(time.time() if now is None else now)
+    try:
+        with open(os.path.join(lists_dir, STATUS_FILE), 'rb') as handle:
+            nxt = int(json.loads(handle.read().decode('utf-8', 'replace')).get('next_expiry') or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    return 0 < nxt <= now
+
+
+def recompile_if_due(lists_dir=None, now=None):
+    """Recompile the lists when an expiry has passed since the last compile (the worker calls this every minute, so an expired entry
+    stops matching within about a minute). Returns the status dict of the compile, or None when nothing was due."""
+    lists_dir = lists_dir or default_dir()
+    if not expiry_due(lists_dir, now):
+        return None
+    return compile_lists(lists_dir, now=now)
+
+
+def prune_expired(path, raw, now):
+    """Remove the lines whose `# expires=` time has passed from a list source. `raw` is what the compile read: a file that changed
+    since is left alone (the next compile does it). Atomic replace, same mode. Returns the number of lines removed."""
+    keep, gone = [], 0
+    for line in re.findall(r'[^\r\n]*(?:\r\n|\n|\r)|[^\r\n]+', raw):
+        if '#' in line:
+            body, comment = line.split('#', 1)
+            exp = expiry(comment)
+            if body.strip() and exp[1] and 0 < exp[0] <= now:
+                gone += 1
+                continue
+        keep.append(line)
+    try:
+        with open(path, 'rb') as handle:
+            if handle.read().decode('utf-8', 'replace') != raw:
+                return 0
+        if not gone:
+            return 0
+        tmp = '%s.tmp%d' % (path, os.getpid())
+        mode = os.stat(path).st_mode & 0o777
+        with open(tmp, 'wb') as handle:
+            handle.write(''.join(keep).encode('utf-8'))
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except OSError:
+        return 0
+    return gone
 
 
 # --------------------------------------------------------------------------
@@ -250,7 +356,7 @@ def read_own(lists_dir):
 def compile_lists(lists_dir, now=None):
     """Build allow.bin / block.bin. Returns the status dict (also written to lists-status.json)."""
     now = int(time.time() if now is None else now)
-    status = {'v': 1, 'time': now, 'by': 'python', 'ok': True, 'errors': [], 'types': {'allow': None, 'block': None}, 'lists': {}}
+    status = {'v': 1, 'time': now, 'by': 'python', 'ok': True, 'errors': [], 'types': {'allow': None, 'block': None}, 'lists': {}, 'next_expiry': 0}
     lock = None
     if fcntl is not None:
         try:
@@ -296,7 +402,15 @@ def _compile_type(lists_dir, kind, lists, now, status, protected=()):
         digest.update(('%d:%s:' % (item['idx'], item.get('mode'))).encode('ascii') + raw)
         # The same checks as a panel upload, for a file that never went through the form: lines that do not
         # parse are counted and shown, entries over a cap are dropped. Nothing here is fatal.
-        entries, bad = parse_text(raw.decode('utf-8', 'replace'))
+        text = raw.decode('utf-8', 'replace')
+        entries, bad = parse_text(text, True)
+        live = [e[:4] for e in entries if not (e[4] and e[4] <= now)]
+        expired = len(entries) - len(live)
+        # The earliest future expiry, stored in the status so the worker (every minute) knows when to recompile.
+        for e in entries:
+            if e[4] and e[4] > now and (not status['next_expiry'] or e[4] < status['next_expiry']):
+                status['next_expiry'] = e[4]
+        entries = live
         dropped = dict((reason, 0) for reason in REASONS)
         samples = []
         huge = 0
@@ -315,7 +429,10 @@ def _compile_type(lists_dir, kind, lists, now, status, protected=()):
         status['lists'][item['id']] = {'entries': len(entries) - sum(dropped.values()), 'v4': len(u4), 'v6': len(u6),
                                        'addresses': sum(e - s + 1 for s, e in u4), 'invalid': len(bad),
                                        'invalid_samples': [[n, t] for n, t in bad[:SAMPLES]], 'dropped': dropped,
-                                       'dropped_n': sum(dropped.values()), 'dropped_huge': huge, 'dropped_samples': samples}
+                                       'dropped_n': sum(dropped.values()), 'dropped_huge': huge, 'dropped_samples': samples,
+                                       'expired': expired}
+        if expired:
+            prune_expired(os.path.join(lists_dir, item['id'] + '.txt'), text, now)
         ranges4.extend((s, e, value) for s, e in u4)
         ranges6.extend((s, e, value) for s, e in u6)
     if failed:

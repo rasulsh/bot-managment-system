@@ -8,6 +8,9 @@
 # request flow with curl: block / challenge / log / monitor, and the whole
 # precedence chain (exempt path, kill switch, allow override, verified bot,
 # unverified and refuted bot, preview fetcher, holdout, expiry).
+# The servers run with OPcache off: the built-in server uses opcache.enable (not enable_cli) and revalidates a file only every
+# revalidate_freq (2) seconds, so a rules.json or cache rewritten within two seconds of a request was served stale and the test
+# raced; production has the same delay unless validate_timestamps is on (docs/06).
 # Every enforce toggle is OFF in this server on purpose: rule actions must not
 # depend on enforce.block / enforce.challenge.
 # GeoIP: a country.bin built by analyzer/geo.py maps 127.0.0.0/8 to US and 5.0.0.0/8 to IR; the
@@ -115,7 +118,17 @@ ilist() {
 }
 lists_compile() {
 	printf '{"v":1,"next_idx":99,"lists":[%s]}' "$(IFS=,; echo "${ILS[*]:-}")" > "$WORK/lists/lists.json"
-	python3 -I "$ROOT/analyzer/iplist.py" --dir "$WORK/lists" >/dev/null 2>&1
+	if [ -n "${LC_NOW:-}" ]; then
+		# compile as of an earlier time (the entries that have since expired are still live then)
+		python3 -I - "$ROOT" "$WORK/lists" "$LC_NOW" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from analyzer import iplist
+iplist.compile_lists(sys.argv[2], now=int(sys.argv[3]))
+PY
+	else
+		python3 -I "$ROOT/analyzer/iplist.py" --dir "$WORK/lists" >/dev/null 2>&1
+	fi
 	ILS=()
 }
 
@@ -123,7 +136,7 @@ redis-server --port "$RPORT" --save "" --appendonly no --dir "$WORK" >"$WORK/red
 PIDS+=($!)
 sleep 0.3
 write_rules
-GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "127.0.0.1:$PORT" "$ROOT/scripts/dev-router.php" >"$WORK/php.log" 2>&1 &
+GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -d opcache.enable=0 -S "127.0.0.1:$PORT" "$ROOT/scripts/dev-router.php" >"$WORK/php.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/t/404" 2>/dev/null && break; sleep 0.1; done
 # Second server: enforce.challenge and ratelimit ON, a low hourly device budget, CAPTCHA instead of the device 429.
@@ -138,10 +151,10 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 \$c['captcha']['device_budget'] = true;
 return \$c;
 CFG
-GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config2.php" "$PHP_BIN" -S "127.0.0.1:$PORT2" "$ROOT/scripts/dev-router.php" >"$WORK/php2.log" 2>&1 &
+GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config2.php" "$PHP_BIN" -d opcache.enable=0 -S "127.0.0.1:$PORT2" "$ROOT/scripts/dev-router.php" >"$WORK/php2.log" 2>&1 &
 PIDS+=($!)
 # Third server: the same config as the first, but GD "missing" (GV_CAPTCHA_NO_GD): a captcha rule falls back to the PoW challenge.
-GV_CAPTCHA_NO_GD=1 GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "127.0.0.1:$PORT3" "$ROOT/scripts/dev-router.php" >"$WORK/php3.log" 2>&1 &
+GV_CAPTCHA_NO_GD=1 GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -d opcache.enable=0 -S "127.0.0.1:$PORT3" "$ROOT/scripts/dev-router.php" >"$WORK/php3.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT2/t/404" 2>/dev/null && curl -s -o /dev/null "http://127.0.0.1:$PORT3/t/404" 2>/dev/null && break; sleep 0.1; done
 
@@ -658,6 +671,130 @@ NE7=$(printf '%s' "$page" | nonce_of); AE7=$("$PHP_BIN" "$ROOT/scripts/captcha-s
 eq "M74 solving it gives a CAPTCHA-level token" "$(curl -s -o /dev/null -w '%{http_code}' -D "$WORK/hdr.txt" -X POST -H 'User-Agent: x escbot' -H "X-GV: $NE7" -H "X-GV-A: $AE7" -H "X-GV-P: $PE7" -c "$WORK/e7.jar" "http://127.0.0.1:$PORT2/")" 204
 eq "M75 ...and the flag is gone" "$(nkeys)" 0
 eq "M76 ...the pages load with the token" "$(get2 'x escbot' /m76 -b "$WORK/e7.jar")" 200
+
+echo "== O. temporary challenge / CAPTCHA overrides (gv:chal:<ip>, '1' = challenge, 'c' = CAPTCHA). Server 1 has every enforce switch OFF: the override alone challenges"
+write_rules
+R flushall
+R set "gv:chal:127.0.0.1" 1 EX 60
+eq "O1 an override challenges this one client although enforce.challenge is OFF (a rule-like operator action): the check page (503)" "$(get 'x ovrbot' /o1)" 503
+has '"ovr":"challenge"'; ok "O2 ...the row: ovr challenge, act challenge, served (sh 0), OVR_CHALLENGE" "$([ $? -eq 0 ] && has '"act":"challenge"' && has '"sh":0' && has '"OVR_CHALLENGE"' && echo 1 || echo 0)"
+ok "O3 a client WITHOUT the override is untouched (another address through the trusted proxy)" "$([ "$(get 'x ovrbot' /o3 -H 'X-Forwarded-For: 9.9.9.9')" = 200 ] && echo 1 || echo 0)"
+page=$(body 'x ovrbot' /o4 -b "$WORK/o1.jar" -c "$WORK/o1.jar"); NO=$(printf '%s' "$page" | nonce_of); CO=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NO")
+eq "O5 solving the check page gives a token" "$(hpost "$PORT" "$NO" "$CO" 'w0.h0.l0.t900' "$WORK/o1.jar" 'x ovrbot')" 204
+eq "O6 with the token the override no longer challenges (no loop)" "$(get 'x ovrbot' /o6 -b "$WORK/o1.jar")" 200
+eq "O7 a POST (challenge.gate_post is off: not a gated page) is served, and only LOGGED as a shadow challenge" "$(get 'x ovrbot' /o7 -X POST)" 200
+has 'OVR_CHALLENGE'; ok "O7b ...the row carries OVR_CHALLENGE with sh 1" "$([ $? -eq 0 ] && has '"sh":1' && echo 1 || echo 0)"
+R del "gv:chal:127.0.0.1"
+eq "O8 removing the override: a token-less request is served again" "$(get 'x ovrbot' /o8)" 200
+
+echo "-- O: CAPTCHA override"
+R set "gv:chal:127.0.0.1" c EX 60
+page=$(body 'x ovrcap' /o10 -b "$WORK/o2.jar" -c "$WORK/o2.jar")
+ok "O10 a CAPTCHA override: the next page load is the image CAPTCHA" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
+has '"ovr":"captcha"'; ok "O11 ...logged with OVR_CAPTCHA and cap show" "$([ $? -eq 0 ] && has 'OVR_CAPTCHA' && has '"cap":"show"' && echo 1 || echo 0)"
+ok "O12 ...counted against the per-IP CAPTCHA budget (read in its own GET: no rule or flag read it)" "$([ "$(redis-cli -p "$RPORT" get gv:cpi:127.0.0.1 | tr -d '\r')" -ge 1 ] && echo 1 || echo 0)"
+page=$(body 'x ovrpow' /o12 -b "$WORK/o3.jar" -c "$WORK/o3.jar")
+NC=$(printf '%s' "$page" | nonce_of); AC=$("$PHP_BIN" "$ROOT/scripts/captcha-solve.php" "$NC" 4 2>/dev/null); PC=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NC")
+eq "O13 solving it gives a CAPTCHA-level token" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'User-Agent: x ovrpow' -H "X-GV: $NC" -H "X-GV-A: $AC" -H "X-GV-P: $PC" -b "$WORK/o3.jar" -c "$WORK/o3.jar" "http://127.0.0.1:$PORT/")" 204
+eq "O14 with a CAPTCHA-level token the override lets the pages through" "$(get 'x ovrpow' /o14 -b "$WORK/o3.jar")" 200
+R set "gv:chal:127.0.0.1" 1 EX 60
+page=$(body 'x ovrpow2' /o15 -b "$WORK/o4.jar" -c "$WORK/o4.jar"); NP2=$(printf '%s' "$page" | nonce_of); CP2=$("$PHP_BIN" "$ROOT/scripts/pow-solve.php" "$NP2")
+eq "O15 a proof-of-work handshake gives a (PoW-level) token under a challenge override" "$(hpost "$PORT" "$NP2" "$CP2" 'w0.h0.l0.t900' "$WORK/o4.jar" 'x ovrpow2')" 204
+R set "gv:chal:127.0.0.1" c EX 60
+eq "O16 a PROOF-OF-WORK token does not satisfy a CAPTCHA override: the CAPTCHA is shown (503)" "$(get 'x ovrpow2' /o16 -b "$WORK/o4.jar")" 503
+R del "gv:chal:127.0.0.1"
+
+echo "-- O: precedence"
+R set "gv:chal:127.0.0.1" 1 EX 60
+R set "gv:allow:127.0.0.1" 1 EX 60
+eq "O20 an ALLOW override beats a challenge override" "$(get 'x ovrbot' /o20)" 200
+has '"act":"allow_override"'; ok "O21 ...logged as allow_override" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+R del "gv:allow:127.0.0.1"
+ilist partners 1 allow enforce true 127.0.0.1
+lists_compile
+eq "O22 an enforced ALLOW LIST beats a challenge override (the list is checked first, as for a deny)" "$(get 'x ovrbot' /o22)" 200
+ilist none 1 block enforce false 1.2.3.4
+lists_compile
+write_rules "$(rule r-blk Blk enforce block '["ovrbot"]')"
+eq "O23 an enforced BLOCK rule keeps priority over a challenge override" "$(get 'x ovrbot' /o23)" 403
+write_rules "$(rule r-chl Chl enforce challenge '["ovrbot"]')"
+eq "O24 a challenge rule and a challenge override together: one check page" "$(get 'x ovrbot' /o24)" 503
+R set "gv:chal:127.0.0.1" c EX 60
+page=$(body 'x ovrbot' /o25)
+ok "O25 a CAPTCHA override upgrades a rule's plain challenge to the CAPTCHA" "$(printf '%s' "$page" | grep -q 'data:image/png;base64,' && echo 1 || echo 0)"
+write_rules
+R set "gv:chal:127.0.0.1" 1 EX 60
+R set "gv:botok:127.0.0.1" 1 EX 60
+eq "O26 a VERIFIED crawler keeps its pass (it cannot solve a challenge)" "$(get "$GBOT" /o26)" 200
+has '"act":"allow_bot"'; ok "O27 ...logged as allow_bot" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+R del "gv:botok:127.0.0.1"
+eq "O28 an EXEMPT path is never challenged" "$(get 'x ovrbot' /exempt-me)" 200
+R del "gv:cpi:127.0.0.1"; R set "gv:chal:127.0.0.1" c EX 60
+eq "O29 enforced (server 2) the override acts the same: a CAPTCHA override shows the image test there too" "$(body2 'x ovrbot' /o29 | grep -c 'data:image/png;base64,' | tr -d ' ')" 1
+R del "gv:chal:127.0.0.1"
+
+echo "-- O: a deny override acts in monitor mode and in the holdout (server 1: every enforce switch OFF, 127.0.0.1 is in the 5% holdout)"
+R set "gv:deny:127.0.0.1" 1 EX 60
+eq "O40 a DENY override blocks with every enforce switch OFF: 403" "$(get 'x ovrbot' /o40)" 403
+has '"ovr":"deny"'; ok "O41 ...logged as a served 403 (sh 0) with OVR_DENY, no SH_ prefix, although the client is in the holdout" "$([ $? -eq 0 ] && has '"act":"403"' && has '"sh":0' && has '"OVR_DENY"' && ! has 'SH_OVR' && has '"hold":1' && echo 1 || echo 0)"
+eq "O42 ...also for a POST and for a non-page request" "$(get 'x ovrbot' /o42 -X POST)$(get 'x ovrbot' /o42b -H 'X-Requested-With: XMLHttpRequest')" 403403
+R set "gv:chal:127.0.0.1" 1 EX 60
+R set "gv:allow:127.0.0.1" 1 EX 60
+eq "O43 an ALLOW override still beats the deny" "$(get 'x ovrbot' /o43)" 200
+R del "gv:allow:127.0.0.1"
+eq "O44 deny beats a challenge override (403, not the check page)" "$(get 'x ovrbot' /o44)" 403
+R del "gv:chal:127.0.0.1"
+R set "gv:chal:127.0.0.1" c EX 60
+touch "$ROOT/guard.off"
+eq "O45 the KILL SWITCH stops deny, challenge and CAPTCHA overrides alike: 200" "$(get 'x ovrbot' /o45)$(get 'x ovrbot' /o45b -X POST)" 200200
+R set "gv:chal:127.0.0.1" 1 EX 60
+eq "O46 ...a challenge override too" "$(get 'x ovrbot' /o46)" 200
+R del "gv:chal:127.0.0.1"
+eq "O47 ...and the deny" "$(get 'x ovrbot' /o47)" 200
+rm -f "$ROOT/guard.off"
+eq "O48 the kill switch off again: the deny is back" "$(get 'x ovrbot' /o48)" 403
+R del "gv:deny:127.0.0.1"
+eq "O49 deny removed: served" "$(get 'x ovrbot' /o49)" 200
+
+echo "-- O: an expired IP-list entry stops matching within a minute, with no nightly compile (the worker's every-minute check)"
+FORCE=true ilist exp 1 block enforce true '127.0.0.1  # expires=2026-01-01'
+LC_NOW=1767000000 lists_compile
+nexp() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("next_expiry", "missing"))' "$WORK/lists/lists-status.json"; }
+eq "O50 the entry is live at compile time (2025-12-29): the enforced block list answers 403" "$(get 'x ovrbot' /o50)" 403
+ok "O51 ...and the compile stored the earliest future expiry in lists-status.json" "$([ "$(nexp)" -gt 0 ] 2>/dev/null && echo 1 || echo 0)"
+cnt=$(python3 -I - "$ROOT" "$WORK/lists" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from analyzer import worker
+print("COUNT", worker.recompile_expired_lists(sys.argv[2]))
+PY
+)
+cnt=${cnt##*COUNT }
+eq "O52 the worker's check (real time, long after the expiry) recompiles and removes one entry" "$cnt" 1
+eq "O53 ...and the very next request is served: the expired entry stopped matching, no nightly job needed" "$(get 'x ovrbot' /o53)" 200
+ok "O54 ...its line is gone from the source and next_expiry is 0 (nothing pending: the worker's check is one file read)" "$(! grep -q '127.0.0.1' "$WORK/lists/exp.txt" && [ "$(nexp)" = 0 ] && echo 1 || echo 0)"
+cnt2=$(python3 -I - "$ROOT" "$WORK/lists" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from analyzer import worker
+print("COUNT", worker.recompile_expired_lists(sys.argv[2]))
+PY
+)
+cnt2=${cnt2##*COUNT }
+eq "O55 a second check right after finds nothing to do" "$cnt2" 0
+ilist none 1 block enforce false 1.2.3.4
+lists_compile
+
+echo "-- O: expiry and cost"
+R set "gv:chal:127.0.0.1" 1 PX 400
+eq "O30 a challenge override with a TTL acts while it lives" "$(get 'x ovrttl' /o30)" 503
+sleep 0.7
+eq "O31 ...and the request is back to normal when the TTL has passed" "$(get 'x ovrttl' /o31)" 200
+ca=$(conns); get 'x ovrcost' /o32 >/dev/null; cb=$(conns)
+R set "gv:chal:127.0.0.1" 1 EX 60
+cc=$(conns); get 'x ovrcost' /o33 >/dev/null; cd2=$(conns)
+eq "O33 reading the override costs no extra round trip: the same number of connections with and without it (the keys ride in the existing pipeline)" "$(( cd2 - cc ))" "$(( cb - ca ))"
+R del "gv:chal:127.0.0.1"
 # the cookie as the second signal: an escalated client whose flag is NOT in Redis (written by a handshake while Redis was down, or evicted) still gets the CAPTCHA
 code8=$(hpost "$PORT2" "$NE8" "$CE8" 'w1.h1.t900' "$WORK/e8.jar"); R flushall
 eq "M77 e8 escalates (202) and its Redis flag is removed again (flushall)" "$code8.$(nkeys)" "202.0"

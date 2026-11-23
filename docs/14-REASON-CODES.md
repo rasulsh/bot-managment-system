@@ -40,6 +40,9 @@ A code that starts with `SH_` (for example `SH_RULE:<id>`, `SH_IPL_BLOCK:<id>`, 
 | `UA_SCRIPT` | Script or library User-Agent | Score signal | The User-Agent names a scripting client such as curl, python-requests, Go or Scrapy (+30). |
 | `CAPT_DEGRADED` | CAPTCHA served without Redis | Degraded mode | Redis is down, so attempts cannot be counted; the CAPTCHA carries a heavier proof of work per answer. |
 | `RULE_SKIP_DEGRADED` | Rule skipped, no verdict (Redis down) | Degraded mode | Redis could not be read, so the crawler verdict was unknown; a known crawler kept its pass and a rule that skips verified crawlers did not apply. |
+| `OVR_CAPTCHA` | Temporary CAPTCHA (override) | Override | An operator set a temporary CAPTCHA on this address or device: it is shown the image test until it holds a CAPTCHA-level token. |
+| `OVR_CHALLENGE` | Temporary challenge (override) | Override | An operator set a temporary challenge on this address or device: it is shown the check page until it holds a valid token. |
+| `OVR_DENY` | Temporary block (override) | Override | An operator set a temporary block on this address or device: the request is refused with a 403, whatever the enforcement switches say. |
 | `TEST` | Test cookie | Other | The request carried the operator test cookie (Settings, test mode); it is challenged on purpose. |
 
 `SH_CAPT_ESC` is the monitor-only form of `CAPT_ESC` (the proof of work looked headless, but CAPTCHA escalation is not enforced).
@@ -64,7 +67,7 @@ A code that starts with `SH_` (for example `SH_RULE:<id>`, `SH_IPL_BLOCK:<id>`, 
 |---|---|---|
 | `act` | Action taken | `allow` Allowed; `challenge` Challenged; `403` Blocked (403); `429` Rate limited (429); `exempt` Exempt path; `allow_bot` Verified crawler passed; `allow_preview` Link preview passed; `allow_override` Allowed by override; `404_hp` Honeypot hit (404); `token_issued` Token issued; `nonce_bad` Bad challenge nonce; `nonce_replay` Challenge replay; `pow_bad` Bad proof of work; `mint_limited` Token minting limited |
 | `tok` | Token state | `v` valid token; `m` no token; `b` bad token |
-| `ovr` | Operator override | `(empty)` none; `allow` allow override; `deny` deny override |
+| `ovr` | Operator override | `(empty)` none; `allow` allow override; `deny` deny override; `challenge` temporary challenge; `captcha` temporary CAPTCHA |
 | `botv` | Crawler verification | `(empty)` not checked; `ok` verified crawler; `bad` claim refuted |
 | `sh` | Monitor only (shadow) | `0` enforced; `1` monitor only |
 | `hold` | Measurement holdout | `0` normal; `1` holdout |

@@ -73,18 +73,15 @@ $v = is_array($verdicts) ? $verdicts : array();
 
 	<div class="gp-card">
 		<div class="gp-card-title"><?= gp_e(gp_t('id_overrides')) ?></div>
+		<?php foreach (array('allow', 'deny', 'challenge', 'captcha') as $ok): ?>
 		<div class="gp-stat-row">
-			<span class="gp-stat-key"><?= gp_e(gp_t('ovr_allow')) ?></span>
+			<span class="gp-stat-key"><?= gp_e(gp_t('ovr_k_' . $ok)) ?></span>
 			<span class="gp-stat-val">
-				<?= $v['allow_ttl'] === null ? gp_e(gp_t('none')) : gp_e(gp_age(time() - (int)$v['allow_ttl'])) ?>
+				<?= $v[$ok . '_ttl'] === null ? gp_e(gp_t('none')) : gp_e(gp_override_expires_text($v[$ok . '_ttl'])) ?>
 			</span>
 		</div>
-		<div class="gp-stat-row">
-			<span class="gp-stat-key"><?= gp_e(gp_t('ovr_deny')) ?></span>
-			<span class="gp-stat-val">
-				<?= $v['deny_ttl'] === null ? gp_e(gp_t('none')) : gp_e(gp_age(time() - (int)$v['deny_ttl'])) ?>
-			</span>
-		</div>
+		<?php endforeach; ?>
+		<?= gp_override_shared_note($identity) ?>
 
 		<?php foreach ((isset($shadow) && is_array($shadow) ? $shadow : array()) as $slist): ?>
 		<div class="gp-note gp-note-strong" role="alert" data-shadow="1"><?= gp_e(str_replace('%s', $slist, gp_t('ovr_deny_shadowed'))) ?>
@@ -94,26 +91,15 @@ $v = is_array($verdicts) ? $verdicts : array();
 			class="gp-form" style="margin-top:.75rem">
 			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 			<input type="hidden" name="identity" value="<?= gp_e($identity) ?>">
-			<label class="gp-field">
-				<span class="gp-label"><?= gp_e(gp_t('id_ttl')) ?></span>
-				<select class="gp-input" name="ttl">
-					<option value="3600"><?= gp_e(gp_plural(1, 'hour')) ?></option>
-					<option value="21600"><?= gp_e(gp_plural(6, 'hour')) ?></option>
-					<option value="86400" selected><?= gp_e(gp_plural(1, 'day')) ?></option>
-					<option value="604800"><?= gp_e(gp_plural(7, 'day')) ?></option>
-					<option value="2592000"><?= gp_e(gp_plural(30, 'day')) ?></option>
-				</select>
-			</label>
+			<div class="gp-field"><?= gp_override_ttl_fields(3600) ?></div>
 			<div class="gp-row-head">
-				<button class="gp-btn gp-btn-primary gp-btn-sm" type="submit"
-					name="override" value="allow"><?= gp_e(gp_t('id_allow')) ?></button>
-				<button class="gp-btn gp-btn-danger gp-btn-sm" type="submit"
-					name="override" value="deny"><?= gp_e(gp_t('id_deny')) ?></button>
+				<?= gp_override_buttons(true) ?>
 				<button class="gp-btn gp-btn-ghost gp-btn-sm" type="submit"
 					name="override" value="clear"><?= gp_e(gp_t('ovr_clear')) ?></button>
 			</div>
 		</form>
 		<?= gp_msg('identity-override') ?>
+		<?= gp_quick_actions_html($identity, 'index.php?r=identity&id=' . rawurlencode($identity), $role ?? '') ?>
 		<p class="gp-note" style="margin-top:.5rem"><?= gp_e(gp_t('ovr_rule_allow')) ?></p>
 	</div>
 </div>

@@ -4,6 +4,19 @@ Newest first. Each entry is one version, written as `## <version>` (the same str
 The Update page of the panel shows the entries between the installed version and the one in the ZIP.
 Older history and upgrade steps: [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md).
 
+## 2026.11.33
+
+- **Behaviour change: overrides always act.** A deny override no longer waits for `enforce.block`: allow, deny, challenge and CAPTCHA overrides act immediately, also in monitor mode and for a client in the holdout, like a rule in enforce mode. Only the kill switch (`guard.off`) stops them. A deny override now logs `OVR_DENY`. The Temporary blocks & allows page says "Overrides act immediately, also in monitor mode." Existing deny overrides that never acted will start blocking at once (docs/10).
+- **IP list expiry within a minute.** The compile stores the earliest future `# expires=` time as `next_expiry` in `lists/lists-status.json`; the every-minute `worker` recompiles when it has passed (one small file read when nothing is pending). The nightly check stays as a safety net.
+
+## 2026.11.32
+
+- **Temporary blocks & allows.** The Overrides page is renamed (route unchanged) with an intro, presets 5 min / 15 min / 30 min / 1 h / 6 h / 24 h / 7 d / 30 d plus a custom number of minutes (max 30 days), the time left and the exact expiry per entry, and extend / shorten / remove.
+- **New override kind: Challenge / CAPTCHA** (`gv:chal:<ip|device>`, `1` / `c`): the client is shown the check page / the image CAPTCHA until it holds a token (a CAPTCHA-level one for CAPTCHA). Precedence allow > deny > CAPTCHA > challenge; a rule that blocks still blocks, a CAPTCHA wins over a rule's plain challenge, a verified crawler keeps its pass, an enforced allow list is checked first. Read in the existing Redis pipeline (no extra round trip); logged as `OVR_CHALLENGE` / `OVR_CAPTCHA` with `ovr` = `challenge` / `captcha`; replay skips such rows. `ctl.py challenge|captcha`.
+- Warning on the form and in the result for a carrier-grade NAT (`100.64.0.0/10`) or known mobile-network address.
+- **Quick actions** (Block 15 min, Challenge 1 h, CAPTCHA 1 h, Allow 1 h, Custom...) on every log row and the Identity page, for the address and the device; admin only, CSRF, audited, they return to the page.
+- **IP lists:** optional per-entry expiry `203.0.113.7  # expires=2026-11-30` (or `T14:30`); expired entries are ignored by the compile (panel and Python) and their lines removed; the nightly job recompiles when one has expired; a malformed `expires=` refuses the line.
+
 ## 2026.11.31
 
 - **Reason codes in words.** New registry `panel/reasons.php` (data only): every reason code the guard, analyzer and panel emit has a full name, a one-sentence explanation, a category and a colour; `SH_` is rendered as a "monitor only" marker. Logs, Identity and the dashboard show badges with the full name, the code in small monospace and the explanation as a tooltip; a rule or list id is resolved to its name and links to it. The log rows keep their short codes (nothing is renamed).

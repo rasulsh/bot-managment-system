@@ -199,6 +199,8 @@ function gp_replay_scan_day($date, array $baseline, array $candidate, $base_hard
 			$result['skipped']++;
 			continue;
 		}
+		// A temporary challenge / CAPTCHA override is an operator action, not a decision of the scoring being replayed.
+		if (in_array((string)($row['ovr'] ?? ''), array('challenge', 'captcha'), true)) { $result['skipped']++; continue; }
 		$sc  = (int)($row['sc'] ?? 0);
 		$rep = (int)($row['rep'] ?? 0);
 		$ml  = isset($row['ml']) ? (int)$row['ml'] : -1;

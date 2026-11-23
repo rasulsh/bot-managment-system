@@ -18,7 +18,7 @@ if (!BASE || !USER || !PASS) { console.error('Usage: node panel-layout-test.js B
 const ROOT = BASE.replace(/\/$/, '') + '/' + (PANEL || '/panel').replace(/^\/|\/$/g, '') + '/index.php';
 const ORIGIN = new URL(BASE).origin;
 const VIEWS = [{ name: 'desktop', width: 1600, height: 1000 }, { name: 'mobile', width: 390, height: 844 }];
-const PAGES = ['dashboard', 'logs', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'identity&id=203.0.113.5', 'overrides', 'rules', 'rules&new=1', 'rules&edit=ZZ',
+const PAGES = ['dashboard', 'logs', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'identity&id=203.0.113.5', 'overrides', 'overrides&new=100.64.0.5', 'rules', 'rules&new=1', 'rules&edit=ZZ',
 	'geo', 'geo&test=1&ip=203.0.113.7', 'iplists', 'iplists&new=1&type=block', 'iplists&test=1&ip=203.0.113.7', 'iplists&new_feed=1&preset=cloudflare#ipl-feeds', 'replay', 'models', 'settings', 'config_file', 'jobs', 'jobs&job=verify', 'audit&event=config&event_op=not', 'update', 'users', 'users&role=admin&role_op=not&q=lay', 'account'];
 let failed = 0;
 const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } else { failed++; console.log('FAIL  ' + name + (extra ? ' (' + extra + ')' : '')); } };
@@ -179,6 +179,20 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		await page.setInputFiles('[data-panel=sources] input[type=file]', { name: 'GeoLite2-Country.mmdb', mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024, 0x61) });
 		check(v.name + ' geo: a small file clears the message and enables Upload again', !(await page.locator('[data-panel=sources] [data-gp-upload-msg]').isVisible()) && !(await page.locator('[data-panel=sources] [data-gp-upload-send]').isDisabled()));
 		check(v.name + ' geo: the "not compiled yet" banner is shown while a source is uncompiled', /not compiled yet|never compiled|not compiled/i.test(await page.locator('main .gp-note-strong').first().innerText()));
+		// ---- temporary blocks (PR G): the page, the shared-address warning, quick actions on a log row (admin), none for an operator
+		await page.goto(ROOT + '?r=overrides&new=100.64.0.5');
+		check(v.name + ' overrides: the page is "Temporary blocks & allows", with four buttons, eight presets, a custom-minutes box and the shared-address warning prefilled from ?new=',
+			/Temporary blocks/.test(await page.locator('h1').innerText()) && (await page.locator('#override-add button[name=override]').count()) === 4 && (await page.locator('#override-add select[name=ttl] option').count()) === 8
+			&& /immediately, also in monitor mode/.test(await page.locator('[data-ovr-immediate]').innerText()) && (await page.locator('#override-add input[name=ttl_minutes]').count()) === 1 && (await page.locator('#override-add input[name=identity]').inputValue()) === '100.64.0.5' && (await page.locator('[data-shared-ip=cgnat]').count()) === 1);
+		await page.goto(ROOT + '?r=logs');
+		await page.locator('.gp-log').first().locator('[data-toggle]').first().click();
+		const qa = page.locator('.gp-log').first().locator('.gp-quick');
+		check(v.name + ' logs: a row opens quick actions for the address (and the device when there is one): Block 15 min, Challenge 1 h, CAPTCHA 1 h, Allow 1 h, Custom...',
+			(await qa.count()) >= 1 && (await qa.first().locator('button[name=quick]').count()) === 4 && /Custom/.test(await qa.first().innerText()) && (await qa.first().locator('input[name=csrf]').count()) === 1);
+		const qaBox = await qa.first().boundingBox();
+		check(v.name + ' logs: the quick actions fit the screen width', !!qaBox && qaBox.x >= 0 && qaBox.x + qaBox.width <= v.width + 1, JSON.stringify(qaBox));
+		await Promise.all([page.waitForNavigation(), qa.first().locator('button[value="challenge:3600"]').click()]);
+		check(v.name + ' logs: pressing a quick action returns to the Logs page (not the Overrides page) with a message', /r=logs/.test(page.url()) && (await page.locator('.gp-flash, [role=status], [role=alert]').count()) >= 1, page.url());
 		// ---- filters
 		await page.goto(ROOT + '?r=logs&act=403&act_op=not&path=admin&path_op=not');
 		const chips = page.locator('.gp-chip');

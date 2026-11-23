@@ -281,7 +281,7 @@ else
 
 		$REDIS_CLI $REDIS_ARGS setex "gv:deny:$dev" 120 1 >/dev/null 2>&1
 		got=$(browser -o /dev/null -w '%{http_code}' -b "$jar" "$BASE_URL/?gv=denyovr")
-		row '14 deny override on a clean device' "$got" '200' '403'
+		row '14 deny override on a clean device' "$got" '403 (acts in monitor mode too)' '403'
 		$REDIS_CLI $REDIS_ARGS del "gv:deny:$dev" >/dev/null 2>&1
 
 		# 15/16. The holdout. Membership is deterministic per identity, so the

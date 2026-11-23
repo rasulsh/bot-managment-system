@@ -106,7 +106,7 @@ same list as a table with the cost of each step: [README §2.2](../README.md#22-
 6. **Honeypot.** The configured `honeypot_path` records an IP flag for 7 days, logs `404_hp` and
    serves a 404, regardless of the enforce toggles.
 7. **Offline verdicts and overrides.** An operator `allow` (device or IP) short-circuits everything
-   below with zero output; a `deny` is recorded and enforced later (needs `enforce.block`).
+   below with zero output; a `deny` refuses the request with a 403 at once (an operator action: no enforce switch, the holdout never suppresses it); a temporary `challenge` / `captcha` override does the same with the check page / the CAPTCHA.
 8. **Static score** from the facts, plus the bot-fake penalty.
 9. **Rule action** from step 3b and the CAPTCHA escalation flag.
 10. **Rate counters** in one pipeline: per device (short window, one hour, one day), per

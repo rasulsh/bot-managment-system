@@ -48,7 +48,16 @@ if grep -qi 'name="identity"' <<<"$ov"; then
 	if grep -q '203.0.113.250' <<<"$ov"; then
 		check "the override is listed (Redis reachable from the panel)" 1
 		tok="$(printf '%s' "$ov" | csrf)"
-		curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'identity=203.0.113.250' -d 'ttl=60' -d 'clear=1' "$URL?r=overrides"
+		curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'identity=203.0.113.250' -d 'override=clear' -d 'from=list' "$URL?r=overrides"
+		# A temporary challenge with a custom time (minutes) and a CAPTCHA, a quick action from a log row, then the clean-up.
+		code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'identity=203.0.113.251' -d 'ttl=3600' -d 'ttl_minutes=15' -d 'override=challenge' "$URL?r=overrides")"
+		check "a temporary challenge with a custom time answers 303" "$([ "$code" = 303 ] && echo 1 || echo 0)"
+		curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'identity=203.0.113.252' -d 'quick=captcha:3600' -d 'from=quick' --data-urlencode 'back=index.php?r=logs' "$URL?r=overrides"
+		ov="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=overrides")"
+		check "the challenge and the quick-action CAPTCHA are listed with their kinds and an expiry" "$(grep -q '203.0.113.251' <<<"$ov" && grep -q '203.0.113.252' <<<"$ov" && grep -q 'gp-badge-warn">Challenge' <<<"$ov" && grep -q 'gp-badge-info">CAPTCHA' <<<"$ov" && grep -q ' UTC)' <<<"$ov" && echo 1 || echo 0)"
+		code="$(curl -sk -o /dev/null -w '%{http_code}' -D - -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'identity=203.0.113.252' -d 'quick=captcha:3600' -d 'from=quick' --data-urlencode 'back=https://evil.example/' "$URL?r=overrides" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
+		check "a quick action never redirects off site (a bad way back falls to the Overrides page)" "$(grep -q 'evil' <<<"$code" && echo 0 || echo 1)"
+		for ident in 203.0.113.251 203.0.113.252; do curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d "identity=$ident" -d 'override=clear' "$URL?r=overrides"; done
 	else
 		echo "NOTE  the override is not listed: the panel cannot reach Redis here (skipped, not a layout problem)"
 	fi

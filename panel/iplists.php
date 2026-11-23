@@ -97,8 +97,22 @@ function gp_ipl_entry_text(array $en) {
 	return inet_ntop($en['s']) . ($en['p'] === $full ? '' : '/' . $en['p']);
 }
 
-// A source text -> array(entries, bad). entries: parsed entries with 'line'; bad: array(array(line, text)).
-// Handles a BOM, CRLF, # comments, blank lines and an optional CSV first column.
+// The expiry an entry carries in its comment: `203.0.113.7  # expires=2026-11-30` (valid through the END of that day, UTC) or
+// `# expires=2026-11-30T14:30` / `2026-11-30 14:30` (UTC, to the minute). Returns array(timestamp, ok): timestamp 0 = no expiry,
+// ok = false for an `expires=` that is not a real date (the line is then refused: a typo must not make a temporary entry permanent).
+function gp_ipl_expiry($comment) {
+	if (!preg_match('/\bexpires\s*=\s*(\S*)(?:[ T](\d{2}:\d{2}))?/i', (string)$comment, $m)) { return array(0, true); }
+	if (!preg_match('/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?$/', $m[1], $d)) { return array(0, false); }
+	if (!checkdate((int)$d[2], (int)$d[3], (int)$d[1])) { return array(0, false); }
+	$hh = isset($d[4]) && $d[4] !== '' ? $d[4] : (isset($m[2]) && $m[2] !== '' ? substr($m[2], 0, 2) : '');
+	$mm = isset($d[5]) && $d[5] !== '' ? $d[5] : (isset($m[2]) && $m[2] !== '' ? substr($m[2], 3, 2) : '');
+	if ($hh === '') { return array(gmmktime(0, 0, 0, (int)$d[2], (int)$d[3], (int)$d[1]) + 86400, true); }
+	if ((int)$hh > 23 || (int)$mm > 59) { return array(0, false); }
+	return array(gmmktime((int)$hh, (int)$mm, 0, (int)$d[2], (int)$d[3], (int)$d[1]), true);
+}
+
+// A source text -> array(entries, bad). entries: parsed entries with 'line' (and 'exp', the expiry timestamp, when the comment has
+// one); bad: array(array(line, text)). Handles a BOM, CRLF, # comments, blank lines and an optional CSV first column.
 function gp_ipl_parse_text($text) {
 	if (strncmp($text, "\xEF\xBB\xBF", 3) === 0) { $text = substr($text, 3); }
 	$entries = array();
@@ -107,14 +121,16 @@ function gp_ipl_parse_text($text) {
 	foreach (preg_split('/\r\n|\n|\r/', $text) as $line) {
 		$n++;
 		$hash = strpos($line, '#');
-		if ($hash !== false) { $line = substr($line, 0, $hash); }
+		$comment = '';
+		if ($hash !== false) { $comment = substr($line, $hash + 1); $line = substr($line, 0, $hash); }
 		$line = trim($line);
 		if ($line === '') { continue; }
 		$comma = strpos($line, ',');
 		$token = trim(trim($comma === false ? $line : substr($line, 0, $comma)), "\"' \t");
 		$en = gp_ipl_parse_entry($token);
-		if ($en === null) { $bad[] = array($n, substr($line, 0, 80)); }
-		else { $en['line'] = $n; $entries[] = $en; }
+		$exp = gp_ipl_expiry($comment);
+		if ($en === null || !$exp[1]) { $bad[] = array($n, substr($line, 0, 80)); }
+		else { $en['line'] = $n; if ($exp[0] > 0) { $en['exp'] = $exp[0]; } $entries[] = $en; }
 		if ($n >= GP_IPL_MAX_LINES) { break; }
 	}
 	return array($entries, $bad);
@@ -411,7 +427,7 @@ function gp_iplists_status() {
 // analyzer/iplist.py. Returns the status array (also written to lists-status.json).
 function gp_iplists_compile($now = null) {
 	$now = $now === null ? time() : (int)$now;
-	$status = array('v' => 1, 'time' => $now, 'by' => 'php', 'ok' => true, 'errors' => array(), 'types' => array('allow' => null, 'block' => null), 'lists' => array());
+	$status = array('v' => 1, 'time' => $now, 'by' => 'php', 'ok' => true, 'errors' => array(), 'types' => array('allow' => null, 'block' => null), 'lists' => array(), 'next_expiry' => 0);
 	if (!gp_ipl_ensure_dir()) { $status['ok'] = false; $status['errors'][] = 'the lists directory is not writable: ' . gp_ipl_dir(); return $status; }
 	$lock = @fopen(gp_ipl_dir() . '/.compile.lock', 'c');
 	if ($lock) { @flock($lock, LOCK_EX); }
@@ -454,7 +470,12 @@ function gp_ipl_compile_type($type, array $lists, $now, array &$status, array $p
 		$huge = 0;
 		$own4 = array();
 		$own6 = array();
-		foreach ($entries as $en) {
+		$expired = 0;
+		foreach ($entries as $k => $en) {
+			// An entry past its `# expires=` time is ignored here, and its line is removed from the source below.
+			if (isset($en['exp']) && $en['exp'] <= $now) { $expired++; unset($entries[$k]); continue; }
+			// The earliest future expiry, stored in the status so the worker (every minute) knows when to recompile.
+			if (isset($en['exp']) && ((int)($status['next_expiry'] ?? 0) === 0 || $en['exp'] < $status['next_expiry'])) { $status['next_expiry'] = (int)$en['exp']; }
 			$why = gp_ipl_refusal($en, $type, $protected, $l['force']);
 			if ($why !== '') {
 				$dropped[$why]++;
@@ -468,7 +489,8 @@ function gp_ipl_compile_type($type, array $lists, $now, array &$status, array $p
 		$u6 = gp_ipl_union($own6);
 		$status['lists'][$l['id']] = array('entries' => count($entries) - array_sum($dropped), 'v4' => count($u4), 'v6' => count($u6),
 			'addresses' => gp_ipl_count4($u4), 'invalid' => count($bad), 'invalid_samples' => array_slice($bad, 0, GP_IPL_SAMPLES),
-			'dropped' => $dropped, 'dropped_n' => array_sum($dropped), 'dropped_huge' => $huge, 'dropped_samples' => $samples);
+			'dropped' => $dropped, 'dropped_n' => array_sum($dropped), 'dropped_huge' => $huge, 'dropped_samples' => $samples, 'expired' => $expired);
+		if ($expired > 0) { gp_ipl_prune_expired($l['id'], $raw, $now); }
 		foreach ($u4 as $r) { $r4[] = array($r[0], $r[1], $value); }
 		foreach ($u6 as $r) { $r6[] = array($r[0], $r[1], $value); }
 	}
@@ -482,6 +504,31 @@ function gp_ipl_compile_type($type, array $lists, $now, array &$status, array $p
 		return;
 	}
 	$status['types'][$type] = array('built' => $now, 'v4' => count($v4), 'v6' => count($v6), 'sha' => $sha, 'lists' => array_map(function ($l) { return $l['id']; }, $lists));
+}
+
+// Remove the lines whose `# expires=` time has passed from a list source (the compile ignored them already). $raw is what the compile
+// read: if the file changed since (an editor saved meanwhile), nothing is rewritten and the next compile does it. Atomic replace,
+// same mode. Returns the number of lines removed.
+function gp_ipl_prune_expired($id, $raw, $now) {
+	$path = gp_ipl_source_path($id);
+	$keep = array();
+	$gone = 0;
+	foreach (preg_split('/(?<=\n)|(?<=\r)(?!\n)/', (string)$raw, -1, PREG_SPLIT_NO_EMPTY) as $line) {
+		$hash = strpos($line, '#');
+		if ($hash !== false) {
+			$exp = gp_ipl_expiry(substr($line, $hash + 1));
+			$body = trim(substr($line, 0, $hash));
+			if ($body !== '' && $exp[1] && $exp[0] > 0 && $exp[0] <= $now) { $gone++; continue; }
+		}
+		$keep[] = $line;
+	}
+	if ($gone === 0 || @file_get_contents($path) !== $raw) { return 0; }
+	$tmp = $path . '.tmp' . getmypid();
+	$mode = @fileperms($path);
+	if (@file_put_contents($tmp, implode('', $keep)) === false) { @unlink($tmp); return 0; }
+	if ($mode !== false) { @chmod($tmp, $mode & 0777); }
+	if (!@rename($tmp, $path)) { @unlink($tmp); return 0; }
+	return $gone;
 }
 
 // Total size of the enabled sources: decides between an inline compile and the worker job.
@@ -765,7 +812,7 @@ function gp_iplists_entries($id, array $f) {
 		if (isset($f['entry']) && !gp_filter_test('text', $f['entry'], $text)) { continue; }
 		if (isset($f['family']) && !gp_filter_test('choice', $f['family'], 'v' . $en['v'])) { continue; }
 		$n++;
-		if (count($rows) < GP_IPL_SHOW_MAX) { $rows[] = array('line' => $en['line'], 'text' => $text, 'v' => $en['v']); }
+		if (count($rows) < GP_IPL_SHOW_MAX) { $rows[] = array('line' => $en['line'], 'text' => $text, 'v' => $en['v'], 'exp' => isset($en['exp']) ? (int)$en['exp'] : 0); }
 	}
 	return array($rows, $n, count($entries), count($bad));
 }
@@ -853,8 +900,12 @@ function gp_iplists_deny_shadow(array $identities) {
 // ---------------------------------------------------------------- warnings
 
 // ASNs of mobile operators whose addresses are shared by many subscribers (a partial, fixed list:
-// MCI, Irancell, Rightel). An allow entry inside one of them lets every subscriber bypass the guard.
-function gp_ipl_mobile_asns() { return array(197207 => 'MCI', 44244 => 'Irancell', 57218 => 'Rightel'); }
+// the Iranian operators first, then a few large ones elsewhere). An allow entry inside one of them lets every subscriber bypass the guard.
+function gp_ipl_mobile_asns() {
+	return array(197207 => 'MCI', 44244 => 'Irancell', 57218 => 'Rightel',
+		21928 => 'T-Mobile US', 22394 => 'Verizon Wireless', 20057 => 'AT&T Mobility', 12576 => 'EE', 55836 => 'Reliance Jio',
+		45609 => 'Bharti Airtel', 38266 => 'Vodafone Idea', 16135 => 'Turkcell', 15897 => 'Vodafone Turkey');
+}
 
 // Warnings for the enabled lists: conflicts, wide allow entries, shared ranges, crawlers. Returns a
 // list of array(code, text detail). $verified_ips: addresses of verified crawlers seen in the logs.

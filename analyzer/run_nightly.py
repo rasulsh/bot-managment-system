@@ -18,6 +18,7 @@ from analyzer import classifier as clf_mod
 from analyzer import config as config_mod
 from analyzer import fsmode
 from analyzer import features as features_mod
+from analyzer import iplist as iplist_mod
 from analyzer import jobreport
 from analyzer import labels as labels_mod
 from analyzer import logs as logs_mod
@@ -156,6 +157,26 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
+def recompile_expired_lists(dry_run=False):
+    """Recompile the IP lists when an enabled source still holds an entry past its `# expires=` time. Returns the number of expired
+    entries that the compile ignored and removed (0 when nothing was due). Never fatal: lists are not what nightly is for."""
+    if dry_run:
+        return 0
+    try:
+        lists_dir = iplist_mod.default_dir()
+        if not iplist_mod.has_expired(lists_dir):
+            return 0
+        status = iplist_mod.compile_lists(lists_dir)
+        n = sum(int(v.get('expired', 0)) for v in (status.get('lists') or {}).values())
+        print('IP lists: %d expired entr%s removed, lists recompiled.' % (n, 'y' if n == 1 else 'ies'))
+        if not status.get('ok'):
+            jobreport.warn('IP list recompile after an expiry reported errors: %s' % '; '.join(status.get('errors') or [])[:200])
+        return n
+    except Exception as exc:
+        jobreport.warn('IP list expiry check failed: %s' % exc)
+        return 0
+
+
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
@@ -177,6 +198,9 @@ def main(argv=None):
     devices = build_device_view(sessions, cfg)
 
     client = redis_io.connect(cfg, write=not args.dry_run)
+
+    # --- IP list entries past their `# expires=` time: recompile, so the compiled files stop matching them and the lines go.
+    lists_expired = recompile_expired_lists(args.dry_run)
 
     # --- reputation -------------------------------------------------------
     rep_written = 0
@@ -339,6 +363,7 @@ def main(argv=None):
             'clf_metrics': {k: v for k, v in (metrics or {}).items() if isinstance(v, (int, float, str))},
             'rows': len(rows), 'devices_scored': sum(1 for e in devices.values() if e['is_device'] and not e.get('holdout')),
             'clf_labels': progress,
+            'iplists_expired': lists_expired,
         })
     if not args.dry_run:
         # The label progress for the Models page and the dashboard (snapshot.py copies it); every nightly run, trained or not.

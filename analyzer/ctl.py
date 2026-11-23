@@ -4,7 +4,9 @@
   python3 analyzer/ctl.py show  <device_id|ip>
   python3 analyzer/ctl.py allow <device_id> [--ttl 3600]
   python3 analyzer/ctl.py deny  <device_id|ip> [--ttl 86400]
-  python3 analyzer/ctl.py list  [--kind allow|deny]
+  python3 analyzer/ctl.py challenge <device_id|ip> [--ttl 86400]    the check page until the client holds a token
+  python3 analyzer/ctl.py captcha   <device_id|ip> [--ttl 86400]    the image CAPTCHA until the client solved one
+  python3 analyzer/ctl.py list  [--kind allow|deny|challenge|captcha]
   python3 analyzer/ctl.py clear <device_id|ip>
 
 `show` first. It prints every gv: verdict touching an identity - reputation,
@@ -12,10 +14,12 @@ anomaly level, classifier level, bot verification, honeypot history and any
 override - which is usually enough to explain what happened without reading a
 single log line.
 
-An allow override is not gated by any enforce toggle: it can only ever make the
-guard less strict, so it takes effect on the customer's next request. A deny
-override is an enforcement action and respects enforce.block like everything
-else, so setting one in monitor mode records the intent without blocking.
+Every override is an explicit operator action and acts immediately on the client's next request,
+also in monitor mode and also for a client in the holdout: no enforce switch gates an allow, a
+deny, a challenge or a captcha override. Only the kill switch (guard.off) stops them.
+
+A challenge / captcha override challenges that ONE client until it holds a token (a CAPTCHA-level one for captcha). Precedence: allow > deny >
+captcha > challenge; a verified crawler keeps its pass; an enforced IP allow list is checked first.
 
 Every override carries a TTL. An override without an expiry is a config change
 in disguise, and it will be forgotten - so TTLs above 30 days are refused.
@@ -62,6 +66,9 @@ def cmd_show(client, args):
                                      if allow_ttl is not None else 'none'))
     print('  deny override    %s' % ('set, expires in ' + _fmt_ttl(deny_ttl)
                                      if deny_ttl is not None else 'none'))
+    for kind in ('challenge', 'captcha'):
+        ttl = verdicts['overrides'].get(kind)
+        print('  %-16s %s' % (kind + ' override', 'set, expires in ' + _fmt_ttl(ttl) if ttl is not None else 'none'))
     if verdicts['overrides'].get('allow') is None and (
             verdicts['botbad'] or verdicts['honeypot']
             or (verdicts['reputation'] or 0) > 0):
@@ -90,8 +97,24 @@ def cmd_deny(client, args):
         print('ERROR: could not write the deny override', file=sys.stderr)
         return 1
     print('Deny override set for %s, expires in %s.' % (args.identity, _fmt_ttl(args.ttl)))
-    print('It is an enforcement action, so it only blocks when enforce.block is on.')
+    print('It acts at once, also in monitor mode (no enforce switch gates an override).')
     return 0
+
+
+def _cmd_chal(kind, what):
+    def run(client, args):
+        if not redis_io.set_override(client, kind, args.identity, args.ttl):
+            print('ERROR: could not write the %s override' % kind, file=sys.stderr)
+            return 1
+        print('%s override set for %s, expires in %s.' % (kind.capitalize(), args.identity, _fmt_ttl(args.ttl)))
+        print('The client is shown %s until it holds a valid token' % what
+              + (' (a CAPTCHA-level one)' if kind == 'captcha' else '') + '; it acts at once, also in monitor mode.')
+        return 0
+    return run
+
+
+cmd_challenge = _cmd_chal('challenge', 'the check page')
+cmd_captcha = _cmd_chal('captcha', 'the image CAPTCHA')
 
 
 def cmd_list(client, args):
@@ -99,9 +122,9 @@ def cmd_list(client, args):
     if not rows:
         print('No override is currently set.')
         return 0
-    print('%-6s %-40s %s' % ('kind', 'identity', 'expires in'))
+    print('%-9s %-40s %s' % ('kind', 'identity', 'expires in'))
     for kind, identity, ttl in sorted(rows):
-        print('%-6s %-40s %s' % (kind, identity[:40], _fmt_ttl(ttl)))
+        print('%-9s %-40s %s' % (kind, identity[:40], _fmt_ttl(ttl)))
     print('')
     print('%d override(s) set.' % len(rows))
     return 0
@@ -149,16 +172,18 @@ def parse_args(argv):
     for name, help_text in (('show', 'print every verdict for an identity'),
                             ('allow', 'set a permissive override'),
                             ('deny', 'set a restrictive override'),
-                            ('clear', 'remove both overrides for an identity')):
+                            ('challenge', 'show the check page until the client holds a token'),
+                            ('captcha', 'show the image CAPTCHA until the client solved one'),
+                            ('clear', 'remove every override for an identity')):
         node = sub.add_parser(name, help=help_text)
         node.add_argument('identity')
-        if name in ('allow', 'deny'):
+        if name in ('allow', 'deny', 'challenge', 'captcha'):
             node.add_argument('--ttl', type=int, default=DEFAULT_TTL,
                               help='seconds until the override expires (default %d)'
                                    % DEFAULT_TTL)
 
     node = sub.add_parser('list', help='list the overrides currently set')
-    node.add_argument('--kind', choices=('allow', 'deny'), default=None)
+    node.add_argument('--kind', choices=('allow', 'deny', 'challenge', 'captcha'), default=None)
 
     node = sub.add_parser('promote-model',
                           help='move a trained candidate model over the live one')
@@ -196,7 +221,7 @@ def main(argv=None):
         return 2
     args.cfg = cfg
 
-    handlers = {'show': cmd_show, 'allow': cmd_allow, 'deny': cmd_deny,
+    handlers = {'show': cmd_show, 'allow': cmd_allow, 'deny': cmd_deny, 'challenge': cmd_challenge, 'captcha': cmd_captcha,
                 'list': cmd_list, 'clear': cmd_clear,
                 'promote-model': cmd_promote_model}
 
@@ -205,7 +230,7 @@ def main(argv=None):
     if args.command == 'promote-model':
         return handlers[args.command](None, args)
 
-    client = redis_io.connect(cfg, write=args.command in ('allow', 'deny', 'clear'))
+    client = redis_io.connect(cfg, write=args.command in ('allow', 'deny', 'challenge', 'captcha', 'clear'))
     if client is None:
         print('ERROR: Redis is unreachable, so no verdict can be read or written.',
               file=sys.stderr)

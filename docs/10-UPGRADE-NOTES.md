@@ -2,6 +2,23 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Overrides always act; list expiry within a minute (2026.11.33)
+
+* **Behaviour change.** An operator **deny** override used to follow `enforce.block`: on an install in monitor mode it was only logged. Now every override is an explicit operator action and acts **immediately, also in monitor mode and for a client in the holdout** (like a rule in enforce mode): deny answers 403, challenge shows the check page, CAPTCHA the image test. Only the kill switch (`guard.off`) stops them. **Check the Temporary blocks & allows page after upgrading: a deny override that was set earlier and never acted will start blocking at once.** The log reason is `OVR_DENY` (no `SH_` form); the page says "Overrides act immediately, also in monitor mode."
+* **IP list expiry without waiting for the nightly job.** The compile stores the earliest future `# expires=` time as `next_expiry` in `lists/lists-status.json`; the `worker` job (every minute) reads that file (one small read, nothing else when no expiry is pending) and recompiles when the time has passed, so an expired entry stops matching within about a minute. Needs the `worker` cron entry (already required). A list edited by hand over SFTP is picked up at the next compile (any panel save, the nightly job).
+
+**Rollback.** Update page *Roll back* or `php updates/rollback.php`; an older guard gates a deny override on `enforce.block` again, and `next_expiry` is ignored.
+
+## Temporary blocks & allows (2026.11.32)
+
+* **New:** the Overrides page is now **Temporary blocks & allows** (route unchanged): presets from 5 minutes, a custom number of minutes, the time left and the exact expiry, extend / shorten / remove, and a new kind **Challenge** / **CAPTCHA** (`gv:chal:<id>`, value `1` / `c`). Precedence allow > deny > CAPTCHA > challenge; it needs no enforce switch. The guard reads the two new keys in its existing Redis pipeline (no round trip added). An older guard ignores the `gv:chal:` keys, so a rollback only loses the challenges.
+* **Quick actions** on every log row and the Identity page; a warning for carrier-grade NAT and known mobile-network addresses.
+* **IP lists:** `# expires=2026-11-30` after an entry; the compile ignores and removes expired entries, and the worker recompiles within about a minute (nightly is the safety net). Lines with a malformed `expires=` are refused (they show as invalid lines).
+* `ctl.py challenge` / `captcha`; log rows decided by such an override carry `ovr` = `challenge` / `captcha` and are skipped by replay.
+* Nothing to do on upgrade.
+
+**Rollback.** Update page *Roll back* or `php updates/rollback.php`; entries with `# expires=` are then plain comments (the entry never expires), so remove those lines first if that matters.
+
 ## Readable reason codes, GeoIP page fixes (2026.11.31)
 
 * **Reason codes in words.** The log rows are unchanged (short codes stay: `SH_RULE:<id>`, `IPL_BLOCK:<id>`, `UA_SCRIPT`, ...). The panel now shows the full name, the code, a tooltip

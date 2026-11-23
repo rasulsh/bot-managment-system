@@ -688,6 +688,7 @@ if (!function_exists('gp_t')) {
 }
 require_once __DIR__ . '/../panel/ui.php';
 require_once __DIR__ . '/../panel/reasons.php';
+require_once __DIR__ . '/../panel/overrides.php';
 if (!function_exists('gp_csrf_token_stub')) {
 	// gp_csrf_token() needs an installed panel; the view only echoes it.
 	function gp_csrf_token_stub() { return str_repeat('a', 64); }
@@ -1860,6 +1861,7 @@ t_section('Panel layout: include / exclude filters, tabs, tooltips');
 require_once __DIR__ . '/../panel/filters.php';
 require_once __DIR__ . '/../panel/ui.php';
 require_once __DIR__ . '/../panel/reasons.php';
+require_once __DIR__ . '/../panel/overrides.php';
 if (!function_exists('gp_t')) {
 	$GP_STRINGS = require __DIR__ . '/../panel/lang.php';
 	function gp_t($key) { global $GP_STRINGS; return isset($GP_STRINGS[$key]) ? $GP_STRINGS[$key] : $key; }
@@ -2841,7 +2843,7 @@ t_ok('compile: ... and compiles again once the source is back', gp_iplists_compi
 $ex = gp_iplists_export('scrapers');
 t_ok('export: the source text comes back; an unknown list gives null', $ex[0]['id'] === 'scrapers' && $ex[1] === "203.0.113.0/24\n198.51.100.0/25\n2001:db8::/48\n" && gp_iplists_export('nope')[0] === null);
 $en = gp_iplists_entries('scrapers', array());
-t_ok('entries: every entry with its line, family and the totals', $en[1] === 3 && $en[2] === 3 && $en[0][0] === array('line' => 1, 'text' => '203.0.113.0/24', 'v' => 4) && $en[0][2]['v'] === 6);
+t_ok('entries: every entry with its line, family and the totals', $en[1] === 3 && $en[2] === 3 && $en[0][0] === array('line' => 1, 'text' => '203.0.113.0/24', 'v' => 4, 'exp' => 0) && $en[0][2]['v'] === 6);
 $en2 = gp_iplists_entries('scrapers', gp_filter_parse(array('entry' => '203.0', 'entry_op' => 'not'), array('entry' => 'text')));
 t_ok('entries: the text filter "does not contain" and the family filter "is" / "is not"', $en2[1] === 2 && array_column($en2[0], 'text') === array('198.51.100.0/25', '2001:db8::/48')
 	&& gp_iplists_entries('scrapers', gp_filter_parse(array('family' => 'v6'), array('family' => 'choice')))[1] === 1 && gp_iplists_entries('scrapers', gp_filter_parse(array('family' => 'v6', 'family_op' => 'not'), array('family' => 'choice')))[1] === 2);
@@ -3030,7 +3032,7 @@ t_ok('shadow: the Overrides page says the deny has no effect, names the list and
 list($sd_h2, $sd_e2) = $sd_over(array());
 t_ok('shadow: no warning when no deny is covered', !$sd_e2 && strpos($sd_h2, 'data-shadow') === false);
 $sd_src = file_get_contents(__DIR__ . '/../panel/index.php');
-t_ok('shadow: creating a deny override flashes the warning (the handler calls the check)', strpos($sd_src, "if (\$action === 'deny') {\n\t\t\t\t\$sh = gp_iplists_deny_shadow(") !== false && strpos((require __DIR__ . '/../panel/lang.php')['ovr_deny_shadowed'], '%s') !== false);
+t_ok('shadow: creating a deny override flashes the warning (the handler calls the check)', strpos($sd_src, "\$sh = gp_iplists_deny_shadow(array(gp_identity_canon(\$identity)));") !== false && strpos($sd_src, "\$action === 'deny' || \$action === 'challenge' || \$action === 'captcha'") !== false && strpos((require __DIR__ . '/../panel/lang.php')['ovr_deny_shadowed'], '%s') !== false);
 foreach (array('shadow-allow', 'shadow-monitor') as $d) { gp_iplists_delete($d, 'tester', '1.1.1.1'); }
 t_ok('shadow: the test lists are gone again', gp_iplists_state()['lists'] === array());
 
@@ -4648,6 +4650,7 @@ $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
 
 t_section('Reason codes: registry, scan of emitted codes, badges, pick list, short fields (PR F)');
 require_once __DIR__ . '/../panel/reasons.php';
+require_once __DIR__ . '/../panel/overrides.php';
 $rc_root = dirname(__DIR__);
 // 1. Every reason code the guard, analyzer and panel can emit is in the registry. The codes are collected from the SOURCE, not listed here.
 $rc_found = array();
@@ -4657,6 +4660,7 @@ foreach (glob($rc_root . '/guard/*.php') as $f) {
 	if (preg_match_all('/\$reasons\[\]\s*=\s*\'([A-Z_]+)\'/', $src, $m, PREG_SET_ORDER)) { foreach ($m as $x) { $rc_found[$x[1]] = basename($f); } }
 	if (preg_match_all('/return \(\(\$rule\[\'mode\'\] === \'enforce\'\) \? \'([A-Z_]+:)\' : \'(SH_[A-Z_]+:)\'/', $src, $m, PREG_SET_ORDER)) { foreach ($m as $x) { $rc_found[$x[1]] = basename($f); $rc_found[$x[2]] = basename($f); } }
 	if (preg_match_all('/\'IPL_\' \. \(\$type === \'block\' \? \'(BLOCK)\' : \'(ALLOW)\'\)/', $src, $m, PREG_SET_ORDER)) { foreach ($m as $x) { $rc_found['IPL_' . $x[1] . ':'] = basename($f); $rc_found['IPL_' . $x[2] . ':'] = basename($f); } }
+	if (preg_match_all('/\'(OVR_[A-Z_]+)\'/', $src, $m)) { foreach ($m[1] as $c) { $rc_found[$c] = basename($f); } }
 	// 'SH_' . $intended: the intended action of a request that a monitor-only rule did not enforce
 	if (preg_match('/\'SH_\' \. \$intended/', $src)) { foreach (array('403', '429', 'challenge') as $a) { $rc_found['SH_' . $a] = basename($f); } }
 }
@@ -4753,6 +4757,115 @@ t_ok('next step: an upload says "press Compile now", and a banner shows while a 
 t_ok('view: the file column has a minimum width and the source table has no unlabelled control', strpos($gu_view, 'gp-col-name') !== false);
 t_ok('layout: tooltips are placed against the viewport (position:fixed in the stylesheet, a rect-based placement in the script)',
 	strpos((string)file_get_contents($rc_root . '/panel/assets/app.src.css'), '.gp-tip-box { @apply fixed') !== false && strpos((string)file_get_contents($rc_root . '/panel/views/layout.php'), 'getBoundingClientRect()') !== false);
+
+
+t_section('Temporary blocks and allows (PR G): helpers, handler, quick actions, list expiry');
+$tb_root = dirname(__DIR__);
+$tb_lang = require $tb_root . '/panel/lang.php';
+// TTL parsing.
+t_ok('ttl: presets are 5 min, 15 min, 30 min, 1 h, 6 h, 24 h, 7 d, 30 d', gp_override_presets() === array(300, 900, 1800, 3600, 21600, 86400, 604800, 2592000));
+t_ok('ttl: a preset is taken as is; the default is 1 hour', gp_override_ttl_from_post(array('ttl' => '900')) === 900 && gp_override_ttl_from_post(array()) === 3600);
+t_ok('ttl: a custom value in minutes wins over the preset (1 to 43200 = 30 days)', gp_override_ttl_from_post(array('ttl' => '3600', 'ttl_minutes' => '7')) === 420 && gp_override_ttl_from_post(array('ttl_minutes' => '1')) === 60 && gp_override_ttl_from_post(array('ttl_minutes' => '43200')) === 2592000);
+t_ok('ttl: out-of-range or junk is refused (0): 0 minutes, 43201, negative, text, 59 seconds, above 30 days', gp_override_ttl_from_post(array('ttl_minutes' => '0')) === 0 && gp_override_ttl_from_post(array('ttl_minutes' => '43201')) === 0
+	&& gp_override_ttl_from_post(array('ttl_minutes' => '-5')) === 0 && gp_override_ttl_from_post(array('ttl_minutes' => 'abc')) === 0 && gp_override_ttl_from_post(array('ttl' => '59')) === 0 && gp_override_ttl_from_post(array('ttl' => '2592001')) === 0 && gp_override_ttl_from_post(array('ttl' => 'x')) === 0);
+t_ok('ttl: labels are whole units', gp_override_ttl_label(300) === '5 minutes' && gp_override_ttl_label(3600) === '1 hour' && gp_override_ttl_label(604800) === '7 days');
+$tb_exp = gp_override_expires_text(900, 1800000000);
+t_ok('expires: "in 15 minutes" and the absolute time in UTC; unknown when Redis gave no TTL', strpos($tb_exp, '15 minutes') !== false && strpos($tb_exp, gmdate('Y-m-d H:i', 1800000900) . ' UTC') !== false && gp_override_expires_text(null) === gp_t('unknown'));
+$tb_form = gp_override_ttl_fields(3600) . gp_override_buttons();
+t_ok('form: eight presets plus a custom minutes box with a tooltip, and four buttons (allow, deny, challenge, captcha)',
+	substr_count($tb_form, '<option') === 8 && strpos($tb_form, 'name="ttl_minutes"') !== false && strpos($tb_form, 'tip-') !== false && preg_match_all('/name="override" value="(allow|deny|challenge|captcha)"/', $tb_form) === 4);
+t_ok('kinds: the four kinds, each with its own colour and word', gp_override_kinds() === array('allow', 'deny', 'challenge', 'captcha')
+	&& strpos(gp_override_badge('challenge'), 'gp-badge-warn') !== false && strpos(gp_override_badge('captcha'), 'CAPTCHA') !== false && strpos(gp_override_badge('deny'), 'Block') !== false);
+// Shared addresses.
+t_ok('shared: carrier-grade NAT 100.64.0.0/10 is flagged, its neighbours are not, IPv6 and junk never',
+	gp_override_shared_ip('100.64.0.1')[0] === 'cgnat' && gp_override_shared_ip('100.127.255.254')[0] === 'cgnat' && gp_override_shared_ip('100.63.255.255') === null
+	&& gp_override_shared_ip('100.128.0.1') === null && gp_override_shared_ip('203.0.113.5') === null && gp_override_shared_ip('2001:db8::1') === null && gp_override_shared_ip('dev123') === null);
+t_ok('shared: the note names the range and advises a challenge and a short time; a normal address has no note',
+	strpos(gp_override_shared_note('100.64.1.1'), 'carrier-grade NAT') !== false && strpos(gp_override_shared_note('100.64.1.1'), 'short time') !== false && gp_override_shared_note('203.0.113.5') === '');
+t_ok('shared: the mobile-operator list includes the Iranian networks', isset(gp_mobile_asns()[197207], gp_mobile_asns()[44244], gp_mobile_asns()[57218]) && gp_mobile_asns() === gp_ipl_mobile_asns());
+// Quick actions.
+$tb_qa = gp_quick_actions_html('203.0.113.9', 'index.php?r=logs&act=403', 'admin');
+t_ok('quick: an admin gets Block 15 min, Challenge 1 h, CAPTCHA 1 h, Allow 1 h and Custom, with the CSRF token, the identity, the way back and a tooltip',
+	strpos($tb_qa, 'Block 15 min') !== false && strpos($tb_qa, 'Challenge 1 h') !== false && strpos($tb_qa, 'CAPTCHA 1 h') !== false && strpos($tb_qa, 'Allow 1 h') !== false && strpos($tb_qa, 'Custom...') !== false
+	&& strpos($tb_qa, 'name="csrf"') !== false && strpos($tb_qa, 'name="identity" value="203.0.113.9"') !== false && strpos($tb_qa, 'name="back" value="index.php?r=logs&amp;act=403"') !== false && strpos($tb_qa, 'tip-') !== false);
+t_ok('quick: an operator, a demo user and an empty identity get nothing (ACL: the POST is admin only)', gp_quick_actions_html('203.0.113.9', 'index.php?r=logs', 'operator') === '' && gp_quick_actions_html('203.0.113.9', 'index.php?r=logs', 'demo') === '' && gp_quick_actions_html('', 'index.php?r=logs', 'admin') === '');
+t_ok('quick: the identity is escaped and labelled address / device', strpos(gp_quick_actions_html('a"><script>', 'index.php?r=logs', 'admin'), '<script>') === false && strpos($tb_qa, 'Address') !== false && strpos(gp_quick_actions_html('devabc', 'index.php?r=logs', 'admin'), 'Device') !== false);
+t_ok('quick: the way back is only Logs, Identity or Live on this site, plain query characters (no open redirect)',
+	gp_quick_back('index.php?r=logs&act=403&act_op=not')[0] === 'logs' && gp_quick_back('index.php?r=identity&id=203.0.113.9')[1] === array('id' => '203.0.113.9') && gp_quick_back('index.php?r=live')[0] === 'live'
+	&& gp_quick_back('https://evil.example/') === null && gp_quick_back('//evil.example') === null && gp_quick_back('index.php?r=settings') === null && gp_quick_back('index.php?r=logs&x=<script>') === null && gp_quick_back("index.php?r=logs\r\nSet-Cookie: a=b") === null && gp_quick_back(array()) === null);
+t_ok('quick: the POST goes to the admin-only Overrides route; its message lands at the top of the page it was pressed on (no section)',
+	gp_acl_required('overrides', 'POST') === 'admin' && gp_post_section('overrides', array('from' => 'quick', 'quick' => 'deny:900')) === '' && gp_post_section('overrides', array('override' => 'clear')) === 'override-list');
+$tb_src = file_get_contents($tb_root . '/panel/index.php');
+t_ok('quick: the handler maps a button to a kind and a time from a fixed table (never from the request), audits it, and returns to the page', strpos($tb_src, "\$specs = gp_quick_specs();") !== false && strpos($tb_src, "'via' => \$via") !== false && strpos($tb_src, 'gp_quick_back($_POST') !== false
+	&& gp_quick_specs()['deny:900'] === array('deny', 900, 'ovr_q_block15') && gp_quick_specs()['challenge:3600'][0] === 'challenge');
+t_ok('views: the Logs detail and the Identity page draw quick actions for the address and the device; the Temporary blocks page prefills from ?new= and shows the shared-address note',
+	strpos(file_get_contents($tb_root . '/panel/views/logs.php'), 'gp_quick_actions_html((string)($row[\'ip\']') !== false && strpos(file_get_contents($tb_root . '/panel/views/logs.php'), 'gp_quick_actions_html((string)($row[\'dev\']') !== false
+	&& strpos(file_get_contents($tb_root . '/panel/views/identity.php'), 'gp_quick_actions_html($identity') !== false && strpos(file_get_contents($tb_root . '/panel/views/overrides.php'), 'gp_override_shared_note($new_identity)') !== false);
+t_ok('menu and page: renamed "Temporary blocks & allows" (route unchanged), with an intro that says it expires by itself and suits dynamic mobile addresses, the precedence and the challenge rule',
+	$tb_lang['nav_overrides'] === 'Temporary blocks & allows' && $tb_lang['ovr_title'] === 'Temporary blocks & allows' && strpos($tb_lang['ovr_intro'], 'expires by itself') !== false && strpos($tb_lang['ovr_intro'], 'mobile') !== false
+	&& strpos($tb_lang['ovr_precedence'], 'Allow beats everything') !== false && strpos($tb_lang['ovr_rule_chal'], 'challenge') !== false);
+t_ok('overrides act at once: the page says "Overrides act immediately, also in monitor mode.", the deny and challenge texts say so, no text still ties a deny to the block switch, OVR_DENY is a registered reason (no SH_ form is offered)',
+	$tb_lang['ovr_immediate'] === 'Overrides act immediately, also in monitor mode.' && strpos(file_get_contents($tb_root . '/panel/views/overrides.php'), 'data-ovr-immediate') !== false
+	&& strpos($tb_lang['ovr_rule_deny'], 'at once') !== false && strpos($tb_lang['ovr_rule_deny'], 'monitor mode') !== false && strpos($tb_lang['ovr_rule_chal'], 'monitor mode') !== false
+	&& strpos($tb_lang['ovr_rule_deny'], 'follows') === false && strpos($tb_lang['ovr_precedence'], 'kill switch') !== false
+	&& gp_reason_parse('OVR_DENY')[3] && gp_reason_registry()['OVR_DENY'] === 'override' && !isset(gp_reason_options()['SH_OVR_DENY']));
+$tb_tips = array();
+foreach (array('ovr_identity', 'ovr_ttl', 'ovr_custom', 'ovr_retime', 'ovr_quick') as $k) { if (empty($tb_lang['tip_' . $k])) { $tb_tips[] = $k; } }
+t_ok('every new field has a ? tooltip text' . ($tb_tips ? ' (missing: ' . implode(',', $tb_tips) . ')' : ''), !$tb_tips);
+t_ok('reasons: OVR_CHALLENGE and OVR_CAPTCHA are registered (category override) and the ovr field names the two new values',
+	gp_reason_parse('OVR_CHALLENGE')[3] && gp_reason_parse('OVR_CAPTCHA')[3] && gp_reason_registry()['OVR_CAPTCHA'] === 'override' && gp_field_value('ovr', 'challenge') === 'temporary challenge' && gp_field_value('ovr', 'captcha') === 'temporary CAPTCHA');
+// The handler against a live Redis, when there is one.
+$tb_conn = function_exists('gp_redis') ? gp_redis() : null;
+if ($tb_conn && gv_redis_alive($tb_conn)) {
+	$tb_id = '203.0.113.211';
+	gp_override_clear($tb_id);
+	t_ok('redis: a challenge and a CAPTCHA override are one key family (chal:), value 1 / c, and read back as their kinds', gp_override_set('challenge', $tb_id, 900) && gv_r_get($tb_conn, gv_key('chal:' . $tb_id)) === '1'
+		&& gp_override_set('captcha', $tb_id, 900) && gv_r_get($tb_conn, gv_key('chal:' . $tb_id)) === 'c' && gp_identity_verdicts($tb_id)['captcha_ttl'] > 800 && gp_identity_verdicts($tb_id)['challenge_ttl'] === null);
+	$tb_list = array_values(array_filter(gp_overrides_list(), function ($i) use ($tb_id) { return $i['identity'] === $tb_id; }));
+	t_ok('redis: the list shows it as a CAPTCHA with its time left', count($tb_list) === 1 && $tb_list[0]['kind'] === 'captcha' && $tb_list[0]['ttl'] > 800 && $tb_list[0]['ttl'] <= 900);
+	t_ok('redis: retime shortens and extends one that exists and refuses one that does not or another kind',
+		gp_override_retime('captcha', $tb_id, 300) && gp_identity_verdicts($tb_id)['captcha_ttl'] <= 300 && gp_override_retime('captcha', $tb_id, 86400) && gp_identity_verdicts($tb_id)['captcha_ttl'] > 86000
+		&& !gp_override_retime('challenge', $tb_id, 600) && !gp_override_retime('deny', $tb_id, 600) && !gp_override_retime('captcha', $tb_id, 30) && !gp_override_retime('captcha', $tb_id, 99999999) && !gp_override_retime('captcha', 'no such id!', 600));
+	t_ok('redis: clear removes allow, deny and chal together; a bad kind or time is refused', gp_override_clear($tb_id) && gv_r_get($tb_conn, gv_key('chal:' . $tb_id)) === null && !gp_override_set('bogus', $tb_id, 900) && !gp_override_set('deny', $tb_id, 30));
+	gp_override_clear($tb_id);
+} else {
+	t_ok('redis: no Redis here, the live override tests were skipped (CI runs them)', true);
+}
+// IP list entry expiry.
+$tb_now = 1800000000;
+$tb_day = gmdate('Y-m-d', $tb_now);
+list($ex_e, $ex_b) = gp_ipl_parse_text("203.0.113.7  # expires=" . gmdate('Y-m-d', $tb_now + 5 * 86400) . "\n198.51.100.1\n192.0.2.9 # expires=2026-13-40\n192.0.2.10 # expires=" . gmdate('Y-m-d\TH:i', $tb_now + 3600) . "\n192.0.2.11 # note, expires=" . $tb_day . " 12:30\n");
+t_ok('expiry: `# expires=DATE` is valid through the END of that day (UTC); `T14:30` or a space time is to the minute; no comment = no expiry',
+	count($ex_e) === 4 && $ex_e[0]['exp'] === gmmktime(0, 0, 0, (int)gmdate('n', $tb_now + 5 * 86400), (int)gmdate('j', $tb_now + 5 * 86400), (int)gmdate('Y', $tb_now + 5 * 86400)) + 86400
+	&& !isset($ex_e[1]['exp']) && $ex_e[2]['exp'] === (int)(floor(($tb_now + 3600) / 60) * 60) && $ex_e[3]['exp'] === gmmktime(12, 30, 0, (int)gmdate('n', $tb_now), (int)gmdate('j', $tb_now), (int)gmdate('Y', $tb_now)));
+t_ok('expiry: an `expires=` that is not a real date refuses the line (a typo must not make a temporary entry permanent)', count($ex_b) === 1 && $ex_b[0][0] === 3);
+t_ok('expiry: hour 24, minute 60 and a bare `expires=` are refused', gp_ipl_expiry(' expires=2026-11-30T24:00')[1] === false && gp_ipl_expiry(' expires=2026-11-30T12:60')[1] === false && gp_ipl_expiry(' expires=')[1] === false && gp_ipl_expiry(' nothing')[0] === 0);
+// Compile ignores and removes expired entries (a throw-away lists directory).
+$tb_dir = sys_get_temp_dir() . '/gp-expiry-' . getmypid();
+@mkdir($tb_dir . '/lists', 0775, true);
+putenv('GV_LISTS_DIR=' . $tb_dir . '/lists');
+$tb_src_text = "# my list\n203.0.113.7 # expires=2026-01-01\n203.0.113.8 # keep this one, expires=2999-01-01\n203.0.113.9\n203.0.113.10 # expires=2026-01-02 note\n";
+file_put_contents($tb_dir . '/lists/tmp.txt', $tb_src_text);
+$tb_status = array('errors' => array(), 'lists' => array(), 'types' => array());
+$tb_lists = array(array('id' => 'tmp', 'idx' => 1, 'mode' => 'enforce', 'force' => false, 'type' => 'block', 'enabled' => true));
+gp_ipl_compile_type('block', $tb_lists, gmmktime(0, 0, 0, 6, 1, 2026), $tb_status, array());
+$tb_after = (string)file_get_contents($tb_dir . '/lists/tmp.txt');
+t_ok('compile: two expired entries are ignored (counted), the live ones compiled, and the expired LINES are removed from the source, comments and other lines untouched',
+	$tb_status['lists']['tmp']['expired'] === 2 && $tb_status['lists']['tmp']['entries'] === 2 && $tb_after === "# my list\n203.0.113.8 # keep this one, expires=2999-01-01\n203.0.113.9\n");
+$tb_status2 = array('errors' => array(), 'lists' => array(), 'types' => array());
+gp_ipl_compile_type('block', $tb_lists, gmmktime(0, 0, 0, 6, 1, 2026), $tb_status2, array());
+t_ok('compile: next_expiry is the EARLIEST future expiry (the 2999 entry here; the expired ones never count) and 0 without any', $tb_status['next_expiry'] === gmmktime(0, 0, 0, 1, 1, 2999) + 86400 && (function () use ($tb_dir, $tb_lists) { file_put_contents($tb_dir . '/lists/tmp.txt', "1.1.1.1\n2.2.2.2 # note\n"); $s = array('errors' => array(), 'lists' => array(), 'types' => array(), 'next_expiry' => 0); gp_ipl_compile_type('block', $tb_lists, gmmktime(0, 0, 0, 6, 1, 2026), $s, array()); file_put_contents($tb_dir . '/lists/tmp.txt', "# my list\n203.0.113.8 # keep this one, expires=2999-01-01\n203.0.113.9\n"); return $s['next_expiry'] === 0; })());
+t_ok('compile: the earliest of several future expiries wins, in any order', (function () use ($tb_dir, $tb_lists) { file_put_contents($tb_dir . '/lists/tmp.txt', "1.1.1.1 # expires=2030-05-01\n2.2.2.2 # expires=2030-02-01T08:15\n3.3.3.3 # expires=2031-01-01\n"); $s = array('errors' => array(), 'lists' => array(), 'types' => array(), 'next_expiry' => 0); gp_ipl_compile_type('block', $tb_lists, gmmktime(0, 0, 0, 6, 1, 2026), $s, array()); file_put_contents($tb_dir . '/lists/tmp.txt', "# my list\n203.0.113.8 # keep this one, expires=2999-01-01\n203.0.113.9\n"); return $s['next_expiry'] === gmmktime(8, 15, 0, 2, 1, 2030); })());
+t_ok('compile: the full compile writes next_expiry into the status (the key the worker reads)', strpos(file_get_contents(__DIR__ . '/../panel/iplists.php'), "'next_expiry' => 0);") !== false);
+t_ok('compile: the next compile has nothing left to remove', $tb_status2['lists']['tmp']['expired'] === 0 && (string)file_get_contents($tb_dir . '/lists/tmp.txt') === $tb_after);
+file_put_contents($tb_dir . '/lists/tmp.txt', $tb_src_text);
+$tb_changed = "203.0.113.7 # expires=2026-01-01\n198.51.100.1\n";
+t_ok('prune: a source that changed since the compile read it is left alone (an editor saved meanwhile)', gp_ipl_prune_expired('tmp', $tb_changed, gmmktime(0, 0, 0, 6, 1, 2026)) === 0 && (string)file_get_contents($tb_dir . '/lists/tmp.txt') === $tb_src_text);
+t_ok('prune: CRLF and a bare CR line end are kept as they were', (function () use ($tb_dir) { $t = "1.1.1.1 # expires=2026-01-01\r\n2.2.2.2\r\n3.3.3.3 # expires=2999-01-01\r"; file_put_contents($tb_dir . '/lists/tmp.txt', $t); return gp_ipl_prune_expired('tmp', $t, gmmktime(0, 0, 0, 6, 1, 2026)) === 1 && file_get_contents($tb_dir . '/lists/tmp.txt') === "2.2.2.2\r\n3.3.3.3 # expires=2999-01-01\r"; })());
+putenv('GV_LISTS_DIR');
+foreach ((array)glob($tb_dir . '/lists/*') as $f) { @unlink($f); }
+@rmdir($tb_dir . '/lists'); @rmdir($tb_dir);
+t_ok('editor and entries: the help says how to write an expiry, the table has an Expires column', strpos($tb_lang['ipl_h_expires'], '# expires=2026-11-30') !== false && strpos(file_get_contents($tb_root . '/panel/views/iplists.php'), "ipl_c_expires") !== false);
 
 echo "\n";
 // Say so out loud. A green run on a host missing the extension must never be

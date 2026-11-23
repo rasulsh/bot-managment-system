@@ -35,7 +35,7 @@ function gp_post_section($route, array $post) {
 	switch ((string)$route) {
 		case 'dashboard': return 'killswitch';
 		case 'identity': return 'identity-override';
-		case 'overrides': return $s('override') === 'clear' ? 'override-list' : ($s('from') === 'list' ? 'ovr-' . gp_row_key($s('identity')) : 'override-add');
+		case 'overrides': return $s('from') === 'quick' ? '' : ($s('override') === 'clear' ? 'override-list' : ($s('from') === 'list' ? 'ovr-' . gp_row_key($s('identity')) : 'override-add'));
 		case 'rules': return in_array($s('do'), array('save', 'preview'), true) ? 'rule-editor' : ($s('do') === 'discard_invalid' ? 'rules-file' : 'rules-list');
 		case 'geo': return $s('do') === 'upload' || $s('do') === 'compile' ? 'geo-upload' : ($s('do') === 'rollback' ? 'geo-status' : 'geo-sources');
 		case 'iplists': $d = $s('do'); if (strncmp($d, 'feed_', 5) === 0) { return $d === 'feed_save' ? 'feed-editor' : ($d === 'feed_delete' ? 'feeds-list' : 'fd-' . gp_row_key($s('id'))); } return $d === 'save' ? 'ipl-editor' : ($d === 'compile' ? 'ipl-compile' : ($d === 'rollback' ? 'ipl-status' : 'ipl-lists'));

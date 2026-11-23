@@ -2005,6 +2005,14 @@ else:
     ok('identity_verdicts reads overrides and verdicts back under the prefix',
        iv['reputation'] == 7 and iv['overrides']['allow'] is not None and iv['overrides']['deny'] is None)
     ok('get_override reports the remaining ttl', 0 < redis_io.get_override(a, 'ident9')['allow'] <= 600)
+    # Temporary challenge overrides: one key family (chal:), '1' = challenge, 'c' = CAPTCHA, the same as the guard and the panel.
+    ok('set_override challenge / captcha writes gv:chal:<id> with value 1 / c and a TTL', redis_io.set_override(a, 'challenge', 'ident9', 600) and admin.get('shop1:gv:chal:ident9') == '1'
+       and 0 < admin.ttl('shop1:gv:chal:ident9') <= 600 and redis_io.set_override(a, 'captcha', 'ident9', 600) and admin.get('shop1:gv:chal:ident9') == 'c')
+    gov = redis_io.get_override(a, 'ident9')
+    ok('get_override reports captcha (not challenge) for value c, and allow alongside', gov['captcha'] is not None and gov['challenge'] is None and gov['allow'] is not None and gov['deny'] is None)
+    ok('list_overrides lists it by kind and filters by kind', ('captcha', 'ident9') in [x[:2] for x in redis_io.list_overrides(a)] and [x[:2] for x in redis_io.list_overrides(a, 'captcha')] == [('captcha', 'ident9')]
+       and redis_io.list_overrides(a, 'challenge') == [])
+    ok('clear_override removes the chal key too', redis_io.clear_override(a, 'ident9') == 2 and admin.get('shop1:gv:chal:ident9') is None)
 
     # PHP guard <-> Python analyzer under one non-empty prefix.
     php_bin_x = shutil.which('php')
@@ -3557,6 +3565,98 @@ ok('nightly with Redis unavailable: the warnings stay (nothing was written), no 
 shutil.rmtree(nt_dir, ignore_errors=True)
 
 ok('the worker records exit, warnings and the result of a job it ran', (lambda w: ('warnings' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read() and 'jobreport.parse' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read()))(0))
+
+
+# --- Temporary blocks (PR G): IP list entry expiry, overrides in redis_io / ctl, replay skip, the nightly recompile ---------------
+ok('expiry: `# expires=DATE` is valid through the END of that day (UTC), `T14:30` or a space time to the minute; the same numbers as the panel (gp_ipl_expiry)',
+   il_mod.expiry(' expires=2026-11-30') == (1796083200, True) and il_mod.expiry(' expires=2026-11-30T14:30') == (1796049000, True)
+   and il_mod.expiry(' expires=2026-11-30 14:30') == (1796049000, True) and il_mod.expiry(' note') == (0, True) and il_mod.expiry('') == (0, True))
+ok('expiry: a date that is not real, hour 24, minute 60 or a bare `expires=` refuses the line', all(il_mod.expiry(c)[1] is False for c in
+   (' expires=2026-13-40', ' expires=2026-11-30T24:00', ' expires=2026-11-30T12:60', ' expires=', ' expires=junk', ' expires=2026-02-30')))
+ee, eb = il_mod.parse_text('203.0.113.7 # expires=2026-11-30\n198.51.100.1\n192.0.2.9 # expires=nope\n', True)
+ok('parse_text(with_expiry): the entry carries its timestamp (0 = none) and a typo is a bad line, not a permanent entry',
+   [e[4] for e in ee] == [1796083200, 0] and eb == [(3, '192.0.2.9')] and len(il_mod.parse_text('203.0.113.7 # expires=2026-11-30\n')[0][0]) == 4)
+ex_text = '# my list\n203.0.113.7 # expires=2026-01-01\n203.0.113.8 # keep this one, expires=2999-01-01\n203.0.113.9\n203.0.113.10 # expires=2026-01-02 note\n'
+dx = il_dir('exp1', [il_list(1, 'block')], {'l1': ex_text})
+now_x = 1780000000                                  # 2026-05-28
+ok('has_expired: true while a past entry is still in an enabled source', il_mod.has_expired(dx, now_x) is True and il_mod.has_expired(dx, 1700000000) is False)
+stx = il_mod.compile_lists(dx, now=now_x)
+blx = open(os.path.join(dx, 'block.bin'), 'rb').read()
+ok('compile: expired entries are ignored (counted), the live ones compiled', stx['lists']['l1']['expired'] == 2 and stx['lists']['l1']['entries'] == 2
+   and geo_mod.lookup(blx, '203.0.113.7') is None and geo_mod.lookup(blx, '203.0.113.10') is None and geo_mod.lookup(blx, '203.0.113.8') == 1 and geo_mod.lookup(blx, '203.0.113.9') == 1)
+ok('compile: the expired LINES are removed from the source; comments and the other lines stay',
+   open(os.path.join(dx, 'l1.txt')).read() == '# my list\n203.0.113.8 # keep this one, expires=2999-01-01\n203.0.113.9\n')
+ok('compile: nothing is left to expire, has_expired is false and a second compile removes nothing',
+   il_mod.has_expired(dx, now_x) is False and il_mod.compile_lists(dx, now=now_x)['lists']['l1']['expired'] == 0)
+raw_x = '1.1.1.1 # expires=2026-01-01\n2.2.2.2\n'
+with open(os.path.join(dx, 'l1.txt'), 'w') as handle: handle.write('9.9.9.9\n')
+ok('prune: a source that changed since the compile read it is left alone', il_mod.prune_expired(os.path.join(dx, 'l1.txt'), raw_x, now_x) == 0 and open(os.path.join(dx, 'l1.txt')).read() == '9.9.9.9\n')
+with open(os.path.join(dx, 'l1.txt'), 'w') as handle: handle.write('1.1.1.1 # expires=2026-01-01\r\n2.2.2.2\r\n3.3.3.3 # expires=2999-01-01\r')
+raw_c = open(os.path.join(dx, 'l1.txt'), newline='').read()
+ok('prune: CRLF and a bare CR line end are kept as they were', il_mod.prune_expired(os.path.join(dx, 'l1.txt'), raw_c, now_x) == 1
+   and open(os.path.join(dx, 'l1.txt'), newline='').read() == '2.2.2.2\r\n3.3.3.3 # expires=2999-01-01\r')
+# The nightly hook.
+os.environ['GV_LISTS_DIR'] = dx
+with open(os.path.join(dx, 'l1.txt'), 'w') as handle: handle.write('1.1.1.1 # expires=2026-01-01\n2.2.2.2\n')
+ok('nightly: recompile_expired_lists recompiles when an entry is due and reports how many it removed (never fatal)',
+   run_nightly_mod.recompile_expired_lists(False) == 1 and open(os.path.join(dx, 'l1.txt')).read() == '2.2.2.2\n' and run_nightly_mod.recompile_expired_lists(False) == 0)
+with open(os.path.join(dx, 'l1.txt'), 'w') as handle: handle.write('1.1.1.1 # expires=2026-01-01\n')
+ok('nightly: a dry run changes nothing', run_nightly_mod.recompile_expired_lists(True) == 0 and open(os.path.join(dx, 'l1.txt')).read() == '1.1.1.1 # expires=2026-01-01\n')
+os.environ.pop('GV_LISTS_DIR', None)
+shutil.rmtree(dx, ignore_errors=True)
+
+
+# --- IP list expiry within a minute: next_expiry in lists-status.json, the worker recompiles when it has passed ---------------------
+from analyzer import worker as worker_ne
+ne_text = '203.0.113.7 # expires=2026-01-01\n203.0.113.8 # expires=2026-03-01T10:30\n203.0.113.9 # expires=2026-02-01\n203.0.113.10\n'
+dn = il_dir('exp2', [il_list(1, 'block')], {'l1': ne_text})
+t0 = 1767000000                                      # 2025-12-29: every entry is still in the future
+stn = il_mod.compile_lists(dn, now=t0)
+exp_feb = il_mod.expiry(' expires=2026-02-01')[0]
+exp_jan = il_mod.expiry(' expires=2026-01-01')[0]
+ok('next_expiry: the compile stores the EARLIEST future expiry in lists-status.json (and in the returned status)', stn['next_expiry'] == exp_jan
+   and json_geo.load(open(os.path.join(dn, 'lists-status.json')))['next_expiry'] == exp_jan and geo_mod.lookup(open(os.path.join(dn, 'block.bin'), 'rb').read(), '203.0.113.7') == 1)
+ok('next_expiry: it is 0 when no entry has an expiry, and an already expired entry never sets it',
+   il_mod.compile_lists(il_dir('exp3', [il_list(1, 'block')], {'l1': '1.1.1.1\n2.2.2.2 # note\n'}), now=t0)['next_expiry'] == 0
+   and il_mod.compile_lists(il_dir('exp4', [il_list(1, 'block')], {'l1': '1.1.1.1 # expires=2025-01-01\n'}), now=t0)['next_expiry'] == 0)
+ok('expiry_due: false before the time, true from the time on; missing, garbage or odd files are quietly false',
+   il_mod.expiry_due(dn, exp_jan - 1) is False and il_mod.expiry_due(dn, exp_jan) is True and il_mod.expiry_due(dn, exp_jan + 10) is True
+   and il_mod.expiry_due(os.path.join(dn, 'nope'), exp_jan) is False)
+with open(os.path.join(dn, 'junk.json'), 'w') as handle: handle.write('not json')
+os.makedirs(os.path.join(dn, 'g'), exist_ok=True)
+with open(os.path.join(dn, 'g', 'lists-status.json'), 'w') as handle: handle.write('not json')
+with open(os.path.join(dn, 'g2.json'), 'w') as handle: handle.write('[]')
+ok('expiry_due: a damaged status file is false, never an exception', il_mod.expiry_due(os.path.join(dn, 'g'), exp_jan) is False)
+# The check is cheap: no source is parsed and nothing is compiled while nothing is due.
+calls = {'compile': 0, 'parse': 0}
+orig_compile, orig_parse = il_mod.compile_lists, il_mod.parse_text
+il_mod.compile_lists = lambda *a, **k: calls.__setitem__('compile', calls['compile'] + 1) or orig_compile(*a, **k)
+il_mod.parse_text = lambda *a, **k: calls.__setitem__('parse', calls['parse'] + 1) or orig_parse(*a, **k)
+try:
+    nothing = il_mod.recompile_if_due(dn, exp_jan - 60)
+    ok('worker check: nothing pending, nothing due: no compile, no source parsed, None', nothing is None and calls == {'compile': 0, 'parse': 0} and worker_ne.recompile_expired_lists(dn, exp_jan - 60) == 0)
+    due = il_mod.recompile_if_due(dn, exp_jan + 30)
+    ok('worker check: the minute after the expiry the lists are recompiled', due is not None and calls['compile'] == 1)
+finally:
+    il_mod.compile_lists, il_mod.parse_text = orig_compile, orig_parse
+blk_n = open(os.path.join(dn, 'block.bin'), 'rb').read()
+ok('worker check: the expired entry no longer matches, the others do, its line is gone and next_expiry moved to the next one',
+   geo_mod.lookup(blk_n, '203.0.113.7') is None and geo_mod.lookup(blk_n, '203.0.113.9') == 1 and geo_mod.lookup(blk_n, '203.0.113.10') == 1
+   and '203.0.113.7' not in open(os.path.join(dn, 'l1.txt')).read() and due['next_expiry'] == exp_feb
+   and json_geo.load(open(os.path.join(dn, 'lists-status.json')))['next_expiry'] == exp_feb)
+ok('worker check: right after it nothing is due again (no loop), and the last expiry empties next_expiry',
+   il_mod.recompile_if_due(dn, exp_jan + 90) is None and il_mod.recompile_if_due(dn, il_mod.expiry(' expires=2026-03-01T10:30')[0] + 1)['next_expiry'] == 0
+   and il_mod.recompile_if_due(dn, il_mod.expiry(' expires=2026-03-01T10:30')[0] + 2) is None)
+ok('worker check: the worker calls it BEFORE it needs Redis (a down Redis must not delay an expiry)',
+   open(os.path.join(IL_ROOT, 'analyzer', 'worker.py')).read().index('recompile_expired_lists()') < open(os.path.join(IL_ROOT, 'analyzer', 'worker.py')).read().index('redis_io.connect(cfg, write=True)'))
+for d_ in ('exp2', 'exp3', 'exp4'):
+    shutil.rmtree(os.path.join(il_work, d_), ignore_errors=True)
+
+# Replay: an operator challenge / CAPTCHA override is not a scoring decision.
+rp_ovr = [{'act': 'challenge', 'sc': 0, 'tok': 'm', 'gate': 1, 'ovr': 'challenge'}, {'act': 'challenge', 'sc': 0, 'tok': 'm', 'gate': 1, 'ovr': 'captcha'},
+          {'act': 'challenge', 'sc': 0, 'tok': 'm', 'gate': 1, 'ovr': ''}]
+rp_o = replay_mod.replay_rows(rp_ovr, {'hard_block_score': 60, 'signals': {}}, {'hard_block_score': 40, 'signals': {}})
+ok('replay: rows decided by a challenge / CAPTCHA override are skipped (an operator action), the normal row is considered', rp_o['considered'] == 1 and rp_o['skipped_non_decision'] == 2)
 
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)
