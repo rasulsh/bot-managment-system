@@ -2951,6 +2951,57 @@ ok('cron-check: a daily feeds entry is ok; an entry that runs only weekly is a w
 ok('cron-check: a corrupt or missing feeds.json is "no scheduled feed", never an error', cron_check.feeds_scheduled(os.path.join(fd_tmp, 'nope')) is False)
 shutil.rmtree(fd_tmp, ignore_errors=True)
 
+# Entries prefixed with a delay (`sleep N;` is a common workaround for jobs that start in the same second) and the environment lines
+# PATH= / SHELL= / MAILTO= are accepted: same job, same schedule, same state as without them.
+def cc_sleep_crontab(prefix_for):
+    return '\n'.join([
+        'PATH=/usr/local/bin:/usr/bin:/bin',
+        'SHELL=/bin/bash',
+        'MAILTO=ops@example.com',
+        'GV_PYTHON=' + CC_PY,
+        '*/10 * * * * %s%s/scripts/analyzer-cron.sh verify >/dev/null 2>&1' % (prefix_for('verify'), CC_ROOT),
+        '* * * * * %s%s/scripts/analyzer-cron.sh worker >/dev/null 2>&1' % (prefix_for('worker'), CC_ROOT),
+        '*/15 * * * * %s%s/scripts/analyzer-cron.sh snapshot >/dev/null 2>&1' % (prefix_for('snapshot'), CC_ROOT),
+        '17 4 * * * %s%s/scripts/analyzer-cron.sh nightly >/dev/null 2>&1' % (prefix_for('nightly'), CC_ROOT),
+        '10 3 * * * %s%s/scripts/guard-logrotate.sh >/dev/null 2>&1' % (prefix_for('logrotate'), CC_ROOT),
+    ]) + '\n'
+
+
+for label, pre in (('bash + sleep N;', lambda j: 'sleep 30; bash '), ('sleep N && bash', lambda j: 'sleep 5 && bash '), ('sleep N;bash (no space)', lambda j: 'sleep 10;bash '),
+                   ('direct script after sleep', lambda j: 'sleep 20; '), ('/usr/bin/sleep and /bin/bash', lambda j: '/usr/bin/sleep 7; /bin/bash '),
+                   ('a different delay per job', lambda j: 'sleep %d; bash ' % (len(j) * 3))):
+    rep = cron_check.evaluate(cc_sleep_crontab(pre), CC_ROOT, geo_used=False, feeds_used=False)
+    states = dict((j['job'], j['state']) for j in rep['jobs'] if j['required'])
+    ok('cron-check: entries prefixed with a delay are accepted (%s): every required job ok, no problems, PATH / SHELL / MAILTO lines read' % label,
+       states == {'verify': 'ok', 'worker': 'ok', 'snapshot': 'ok', 'nightly': 'ok', 'logrotate': 'ok'} and rep['problems'] == 0 and rep['ok'])
+fd_rep = cron_check.evaluate(cc_sleep_crontab(lambda j: 'sleep 30; bash '), CC_ROOT, geo_used=False, feeds_used=False)
+ok('cron-check: the delay does not change the schedule or hide a wrong path (a sleep-prefixed entry of ANOTHER install is still wrong_path)',
+   cc_state(fd_rep, 'nightly')['schedule'] == '17 4 * * *' and cc_state(cron_check.evaluate(cc_sleep_crontab(lambda j: 'sleep 30; bash ').replace(CC_ROOT + '/scripts/analyzer-cron.sh nightly',
+       '/home/other/bot-guard/scripts/analyzer-cron.sh nightly'), CC_ROOT, geo_used=False, feeds_used=False), 'nightly')['state'] == 'wrong_path')
+ok('cron-check: a sleep-prefixed entry that is commented out is "disabled", not missing and not ok', cc_state(cron_check.evaluate(
+   cc_sleep_crontab(lambda j: 'sleep 30; bash ').replace('17 4 * * * ', '#17 4 * * * '), CC_ROOT, geo_used=False, feeds_used=False), 'nightly')['state'] == 'disabled')
+ok('cron-check: PATH= (with the usual value) is what the php check searches, MAILTO="" and SHELL= are not entries', cron_check.parse_crontab(cc_sleep_crontab(lambda j: 'sleep 30; bash '))[0].get('PATH') == '/usr/local/bin:/usr/bin:/bin'
+   and cron_check.parse_crontab('MAILTO=""\nSHELL=/bin/sh\n')[1] == [])
+
+# `cron_check.py --get-env NAME`: the wrappers read GV_PYTHON from the user's crontab with the SAME parser as the check
+import io as io_getenv
+import contextlib as ctx_getenv
+
+
+def cc_get_env(text, name):
+    path = os.path.join(tempfile.mkdtemp(), 'crontab.txt')
+    with open(path, 'w') as fh:
+        fh.write(text)
+    buf = io_getenv.StringIO()
+    with ctx_getenv.redirect_stdout(buf):
+        rc = cron_check.main(['--get-env', name, '--file', path])
+    shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+    return rc, buf.getvalue().strip()
+
+
+ok('cron-check --get-env: the value of GV_PYTHON (quotes stripped, among PATH / MAILTO lines and entries), exit 0', cc_get_env('PATH=/usr/bin\nMAILTO=""\nGV_PYTHON="/home/u/venv/bin/python"\n*/10 * * * * sleep 5; bash /x/scripts/analyzer-cron.sh verify\n', 'GV_PYTHON') == (0, '/home/u/venv/bin/python')
+   and cc_get_env('GV_PYTHON=/a/python\n', 'GV_PYTHON')[1] == '/a/python' and cc_get_env('PATH=/usr/bin\n', 'GV_PYTHON') == (0, '')
+   and cc_get_env('# GV_PYTHON=/commented/python\n', 'GV_PYTHON') == (0, '') and cc_get_env('', 'GV_PYTHON') == (0, '') and cc_get_env('PATH=/usr/local/bin:/usr/bin\n', 'PATH')[1] == '/usr/local/bin:/usr/bin')
 full = cron_check.evaluate(CC_FULL, CC_ROOT, geo_used=False, now=1)
 ok('a complete crontab: every required entry ok, exit-style ok flag, no problems', full['ok'] and full['problems'] == 0
    and all(cc_state(full, j)['state'] == 'ok' for j in ('verify', 'worker', 'snapshot', 'nightly', 'logrotate')))
@@ -3234,6 +3285,93 @@ ok('kpi: an odd and an even number of solve times (median of 3 and of 4)', snap_
 ok('kpi: a CAPTCHA-solved token_issued row still counts as a token (the challenge success rate)', logs_mod.token_was_issued({'act': 'token_issued', 'cap': 'ok'}) and kcap['token_issued'] == 4)
 tz_p4 = snap_p4.local_tz()
 ok('the analyzer reports its time zone offset (daily logs, logrotate and "today" follow it)', isinstance(tz_p4['offset'], int) and abs(tz_p4['offset']) <= 14 * 3600 and 'name' in tz_p4)
+# --- the worker's write lock: only around a job that writes models or verdicts, held as briefly as possible
+import json as _json_wl
+import threading as _thr_wl
+
+
+class _FakeQueue(object):
+    """A list standing in for the Redis queue: the worker pops from the tail (rpop) and puts a deferred job back with rpush."""
+
+    def __init__(self, entries):
+        self.items = list(entries)
+
+    def rpop(self, key):
+        return self.items.pop() if self.items else None
+
+    def rpush(self, key, raw):
+        self.items.append(raw)
+
+
+def _job(t, i='j1'):
+    return _json_wl.dumps({'id': i, 'type': t, 'params': {}})
+
+
+wl_dir = tempfile.mkdtemp()
+os.environ['GV_LOCK_DIR'] = wl_dir
+wl_seen = []
+
+
+def wl_runner(client, cfg, raw):
+    # whether the write lock is held by US right now, seen from another file handle
+    import fcntl as _f
+    fh = open(os.path.join(wl_dir, '.write.lock'), 'a')
+    try:
+        _f.flock(fh.fileno(), _f.LOCK_EX | _f.LOCK_NB)
+        held = False
+        _f.flock(fh.fileno(), _f.LOCK_UN)
+    except (IOError, OSError):
+        held = True
+    fh.close()
+    wl_seen.append((worker_mod.job_type_of(raw), held))
+    return True
+
+
+worker_mod.drain(_FakeQueue([]), {}, 4, wait=0, runner=wl_runner)
+ok('worker: an empty queue takes no write lock (the lock file is not even created)', not os.path.exists(os.path.join(wl_dir, '.write.lock')) and wl_seen == [])
+q = _FakeQueue([_job('snapshot', 'a'), _job('geo_compile', 'b'), _job('iplist_compile', 'c'), _job('replay_full', 'd')])
+done, back = worker_mod.drain(q, {}, 8, wait=0, runner=wl_runner)
+ok('worker: read-only jobs (snapshot, geo / IP list compile, replay) run without the write lock', done == 4 and back == 0 and all(not h for _, h in wl_seen))
+wl_seen[:] = []
+q = _FakeQueue([_job(t, t) for t in ('nightly', 'train', 'train_clf', 'verify', 'promote_ml', 'promote_clf')])
+done, back = worker_mod.drain(q, {}, 8, wait=0, runner=wl_runner)
+ok('worker: every job that writes models or verdicts runs WITH the write lock held, and the lock is free again afterwards', done == 6 and all(h for _, h in wl_seen) and worker_mod.WriteLock().acquire(0))
+wl_seen[:] = []
+q = _FakeQueue([_job('nightly', 'n1'), _job('snapshot', 's1')])      # rpop takes the tail: snapshot first, then nightly
+worker_mod.drain(q, {}, 8, wait=0, runner=wl_runner)
+ok('worker: the lock is held only around the write job (the read-only one before it ran without it)', wl_seen == [('snapshot', False), ('nightly', True)])
+# the lock is busy (nightly holds it): the write job goes back to the queue, is the next one popped, and the drain stops
+busy = worker_mod.WriteLock(mode='nightly')
+ok('worker: the test holder takes the lock', busy.acquire(0))
+wl_seen[:] = []
+q = _FakeQueue([_job('nightly', 'late'), _job('verify', 'v1'), _job('snapshot', 's2')])    # pop order: snapshot, verify
+t0 = time.time()
+done, back = worker_mod.drain(q, {}, 8, wait=0.6, runner=wl_runner)
+ok('worker: when the write lock stays busy the write job waits up to the wait, then goes back to the queue and the drain stops (read-only jobs before it still ran)',
+   back == 1 and done == 1 and [t for t, _ in wl_seen] == ['snapshot'] and 0.5 <= time.time() - t0 < 5 and worker_mod.job_type_of(q.items[-1]) == 'verify' and len(q.items) == 2)
+holder_file = os.path.join(wl_dir, '.write.lock.holder')
+ok('worker: the holder file names who holds the lock (mode, pid, start) while it is held, and is removed on release', open(holder_file).read().split()[0] == 'nightly' and int(open(holder_file).read().split()[1]) == os.getpid())
+busy.release()
+ok('worker: the holder file is gone after the release', not os.path.exists(holder_file))
+# the lock frees up inside the wait: the job runs instead of going back
+busy = worker_mod.WriteLock(mode='nightly')
+busy.acquire(0)
+tm = _thr_wl.Timer(0.5, busy.release)
+tm.start()
+wl_seen[:] = []
+q = _FakeQueue([_job('verify', 'v2')])
+done, back = worker_mod.drain(q, {}, 4, wait=5, runner=wl_runner)
+tm.join()
+ok('worker: a write job that finds the lock busy but free within the wait runs (and is not requeued)', done == 1 and back == 0 and wl_seen == [('verify', True)] and q.items == [])
+ok('worker: the wait is GV_WORKER_LOCK_WAIT (default 45 s, bad values fall back, 0 = no wait)', (lambda: (os.environ.pop('GV_WORKER_LOCK_WAIT', None), worker_mod.lock_wait())[1])() == 45
+   and (lambda: (os.environ.__setitem__('GV_WORKER_LOCK_WAIT', '7'), worker_mod.lock_wait())[1])() == 7
+   and (lambda: (os.environ.__setitem__('GV_WORKER_LOCK_WAIT', 'x'), worker_mod.lock_wait())[1])() == 45
+   and (lambda: (os.environ.__setitem__('GV_WORKER_LOCK_WAIT', '0'), worker_mod.lock_wait())[1])() == 0)
+os.environ.pop('GV_WORKER_LOCK_WAIT', None)
+ok('worker: a garbage queue entry is not a write job (it is refused by run_one, no lock taken)', worker_mod.job_type_of('not json') == '' and worker_mod.job_type_of('[1]') == '' and worker_mod.job_type_of(_job('nightly')) == 'nightly')
+os.environ.pop('GV_LOCK_DIR', None)
+shutil.rmtree(wl_dir, ignore_errors=True)
+
 ok('the worker records exit, warnings and the result of a job it ran', (lambda w: ('warnings' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read() and 'jobreport.parse' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read()))(0))
 
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))

@@ -148,6 +148,95 @@ ok "when quota does not exist it is skipped silently" "$(if [ -n "$(PATH=/usr/bi
 GV_PHP=/nonexistent GV_LOG_DIR="$WORK/nodir" GV_JOBLOG_DIR="$L" bash "$ROOT/scripts/guard-logrotate.sh" > /dev/null 2>&1
 ok "a missing log directory is a warning, not a silent success" "$(yes_if [ "$(status logrotate status)" = warning ])"
 
+echo "== write lock: nightly / train / train-clf wait, the worker takes it only around a write job"
+LK="$WORK/locks"
+# holder SECONDS: take analyzer/.write.lock through the real worker.WriteLock for SECONDS seconds (what a running write job of the worker does)
+holder() {
+	rm -f "$WORK/held"
+	( GV_LOCK_DIR="$LK" python3 - "$1" "$ROOT" "$WORK/held" <<'PY'
+import sys, time
+sys.path.insert(0, sys.argv[2])
+from analyzer import worker
+l = worker.WriteLock()
+assert l.acquire(0)
+open(sys.argv[3], 'w').write('held')
+time.sleep(float(sys.argv[1]))
+l.release()
+PY
+	) > /dev/null 2>&1 &
+	HPID=$!
+	for _ in $(seq 1 50); do [ -f "$WORK/held" ] && break; sleep 0.1; done
+}
+holder 3
+t0=$(date +%s)
+GV_LOCK_WAIT=20 FAKE_MODE=ok bash "$CRON" nightly > "$WORK/w1" 2>&1; rc=$?
+t1=$(date +%s)
+wait "$HPID" 2>/dev/null
+ok "worker + nightly start together: nightly WAITS for the lock, then runs (exit 0, status ok, it ran after about 3 s, nothing skipped)" "$(yes_if [ $rc -eq 0 ] && [ "$(status nightly status)" = ok ] && [ $((t1 - t0)) -ge 2 ] && [ "$(status nightly skipped)" = 0 ] && grep -qx 'did the work' "$WORK/w1")"
+holder 6
+FAKE_MODE=ok GV_LOCK_WAIT=1 bash "$CRON" nightly > "$WORK/w2" 2>&1; rc=$?
+ok "the wait runs out: exit 0, status skipped, 'skipped (lock busy after 1 s)', the holder (worker) is named and stored, no failure, the job did not run" \
+	"$(yes_if [ $rc -eq 0 ] && [ "$(status nightly status)" = skipped ] && status nightly last_error | grep -q 'lock busy after 1 s' && status nightly last_error | grep -q 'held by worker' && [ "$(status nightly lock_holder)" = worker ] && ! grep -qx 'did the work' "$WORK/w2" && [ "$(status nightly skipped)" = 1 ])"
+ok "...and the earlier successful run's last_success is kept (a skip never erases it)" "$(yes_if [ "$(status nightly last_success)" -gt 0 ])"
+FAKE_MODE=ok GV_LOCK_WAIT=1 bash "$CRON" train > /dev/null 2>&1
+FAKE_MODE=ok GV_LOCK_WAIT=1 bash "$CRON" train-clf > /dev/null 2>&1
+ok "train and train-clf wait too: both are recorded as skipped (lock busy after 1 s)" "$(yes_if [ "$(status train status)" = skipped ] && [ "$(status train-clf status)" = skipped ] && status train last_error | grep -q 'lock busy after 1 s')"
+GV_LOCK_WAIT=0 FAKE_MODE=ok bash "$CRON" nightly > /dev/null 2>&1
+ok "GV_LOCK_WAIT=0 means no wait: skipped at once with the plain note" "$(yes_if [ "$(status nightly status)" = skipped ] && status nightly last_error | grep -q 'holds the lock')"
+FAKE_MODE=ok bash "$CRON" worker > "$WORK/w3" 2>&1; rc=$?
+ok "the worker wrapper does not touch the write lock (python takes it only around a write job): it runs at once while a write job holds it" "$(yes_if [ $rc -eq 0 ] && [ "$(status worker status)" = ok ] && grep -qx 'did the work' "$WORK/w3")"
+wait "$HPID" 2>/dev/null
+GV_LOCK_WAIT=abc FAKE_MODE=ok bash "$CRON" nightly > /dev/null 2>&1
+ok "a garbage GV_LOCK_WAIT falls back to the 900 s default and still runs when the lock is free" "$(yes_if [ "$(status nightly status)" = ok ])"
+( exec 9>"$LK/.worker.lock"; flock -n 9; sleep 3 ) > /dev/null 2>&1 &
+sleep 0.5
+FAKE_MODE=ok bash "$CRON" worker > /dev/null 2>&1
+ok "two workers never overlap: a second worker firing is skipped by its own lock" "$(yes_if [ "$(status worker status)" = skipped ])"
+wait 2>/dev/null
+
+echo "== which Python runs the job (environment, crontab, .venv, python3) and which php (CLI fallback)"
+INST="$WORK/inst"; mkdir -p "$INST/scripts" "$INST/analyzer" "$WORK/bin" "$WORK/cli"
+cp "$ROOT/scripts/analyzer-cron.sh" "$ROOT/scripts/lib-jobstatus.sh" "$ROOT/scripts/cron_check.py" "$ROOT/scripts/cron-check.sh" "$INST/scripts/"
+# mkpy FILE NAME: a Python stand-in that passes the import preflight and says who ran (and which php it was given)
+mkpy() { mkdir -p "$(dirname "$1")"; printf '#!/usr/bin/env bash\nif [ "$1" = "-c" ]; then exit 0; fi\necho "ran-by-%s php=${GV_PHP:-none}"\n' "$2" > "$1"; chmod +x "$1"; }
+mkpy "$WORK/py-env" env; mkpy "$WORK/py-cron" cron; mkpy "$WORK/bin/python3" default
+printf '#!/usr/bin/env bash\nif [ "$1" = "-l" ]; then [ -f "%s/crontab.txt" ] && cat "%s/crontab.txt" || { echo "no crontab for tester" >&2; exit 1; }; fi\n' "$WORK" "$WORK" > "$WORK/bin/crontab"; chmod +x "$WORK/bin/crontab"
+byhand() {   # the wrapper as an operator runs it over SSH: no GV_PYTHON, no GV_PHP, our fake crontab and python3 first on PATH
+	env -u GV_PYTHON -u GV_PHP PATH="$WORK/bin:$PATH" GV_PHP_FALLBACK=/nonexistent bash "$INST/scripts/analyzer-cron.sh" "$@"
+}
+printf '%s\n' "GV_PYTHON=$WORK/py-cron" '*/10 * * * * bash /x/scripts/analyzer-cron.sh verify' > "$WORK/crontab.txt"
+GV_PYTHON="$WORK/py-env" PATH="$WORK/bin:$PATH" bash "$INST/scripts/analyzer-cron.sh" verify > "$WORK/p1" 2>&1
+ok "GV_PYTHON in the environment wins (even over the crontab): used, and recorded as '(source: environment)'" "$(yes_if grep -q 'ran-by-env' "$WORK/p1" && [ "$(status verify python)" = "$WORK/py-env (source: environment)" ])"
+byhand verify > "$WORK/p2" 2>&1
+ok "no GV_PYTHON (an SSH shell): the one in the user's crontab is used, recorded as '(source: crontab)'" "$(yes_if grep -q 'ran-by-cron' "$WORK/p2" && [ "$(status verify python)" = "$WORK/py-cron (source: crontab)" ] && [ "$(status verify status)" = ok ])"
+printf '%s\n' 'GV_PYTHON="/nonexistent/venv/bin/python"' > "$WORK/crontab.txt"
+byhand verify > "$WORK/p3" 2>&1
+ok "a crontab GV_PYTHON that is not an executable file is ignored (falls through to python3 here)" "$(yes_if grep -q 'ran-by-default' "$WORK/p3" && [ "$(status verify python)" = "python3 (source: default)" ])"
+mkpy "$INST/.venv/bin/python" venv
+byhand verify > "$WORK/p4" 2>&1
+ok "then <install-dir>/.venv/bin/python when it exists and is executable ('(source: venv)')" "$(yes_if grep -q 'ran-by-venv' "$WORK/p4" && [ "$(status verify python)" = "$INST/.venv/bin/python (source: venv)" ])"
+printf '%s\n' "GV_PYTHON=$WORK/py-cron" > "$WORK/crontab.txt"
+byhand verify > "$WORK/p5" 2>&1
+ok "the crontab still comes before the .venv" "$(yes_if grep -q 'ran-by-cron' "$WORK/p5")"
+chmod -x "$INST/.venv/bin/python"; rm -f "$WORK/crontab.txt"
+byhand verify > "$WORK/p6" 2>&1
+ok "an unreadable crontab and a non-executable .venv python: python3 ('(source: default)')" "$(yes_if grep -q 'ran-by-default' "$WORK/p6" && [ "$(status verify python)" = "python3 (source: default)" ])"
+printf '#!/usr/bin/env bash\nif [ "$1" = "-c" ]; then echo "ModuleNotFoundError: No module named numpy" >&2; exit 1; fi\n' > "$WORK/bin/python3"; chmod +x "$WORK/bin/python3"
+byhand nightly > "$WORK/p7" 2>&1; rc=$?
+ok "the bare python3 without the packages still fails the preflight (a recorded failure that names which Python was chosen and why)" "$(yes_if [ $rc -eq 3 ] && [ "$(status nightly status)" = failed ] && status nightly last_error | grep -q 'python3 (source: default)' && status nightly last_error | grep -q numpy)"
+rm -rf "$INST/.venv"; mkpy "$WORK/bin/python3" default
+# php: a non-CLI php on PATH falls back to /usr/local/bin/php (GV_PHP_FALLBACK in the test) when that one is the CLI build
+printf '#!/usr/bin/env bash\necho cgi-fcgi\n' > "$WORK/bin/php"; chmod +x "$WORK/bin/php"
+printf '#!/usr/bin/env bash\necho cli\n' > "$WORK/cli/php"; chmod +x "$WORK/cli/php"
+env -u GV_PYTHON -u GV_PHP PATH="$WORK/bin:$PATH" GV_PHP_FALLBACK="$WORK/cli/php" bash "$INST/scripts/analyzer-cron.sh" verify > "$WORK/q1" 2> "$WORK/q1e"
+ok "php on PATH is the cgi-fcgi SAPI: /usr/local/bin/php (the CLI build) is used instead and passed on as GV_PHP, with a note, and the run is ok (no warning)" "$(yes_if grep -q "php=$WORK/cli/php" "$WORK/q1" && grep -q 'cgi-fcgi SAPI' "$WORK/q1e" && [ "$(status verify status)" = ok ])"
+env -u GV_PYTHON -u GV_PHP PATH="$WORK/bin:$PATH" GV_PHP_FALLBACK=/nonexistent bash "$INST/scripts/analyzer-cron.sh" verify > "$WORK/q2" 2>&1
+ok "...and without a CLI fallback the warning about the cgi php stays (status warning, no GV_PHP invented)" "$(yes_if [ "$(status verify status)" = warning ] && status verify warnings | grep -q 'cgi-fcgi' && grep -q 'php=none' "$WORK/q2")"
+printf '#!/usr/bin/env bash\necho cli\n' > "$WORK/bin/php"
+env -u GV_PYTHON -u GV_PHP PATH="$WORK/bin:$PATH" GV_PHP_FALLBACK="$WORK/cli/php" bash "$INST/scripts/analyzer-cron.sh" verify > "$WORK/q3" 2> "$WORK/q3e"
+ok "a CLI php on PATH is left alone (no fallback, no note)" "$(yes_if grep -q 'php=none' "$WORK/q3" && ! grep -q 'SAPI' "$WORK/q3e" && [ "$(status verify status)" = ok ])"
+rm -f "$WORK/bin/php" "$WORK/crontab.txt"
+
 echo "== feeds (PHP job behind analyzer-cron.sh feeds)"
 FD="$WORK/feeds"; mkdir -p "$FD/lists" "$FD/logs"
 unset GV_PHP

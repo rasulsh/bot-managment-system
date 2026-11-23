@@ -494,6 +494,7 @@ The first time you use this feature on an install that was set up by copying fil
 | **Everything shows "unknown" country** | No GeoIP database compiled, or *log country* is off | **GeoIP** page: upload, **Compile now**; Settings → GeoIP |
 | **The site feels slower** | Redis slow or on another host; rules read without OPcache; disk full | Typical cost is a fraction of a millisecond ([2.4](#24-performance-budgets)); check `ms` in Logs; keep Redis local; save rules from the panel to rebuild the cache |
 | **Job fails with "cannot import"** | `GV_PYTHON` not set or wrong | Install `analyzer/requirements.txt` in a virtual environment and put `GV_PYTHON=<python-binary>` at the top of the crontab |
+| **Running a job by hand from SSH fails: "preflight: python3 (source: default) cannot import: No module named 'numpy'"** | A shell has no `GV_PYTHON` (cron gets it from its crontab), so the bare `python3` ran, which has none of the packages | Nothing to set any more: the wrapper now picks the Python in this order: `GV_PYTHON` from the environment, `GV_PYTHON` read from your crontab, `<install-dir>/.venv/bin/python`, then `python3`, and records the choice as `"python": "... (source: crontab)"` in `analyzer/.jobstatus-<mode>.json` (Jobs page). If it still says `(source: default)`, create the virtualenv (`python3 -m venv .venv && .venv/bin/pip install -r analyzer/requirements.txt`) or add `GV_PYTHON=<install-dir>/.venv/bin/python` to your crontab. A `php` that is not the command-line build (cgi-fcgi) falls back to `/usr/local/bin/php` when that is one |
 | **Job warning "verify: Redis unavailable" / "Redis settings not confirmed (the PHP bridge failed)", jobs exit 0 but store nothing** | The `php` that cron runs is not the command line build (cron's minimal `PATH` finds `php-cgi` / `cgi-fcgi`, which prints HTTP headers first, so the settings cannot be read). *Redis unavailable* without "not confirmed" is a real connection problem | Run `bash scripts/cron-check.sh` (it names the php cron would run), add `PATH=/usr/local/bin:/usr/bin:/bin` (or `GV_PHP=/usr/local/bin/php`) at the top of the crontab. The analyzer now passes `-q` and ignores a header block, and warns once naming the binary |
 | **Redis alert: "can silently delete"** | Redis eviction policy is not `noeviction` | Set `maxmemory-policy noeviction` or use a dedicated Redis |
 
@@ -819,10 +820,18 @@ Examples (the first two are in [docs/04-CMS-INTEGRATION.md](docs/04-CMS-INTEGRAT
 
 ## 2.8 Scheduled jobs
 
-Every cron run of `scripts/analyzer-cron.sh <mode>` takes its own `flock` (the modes that write
-verdicts or models share one lock), records `analyzer/.jobstatus-<mode>.json` and
+Every cron run of `scripts/analyzer-cron.sh <mode>` takes a `flock`, records `analyzer/.jobstatus-<mode>.json` and
 `logs/jobs.log`, and exits 3 with the fix in the message when its Python cannot import the
 packages it needs.
+
+**The write lock.** Everything that writes models or verdicts shares `analyzer/.write.lock`. `nightly`, `train` and `train-clf`
+(daily / weekly) **wait** for it (`flock -w`, `GV_LOCK_WAIT` seconds, default 900, `0` = no wait); a run that still cannot get it is
+recorded as `skipped (lock busy after N s)` (status `skipped`, `lock_holder` names the job that held it when known) and the panel calls
+the job **skipped by lock**, not "never ran". The `worker` (every minute) does not take the lock in the wrapper: `analyzer/worker.py` takes it
+only around a job that writes models or verdicts (`verify`, `nightly`, `train`, `train_clf`, `promote_ml`, `promote_clf`), waits up to
+`GV_WORKER_LOCK_WAIT` seconds (default 45), and puts the job back on the queue when the lock stays busy; an empty queue or a read-only job
+(snapshot, replay, GeoIP / IP list compile, pip sync) takes none. `.write.lock.holder` (`<mode> <pid> <start>`) names the holder while it runs.
+Before this change `nightly` started in the same second as the worker lost the race and was skipped almost every night.
 
 | Job | Command | Schedule | Required | If it does not run |
 |---|---|---|---|---|

@@ -2524,6 +2524,57 @@ $jh_render = function ($view, array $in, array $extra = array()) use ($jh_now, $
 	restore_error_handler();
 	return array($html, $errs);
 };
+// --- Job lock waits: "skipped by lock" is not "never ran", the dashboard card never shows an empty box, ages are never since 1970
+t_section('Job health: skipped by lock, cron card without an empty box, permission age');
+$sk_def = gp_job_defs()['nightly'];
+$sk_st = array('status' => 'skipped', 'skipped' => 3, 'runs' => 0, 'failures' => 0, 'last_success' => 0, 'last_failure' => 0, 'last_start' => $jh_now - 60, 'last_end' => $jh_now - 60,
+	'last_error' => 'skipped (lock busy after 900 s), held by worker', 'lock_holder' => 'worker');
+$sk_h = gp_job_health_one('nightly', $sk_def, $sk_st, 0, 86400, $jh_now);
+t_ok('a required job whose only runs were lock skips is "skipped by lock", not "never ran", and the holder is kept', $sk_h['state'] === 'skipped' && $sk_h['lock_holder'] === 'worker' && $sk_h['lock_skipped'] === true
+	&& gp_job_health_one('nightly', $sk_def, null, 0, 86400, $jh_now)['state'] === 'never' && gp_t('job_s_skipped') === 'skipped by lock' && gp_job_badge('skipped') === 'gp-badge-warn');
+$sk_al = gp_health_alerts(array_merge($healthy, array('jobs' => array('nightly' => $sk_h))));
+$sk_a = array_values(array_filter($sk_al, function ($x) { return $x['id'] === 'job_skipped_nightly'; }));
+t_ok('the alert says so, names the job holding the lock, links to the job, and there is no "never ran, check the crontab" alert for it', $sk_a && $sk_a[0]['key'] === 'al_job_skipped' && $sk_a[0]['detail'] === 'nightly (worker)'
+	&& $sk_a[0]['link'] === 'jobs&job=nightly' && $sk_a[0]['level'] === 'warning' && !array_filter($sk_al, function ($x) { return $x['id'] === 'job_never_nightly'; })
+	&& stripos(gp_t('al_job_skipped'), 'lock') !== false && stripos(gp_t('al_job_skipped'), 'crontab is fine') !== false);
+$sk_h2 = gp_job_health_one('nightly', $sk_def, array_merge($sk_st, array('lock_holder' => '', 'last_error' => 'skipped: another run holds the lock')), 0, 86400, $jh_now);
+$sk_a2 = array_values(array_filter(gp_health_alerts(array_merge($healthy, array('jobs' => array('nightly' => $sk_h2)))), function ($x) { return $x['id'] === 'job_skipped_nightly'; }));
+t_ok('without a known holder the alert still says "skipped by the lock" (just the job name)', $sk_a2 && $sk_a2[0]['detail'] === 'nightly');
+t_ok('a holder that is not a plain mode name is dropped (the status file is data, not markup)', gp_job_health_one('nightly', $sk_def, array_merge($sk_st, array('lock_holder' => '<b>x</b>')), 0, 86400, $jh_now)['lock_holder'] === ''
+	&& gp_job_health_one('nightly', $sk_def, array_merge($sk_st, array('lock_holder' => str_repeat('a', 40))), 0, 86400, $jh_now)['lock_holder'] === '');
+$sk_late = gp_job_health_one('nightly', $sk_def, array_merge($sk_st, array('last_success' => $jh_now - 3 * 86400, 'runs' => 4)), 0, 86400, $jh_now);
+$sk_la = array_values(array_filter(gp_health_alerts(array_merge($healthy, array('jobs' => array('nightly' => $sk_late)))), function ($x) { return $x['id'] === 'job_late_nightly'; }));
+t_ok('a job that is late because its last firing was skipped by the lock says so (al_job_late_lock), with the holder in brackets', $sk_late['state'] === 'late' && $sk_la && $sk_la[0]['key'] === 'al_job_late_lock' && $sk_la[0]['detail'] === 'nightly (worker)');
+t_ok('a real failure still wins over skips; an optional job that was only skipped raises no alert', gp_job_health_one('nightly', $sk_def, array_merge($sk_st, array('last_failure' => $jh_now - 500, 'failures' => 1, 'runs' => 1)), 0, 86400, $jh_now)['state'] === 'failing'
+	&& !array_filter(gp_health_alerts(array_merge($healthy, array('jobs' => array('train' => gp_job_health_one('train', gp_job_defs()['train'], $sk_st, 0, 604800, $jh_now))))), function ($x) { return strpos($x['id'], 'job_skipped_') === 0; }));
+list($h_sk, $e_sk) = $jh_render('jobs', array('jobs' => array_merge($healthy['jobs'], array('nightly' => $sk_h))), array('health' => array_merge($healthy['jobs'], array('nightly' => $sk_h)), 'detail' => '', 'runs' => array(), 'errors' => array(), 'perms' => null, 'php_env' => null));
+t_ok('the Jobs page shows the state "skipped by lock" for it', !$e_sk && strpos($h_sk, 'skipped by lock') !== false);
+// the dashboard "Cron setup" card: no crontab line missing = a reason, never an empty code box
+list($h_cc0, $e_cc0) = $jh_render('dashboard', array(), array('cron_card' => true, 'cron_lines' => array()));
+$cc0 = ($i0 = strpos($h_cc0, 'id="cron-setup"')) !== false ? substr($h_cc0, $i0, (($j0 = strpos($h_cc0, '<section aria-label=', $i0)) === false ? 3000 : $j0 - $i0)) : '';
+t_ok('the Cron setup card with nothing to add shows the reason and no (empty) code box', !$e_cc0 && $cc0 !== '' && strpos($cc0, '<pre') === false && strpos($cc0, 'Nothing to add') !== false && strpos($cc0, 'crontab -e') === false);
+list($h_cc1, $e_cc1) = $jh_render('dashboard', array(), array('cron_card' => true, 'cron_lines' => array('* * * * * bash /x/scripts/analyzer-cron.sh worker')));
+$cc1 = ($i1 = strpos($h_cc1, 'id="cron-setup"')) !== false ? substr($h_cc1, $i1, (($j1 = strpos($h_cc1, '<section aria-label=', $i1)) === false ? 3000 : $j1 - $i1)) : '';
+t_ok('...and with lines to add it shows the code box with them (and not the reason)', !$e_cc1 && strpos($cc1, '<pre') !== false && strpos($cc1, 'analyzer-cron.sh worker') !== false && strpos($cc1, 'Nothing to add') === false);
+// ages: a zero timestamp is not 20,780 days
+t_ok('gp_age: a zero, empty or negative timestamp is a dash, never the time since 1970; real ones are unchanged', gp_age(0) === '—' && gp_age('') === '—' && gp_age(-5) === '—' && gp_age(time() - 120) === '2 minutes' && gp_age(time() - 90000) === '1 day');
+$pm_dir = sys_get_temp_dir() . '/gp-perm-' . getmypid();
+@mkdir($pm_dir . '/scripts', 0775, true);
+$pm_env_prev = getenv('GV_JOBSTATUS_DIR');
+putenv('GV_JOBSTATUS_DIR=' . $pm_dir);
+$pm0 = gp_perm_scan(true, 0, $pm_dir);
+t_ok('the permission scan never stores a zero timestamp (a zero "now" means the real time), also in its cache', $pm0['time'] > 1700000000 && (int)json_decode((string)@file_get_contents(gp_perm_cache_path()), true)['time'] > 1700000000);
+file_put_contents(gp_perm_cache_path(), json_encode(array_merge($pm0, array('time' => 0))));
+t_ok('a cached scan with a zero timestamp is not served: it is rescanned and gets a real timestamp', gp_perm_scan(false, null, $pm_dir)['time'] > 1700000000);
+list($h_pm, $e_pm) = $jh_render('jobs', array(), array('health' => $healthy['jobs'], 'detail' => '', 'runs' => array(), 'errors' => array(), 'php_env' => null, 'perms' => array_merge($pm0, array('time' => time() - 300))));
+t_ok('Jobs -> File permissions shows the real age (5 minutes), not 20,780 days', !$e_pm && strpos($h_pm, '5 minutes ago') !== false && strpos($h_pm, 'days ago') === false);
+list($h_pm0, $e_pm0) = $jh_render('jobs', array(), array('health' => $healthy['jobs'], 'detail' => '', 'runs' => array(), 'errors' => array(), 'php_env' => null, 'perms' => array_merge($pm0, array('time' => 0))));
+t_ok('...and a scan with no timestamp says "not scanned yet" instead of an age', !$e_pm0 && strpos($h_pm0, 'not scanned yet') !== false && strpos($h_pm0, 'days ago') === false);
+putenv($pm_env_prev === false ? 'GV_JOBSTATUS_DIR' : 'GV_JOBSTATUS_DIR=' . $pm_env_prev);
+foreach ((array)glob($pm_dir . '/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+@rmdir($pm_dir . '/scripts'); @rmdir($pm_dir);
+t_ok('the IP feeds table shows a real age for the last run (it had the same double subtraction)', strpos((string)file_get_contents(__DIR__ . '/../panel/views/iplists_feeds.php'), 'gp_age(max(0, time()') === false);
+
 $kpi_snap = array('generated_at' => $jh_now, 'tz' => array('offset' => 0, 'name' => 'UTC'), 'traffic' => array('requests' => 10, 'devices' => 3, 'addresses' => 4, 'degraded' => 0), 'decisions' => array('allow' => 9, '403' => 1),
 	'kpi' => array('cur' => array('requests' => 120, 'allowed' => 100, 'blocked' => 10, 'limited' => 2, 'challenged' => 8, 'challenge_success' => 91.5, 'rule_hits' => 7, 'honeypot' => 1, 'degraded' => 0), 'prev' => array('requests' => 100, 'allowed' => 90, 'blocked' => 5, 'limited' => 2, 'challenged' => 8, 'challenge_success' => 95.0, 'rule_hits' => 0, 'honeypot' => 1, 'degraded' => 0)),
 	'top' => array('rules' => array(array('r1', 5)), 'reasons' => array(array('UA_SCRIPT', 9)), 'ips' => array(array('203.0.113.5', 4)), 'devices' => array(), 'uas' => array(array('curl/8.4', 4)), 'paths' => array(array('/shop?x=<b>', 3)), 'countries' => array(array('IR', 6))));

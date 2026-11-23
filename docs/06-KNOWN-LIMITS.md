@@ -199,6 +199,10 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
 
 - A job's state comes from the status file the cron wrapper writes. Run a mode by hand with `python3 analyzer/...` (not through
   `scripts/analyzer-cron.sh`) and it leaves only the old `.lastrun-*` heartbeat, no error log.
+- **A run that waits for the write lock starts late.** `nightly`, `train` and `train-clf` wait up to `GV_LOCK_WAIT` seconds (default 900) for
+  `analyzer/.write.lock`; if a long job (a big training run) holds it longer they are recorded as *skipped (lock busy after N s)* and
+  run at their next firing, so one night's nightly can be missed when training overlaps it. The worker puts a write job back on the queue
+  when the lock stays busy for 45 s (`GV_WORKER_LOCK_WAIT`); it runs at the next minute that finds the lock free.
 - **Without the `verify` cron job** real crawlers stay in the shared `limits.bot_unverified` budget for ever (the dashboard calls
   `verify` required and alerts when it is missing or late).
 - The panel's crontab check sees the crontab of the user PHP runs as. On a host where PHP runs as another user than the cron

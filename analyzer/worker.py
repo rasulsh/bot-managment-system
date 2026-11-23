@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Drain the panel's job queue.
 
-Run every minute from cron, behind the same flock as the other analyzer modes so
-a job and a nightly run cannot collide.
+Run every minute from cron. It takes the write lock (analyzer/.write.lock, the one nightly / train /
+train-clf hold) only around a job that writes models or verdicts, so an empty queue or a read-only
+job never keeps nightly out, and a job and a nightly run still cannot collide.
 
 THE RULE THAT SHAPES THIS FILE: a job type maps to a PYTHON FUNCTION CALLED
 IN-PROCESS. Nothing here builds a command string and nothing here executes one.
@@ -28,6 +29,11 @@ import sys
 import time
 import traceback
 
+try:                       # POSIX only; without it the worker simply takes no lock (the cron wrapper of the other modes still does)
+    import fcntl
+except ImportError:        # pragma: no cover
+    fcntl = None
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import config as config_mod
@@ -43,6 +49,12 @@ from analyzer import snapshot as snapshot_mod
 
 JOB_TTL = 86400
 MAX_OUTPUT = 8000
+
+# Jobs that write MODELS or VERDICTS. Only these take analyzer/.write.lock (the lock nightly / train / train-clf hold for their whole run), and only
+# while they run: an empty queue, a snapshot, a replay, a GeoIP / IP list compile or a pip sync need none, so the worker (every minute) no
+# longer keeps nightly out of the lock.
+WRITE_JOBS = frozenset(['verify', 'nightly', 'train', 'train_clf', 'promote_ml', 'promote_clf'])
+LOCK_WAIT_DEFAULT = 45     # seconds a write job waits for the lock before it goes back to the queue (the worker fires every minute)
 
 
 class Captured(object):
@@ -152,6 +164,119 @@ def job_pip_sync(cfg, params):
         return 1
     print((done.stdout or '')[-8000:])
     return 0 if done.returncode == 0 else 1
+
+
+def lock_dir():
+    env = os.environ.get('GV_LOCK_DIR')
+    if env:
+        return env
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer')
+
+
+def write_lock_path():
+    return os.path.join(lock_dir(), '.write.lock')
+
+
+def lock_wait():
+    """Seconds a write job waits for the lock (GV_WORKER_LOCK_WAIT, default 45; 0 = do not wait)."""
+    try:
+        return max(0, int(os.environ.get('GV_WORKER_LOCK_WAIT', LOCK_WAIT_DEFAULT)))
+    except ValueError:
+        return LOCK_WAIT_DEFAULT
+
+
+class WriteLock(object):
+    """The same flock the cron wrapper takes for nightly / train / train-clf (analyzer/.write.lock), held as briefly as possible.
+
+    acquire(wait) polls a non-blocking flock for up to `wait` seconds. On success it records who holds it
+    (".write.lock.holder": "<mode> <pid> <start>") so a run that has to give up can name the holder.
+    """
+
+    def __init__(self, path=None, mode='worker'):
+        self.path = path or write_lock_path()
+        self.mode = mode
+        self.fh = None
+
+    def acquire(self, wait=0.0):
+        if fcntl is None:
+            return True
+        try:
+            fh = open(self.path, 'a')
+        except OSError:
+            return True            # an unwritable lock directory must not stop the queue: nothing else can hold what cannot be created
+        deadline = time.time() + max(0.0, float(wait))
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (IOError, OSError):
+                if time.time() >= deadline:
+                    fh.close()
+                    return False
+                time.sleep(0.25)
+        self.fh = fh
+        try:
+            with open(self.path + '.holder', 'w') as hf:
+                hf.write('%s %d %d\n' % (self.mode, os.getpid(), int(time.time())))
+        except OSError:
+            pass
+        return True
+
+    def release(self):
+        if self.fh is None:
+            return
+        try:
+            fcntl.flock(self.fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.fh.close()
+            self.fh = None
+            try:
+                os.unlink(self.path + '.holder')
+            except OSError:
+                pass
+
+
+def job_type_of(raw):
+    """The type of a queue entry, '' when it cannot be read (run_one refuses it later). Never raises."""
+    try:
+        env = json.loads(raw)
+    except Exception:
+        return ''
+    t = env.get('type') if isinstance(env, dict) else ''
+    return t if isinstance(t, str) else ''
+
+
+def drain(client, cfg, max_jobs, wait=None, runner=None):
+    """Run up to max_jobs queued jobs. A job that writes models or verdicts takes the write lock around itself only; when the lock stays
+    busy for `wait` seconds the job goes back to the queue (it is the next one popped) and the drain stops. Returns (done, requeued)."""
+    wait = lock_wait() if wait is None else wait
+    runner = runner or run_one
+    done = 0
+    for _ in range(max(1, int(max_jobs))):
+        try:
+            raw = client.rpop(redis_io.gp_key('jobs'))
+        except Exception as exc:
+            redis_io.warn('could not read the queue: %s' % exc)
+            break
+        if not raw:
+            break
+        if job_type_of(raw) in WRITE_JOBS:
+            lock = WriteLock()
+            if not lock.acquire(wait):
+                try:
+                    client.rpush(redis_io.gp_key('jobs'), raw)
+                except Exception as exc:
+                    redis_io.warn('could not put a job back on the queue: %s' % exc)
+                print('The write lock is busy (nightly or a training run holds it): the %s job stays queued for the next firing.' % job_type_of(raw))
+                return done, 1
+            try:
+                runner(client, cfg, raw)
+            finally:
+                lock.release()
+        else:
+            runner(client, cfg, raw)
+        done += 1
+    return done, 0
 
 
 HANDLERS = {
@@ -299,20 +424,10 @@ def main(argv=None):
         print(redis_io.unavailable_reason(cfg, 'no jobs can be drained') + '.')
         return 0
 
-    done = 0
-    for _ in range(max(1, int(args.max_jobs))):
-        try:
-            raw = client.rpop(redis_io.gp_key('jobs'))
-        except Exception as exc:
-            redis_io.warn('could not read the queue: %s' % exc)
-            break
-        if not raw:
-            break
-        run_one(client, cfg, raw)
-        done += 1
+    done, requeued = drain(client, cfg, args.max_jobs)
 
     snapshot_mod.touch_run(cfg, 'worker')
-    print('Worker finished: %d job(s) processed.' % done)
+    print('Worker finished: %d job(s) processed%s.' % (done, ', %d left queued (write lock busy)' % requeued if requeued else ''))
     return 0
 
 

@@ -152,7 +152,7 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 	<?= gp_msg('jobs-perms') ?>
 	<p class="gp-help"><?= gp_e(gp_t('perm_help')) ?><?= gp_tip('perm_check') ?></p>
 	<p class="gp-help"><?= gp_e(gp_t('perm_scanned')) ?>: <span class="gp-mono"><?= gp_num((int)$perms['scanned']) ?></span>
-		(<?= gp_e(gp_age(max(0, time() - (int)$perms['time']))) ?> <?= gp_e(gp_t('ago')) ?>; <?= gp_e(gp_t('perm_cached')) ?>)</p>
+		(<?= (int)($perms['time'] ?? 0) > 0 ? gp_e(gp_age((int)$perms['time'])) . ' ' . gp_e(gp_t('ago')) . '; ' . gp_e(gp_t('perm_cached')) : gp_e(gp_t('perm_not_scanned')) ?>)</p>
 	<?php if (!$perm_bad): ?>
 	<p><span class="gp-badge gp-badge-on"><?= gp_e(gp_t('perm_ok')) ?></span></p>
 	<?php else: ?>

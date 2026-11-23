@@ -68,7 +68,7 @@ generates a session secret distinct from the guard's, and writes
    `snapshot` writes `analyzer/snapshot.json`, which is the only thing the
    dashboard reads — a busy site's dashboard opens as fast as a quiet one's.
    `worker` drains the job queue; without it the panel's action buttons queue
-   jobs that nobody runs. Both take the same `flock` as the other modes.
+   jobs that nobody runs. `worker` takes the write lock only around a job that writes models or verdicts (see README Part 2, *The write lock*).
 
 3. Serve `panel/` over HTTPS. The session cookie sets `Secure` on HTTPS,
    `HttpOnly` and `SameSite=Strict` always, with `Path` scoped to the panel
@@ -338,6 +338,11 @@ editor (`crontab -e`).
 read **inside the panel request**, so they describe the PHP that serves the site (`php -i` over SSH shows the command-line PHP, which can differ). With
 `opcache.validate_timestamps = 0` the dashboard raises a warning: PHP keeps the old code after an update and after a change of rules, lists or settings
 until OPcache is reset or PHP restarts (the updater and the panel do call `opcache_invalidate`, which only reaches the pool that serves the panel).
+
+**Skipped by lock.** A job whose only firings so far were skipped because the write lock was busy has the state **skipped by lock** (not "never ran, check the crontab"):
+the dashboard alert says the crontab is fine, names the job that held `analyzer/.write.lock` when known, and a job that is late because its last firing was skipped says so too.
+The crontab check accepts entries prefixed with `sleep N;` / `sleep N &&` and the `PATH=`, `SHELL=` and `MAILTO=` lines. The dashboard *Cron setup* card shows only when a required job
+never ran; with nothing to add it gives the reason instead of an empty box. *File permissions* shows the real age of the scan ("not scanned yet" without one).
 
 **Jobs page.** The crontab check runs `scripts/cron-check.sh` through `proc_open` (argv array, stderr to `/dev/null`, 3 s read limit,
 SIGTERM then SIGKILL after 1 s for a child that hangs); the result is cached in `analyzer/.cron-check-live.json` for 5 minutes, so the dashboard

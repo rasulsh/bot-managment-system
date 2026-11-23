@@ -16,6 +16,8 @@ JS_ROOT="$REPO"
 # shellcheck source=lib-jobstatus.sh
 . "$REPO/scripts/lib-jobstatus.sh"
 js_begin feeds
+js_php_resolve
+PHP_BIN="${GV_PHP:-php}"
 js_php_check "$PHP_BIN"
 
 LOCK="${GV_LOCK_DIR:-$REPO/analyzer}/.feeds.lock"
