@@ -120,7 +120,7 @@
 		$gp_active = ($route === $gp_key) ? ' gp-nav-active' : ''; ?>
 	<a class="gp-bottom-item<?= $gp_active ?>" href="index.php?r=<?= gp_e($gp_key) ?>">
 		<span class="gp-nav-icon" aria-hidden="true"><?= $gp_nav[$gp_key][1] ?></span>
-		<span class="gp-bottom-label"><?= gp_e(gp_t($gp_nav[$gp_key][0])) ?></span>
+		<?php $gp_short = gp_t($gp_nav[$gp_key][0] . '_short'); ?><span class="gp-bottom-label"><?= gp_e($gp_short !== $gp_nav[$gp_key][0] . '_short' ? $gp_short : gp_t($gp_nav[$gp_key][0])) ?></span>
 	</a>
 	<?php endforeach; ?>
 </nav>

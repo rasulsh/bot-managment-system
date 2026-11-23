@@ -756,12 +756,8 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
 .gp-dtile-label .gp-tip { flex: none; }
 .gp-dtile-label .gp-tip-btn { margin: 0; width: 1.25rem; height: 1.25rem; }
 .gp-dtable { min-width: 0; }
-#dash-ready .gp-dtable th { white-space: nowrap; vertical-align: bottom; line-height: 1.2; }
-#dash-ready .gp-dtable th, #dash-ready .gp-dtable td { padding-inline: .375rem; }
-#dash-ready .gp-dtable { font-size: .8125rem; }
-#dash-ready .gp-dtable th:first-child, #dash-ready .gp-dtable td:first-child { padding-inline-start: 0; }
 .gp-dtable th { vertical-align: bottom; }
-.gp-dname { min-width: 6.5rem; overflow-wrap: anywhere; }
+.gp-dname { min-width: 7rem; overflow-wrap: anywhere; }
 .gp-kill-confirm { display: flex; flex-direction: column; gap: .4rem; }
 .gp-kill-ask { @apply text-xs; }
 .gp-kill-btns { display: flex; gap: .4rem; }
@@ -769,4 +765,12 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
 .gp-alerts-more[open] .gp-alerts-show, .gp-alerts-more:not([open]) .gp-alerts-hide { display: none; }
 .gp-alerts-more > .gp-alert-list { @apply mt-1; }
 .gp-alerts > .gp-alert-list { @apply mb-1; }
-#dash-ready .gp-dtable th:nth-child(7) { white-space: normal; }
+
+/* readiness table: headers never wrap; if the card is too narrow the table scrolls inside it, it is never clipped */
+.gp-dready { width: 100%; }
+.gp-dready th { white-space: nowrap; vertical-align: bottom; }
+.gp-dready .gp-dgroup { text-align: center; border-bottom: 1px solid rgb(var(--gp-line)); }
+.gp-dready .gp-badge { white-space: nowrap; }
+.gp-dready .gp-dname .gp-badge { display: block; width: max-content; margin-top: .25rem; }
+#dash-ready .gp-table-wrap { overflow-x: auto; }
+.gp-bottom-label { white-space: nowrap; }

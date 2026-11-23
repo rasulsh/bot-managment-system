@@ -119,10 +119,50 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 				const rowsOf = (ys) => { const m = {}; ys.forEach((y, i) => { (m[Math.round(y / 50)] = m[Math.round(y / 50)] || []).push(i); }); return Object.keys(m).length; };
 				check(label + ': KPI values start at the same height in every tile of a row (the help icon does not push one down)', new Set(r.vals.slice(0, v.name === 'desktop' ? 6 : 2)).size === 1 && new Set(r.labels).size === 1, JSON.stringify([r.vals, r.labels]));
 				check(label + ': KPI sparklines line up across a row', new Set(r.sparks.slice(0, v.name === 'desktop' ? 6 : 2)).size === 1, JSON.stringify(r.sparks));
-				check(label + ': readiness headers do not run together (no clipped header, none overlapping its neighbour)', r.th.length >= 8 && r.th.every((t, i) => !t.clip && (i === 0 || r.th[i - 1].y !== t.y || r.th[i - 1].r <= t.x + 0.5)), JSON.stringify(r.th.map((t) => [t.t, Math.round(t.x), Math.round(t.r), t.clip])));
-				const wrapFits = await page.evaluate(() => { const w = document.querySelector('#dash-ready .gp-table-wrap'); return w ? [w.scrollWidth, w.clientWidth] : null; });
-				if (v.name === 'desktop') { check(label + ': the readiness table fits its card (no horizontal scroll, every column visible)', !!wrapFits && wrapFits[0] <= wrapFits[1] + 1, JSON.stringify(wrapFits)); }
 				check(label + ': the "Ready to enforce" and type badges never wrap (one line high)', r.badges.length > 0 && r.badges.every((h) => h < 30), JSON.stringify(r.badges));
+				// readiness table: no header wraps, no cell is clipped (it fits, or its wrapper scrolls), light and dark, at 1600 and 1280 px
+				const tableProbe = () => page.evaluate(() => {
+					const wrap = document.querySelector('#dash-ready .gp-table-wrap'), tb = document.querySelector('#dash-ready table');
+					if (!wrap || !tb) { return null; }
+					const lines = (el) => { const r = document.createRange(); r.selectNodeContents(el); const tops = {}; Array.prototype.slice.call(r.getClientRects()).forEach((x) => { tops[Math.round(x.top)] = 1; }); return Object.keys(tops).length; };
+					const ths = Array.prototype.slice.call(tb.querySelectorAll('th')), cells = Array.prototype.slice.call(tb.querySelectorAll('th, td'));
+					const cs = getComputedStyle(wrap);
+					return { wrapW: wrap.clientWidth, scrollW: wrap.scrollWidth, tableW: Math.round(tb.getBoundingClientRect().width), scrolls: wrap.scrollWidth > wrap.clientWidth + 1 && /auto|scroll/.test(cs.overflowX),
+						wrapped: ths.filter((t) => lines(t) > 1 || getComputedStyle(t).whiteSpace !== 'nowrap').map((t) => t.innerText), clipped: cells.filter((c) => c.scrollWidth > c.clientWidth + 1).map((c) => c.innerText.trim().slice(0, 20)),
+						badgeLines: Array.prototype.slice.call(tb.querySelectorAll('.gp-badge')).filter((b) => lines(b) > 1).length, heads: ths.map((t) => t.innerText.trim()) };
+				});
+				if (v.name === 'desktop') {
+					for (const width of [1600, 1280]) {
+						for (const scheme of ['light', 'dark']) {
+							await page.setViewportSize({ width: width, height: v.height }); await page.emulateMedia({ colorScheme: scheme }); await page.waitForTimeout(300);
+							const t = await tableProbe();
+							const tag = label + ' ' + width + ' px ' + scheme + ': readiness table';
+							check(tag + ' has the grouped header (Hits: 24 h, 7 d) and 7 header cells, no Devices column of its own', !!t && t.heads.join('|') === 'Rule or list|Hits|Addresses / devices|With valid token|Ready to enforce?|24 h|7 d', JSON.stringify(t && t.heads));
+							check(tag + ': no header wraps, no badge wraps', !!t && t.wrapped.length === 0 && t.badgeLines === 0, JSON.stringify(t && [t.wrapped, t.badgeLines]));
+							check(tag + ': no cell is clipped (it fits its card, or its wrapper scrolls)', !!t && t.clipped.length === 0 && (t.scrollW <= t.wrapW + 1 || t.scrolls), JSON.stringify(t && [t.wrapW, t.scrollW, t.tableW, t.scrolls, t.clipped]));
+							if (width === 1600) { check(tag + ' fits its card at 1600 px without scrolling', !!t && t.scrollW <= t.wrapW + 1, JSON.stringify(t && [t.wrapW, t.scrollW])); }
+						}
+					}
+					await page.setViewportSize({ width: v.width, height: v.height }); await page.emulateMedia({ colorScheme: 'light' }); await page.waitForTimeout(300);
+				} else {
+					const t = await tableProbe();
+					check(label + ': readiness table on a phone: no header wraps and nothing is clipped (the wrapper scrolls)', !!t && t.wrapped.length === 0 && t.clipped.length === 0 && (t.scrollW <= t.wrapW + 1 || t.scrolls), JSON.stringify(t && [t.wrapW, t.scrollW, t.scrolls, t.wrapped, t.clipped]));
+					// bottom navigation: single-line labels, the page leaves room for the fixed bar, the last content is never behind it
+					const nv = await page.evaluate(() => {
+						const nav = document.querySelector('.gp-bottomnav'); if (!nav) { return null; }
+						const lines = (el) => { const r = document.createRange(); r.selectNodeContents(el); const tops = {}; Array.prototype.slice.call(r.getClientRects()).forEach((x) => { tops[Math.round(x.top)] = 1; }); return Object.keys(tops).length; };
+						window.scrollTo(0, document.documentElement.scrollHeight);
+						const navTop = nav.getBoundingClientRect().top;
+						const main = document.querySelector('main');
+						const lowest = main ? main.getBoundingClientRect().bottom : 0;      // scrolled to the end: the content must end above the bar
+						const docEnd = Math.round(window.scrollY + window.innerHeight);
+						const labels = Array.prototype.slice.call(nav.querySelectorAll('.gp-bottom-label')).map((l) => [l.innerText, lines(l)]);
+						const out = { navH: nav.getBoundingClientRect().height, pad: parseFloat(getComputedStyle(document.body).paddingBottom), navTop: navTop, lowest: lowest, labels: labels, atEnd: docEnd >= document.documentElement.scrollHeight - 2 };
+						window.scrollTo(0, 0); return out;
+					});
+					check(label + ': bottom navigation labels are one line each ("Blocks", not "Temporary blocks & allows")', !!nv && nv.labels.every((l) => l[1] === 1) && nv.labels.some((l) => l[0] === 'Blocks') && !nv.labels.some((l) => /Temporary/.test(l[0])), JSON.stringify(nv && nv.labels));
+					check(label + ': the page has bottom padding at least as tall as the fixed bottom bar, and the last content ends above it', !!nv && nv.pad >= nv.navH - 0.5 && nv.atEnd && nv.lowest <= nv.navTop + 1, JSON.stringify(nv && [nv.navH, nv.pad, nv.navTop, nv.lowest, nv.atEnd]));
+				}
 				if (v.name === 'mobile') {
 					check(label + ': the alert list is collapsed on a phone, the first critical alert is still shown, the card stays short', r.open === false && r.firstVisible === true && r.alertsH < 420, JSON.stringify([r.open, r.firstVisible, r.alertsH, r.tileY]));
 				} else {

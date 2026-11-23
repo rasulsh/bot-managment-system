@@ -3703,6 +3703,15 @@ dv_f2 = dv_snap.funnel_by_level([
     {'ts': 2, 'cap': 'ok', 'ct': 1, 'dev': 'ghost', 'ip': '7.7.7.7', 'act': 'allow'}, {'ts': 2, 'act': 'token_issued', 'dev': 'ghost2', 'ip': '7.7.7.8'}])
 ok('funnel: served -> solved -> passed count distinct visitors, each stage a subset of the one before (a solve or a pass with no served page is not counted)',
    dv_f2['captcha'] == {'served': 4, 'solved': 2, 'passed': 1, 'failed': 2, 'median_s': 6.0} and dv_f2['js'] == {'served': 2, 'solved': 1, 'passed': 1, 'failed': 1, 'median_s': None})
+dv_guard = [   # image CAPTCHA rows with the fields the guard really writes (guard/captcha.php, guard.php gv_log_row)
+    {'ts': 100.0, 'ip': '192.0.2.7', 'dev': '', 'act': 'challenge', 'cap': 'show', 'tok': 'm', 'sh': 0, 'rs': ['RULE:st-curl']},
+    {'ts': 108.0, 'ip': '192.0.2.7', 'dev': 'newdev99', 'act': 'token_issued', 'cap': 'ok', 'ct': 8, 'tl': 'c', 'tok': 'v', 'sh': 0},
+    {'ts': 115.0, 'ip': '192.0.2.7', 'dev': 'newdev99', 'act': 'allow', 'tl': 'c', 'tok': 'v', 'sh': 0},
+    {'ts': 100.0, 'ip': '192.0.2.8', 'dev': '', 'act': 'challenge', 'cap': 'show', 'tok': 'm', 'sh': 0},
+    {'ts': 109.0, 'ip': '192.0.2.8', 'dev': '', 'act': 'nonce_bad', 'cap': 'wrong', 'tok': 'm', 'sh': 0}]
+dv_fg = dv_snap.funnel_by_level(dv_guard)
+ok('funnel: a CAPTCHA solved as the guard writes it (a token_issued row with cap ok and the NEW device id) is Solved, its later request with the token is Passed, a wrong answer is Failed',
+   dv_fg['captcha'] == {'served': 2, 'solved': 1, 'passed': 1, 'failed': 1, 'median_s': 8.0} and dv_fg['js'] == {'served': 0, 'solved': 0, 'passed': 0, 'failed': 0, 'median_s': None})
 ok('funnel: a solve at the same time as the served page counts, one BEFORE it does not; a pass must come after the solve',
    dv_snap.funnel_by_level([{'ts': 5, 'act': 'challenge', 'ip': '1.1.1.1'}, {'ts': 4, 'act': 'token_issued', 'ip': '1.1.1.1'}])['js']['solved'] == 0
    and dv_snap.funnel_by_level([{'ts': 5, 'act': 'challenge', 'ip': '1.1.1.1'}, {'ts': 5, 'act': 'token_issued', 'ip': '1.1.1.1'}])['js']['solved'] == 1

@@ -3465,7 +3465,7 @@ $dv_snap = $kpi_snap; $dv_snap['dash']['readiness'] = array('rules' => array('r1
 list($dv_hm, $dv_em) = $jh_render('dashboard', array('snapshot' => $dv_snap), array('rules' => $dv_rules, 'iplists' => $dv_lists, 'protection' => gp_protection_mode(gv_cfg_defaults(array()), $dv_rules), 'rsum' => gp_rules_summary($dv_rules)));
 t_ok('rollout readiness, all-monitor install: one row per ENABLED monitor-mode rule and list (not the enforced or disabled ones), hits 24 h / 7 d, addresses, devices, valid-token share, and the hint',
 	!$dv_em && substr_count($dv_hm, 'data-ready="') === 3 && strpos($dv_hm, 'Enforced one') === false && strpos($dv_hm, 'Enforced list') === false && strpos($dv_hm, 'Disabled rule x') === false
-	&& strpos($dv_hm, 'data-ready="review"') !== false && strpos($dv_hm, 'data-ready="ready"') !== false && strpos($dv_hm, 'data-ready="more"') !== false && strpos($dv_hm, '12.5%') !== false && strpos($dv_hm, 'Review first') !== false && strpos($dv_hm, '>Ready</span>') !== false);
+	&& strpos($dv_hm, 'data-ready="review"') !== false && strpos($dv_hm, 'data-ready="ready"') !== false && strpos($dv_hm, 'data-ready="more"') !== false && strpos($dv_hm, '12.5%') !== false && strpos($dv_hm, 'Review first') !== false && strpos($dv_hm, '>Ready to enforce</span>') !== false);
 t_ok('rollout readiness: names are escaped, each row links to the Logs filter of its rule or list, the order is by hits in 7 d', strpos($dv_hm, 'Scrapers &lt;b&gt;') !== false && strpos($dv_hm, 'Scrapers <b>') === false && strpos($dv_hm, 'reason=SH_RULE%3Ar1%2CRULE%3Ar1') !== false && strpos($dv_hm, 'ipln=l1&amp;ipl=block') !== false
 	&& strpos($dv_hm, 'Bad nets') < strpos($dv_hm, 'Scrapers') && strpos($dv_hm, 'Scrapers') < strpos($dv_hm, 'data-ready="more"'));
 list($dv_hn, $dv_en) = $jh_render('dashboard', array('snapshot' => $kpi_snap), array('rules' => array($dv_rules[2]), 'iplists' => array($dv_lists[1])));
@@ -3528,8 +3528,10 @@ t_ok('alerts: the layout script opens a [data-open-wide] list on wide screens on
 t_ok('the "secret is still the placeholder" warning is shown once', substr_count($rv_a, 'secret is still the placeholder') === 1 && strpos($rv_a, gp_t('dash_mode_forced')) === false);
 // the readiness table: a type column with consistent chips
 list($rv_r, $rv_re) = $jh_render('dashboard', array('snapshot' => $dv_snap), array('rules' => $dv_rules, 'iplists' => array_merge($dv_lists, array(array('id' => 'l3', 'name' => 'Partners', 'enabled' => true, 'type' => 'allow', 'mode' => 'monitor')))));
-t_ok('readiness table: a Type column with the chips "Rule", "IP list · block" and "IP list · allow", and the hint badge never wraps (nowrap rule in the CSS)', !$rv_re && strpos($rv_r, '>Type<') !== false && strpos($rv_r, 'data-type="rule">Rule<') !== false && strpos($rv_r, 'data-type="list-block">IP list · block<') !== false && strpos($rv_r, 'data-type="list-allow">IP list · allow<') !== false
-	&& strpos(file_get_contents(__DIR__ . '/../panel/assets/app.src.css'), '.gp-dtable .gp-badge { white-space: nowrap; }') !== false);
+t_ok('readiness table: the chips "Rule", "IP list · block" and "IP list · allow" under the name, a grouped "Hits" header with "24 h" and "7 d", one "Addresses / devices" column ("12 / 11"), the full "Ready to enforce" badge, nowrap headers', !$rv_re && strpos($rv_r, 'colspan="2" class="gp-num gp-dgroup">Hits<') !== false && strpos($rv_r, '>Addresses / devices<') !== false && strpos($rv_r, '12 / 11') !== false && strpos($rv_r, '>Type<') === false && strpos($rv_r, 'data-type="rule">Rule<') !== false && strpos($rv_r, 'data-type="list-block">IP list · block<') !== false && strpos($rv_r, 'data-type="list-allow">IP list · allow<') !== false
+	&& strpos(file_get_contents(__DIR__ . '/../panel/assets/app.src.css'), '.gp-dready th { white-space: nowrap;') !== false);
+
+t_ok('bottom navigation: "Temporary blocks & allows" has the short label "Blocks" there (the side menu and page title keep the full name)', strpos(file_get_contents(__DIR__ . '/../panel/views/layout.php'), "'_short'") !== false && gp_t('nav_overrides_short') === 'Blocks' && gp_t('nav_overrides') === 'Temporary blocks & allows');
 
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');

@@ -209,16 +209,19 @@ usort($rrows, function ($a, $b) { return $b['h']['d7'] <=> $a['h']['d7']; });
 	<?php if (!$rrows): ?>
 	<p class="gp-note"><?= gp_e(gp_t('dash_ready_none')) ?> <a href="index.php?r=rules"><?= gp_e(gp_t('nav_rules')) ?></a> · <a href="index.php?r=iplists"><?= gp_e(gp_t('nav_iplists')) ?></a></p>
 	<?php else: ?>
-	<div class="gp-table-wrap"><table class="gp-table gp-dtable">
-		<thead><tr><th><?= gp_e(gp_t('dash_rd_name')) ?></th><th><?= gp_e(gp_t('dash_rd_type')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_h24')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_d7')) ?></th>
-			<th class="gp-num"><?= gp_e(gp_t('dash_rd_ips')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_devs')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_tok')) ?></th><th><?= gp_e(gp_t('dash_rd_ready')) ?></th></tr></thead>
+	<div class="gp-table-wrap"><table class="gp-table gp-dtable gp-dready">
+		<thead>
+			<tr><th rowspan="2"><?= gp_e(gp_t('dash_rd_name')) ?></th><th colspan="2" class="gp-num gp-dgroup"><?= gp_e(gp_t('dash_rd_hits')) ?></th>
+				<th rowspan="2" class="gp-num"><?= gp_e(gp_t('dash_rd_addr')) ?></th><th rowspan="2" class="gp-num"><?= gp_e(gp_t('dash_rd_tok')) ?></th><th rowspan="2"><?= gp_e(gp_t('dash_rd_ready')) ?></th></tr>
+			<tr><th class="gp-num"><?= gp_e(gp_t('dash_rd_h24')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_d7')) ?></th></tr>
+		</thead>
 		<tbody>
 		<?php foreach ($rrows as $rw): $hint = gp_dash_ready_hint($rw['h']); ?>
 		<tr data-ready="<?= gp_e($hint[0]) ?>">
-			<td class="gp-dname"><a href="<?= $rw['logs'] ?>"><?= gp_e($rw['name']) ?></a></td>
-			<td><span class="gp-badge gp-badge-off" data-type="<?= $rw['kind'] === 'rule' ? 'rule' : 'list-' . gp_e($rw['type']) ?>"><?= gp_e($rw['kind'] === 'rule' ? gp_t('dash_rd_t_rule') : gp_t('dash_rd_t_list_' . $rw['type'])) ?></span></td>
+			<td class="gp-dname"><a href="<?= $rw['logs'] ?>"><?= gp_e($rw['name']) ?></a>
+				<span class="gp-badge gp-badge-off" data-type="<?= $rw['kind'] === 'rule' ? 'rule' : 'list-' . gp_e($rw['type']) ?>"><?= gp_e($rw['kind'] === 'rule' ? gp_t('dash_rd_t_rule') : gp_t('dash_rd_t_list_' . $rw['type'])) ?></span></td>
 			<td class="gp-num"><?= gp_num((int)$rw['h']['h24']) ?></td><td class="gp-num"><?= gp_num((int)$rw['h']['d7']) ?></td>
-			<td class="gp-num"><?= gp_num((int)$rw['h']['ips']) ?></td><td class="gp-num"><?= gp_num((int)$rw['h']['devs']) ?></td>
+			<td class="gp-num"><?= gp_num((int)$rw['h']['ips']) ?> / <?= gp_num((int)$rw['h']['devs']) ?></td>
 			<td class="gp-num"><?= (int)$rw['h']['d7'] > 0 ? gp_e(gp_num((float)$rw['h']['tok'], 1)) . '%' : '—' ?></td>
 			<td><span class="gp-badge <?= gp_dash_ready_badge($hint[0]) ?>"><?= gp_e(gp_t($hint[1])) ?></span></td>
 		</tr>

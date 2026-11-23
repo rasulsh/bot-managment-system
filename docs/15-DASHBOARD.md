@@ -30,6 +30,8 @@ by the analyzer snapshot (`analyzer/snapshot.py`, key `dash`), never in the page
 | 6 | **System** (compact): Jobs, Redis and guard, Storage, Models (with classifier label progress), GeoIP and feeds, Permissions | 4 each (3 per row) | 6 each | 12 each |
 | 7 | **More** (collapsed): score histograms, status codes, reasons, coverage, holdout | 6 each | 12 | 12 |
 
+The readiness table has six columns: *Rule or list* (with the type chip *Rule* / *IP list · block* / *IP list · allow* under the name), *Hits* (grouped: *24 h*, *7 d*), *Addresses / devices* (`60 / 80`), *With valid token*, *Ready to enforce?*. Headers never wrap; the table fits the card at 1280 px and wider with the type size of the rest of the page, and would scroll inside the card rather than be clipped. On a phone the bottom bar shows short labels (*Blocks* for *Temporary blocks & allows*) and the page keeps bottom padding equal to the bar.
+
 Rules that apply to every card: a card is a `gp-dcard` (same padding, border, radius and title row); the title row says the period
 ("Last 24 hours") and the comparison where there is one ("vs previous 24 hours"); a card in a row has the height of the tallest card in
 that row (grid `align-items: stretch`, card body is a flex column); no card sets its own width.

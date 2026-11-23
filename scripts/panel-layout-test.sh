@@ -98,9 +98,22 @@ for h in range(168, -1, -1):
                 syn.append({'ts': t0 + 2, 'act': 'token_issued', 'ip': ipx, 'dev': dv, 'tok': 'm', 'rs': []})
                 if rnd.random() < 0.8:
                     syn.append({'ts': t0 + 6, 'act': 'allow', 'ip': ipx, 'dev': dv, 'tok': 'v', 'rs': []})
+        if rnd.random() < 0.12:
+            # an image CAPTCHA the way the guard writes it: the page (act challenge, cap show, no device yet), the right answer
+            # (act token_issued, cap ok, ct seconds, tl c, the NEW device id from the token), then a request carrying that token
+            t0 = now - h * 3600 + rnd.random() * 3300
+            ipx, dv = '192.0.2.%d' % rnd.randint(1, 250), 'cdev%d' % rnd.randint(1, 9999)
+            syn.append({'ts': t0, 'act': 'challenge', 'cap': 'show', 'ip': ipx, 'dev': '', 'tok': 'm', 'rs': ['RULE:st-curl'], 'sh': 0})
+            q = rnd.random()
+            if q < 0.1:
+                syn.append({'ts': t0 + 9, 'act': 'nonce_bad', 'cap': 'wrong', 'ip': ipx, 'dev': '', 'tok': 'm', 'rs': [], 'sh': 0})
+            elif q < 0.8:
+                syn.append({'ts': t0 + 8, 'act': 'token_issued', 'cap': 'ok', 'ct': rnd.randint(3, 20), 'tl': 'c', 'ip': ipx, 'dev': dv, 'tok': 'v', 'rs': [], 'sh': 0})
+                if rnd.random() < 0.8:
+                    syn.append({'ts': t0 + 15, 'act': 'allow', 'tl': 'c', 'ip': ipx, 'dev': dv, 'tok': 'v', 'rs': [], 'sh': 0})
         syn.append({'ts': now - h * 3600 + rnd.random() * 3500, 'act': act, 'sh': sh, 'rs': rs, 'ip': '203.0.113.%d' % rnd.randint(1, 60), 'dev': 'dev%d' % rnd.randint(1, 80), 'ua': ua,
                     'p': '/shop/item-%d' % rnd.randint(1, 9), 'cc': rnd.choice(['IR', 'US', 'DE', 'IR']), 'asn': rnd.choice([12880, 15169, 24940]), 'tok': 'v' if r > 0.5 else 'm',
-                    'cap': 'show' if 0.27 < r < 0.28 else ''})
+                    'cap': ''})
 dash = snap_mod.build_dash([x for x in syn if x['ts'] >= now - 86400], syn, now)
 json.dump({'generated_at': now - 300, 'dash': dash, 'tz': {'name': 'UTC', 'offset': 0}, 'traffic': {'requests': 1840, 'devices': 310, 'addresses': 280, 'degraded': 0},
            'decisions': {'allow': 1500, '403': 210, 'challenge': 96, '429': 12}, 'kpi': {'cur': cur, 'prev': prev, 'window_h': 24},
