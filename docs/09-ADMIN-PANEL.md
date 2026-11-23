@@ -341,6 +341,8 @@ Crontab: `27 3 * * * bash <install-dir>/scripts/analyzer-cron.sh feeds` (PHP onl
 
 ## Dashboard, job health and alerts
 
+The layout (12-column grid, spans per card at each breakpoint), the charts, the colours, the `dash` snapshot keys and the empty states are specified in [15-DASHBOARD.md](15-DASHBOARD.md). The ordering below still holds: alerts are live, the reports come from the snapshot.
+
 The dashboard is ordered by importance. Anything that decides an alert is read **live** (a file stat or a small read, one
 cheap Redis command), never from the snapshot, because the snapshot job is one of the things that can die.
 

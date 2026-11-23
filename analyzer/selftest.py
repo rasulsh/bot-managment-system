@@ -10,6 +10,7 @@ when those are not installed.
 from __future__ import print_function
 
 import os
+import random
 import re
 import shutil
 import sys
@@ -3657,6 +3658,94 @@ rp_ovr = [{'act': 'challenge', 'sc': 0, 'tok': 'm', 'gate': 1, 'ovr': 'challenge
           {'act': 'challenge', 'sc': 0, 'tok': 'm', 'gate': 1, 'ovr': ''}]
 rp_o = replay_mod.replay_rows(rp_ovr, {'hard_block_score': 60, 'signals': {}}, {'hard_block_score': 40, 'signals': {}})
 ok('replay: rows decided by a challenge / CAPTCHA override are skipped (an operator action), the normal row is considered', rp_o['considered'] == 1 and rp_o['skipped_non_decision'] == 2)
+
+# Dashboard v2 data (snapshot key "dash"): computed by the analyzer, not by the page request.
+section('Dashboard v2 snapshot data')
+from analyzer import snapshot as dv_snap
+dv_now = 1000000 * 3600 + 1800.0
+dv_rows = [
+    {'ts': dv_now - 100, 'act': 'allow', 'ip': '1.1.1.1', 'dev': 'd1', 'tok': 'v', 'cc': 'IR', 'asn': 123},
+    {'ts': dv_now - 90, 'act': 'challenge', 'ip': '2.2.2.2', 'dev': 'd2', 'rs': ['RULE:r1'], 'tok': 'm'},
+    {'ts': dv_now - 80, 'act': 'challenge', 'sh': 1, 'ip': '2.2.2.2', 'dev': 'd2', 'rs': ['SH_RULE:r1'], 'tok': 'v'},
+    {'ts': dv_now - 70, 'act': 'allow', 'ip': '2.2.2.2', 'dev': 'd2', 'tok': 'v'},
+    {'ts': dv_now - 60, 'act': 'challenge', 'cap': 'show', 'ip': '3.3.3.3', 'dev': 'd3'},
+    {'ts': dv_now - 50, 'act': '403', 'ip': '3.3.3.3', 'dev': 'd3', 'rs': ['IPL_BLOCK:l1']},
+    {'ts': dv_now - 40, 'act': '429', 'ip': '4.4.4.4', 'dev': 'd4'},
+    {'ts': dv_now - 3 * 3600, 'act': 'allow', 'ip': '5.5.5.5', 'dev': 'd5', 'rs': ['RULE:r1'], 'tok': 'v'},
+]
+ok('outcome classes: allowed, challenged, CAPTCHA, blocked, rate limited, monitor-only (a shadow row that WOULD have acted)',
+   [dv_snap.outcome_class(r) for r in dv_rows[:7]] == ['a', 'c', 'm', 'a', 'p', 'b', 'r'])
+dv_d = dv_snap.build_dash(dv_rows, dv_rows, dv_now)
+ok('hourly buckets: 24 and 168 of them, oldest first, aligned to the hour, zero-filled',
+   len(dv_d['hours']) == 24 and len(dv_d['days7']) == 168 and dv_d['hours'][0]['t'] % 3600 == 0 and dv_d['hours'][-1]['t'] - dv_d['hours'][0]['t'] == 23 * 3600
+   and sum(b['n'] for b in dv_d['hours']) == 8 and dv_d['hours'][5]['n'] == 0)
+ok('hourly buckets: the current hour counts every outcome and the distinct addresses',
+   dv_d['hours'][-1]['n'] == 7 and dv_d['hours'][-1]['a'] == 2 and dv_d['hours'][-1]['c'] == 1 and dv_d['hours'][-1]['p'] == 1 and dv_d['hours'][-1]['b'] == 1
+   and dv_d['hours'][-1]['r'] == 1 and dv_d['hours'][-1]['m'] == 1 and dv_d['hours'][-1]['ips'] == 4)
+ok('hourly buckets: a row outside the window is not counted', sum(b['n'] for b in dv_snap.hour_buckets(dv_rows, dv_now, 2)) == 7)
+ok('kpi: would_act counts the monitor-only rows (and they stay in "allowed" as before)',
+   dv_snap.kpi_counts(dv_rows)['would_act'] == 1 and dv_snap.kpi_counts([])['would_act'] == 0)
+dv_r = dv_d['readiness']
+ok('readiness: hits in 24 h and 7 d, distinct addresses and devices, the share with a valid token, per rule and per IP list',
+   dv_r['rules']['r1'] == {'h24': 3, 'd7': 3, 'ips': 2, 'devs': 2, 'tok': 66.7} and dv_r['lists']['block:l1']['d7'] == 1 and dv_r['lists']['block:l1']['tok'] == 0.0)
+dv_big = [{'ts': dv_now - 10, 'act': 'allow', 'ip': '10.0.%d.%d' % (i // 250, i % 250), 'dev': 'x%d' % i, 'rs': ['RULE:r9']} for i in range(2600)]
+ok('readiness: the distinct sets are bounded (a flood cannot grow the snapshot without limit)', dv_snap.readiness(dv_big, dv_now)['rules']['r9']['ips'] == dv_snap.SET_CAP and dv_snap.readiness(dv_big, dv_now)['rules']['r9']['d7'] == 2600)
+dv_f = dv_d['funnel']
+ok('funnel: the sample has one visitor served the check page and one served a CAPTCHA, and nobody solved either (so nobody passed)',
+   dv_f['js']['served'] == 1 and dv_f['js']['solved'] == 0 and dv_f['js']['passed'] == 0 and dv_f['captcha']['served'] == 1 and dv_f['captcha']['solved'] == 0 and dv_f['captcha']['passed'] == 0)
+dv_f2 = dv_snap.funnel_by_level([
+    {'ts': 1, 'act': 'challenge', 'cap': 'show', 'dev': 'a', 'ip': '9.9.9.1'}, {'ts': 2, 'cap': 'ok', 'ct': 4, 'dev': 'a', 'ip': '9.9.9.1', 'act': 'allow'}, {'ts': 3, 'act': 'allow', 'tok': 'v', 'dev': 'a', 'ip': '9.9.9.1'},
+    {'ts': 1, 'act': 'challenge', 'cap': 'show', 'dev': 'b', 'ip': '9.9.9.2'}, {'ts': 3, 'cap': 'ok', 'ct': 8, 'dev': 'b', 'ip': '9.9.9.2', 'act': 'allow'},
+    {'ts': 1, 'act': 'challenge', 'cap': 'show', 'dev': 'c', 'ip': '9.9.9.3'}, {'ts': 4, 'cap': 'wrong', 'dev': 'c', 'ip': '9.9.9.3', 'act': 'challenge'},
+    {'ts': 1, 'act': 'challenge', 'cap': 'show', 'dev': 'd', 'ip': '9.9.9.4'}, {'ts': 5, 'cap': 'exp', 'dev': 'd', 'ip': '9.9.9.4', 'act': 'challenge'},
+    {'ts': 1, 'act': 'challenge', 'ip': '8.8.8.1'}, {'ts': 2, 'act': 'token_issued', 'dev': 'e', 'ip': '8.8.8.1'}, {'ts': 3, 'act': 'allow', 'tok': 'v', 'dev': 'e', 'ip': '8.8.8.1'},
+    {'ts': 1, 'act': 'challenge', 'ip': '8.8.8.2'}, {'ts': 2, 'act': 'nonce_bad', 'ip': '8.8.8.2'},
+    {'ts': 2, 'cap': 'ok', 'ct': 1, 'dev': 'ghost', 'ip': '7.7.7.7', 'act': 'allow'}, {'ts': 2, 'act': 'token_issued', 'dev': 'ghost2', 'ip': '7.7.7.8'}])
+ok('funnel: served -> solved -> passed count distinct visitors, each stage a subset of the one before (a solve or a pass with no served page is not counted)',
+   dv_f2['captcha'] == {'served': 4, 'solved': 2, 'passed': 1, 'failed': 2, 'median_s': 6.0} and dv_f2['js'] == {'served': 2, 'solved': 1, 'passed': 1, 'failed': 1, 'median_s': None})
+dv_guard = [   # image CAPTCHA rows with the fields the guard really writes (guard/captcha.php, guard.php gv_log_row)
+    {'ts': 100.0, 'ip': '192.0.2.7', 'dev': '', 'act': 'challenge', 'cap': 'show', 'tok': 'm', 'sh': 0, 'rs': ['RULE:st-curl']},
+    {'ts': 108.0, 'ip': '192.0.2.7', 'dev': 'newdev99', 'act': 'token_issued', 'cap': 'ok', 'ct': 8, 'tl': 'c', 'tok': 'v', 'sh': 0},
+    {'ts': 115.0, 'ip': '192.0.2.7', 'dev': 'newdev99', 'act': 'allow', 'tl': 'c', 'tok': 'v', 'sh': 0},
+    {'ts': 100.0, 'ip': '192.0.2.8', 'dev': '', 'act': 'challenge', 'cap': 'show', 'tok': 'm', 'sh': 0},
+    {'ts': 109.0, 'ip': '192.0.2.8', 'dev': '', 'act': 'nonce_bad', 'cap': 'wrong', 'tok': 'm', 'sh': 0}]
+dv_fg = dv_snap.funnel_by_level(dv_guard)
+ok('funnel: a CAPTCHA solved as the guard writes it (a token_issued row with cap ok and the NEW device id) is Solved, its later request with the token is Passed, a wrong answer is Failed',
+   dv_fg['captcha'] == {'served': 2, 'solved': 1, 'passed': 1, 'failed': 1, 'median_s': 8.0} and dv_fg['js'] == {'served': 0, 'solved': 0, 'passed': 0, 'failed': 0, 'median_s': None})
+ok('funnel: a solve at the same time as the served page counts, one BEFORE it does not; a pass must come after the solve',
+   dv_snap.funnel_by_level([{'ts': 5, 'act': 'challenge', 'ip': '1.1.1.1'}, {'ts': 4, 'act': 'token_issued', 'ip': '1.1.1.1'}])['js']['solved'] == 0
+   and dv_snap.funnel_by_level([{'ts': 5, 'act': 'challenge', 'ip': '1.1.1.1'}, {'ts': 5, 'act': 'token_issued', 'ip': '1.1.1.1'}])['js']['solved'] == 1
+   and dv_snap.funnel_by_level([{'ts': 5, 'act': 'challenge', 'ip': '1.1.1.1'}, {'ts': 6, 'act': 'token_issued', 'ip': '1.1.1.1'}, {'ts': 6, 'act': 'allow', 'tok': 'v', 'ip': '1.1.1.1'}])['js']['passed'] == 0)
+dv_rng = random.Random(11)
+dv_mono = True
+dv_acts = ['challenge', 'token_issued', 'allow', 'nonce_bad', '403', 'allow_bot']
+for dv_i in range(300):
+    dv_rows = []
+    for dv_j in range(dv_rng.randint(0, 60)):
+        dv_row = {'ts': dv_rng.randint(1, 40), 'act': dv_rng.choice(dv_acts), 'ip': '10.0.0.%d' % dv_rng.randint(1, 6)}
+        if dv_rng.random() < 0.7:
+            dv_row['dev'] = 'd%d' % dv_rng.randint(1, 5)
+        if dv_rng.random() < 0.4:
+            dv_row['cap'] = dv_rng.choice(['show', 'ok', 'wrong', 'fail', 'exp', 'inv', 'esc'])
+            dv_row['ct'] = dv_rng.randint(1, 30)
+        if dv_rng.random() < 0.5:
+            dv_row['tok'] = dv_rng.choice(['v', 'm', 'b'])
+        if dv_rng.random() < 0.15:
+            dv_row['sh'] = 1
+        dv_rows.append(dv_row)
+    dv_ff = dv_snap.funnel_by_level(dv_rows)
+    for dv_lv in ('js', 'captcha'):
+        dv_x = dv_ff[dv_lv]
+        if not (0 <= dv_x['passed'] <= dv_x['solved'] <= dv_x['served'] and 0 <= dv_x['failed'] <= dv_x['served']):
+            dv_mono = False
+ok('funnel: for any input (300 random logs) passed <= solved <= served and failed <= served, per level', dv_mono)
+dv_t = dv_d['top']
+ok('top lists: every outcome counted (not only served ones), with the outcome mix per entry, an AS number as text, an empty value skipped',
+   dv_t['ips'][0][:2] == ['2.2.2.2', 3] and dv_t['ips'][0][2:] == [1, 1, 0, 0, 1] and dv_t['asns'] == [['123', 1, 1, 0, 0, 0, 0]] and dv_t['countries'] == [['IR', 1, 1, 0, 0, 0, 0]]
+   and all(k in dv_t for k in ('ips', 'devices', 'uas', 'paths', 'countries', 'asns')))
+ok('top lists: at most 10 entries per list', len(dv_snap.top_mix([{'ts': 1, 'act': 'allow', 'ip': '9.9.9.%d' % i} for i in range(40)])['ips']) == 10)
+ok('the whole block is JSON-serialisable and small (an empty install is well under 64 KiB)', len(json.dumps(dv_snap.build_dash([], [], dv_now))) < 65536 and json.loads(json.dumps(dv_d))['v'] == 1)
+ok('snapshot main() writes the dash block (read from 9 days of logs)', "payload['dash'] = build_dash(" in open(os.path.join(IL_ROOT, 'analyzer', 'snapshot.py')).read())
 
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)

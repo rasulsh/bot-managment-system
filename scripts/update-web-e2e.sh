@@ -120,7 +120,7 @@ check "C: the check ran through recover.php and sent the browser on (Location or
 res="$(curl -s -c "$JAR" -b "$JAR" "$BASE$PANEL/$next")"
 check "C: the result page says it was rolled back automatically" "$(has 'rolled back automatically' "$res")"
 check "C: the old version is running again and guard.off is gone" "$(state_clean)"
-check "C: the panel still works" "$(has 'name="killswitch"' "$(page dashboard)")"
+check "C: the panel still works" "$(has 'data-chip="kill"' "$(page dashboard)")"
 
 # ---- D: the shell
 echo "--- D: the check and the rollback from the shell"

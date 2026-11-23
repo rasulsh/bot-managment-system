@@ -13,7 +13,7 @@ if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 // The only KPI keys the demo page shows: counts and rates, never a name.
 function gp_demo_kpi_keys() {
 	return array('requests', 'allowed', 'blocked', 'limited', 'challenged', 'challenge_success', 'rule_hits', 'honeypot', 'degraded',
-		'captcha_shown', 'captcha_solved', 'captcha_failed', 'captcha_expired', 'captcha_solve_rate');
+		'captcha_shown', 'captcha_solved', 'captcha_failed', 'captcha_expired', 'captcha_solve_rate', 'would_act');
 }
 
 // $in (all optional, for tests): snapshot, cfg, rules, lists, jobs, now. Defaults read the live data.
@@ -50,7 +50,18 @@ function gp_demo_model(array $in = array()) {
 		if ($state === 'ok') { $ok++; }
 		elseif (in_array($state, array('failing', 'late', 'warning'), true) || ($state === 'skipped' && !empty($h['required'])) || ($state === 'never' && !empty($h['required']))) { $bad++; }
 	}
-	return array('generated' => (int)$gen, 'stale' => ($gen > 0 && ($now - $gen) > 3600), 'has_data' => ($cur !== array()),
+	// The main chart: hourly COUNTS only (an hour, five outcome counts, a distinct-address count). Nothing else from the dash block is read.
+	$chart = array('h24' => array(), 'd7' => array());
+	$dash = gp_dash_block($snap);
+	foreach (array('h24' => 'hours', 'd7' => 'days7') as $ck => $dk) {
+		foreach ((isset($dash[$dk]) && is_array($dash[$dk])) ? $dash[$dk] : array() as $b) {
+			if (!is_array($b)) { continue; }
+			$row = array();
+			foreach (array('t', 'n', 'a', 'c', 'p', 'b', 'r', 'm', 'ips') as $f) { $row[$f] = isset($b[$f]) && is_numeric($b[$f]) ? (int)$b[$f] : 0; }
+			$chart[$ck][] = $row;
+		}
+	}
+	return array('generated' => (int)$gen, 'chart' => $chart, 'stale' => ($gen > 0 && ($now - $gen) > 3600), 'has_data' => ($cur !== array()),
 		'kpi' => $tiles, 'protection' => $protection,
 		'counts' => array('rules_total' => $rn, 'rules_enabled' => $re, 'lists_total' => $ln, 'lists_enabled' => $le,
 			'jobs_healthy' => $ok, 'jobs_unhealthy' => $bad));

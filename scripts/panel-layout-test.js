@@ -83,7 +83,108 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 			check(label + ': HTTP 200', resp && resp.status() === 200, resp && String(resp.status()));
 			check(label + ': no horizontal page scroll', m.over <= 1, 'overflow ' + m.over + ' px');
 			if (v.name === 'desktop' && p === 'dashboard') { check('desktop: the wide layout uses the screen (shell >= 1500 px at 1600)', m.shell >= 1500, 'shell ' + m.shell); }
-			if (SHOTS && ['dashboard', 'update', 'users', 'settings', 'rules&new=1', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'geo'].indexOf(p) >= 0) {
+			if (p === 'dashboard') {
+				// Dashboard v2 grid (docs/15-DASHBOARD.md): tiles, readiness | funnel, system cards.
+				const g = await page.evaluate(() => {
+					const box = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top + window.scrollY), w: Math.round(r.width), h: Math.round(r.height) }; };
+					const all = (sel) => Array.prototype.slice.call(document.querySelectorAll(sel)).map(box);
+					return { tiles: all('[data-tile]'), ready: all('#dash-ready'), funnel: all('#dash-funnel'), sys: all('[id^=dash-sys-], #clf-labels'), main: all('#dash-main'), strip: all('#dash-strip'), chips: all('.gp-dchip'),
+						svgW: (document.querySelector('#dash-main svg') || { getBoundingClientRect: () => ({ width: 0 }) }).getBoundingClientRect().width };
+				});
+				const rows = (list) => { const m = {}; list.forEach((b) => { (m[b.y] = m[b.y] || []).push(b); }); return Object.keys(m).map((k) => m[k]); };
+				check(label + ': six KPI tiles', g.tiles.length === 6, String(g.tiles.length));
+				const perRow = v.name === 'desktop' ? 6 : 2;
+				check(label + ': KPI tiles ' + perRow + ' per row, equal width and height', rows(g.tiles).every((r) => r.length === perRow && r.every((b) => Math.abs(b.w - r[0].w) <= 1 && Math.abs(b.h - r[0].h) <= 1)), JSON.stringify(g.tiles.map((b) => [b.x, b.y, b.w, b.h])));
+				check(label + ': status strip has 6 chips, ' + (v.name === 'desktop' ? 'one row' : 'two per row'), g.chips.length === 6 && rows(g.chips).length === (v.name === 'desktop' ? 1 : 3), String(rows(g.chips).length));
+				if (g.ready.length && g.funnel.length) {
+					if (v.name === 'desktop') { check(label + ': readiness and funnel side by side, equal height, 7:5', g.ready[0].y === g.funnel[0].y && g.ready[0].h === g.funnel[0].h && Math.abs(g.ready[0].w / g.funnel[0].w - 7 / 5) < 0.12, JSON.stringify([g.ready[0], g.funnel[0]])); }
+					else { check(label + ': readiness and funnel stacked full width', g.funnel[0].y > g.ready[0].y && Math.abs(g.ready[0].w - g.funnel[0].w) <= 1, JSON.stringify([g.ready[0], g.funnel[0]])); }
+				}
+				check(label + ': system cards equal height per row', rows(g.sys).every((r) => r.every((b) => b.h === r[0].h)), JSON.stringify(g.sys.map((b) => [b.y, b.h])));
+				check(label + ': main chart fills its card (' + Math.round(g.svgW) + ' px)', g.svgW > (v.name === 'desktop' ? 1000 : 300), String(g.svgW));
+			}
+			if (p === 'dashboard') {
+				// review fixes: tiles aligned, readiness table not run together, alerts on a phone, active tab readable in both themes
+				const r = await page.evaluate(() => {
+					const rect = (el) => { const b = el.getBoundingClientRect(); return { x: b.left, y: Math.round(b.top + window.scrollY), w: b.width, h: b.height, r: b.right }; };
+					const th = Array.prototype.slice.call(document.querySelectorAll('#dash-ready thead th')).map((e) => Object.assign(rect(e), { clip: e.scrollWidth > e.clientWidth + 1, t: e.innerText }));
+					const badges = Array.prototype.slice.call(document.querySelectorAll('#dash-ready [data-ready] .gp-badge')).map((e) => rect(e).h);
+					const det = document.querySelector('#dash-alerts details');
+					const first = document.querySelector('#dash-alerts [data-alerts-first] .gp-alert');
+					const tile0 = document.querySelector('[data-tile]');
+					return { vals: Array.prototype.slice.call(document.querySelectorAll('[data-tile] .gp-dtile-value')).map((e) => rect(e).y), sparks: Array.prototype.slice.call(document.querySelectorAll('[data-tile] .gp-dspark')).map((e) => rect(e).y),
+						labels: Array.prototype.slice.call(document.querySelectorAll('[data-tile] .gp-dtile-label')).map((e) => Math.round(rect(e).h)), th, badges,
+						open: det ? det.hasAttribute('open') : null, firstVisible: first ? (rect(first).h > 20 && rect(first).y < 900) : null, alertsH: Math.round(rect(document.querySelector('#dash-alerts')).h), tileY: tile0 ? rect(tile0).y : 0 };
+				});
+				const rowsOf = (ys) => { const m = {}; ys.forEach((y, i) => { (m[Math.round(y / 50)] = m[Math.round(y / 50)] || []).push(i); }); return Object.keys(m).length; };
+				check(label + ': KPI values start at the same height in every tile of a row (the help icon does not push one down)', new Set(r.vals.slice(0, v.name === 'desktop' ? 6 : 2)).size === 1 && new Set(r.labels).size === 1, JSON.stringify([r.vals, r.labels]));
+				check(label + ': KPI sparklines line up across a row', new Set(r.sparks.slice(0, v.name === 'desktop' ? 6 : 2)).size === 1, JSON.stringify(r.sparks));
+				check(label + ': the "Ready to enforce" and type badges never wrap (one line high)', r.badges.length > 0 && r.badges.every((h) => h < 30), JSON.stringify(r.badges));
+				// readiness table: no header wraps, no cell is clipped (it fits, or its wrapper scrolls), light and dark, at 1600 and 1280 px
+				const tableProbe = () => page.evaluate(() => {
+					const wrap = document.querySelector('#dash-ready .gp-table-wrap'), tb = document.querySelector('#dash-ready table');
+					if (!wrap || !tb) { return null; }
+					const lines = (el) => { const r = document.createRange(); r.selectNodeContents(el); const tops = {}; Array.prototype.slice.call(r.getClientRects()).forEach((x) => { tops[Math.round(x.top)] = 1; }); return Object.keys(tops).length; };
+					const ths = Array.prototype.slice.call(tb.querySelectorAll('th')), cells = Array.prototype.slice.call(tb.querySelectorAll('th, td'));
+					const cs = getComputedStyle(wrap);
+					return { wrapW: wrap.clientWidth, scrollW: wrap.scrollWidth, tableW: Math.round(tb.getBoundingClientRect().width), scrolls: wrap.scrollWidth > wrap.clientWidth + 1 && /auto|scroll/.test(cs.overflowX),
+						wrapped: ths.filter((t) => lines(t) > 1 || getComputedStyle(t).whiteSpace !== 'nowrap').map((t) => t.innerText), clipped: cells.filter((c) => c.scrollWidth > c.clientWidth + 1).map((c) => c.innerText.trim().slice(0, 20)),
+						badgeLines: Array.prototype.slice.call(tb.querySelectorAll('.gp-badge')).filter((b) => lines(b) > 1).length, heads: ths.map((t) => t.innerText.trim()) };
+				});
+				if (v.name === 'desktop') {
+					for (const width of [1600, 1280]) {
+						for (const scheme of ['light', 'dark']) {
+							await page.setViewportSize({ width: width, height: v.height }); await page.emulateMedia({ colorScheme: scheme }); await page.waitForTimeout(300);
+							const t = await tableProbe();
+							const tag = label + ' ' + width + ' px ' + scheme + ': readiness table';
+							check(tag + ' has the grouped header (Hits: 24 h, 7 d) and 7 header cells, no Devices column of its own', !!t && t.heads.join('|') === 'Rule or list|Hits|Addresses / devices|With valid token|Ready to enforce?|24 h|7 d', JSON.stringify(t && t.heads));
+							check(tag + ': no header wraps, no badge wraps', !!t && t.wrapped.length === 0 && t.badgeLines === 0, JSON.stringify(t && [t.wrapped, t.badgeLines]));
+							check(tag + ': no cell is clipped (it fits its card, or its wrapper scrolls)', !!t && t.clipped.length === 0 && (t.scrollW <= t.wrapW + 1 || t.scrolls), JSON.stringify(t && [t.wrapW, t.scrollW, t.tableW, t.scrolls, t.clipped]));
+							if (width === 1600) { check(tag + ' fits its card at 1600 px without scrolling', !!t && t.scrollW <= t.wrapW + 1, JSON.stringify(t && [t.wrapW, t.scrollW])); }
+						}
+					}
+					await page.setViewportSize({ width: v.width, height: v.height }); await page.emulateMedia({ colorScheme: 'light' }); await page.waitForTimeout(300);
+				} else {
+					const t = await tableProbe();
+					check(label + ': readiness table on a phone: no header wraps and nothing is clipped (the wrapper scrolls)', !!t && t.wrapped.length === 0 && t.clipped.length === 0 && (t.scrollW <= t.wrapW + 1 || t.scrolls), JSON.stringify(t && [t.wrapW, t.scrollW, t.scrolls, t.wrapped, t.clipped]));
+					// bottom navigation: single-line labels, the page leaves room for the fixed bar, the last content is never behind it
+					const nv = await page.evaluate(() => {
+						const nav = document.querySelector('.gp-bottomnav'); if (!nav) { return null; }
+						const lines = (el) => { const r = document.createRange(); r.selectNodeContents(el); const tops = {}; Array.prototype.slice.call(r.getClientRects()).forEach((x) => { tops[Math.round(x.top)] = 1; }); return Object.keys(tops).length; };
+						window.scrollTo(0, document.documentElement.scrollHeight);
+						const navTop = nav.getBoundingClientRect().top;
+						const main = document.querySelector('main');
+						const lowest = main ? main.getBoundingClientRect().bottom : 0;      // scrolled to the end: the content must end above the bar
+						const docEnd = Math.round(window.scrollY + window.innerHeight);
+						const labels = Array.prototype.slice.call(nav.querySelectorAll('.gp-bottom-label')).map((l) => [l.innerText, lines(l)]);
+						const out = { navH: nav.getBoundingClientRect().height, pad: parseFloat(getComputedStyle(document.body).paddingBottom), navTop: navTop, lowest: lowest, labels: labels, atEnd: docEnd >= document.documentElement.scrollHeight - 2 };
+						window.scrollTo(0, 0); return out;
+					});
+					check(label + ': bottom navigation labels are one line each ("Blocks", not "Temporary blocks & allows")', !!nv && nv.labels.every((l) => l[1] === 1) && nv.labels.some((l) => l[0] === 'Blocks') && !nv.labels.some((l) => /Temporary/.test(l[0])), JSON.stringify(nv && nv.labels));
+					check(label + ': the page has bottom padding at least as tall as the fixed bottom bar, and the last content ends above it', !!nv && nv.pad >= nv.navH - 0.5 && nv.atEnd && nv.lowest <= nv.navTop + 1, JSON.stringify(nv && [nv.navH, nv.pad, nv.navTop, nv.lowest, nv.atEnd]));
+				}
+				if (v.name === 'mobile') {
+					check(label + ': the alert list is collapsed on a phone, the first critical alert is still shown, the card stays short', r.open === false && r.firstVisible === true && r.alertsH < 420, JSON.stringify([r.open, r.firstVisible, r.alertsH, r.tileY]));
+				} else {
+					check(label + ': the alert list is open on a wide screen', r.open === true, String(r.open));
+				}
+				for (const scheme of ['light', 'dark']) {
+					await page.emulateMedia({ colorScheme: scheme }); await page.waitForTimeout(500);
+					const ct = await page.evaluate(() => {
+						const lum = (c) => { const m = c.match(/[\d.]+/g).map(Number); const f = (x) => { x /= 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); }; return 0.2126 * f(m[0]) + 0.7152 * f(m[1]) + 0.0722 * f(m[2]); };
+						const bg = (el) => { while (el) { const c = getComputedStyle(el).backgroundColor; if (c && !/rgba?\(0, 0, 0, 0\)/.test(c) && !/, 0\)$/.test(c)) { return c; } el = el.parentElement; } return 'rgb(255, 255, 255)'; };
+						const on = document.querySelector('#dash-main .gp-tab[aria-selected="true"]'), off = document.querySelector('#dash-main .gp-tab[aria-selected="false"]');
+						if (!on || !off) { return null; }
+						const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+						return { on: ratio(getComputedStyle(on).color, bg(on)), off: ratio(getComputedStyle(off).color, bg(off)), onW: getComputedStyle(on).fontWeight, same: getComputedStyle(on).color !== getComputedStyle(off).color || getComputedStyle(on).fontWeight !== getComputedStyle(off).fontWeight };
+					});
+					check(label + ' ' + scheme + ': the active "24 h" tab is readable (contrast >= 4.5) and looks active, not disabled', !!ct && ct.on >= 4.5 && ct.off >= 3 && ct.same, JSON.stringify(ct));
+					if (SHOTS) { await page.screenshot({ path: SHOTS + '/' + v.name + '-dashboard-' + scheme + '.png', fullPage: true }); }
+				}
+				await page.emulateMedia({ colorScheme: 'light' });
+			}
+			if (false) {
+			} else if (SHOTS && ['update', 'users', 'settings', 'rules&new=1', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'geo'].indexOf(p) >= 0) {
 				await page.screenshot({ path: SHOTS + '/' + v.name + '-' + p.split('&')[0] + (p.indexOf('new=1') > 0 ? '-form' : '') + (p.indexOf('act_op') > 0 ? '-filters' : '') + '.png', fullPage: false });
 			}
 		}
@@ -393,10 +494,20 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		await Promise.all([page.waitForNavigation(), page.click('button[name=override][value=allow]')]);
 		await ctxCheck('override', 'msg-override-add', '.gp-card');
 		await page.goto(ROOT + '?r=dashboard');
-		await Promise.all([page.waitForNavigation(), page.click('form[action$="r=dashboard"] button[type=submit]')]);
+		let dialogs = 0; const onDialog = () => { dialogs++; }; page.on('dialog', onDialog);
+		await Promise.all([page.waitForNavigation(), page.click('#dash-kill a[href*="kill_confirm=1"]')]);
+		const ask = await page.locator('#dash-kill .gp-kill-confirm').innerText();
+		check(v.name + ' kill switch: one click only asks ("Stop the guard? This switches off all protection." Stop / Cancel), inline, no browser dialog, nothing stopped yet',
+			/Stop the guard\?/.test(ask) && /switches off all protection/.test(ask) && /Cancel/.test(ask) && dialogs === 0 && (await page.locator('#dash-kill .gp-pulse-ok').count()) === 1, ask.replace(/\s+/g, ' '));
+		await Promise.all([page.waitForNavigation(), page.click('#dash-kill a:has-text("Cancel")')]);
+		check(v.name + ' kill switch: Cancel leaves the guard running and the Stop link back', (await page.locator('#dash-kill .gp-pulse-ok').count()) === 1 && (await page.locator('#dash-kill .gp-kill-confirm').count()) === 0);
+		await Promise.all([page.waitForNavigation(), page.click('#dash-kill a[href*="kill_confirm=1"]')]);
+		await Promise.all([page.waitForNavigation(), page.click('#dash-kill .gp-kill-confirm button[type=submit]')]);
+		check(v.name + ' kill switch: the confirmed Stop stopped the guard (no dialog)', (await page.locator('#dash-kill .gp-pulse-bad').count()) === 1 && dialogs === 0);
 		await ctxCheck('kill switch stop', 'msg-killswitch', 'div');
-		await Promise.all([page.waitForNavigation(), page.click('form[action$="r=dashboard"] button[type=submit]')]);
+		await Promise.all([page.waitForNavigation(), page.click('#dash-kill form button[type=submit]')]);
 		await ctxCheck('kill switch start', 'msg-killswitch', 'div');
+		page.off('dialog', onDialog);
 		// ---- IP feeds tab: presets, create, a refused fetch (SSRF guard, no network needed), messages in context, delete
 		await page.goto(ROOT + '?r=iplists&new_feed=1&preset=uptimerobot#ipl-feeds');
 		check(v.name + ' feeds: the Feeds tab opens on the hash, the preset fills the form (name, URL, allow-list destination), the CDN warning is visible',

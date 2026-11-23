@@ -27,6 +27,15 @@ mkdir "$WORK/bg"
 (cd "$WORK/bg" && "$PHP_BIN" -r 'define("GP_BOOT",1);define("GV_BOOT",1);define("GV_NO_AUTORUN",1);require "panel/config_io.php";require "panel/auth.php";
 	$a=gp_users_create("admin","layout-op","operator","op-layout-pass-12345");$b=gp_users_create("admin","layout-demo","demo","demo-layout-pass-12345");exit(($a[0]&&$b[0])?0:1);') \
 	|| { echo "ERROR: could not create the role users"; exit 2; }
+# Two rules and one IP list in monitor mode (the dashboard's rollout readiness card) and one enforced rule.
+(cd "$WORK/bg" && "$PHP_BIN" -r 'define("GP_BOOT",1);define("GV_BOOT",1);define("GV_NO_AUTORUN",1);
+	foreach (array("config_io","auth","acl","demo","data","jobs","update","replay","filters","ui","reasons","overrides","live","dash","health","geo","rules","iplists","feeds") as $f) { require_once "panel/$f.php"; }
+	$r1 = gp_rule_blank(); $r1["id"]="r1a2b3c"; $r1["name"]="Scripted clients"; $r1["action"]="block"; $r1["ua"]["values"]=array("curl","python-requests");
+	$r2 = gp_rule_blank(); $r2["id"]="st-curl"; $r2["name"]="Headless browsers"; $r2["action"]="captcha"; $r2["ua"]["values"]=array("HeadlessChrome");
+	$r3 = gp_rule_blank(); $r3["id"]="enf1abc"; $r3["name"]="Known bad path"; $r3["action"]="block"; $r3["mode"]="enforce"; $r3["priority"]=200; $r3["ua"]=null; $r3["path"]=array("op"=>"include","type"=>"prefix","values"=>array("/wp-login"));
+	$w = gp_rules_write(array($r1,$r2,$r3));
+	$l = gp_iplists_save(array("name"=>"Hosting ranges","type"=>"block","mode"=>"monitor","enabled"=>"1","text"=>"198.51.100.0/24\n203.0.113.0/28\n"), null, "admin", "127.0.0.1");
+	exit(($w[0] && $l["ok"]) ? 0 : 1);') || { echo "ERROR: could not create the sample rules and list"; exit 2; }
 # Sample traffic so the log, identity and dashboard pages have something to show.
 mkdir -p "$WORK/bg/logs"
 # Two uploaded GeoIP sources that were never compiled (the GeoIP page warns and shows them in the table).
@@ -63,9 +72,50 @@ status('verify', status='failed', last_exit=1, last_failure=now - 120, last_succ
 status('nightly', last_success=now - 3 * 86400, last_end=now - 3 * 86400)
 status('train', status='warning', warnings=['model training produced no candidate: skipped: 12 clean sessions is below ml_min_train=200'], last_error='model training produced no candidate',
        last_success=now - 3600, result_json=json.dumps({'ml_trained': False, 'ml_samples': 12}))
-cur = {'requests': 1840, 'allowed': 1500, 'blocked': 210, 'limited': 12, 'challenged': 96, 'challenge_success': 91.4, 'token_issued': 88, 'rule_hits': 140, 'honeypot': 6, 'degraded': 0}
-prev = {'requests': 1500, 'allowed': 1320, 'blocked': 120, 'limited': 12, 'challenged': 40, 'challenge_success': 96.0, 'token_issued': 38, 'rule_hits': 0, 'honeypot': 9, 'degraded': 0}
-json.dump({'generated_at': now - 300, 'tz': {'name': 'UTC', 'offset': 0}, 'traffic': {'requests': 1840, 'devices': 310, 'addresses': 280, 'degraded': 0},
+cur = {'requests': 1840, 'allowed': 1500, 'blocked': 210, 'limited': 12, 'challenged': 96, 'challenge_success': 91.4, 'token_issued': 88, 'rule_hits': 140, 'honeypot': 6, 'degraded': 0, 'would_act': 340}
+prev = {'requests': 1500, 'allowed': 1320, 'blocked': 120, 'limited': 12, 'challenged': 40, 'challenge_success': 96.0, 'token_issued': 38, 'rule_hits': 0, 'honeypot': 9, 'degraded': 0, 'would_act': 200}
+sys.path.insert(0, os.path.dirname(d))
+from analyzer import snapshot as snap_mod
+import random
+rnd = random.Random(7)
+syn = []
+for h in range(168, -1, -1):
+    base = 40 + int(35 * (1 + __import__('math').sin(h / 3.8)))
+    for _ in range(base):
+        r = rnd.random()
+        ua = 'curl/8.4.0' if r < 0.22 else 'Mozilla/5.0 Chrome/130.0'
+        act, sh, rs = 'allow', 0, []
+        if r < 0.10: act, rs = '403', ['SH_RULE:r1a2b3c']
+        elif r < 0.14: act, sh, rs = '403', 1, ['SH_RULE:r1a2b3c']
+        elif r < 0.22: act, sh, rs = 'challenge', 1, ['SH_IPL_BLOCK:hosting-ranges']
+        elif r < 0.27: act = 'challenge'
+        elif r < 0.29: act = '429'
+        if act == 'challenge' and not sh and rnd.random() < 0.9:
+            t0 = now - h * 3600 + rnd.random() * 3400
+            dv, ipx = 'dev%d' % rnd.randint(81, 400), '198.51.100.%d' % rnd.randint(1, 250)
+            syn.append({'ts': t0, 'act': 'challenge', 'ip': ipx, 'dev': dv, 'tok': 'm', 'rs': []})
+            if rnd.random() < 0.7:
+                syn.append({'ts': t0 + 2, 'act': 'token_issued', 'ip': ipx, 'dev': dv, 'tok': 'm', 'rs': []})
+                if rnd.random() < 0.8:
+                    syn.append({'ts': t0 + 6, 'act': 'allow', 'ip': ipx, 'dev': dv, 'tok': 'v', 'rs': []})
+        if rnd.random() < 0.12:
+            # an image CAPTCHA the way the guard writes it: the page (act challenge, cap show, no device yet), the right answer
+            # (act token_issued, cap ok, ct seconds, tl c, the NEW device id from the token), then a request carrying that token
+            t0 = now - h * 3600 + rnd.random() * 3300
+            ipx, dv = '192.0.2.%d' % rnd.randint(1, 250), 'cdev%d' % rnd.randint(1, 9999)
+            syn.append({'ts': t0, 'act': 'challenge', 'cap': 'show', 'ip': ipx, 'dev': '', 'tok': 'm', 'rs': ['RULE:st-curl'], 'sh': 0})
+            q = rnd.random()
+            if q < 0.1:
+                syn.append({'ts': t0 + 9, 'act': 'nonce_bad', 'cap': 'wrong', 'ip': ipx, 'dev': '', 'tok': 'm', 'rs': [], 'sh': 0})
+            elif q < 0.8:
+                syn.append({'ts': t0 + 8, 'act': 'token_issued', 'cap': 'ok', 'ct': rnd.randint(3, 20), 'tl': 'c', 'ip': ipx, 'dev': dv, 'tok': 'v', 'rs': [], 'sh': 0})
+                if rnd.random() < 0.8:
+                    syn.append({'ts': t0 + 15, 'act': 'allow', 'tl': 'c', 'ip': ipx, 'dev': dv, 'tok': 'v', 'rs': [], 'sh': 0})
+        syn.append({'ts': now - h * 3600 + rnd.random() * 3500, 'act': act, 'sh': sh, 'rs': rs, 'ip': '203.0.113.%d' % rnd.randint(1, 60), 'dev': 'dev%d' % rnd.randint(1, 80), 'ua': ua,
+                    'p': '/shop/item-%d' % rnd.randint(1, 9), 'cc': rnd.choice(['IR', 'US', 'DE', 'IR']), 'asn': rnd.choice([12880, 15169, 24940]), 'tok': 'v' if r > 0.5 else 'm',
+                    'cap': ''})
+dash = snap_mod.build_dash([x for x in syn if x['ts'] >= now - 86400], syn, now)
+json.dump({'generated_at': now - 300, 'dash': dash, 'tz': {'name': 'UTC', 'offset': 0}, 'traffic': {'requests': 1840, 'devices': 310, 'addresses': 280, 'degraded': 0},
            'decisions': {'allow': 1500, '403': 210, 'challenge': 96, '429': 12}, 'kpi': {'cur': cur, 'prev': prev, 'window_h': 24},
            'top': {'rules': [['st-curl', 90], ['r1a2b3c', 50]], 'reasons': [['UA_SCRIPT', 190], ['NO_AL', 40]], 'ips': [['203.0.113.5', 80], ['198.51.100.9', 60]], 'devices': [['dev3', 30]],
                    'uas': [['curl/8.4.0', 120], ['python-requests/2.31', 60]], 'paths': [['/shop/item-1', 40], ['/login', 22]], 'countries': [['IR', 900], ['US', 400]]}},

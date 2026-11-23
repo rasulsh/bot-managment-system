@@ -120,7 +120,7 @@
 		$gp_active = ($route === $gp_key) ? ' gp-nav-active' : ''; ?>
 	<a class="gp-bottom-item<?= $gp_active ?>" href="index.php?r=<?= gp_e($gp_key) ?>">
 		<span class="gp-nav-icon" aria-hidden="true"><?= $gp_nav[$gp_key][1] ?></span>
-		<span class="gp-bottom-label"><?= gp_e(gp_t($gp_nav[$gp_key][0])) ?></span>
+		<?php $gp_short = gp_t($gp_nav[$gp_key][0] . '_short'); ?><span class="gp-bottom-label"><?= gp_e($gp_short !== $gp_nav[$gp_key][0] . '_short' ? $gp_short : gp_t($gp_nav[$gp_key][0])) ?></span>
 	</a>
 	<?php endforeach; ?>
 </nav>
@@ -201,6 +201,10 @@
 			else { target.setAttribute('hidden', ''); }
 			button.setAttribute('aria-expanded', hidden ? 'true' : 'false');
 		});
+	});
+	// Collapsible lists that start open on wide screens and closed on a phone (the dashboard's alert list).
+	document.querySelectorAll('details[data-open-wide]').forEach(function (d) {
+		if (window.matchMedia && window.matchMedia('(min-width: 768px)').matches) { d.setAttribute('open', ''); }
 	});
 	// Tabs: the markup already contains every panel, stacked. With the script the
 	// strip appears, only the active panel shows, the arrow keys move between tabs

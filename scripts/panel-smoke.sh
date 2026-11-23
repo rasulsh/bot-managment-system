@@ -60,7 +60,7 @@ fi
 code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "username=$USER_NAME" --data-urlencode "password=$PASS" "$URL?r=login")"
 check "login answers 303" "$([ "$code" = 303 ] && echo 1 || echo 0)"
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
-check "dashboard is shown after login (session cookie works on this path)" "$(grep -q 'name="killswitch"' <<<"$dash" && echo 1 || echo 0)"
+check "dashboard is shown after login (session cookie works on this path)" "$(grep -q 'data-chip="kill"' <<<"$dash" && echo 1 || echo 0)"
 cpath="$(awk '$6 ~ /^gp_/ {print $3; exit}' "$JAR")"
 check "the session cookie path is the panel path ($cpath)" "$([ "$cpath" = "$PANEL/" ] && echo 1 || echo 0)"
 
@@ -243,13 +243,17 @@ cf2="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=config_file")"
 check "config editor left the file unchanged" "$([ "$(grep -o 'name="base_hash" value="[0-9a-f]*"' <<<"$cf2")" = "$(grep -o 'name="base_hash" value="[0-9a-f]*"' <<<"$cf")" ] && echo 1 || echo 0)"
 
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"; tok="$(printf '%s' "$dash" | csrf)"
-curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'killswitch=stop' "$URL?r=dashboard"
+curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'killswitch=stop' -d 'confirm=1' "$URL?r=dashboard"
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
 check "kill switch can be engaged" "$(grep -q 'value="start"' <<<"$dash" && echo 1 || echo 0)"
 tok="$(printf '%s' "$dash" | csrf)"
 curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'killswitch=start' "$URL?r=dashboard"
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
-check "kill switch can be released" "$(grep -q 'value="stop"' <<<"$dash" && echo 1 || echo 0)"
+check "kill switch can be released (the strip offers Stop again, as a link to the confirmation)" "$(grep -q 'kill_confirm=1' <<<"$dash" && echo 1 || echo 0)"
+tok="$(printf '%s' "$dash" | csrf)"
+nc="$(curl -sk -o /dev/null -D - -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'killswitch=stop' "$URL?r=dashboard")"
+dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
+check "a Stop POST without the confirmation step redirects to it and stops nothing" "$(grep -qi 'location: .*kill_confirm=1' <<<"$nc" && grep -q 'kill_confirm=1' <<<"$dash" && ! grep -q 'value="start"' <<<"$dash" && echo 1 || echo 0)"
 
 # Roles. The admin creates a Monitoring operator and a Demo user through the Users page, then each of them signs in once and
 # visits every page: allowed pages answer 200, every other page 403; POSTs are refused with 403 (operator) and the effect is
@@ -296,7 +300,7 @@ check "operator: a settings save is refused with 403" "$([ "$(opost -d action=sa
 sv="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=settings")"
 check "...and the value was not saved" "$(! grep -q 'value="77"' <<<"$sv" && echo 1 || echo 0)"
 ks_before="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard" | grep -c 'value="stop"')"
-kc="$(opost -d "killswitch=$([ "$ks_before" -gt 0 ] && echo stop || echo start)" "$URL?r=dashboard")"
+kc="$(opost -d "killswitch=$([ "$ks_before" -gt 0 ] && echo stop || echo start)" -d confirm=1 "$URL?r=dashboard")"
 ks_after="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard" | grep -c 'value="stop"')"
 check "operator: flipping the kill switch is refused with 403 and the switch did not change" "$([ "$kc" = 403 ] && [ "$ks_before" = "$ks_after" ] && echo 1 || echo 0)"
 check "operator: creating a user, an override, a rule, a job and an update are all refused with 403" "$([ "$(opost -d do=create -d username=smoke-hack -d role=admin -d password=hacked-password-1 "$URL?r=users")" = 403 ] && [ "$(opost -d action=add -d ip=203.0.113.9 "$URL?r=overrides")" = 403 ] && [ "$(opost -d do=save "$URL?r=rules")" = 403 ] && [ "$(opost -d job=verify "$URL?r=jobs")" = 403 ] && [ "$(opost -d do=upload "$URL?r=update")" = 403 ] && echo 1 || echo 0)"

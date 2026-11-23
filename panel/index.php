@@ -28,6 +28,7 @@ require_once __DIR__ . '/ui.php';
 require_once __DIR__ . '/reasons.php';
 require_once __DIR__ . '/overrides.php';
 require_once __DIR__ . '/live.php';
+require_once __DIR__ . '/dash.php';
 require_once __DIR__ . '/health.php';
 require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/rules.php';
@@ -256,6 +257,8 @@ switch ($gp_route) {
 		if ($gp_role === 'demo') { gp_render('demo', array('demo' => gp_demo_model())); }
 		if ($gp_post && isset($_POST['killswitch'])) {
 			$stop = $_POST['killswitch'] === 'stop';
+			// Stopping all protection takes a confirmation step: the form that carries confirm=1 is only drawn by the confirmation state.
+			if ($stop && (($_POST['confirm'] ?? '') !== '1')) { gp_redirect('dashboard', array('kill_confirm' => 1)); }
 			if (gp_killswitch_set($stop)) {
 				gp_audit_append(array('event' => 'killswitch', 'actor' => $gp_user,
 					'ip' => $gp_ip, 'key' => 'guard.off',
@@ -272,10 +275,12 @@ switch ($gp_route) {
 		$hjobs = $hin['jobs'];
 		$hcfg = gv_cfg_load();
 		$hrules = gp_rules_state();
+		$hlists = gp_iplists_state()['lists'];
 		gp_render('dashboard', array(
 			'snapshot' => $hin['snapshot'], 'clf_labels' => gp_clf_labels(),
 			'cfg'      => $hcfg,
 			'kill'     => gp_killswitch_on(),
+			'kill_confirm' => (($_GET['kill_confirm'] ?? '') === '1'),
 			'redis_up' => $hin['redis_up'],
 			'health'   => gp_guard_health(),
 			'rinfo'    => gp_redis_info(),
@@ -292,7 +297,12 @@ switch ($gp_route) {
 			'cron_lines' => gp_cron_setup_lines($hjobs, $hin['cron']),
 			'protection' => gp_protection_mode($hcfg, $hrules['rules']),
 			'rsum'     => gp_rules_summary($hrules['rules']),
-			'isum'     => gp_iplists_summary(gp_iplists_state()['lists']),
+			'isum'     => gp_iplists_summary($hlists),
+			'rules'    => $hrules['rules'],
+			'iplists'  => $hlists,
+			'geo'      => gp_geo_status(),
+			'feeds'    => $hin['feeds'],
+			'perms'    => $hin['perms'],
 		));
 
 	case 'logs':
