@@ -36,7 +36,8 @@ python3 - "$WORK/bg/logs/guard-$(date +%Y%m%d).jsonl" <<'PY'
 import json, sys, time
 now = time.time()
 rows = []
-for i in range(60):
+# oldest first, like the guard writes it (the Live page tails the file in order)
+for i in range(59, -1, -1):
     bad = i % 3 == 0
     rows.append({'v': 5, 'rid': '%012x' % i, 'ts': now - i * 40, 'ip': '203.0.113.%d' % (5 + i % 4), 'ua': 'curl/8.4.0' if bad else 'Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0 Safari/537.36',
                  'uah': 'a' * 12, 'm': 'GET', 'p': '/shop/item-%d' % i, 'q': '', 'aj': 0, 'nav': 1, 'gate': 1, 'tok': 'm' if bad else 'v', 'dev': '' if bad else 'dev%d' % (i % 5),
@@ -81,7 +82,7 @@ PY
 PID=$!
 for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/panel/index.php" 2>/dev/null && break; sleep 0.1; done
 [ -n "$SHOTS" ] && mkdir -p "$SHOTS"
-node "$ROOT/scripts/panel-layout-test.js" "http://127.0.0.1:$PORT" /panel admin layout-pass-12345 "$SHOTS" layout-op op-layout-pass-12345 layout-demo demo-layout-pass-12345
+LAYOUT_LOG_FILE="$WORK/bg/logs/guard-$(date +%Y%m%d).jsonl" node "$ROOT/scripts/panel-layout-test.js" "http://127.0.0.1:$PORT" /panel admin layout-pass-12345 "$SHOTS" layout-op op-layout-pass-12345 layout-demo demo-layout-pass-12345
 rc=$?
 # A PHP warning, notice, deprecation or fatal error on any page is a failure too.
 if grep -E 'Warning|Notice|Deprecated|Fatal error|Parse error' "$WORK/php.log" >/dev/null 2>&1; then

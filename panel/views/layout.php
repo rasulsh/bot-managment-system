@@ -47,6 +47,7 @@
 		$gp_nav = array(
 			'dashboard' => array('nav_dashboard', '&#9632;'),
 			'logs'      => array('nav_logs', '&#9776;'),
+			'live'      => array('nav_live', '&#9654;'),
 			'identity'  => array('id_title', '&#9678;'),
 			'overrides' => array('nav_overrides', '&#9873;'),
 			'rules'     => array('nav_rules', '&#9888;'),

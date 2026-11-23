@@ -199,6 +199,25 @@ who steals the session.
   last successful `run_verify` / `run_nightly` / `snapshot` / `worker` times with
   a stale warning. KPI cards, inline-SVG charts generated in PHP, and the
   kill-switch control itself behind a confirm step.
+- **Live requests** (route `live`) — the current daily log as a **tail**, for operators and admins (the Demo role is refused by the
+  permission map). The page is a shell; the script polls `index.php?r=live&poll=1`, a GET that answers JSON with `Cache-Control:
+  no-store`, needs no CSRF token (it only reads) and uses no Redis and writes nothing. **Cursor:** `YYYYMMDD.OFFSET`, the byte after the
+  last COMPLETE line delivered, so each poll reads only the new bytes and a line still being written waits for its newline; at the end of a
+  day's file the cursor continues at byte 0 of the next day's file (days without traffic are skipped; a half line abandoned at the end of a
+  finished day is dropped); a file shorter than the cursor is read again from the start. **Caps per poll:** 500 rows and 1 MiB (`more` makes the
+  page ask again at once). **Live** mode starts with the last 1 / 5 / 15 / 60 minutes (read backwards from the end, at most 2 MiB, across
+  midnight when needed) and then follows; **Fixed window** takes a start and an end (server time zone; at most two days; found with a binary
+  search on the time stamps, replayed forward, "End of the window reached"). Outcome lines (`o` = 1) that arrive in a later poll are merged into
+  the rows already shown. **Filters:** every Logs filter with include / exclude (action, reason, method, IP or CIDR, device, path, User-Agent,
+  country, ASN, IP list membership, response status, ...) through the same code as the Logs page (the status filter sees only outcomes that
+  arrived in the same poll), plus the quick toggles *blocked, challenged, CAPTCHA, rate limited, monitor-only would-act, allowed, verified
+  crawlers* (OR among themselves, AND with the filters). A **watched** address or device (kept in this browser only) always passes the filters
+  and is marked. Refresh 2 / 5 / 10 / 30 s or paused; the polling also stops while the pointer is over the table and while the tab is hidden.
+  Rows kept on screen: 200 / 500 / 1000. **Display:** rows coloured by outcome (allowed, challenged, CAPTCHA, blocked, rate limited,
+  monitor-only; the word is always printed), the reason badges of PR F, a header strip (requests, per second, count per outcome, distinct
+  addresses and devices, an inline-SVG per-second chart), **Top right now** (press an entry to add a filter), a details drawer (all fields, the
+  rule or list that matched, the identity history, the quick actions of *Temporary blocks & allows* for the address and the device) and **Export CSV**
+  of the rows on screen. Everything a client wrote (User-Agent, path, query) is put on the page with `textContent`, never as markup.
 - **Log explorer** — the replacement for `grep` and `jq`. Filters on date, `act`,
   `sh`, `hold`, `ovr`, `tok`, device, IP, path substring, reason, response status
   and score ranges; reverse-streamed with a hard cap of 200 rows per page. It
@@ -468,6 +487,7 @@ Read-only roles can use this form.
 | `account` | demo | demo for `do=password`, admin otherwise |
 | `logout` | demo | demo |
 | `logs` | operator (CSV export and share links included) | admin |
+| `live` | operator (the page and its JSON poll are GET reads of the log) | admin (none used) |
 | `identity` | operator | admin (quick block, mark seen) |
 | `overrides`, `rules`, `geo`, `iplists`, `replay`, `models`, `settings`, `jobs`, `audit`, `captcha_preview` | operator (the test and lookup boxes, exports and the CAPTCHA sample are GET reads) | admin |
 | `config_file` | admin (raw overlay editor) | admin |

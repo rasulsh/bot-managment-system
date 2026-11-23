@@ -4,6 +4,11 @@ Newest first. Each entry is one version, written as `## <version>` (the same str
 The Update page of the panel shows the entries between the installed version and the one in the ZIP.
 Older history and upgrade steps: [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md).
 
+## 2026.11.34
+
+- **Live requests page** (`?r=live`, Monitoring operators and administrators): the current daily log read as a tail from a byte-offset cursor (`panel/live.php`), polled as JSON (`?r=live&poll=1`, a GET, never cached, no Redis, no writes). A line still being written waits for its newline, the cursor crosses midnight and skips days without traffic, caps per poll are 500 rows and 1 MiB, **Live** (last 1 / 5 / 15 / 60 minutes, then follow) or a **fixed start / end** window (binary search on the time stamps); refresh 2 / 5 / 10 / 30 s or paused, paused while the pointer is over the table and stopped while the tab is hidden; 200 / 500 / 1000 rows kept.
+- All Logs filters with include / exclude plus quick toggles (blocked, challenged, CAPTCHA, rate limited, monitor-only would-act, allowed, verified crawlers); rows coloured by outcome with full reason names (PR F); a strip with requests per second, counts per outcome, distinct addresses and devices and an inline-SVG per-second chart; **Top right now** (press to filter); a details drawer (all fields, the rule or list that matched, the identity history, the quick actions of *Temporary blocks & allows* for the address and the device); **Watch** an address or device; CSV export of the rows on screen. Client-written text is only ever put on the page as text.
+
 ## 2026.11.33
 
 - **Behaviour change: overrides always act.** A deny override no longer waits for `enforce.block`: allow, deny, challenge and CAPTCHA overrides act immediately, also in monitor mode and for a client in the holdout, like a rule in enforce mode. Only the kill switch (`guard.off`) stops them. A deny override now logs `OVR_DENY`. The Temporary blocks & allows page says "Overrides act immediately, also in monitor mode." Existing deny overrides that never acted will start blocking at once (docs/10).

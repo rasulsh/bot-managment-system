@@ -18,7 +18,7 @@ if (!BASE || !USER || !PASS) { console.error('Usage: node panel-layout-test.js B
 const ROOT = BASE.replace(/\/$/, '') + '/' + (PANEL || '/panel').replace(/^\/|\/$/g, '') + '/index.php';
 const ORIGIN = new URL(BASE).origin;
 const VIEWS = [{ name: 'desktop', width: 1600, height: 1000 }, { name: 'mobile', width: 390, height: 844 }];
-const PAGES = ['dashboard', 'logs', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'identity&id=203.0.113.5', 'overrides', 'overrides&new=100.64.0.5', 'rules', 'rules&new=1', 'rules&edit=ZZ',
+const PAGES = ['dashboard', 'logs', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'identity&id=203.0.113.5', 'overrides', 'overrides&new=100.64.0.5', 'live&minutes=60', 'rules', 'rules&new=1', 'rules&edit=ZZ',
 	'geo', 'geo&test=1&ip=203.0.113.7', 'iplists', 'iplists&new=1&type=block', 'iplists&test=1&ip=203.0.113.7', 'iplists&new_feed=1&preset=cloudflare#ipl-feeds', 'replay', 'models', 'settings', 'config_file', 'jobs', 'jobs&job=verify', 'audit&event=config&event_op=not', 'update', 'users', 'users&role=admin&role_op=not&q=lay', 'account'];
 let failed = 0;
 const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } else { failed++; console.log('FAIL  ' + name + (extra ? ' (' + extra + ')' : '')); } };
@@ -193,6 +193,114 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		check(v.name + ' logs: the quick actions fit the screen width', !!qaBox && qaBox.x >= 0 && qaBox.x + qaBox.width <= v.width + 1, JSON.stringify(qaBox));
 		await Promise.all([page.waitForNavigation(), qa.first().locator('button[value="challenge:3600"]').click()]);
 		check(v.name + ' logs: pressing a quick action returns to the Logs page (not the Overrides page) with a message', /r=logs/.test(page.url()) && (await page.locator('.gp-flash, [role=status], [role=alert]').count()) >= 1, page.url());
+		// ---- Live requests (PR H): follows the log, half lines wait, hover and hidden tab pause the polling, text is never markup, drawer with quick actions
+		if (process.env.LAYOUT_LOG_FILE) {
+			const fs = require('fs');
+			const LOGF = process.env.LAYOUT_LOG_FILE;
+			const rowJson = (extra) => JSON.stringify(Object.assign({ v: 5, rid: Math.random().toString(16).slice(2, 14).padEnd(12, '0'), ts: Date.now() / 1000, ip: '203.0.113.77', ua: 'live-test', uah: 'b'.repeat(12), m: 'GET', p: '/live-test', q: '', aj: 0, nav: 1, gate: 1, tok: 'm', dev: 'devlive1', sf: 'navigate', al: 1, hc: 8, sc: 0, esc: 0, rs: [], rd: 0, hp: 0, bot: '', ref: '', botv: '', rep: 0, ml: -1, clf: -1, hold: 0, ovr: '', act: 'allow', sh: 0, ms: 1 }, extra));
+			const sfx = v.name;                                       // paths are unique per viewport: the log keeps the rows of the first pass
+			let ridN = 0;
+			const uid = () => (Date.now() * 100 + (++ridN)).toString(16).padStart(12, '0').slice(-12);      // a new request id per row: the page never shows one id twice
+			let polls = 0;
+			page.on('request', (r) => { if (/[?&]poll=1/.test(r.url())) { polls++; } });
+			await page.goto(ROOT + '?r=live&minutes=60');
+			await page.selectOption('#live-interval', '2');
+			await page.waitForSelector('#live-rows .gp-live-row');
+			if (SHOTS) { await page.screenshot({ path: SHOTS + '/' + v.name + '-live.png', fullPage: false }); }
+			const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+			check(v.name + ' live: the first load shows the last 60 minutes, newest on top, no horizontal scroll', (await page.locator('#live-rows .gp-live-row').count()) >= 20 && over <= 1, String(over));
+			check(v.name + ' live: the header strip has numbers, an inline SVG chart with bars and a legend; Top right now has entries',
+				(await page.locator('#live-stats .gp-live-stat').count()) >= 8 && (await page.locator('#live-chart svg rect').count()) >= 1 && (await page.locator('#live-chart .gp-live-legend-i').count()) === 6 && (await page.locator('#live-toplists .gp-live-top-i').count()) >= 3);
+			check(v.name + ' live: reasons are badges with the full name, the code and a monitor marker for SH_ codes', /Rule matched/.test(await page.locator('#live-rows').innerText()) && (await page.locator('#live-rows .gp-reason-mon').count()) >= 1 && (await page.locator('#live-rows .gp-reason-code').count()) >= 3);
+			// a client-written User-Agent and path are text, never markup; a half line waits until it is complete
+			fs.appendFileSync(LOGF, rowJson({ rid: uid(), ua: '<img src=x onerror=window.__xss=1>', p: '/<b>live-xss-' + sfx + '</b>', rs: ['SH_RULE:r1'], act: '403', sh: 1 }) + '\n');
+			const half = rowJson({ rid: uid(), p: '/live-half-' + sfx, act: '429' });
+			fs.appendFileSync(LOGF, half.slice(0, 40));
+			await page.waitForSelector('#live-rows .gp-live-path:text("live-xss-' + sfx + '")', { timeout: 8000 });
+			check(v.name + ' live: a row appended to the log appears at the top without a reload', (await page.locator('#live-rows .gp-live-row').first().locator('.gp-live-path').innerText()).indexOf('live-xss-' + sfx) >= 0);
+			check(v.name + ' live: the markup in the User-Agent and the path is shown as text (no element created, no script ran)', (await page.locator('#live-rows img, #live-rows b').count()) === 0 && (await page.evaluate(() => window.__xss === undefined)));
+			await page.waitForTimeout(2600);
+			check(v.name + ' live: a half-written line is not shown', (await page.locator('#live-rows .gp-live-path:text("live-half-' + sfx + '")').count()) === 0);
+			fs.appendFileSync(LOGF, half.slice(40) + '\n');
+			await page.waitForSelector('#live-rows .gp-live-path:text("live-half-' + sfx + '")', { timeout: 8000 });
+			check(v.name + ' live: ...and it is shown, once, when it is complete', (await page.locator('#live-rows .gp-live-path:text("live-half-' + sfx + '")').count()) === 1);
+			// hover pauses the polling
+			await page.hover('#live-rows');
+			await page.waitForTimeout(300);
+			const p0 = polls;
+			fs.appendFileSync(LOGF, rowJson({ rid: uid(), p: '/live-hover-' + sfx }) + '\n');
+			await page.waitForTimeout(4500);
+			check(v.name + ' live: no request is made while the pointer is over the table, and the row waits', polls === p0 && (await page.locator('#live-rows .gp-live-path:text("live-hover-' + sfx + '")').count()) === 0 && /pointer/.test(await page.locator('#live-state').innerText()), polls + ' vs ' + p0);
+			await page.mouse.move(5, 5);
+			await page.waitForSelector('#live-rows .gp-live-path:text("live-hover-' + sfx + '")', { timeout: 8000 });
+			check(v.name + ' live: leaving the table resumes it and the waiting row arrives (cursor, nothing lost)', true);
+			// a hidden tab stops polling
+			await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); });
+			await page.waitForTimeout(300);
+			const p1 = polls;
+			await page.waitForTimeout(4500);
+			check(v.name + ' live: no request is made while the tab is hidden', polls === p1 && /not visible/.test(await page.locator('#live-state').innerText()), polls + ' vs ' + p1);
+			await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')); });
+			await page.waitForTimeout(2600);
+			check(v.name + ' live: showing the tab again resumes the polling', polls > p1);
+			await page.selectOption('#live-interval', '0');
+			await page.waitForTimeout(400);
+			const p2 = polls;
+			await page.waitForTimeout(3000);
+			check(v.name + ' live: interval "Paused" makes no request', polls === p2 && /Paused/.test(await page.locator('#live-state').innerText()));
+			await page.selectOption('#live-interval', '2');
+			// details drawer, quick actions, watch
+			await page.locator('#live-rows .gp-live-row:has(.gp-live-path:text("live-xss-' + sfx + '"))').first().click();
+			check(v.name + ' live: a row opens the details drawer with the reasons, the identity links and all fields', await page.locator('#live-drawer').isVisible() && (await page.locator('#live-drawer .gp-prop').count()) >= 10 && (await page.locator('#live-drawer a[href*="r=identity"]').count()) >= 1 && (await page.locator('#live-drawer .gp-reason').count()) >= 1);
+			check(v.name + ' live: the drawer has the quick actions for the address and the device (Block 15 min, Challenge 1 h, CAPTCHA 1 h, Allow 1 h, Custom...), CSRF-protected, returning to Live',
+				(await page.locator('#live-drawer form.gp-quick').count()) === 2 && (await page.locator('#live-drawer form.gp-quick').first().locator('button[name=quick]').count()) === 4 && (await page.locator('#live-drawer form.gp-quick input[name=csrf]').first().inputValue()).length >= 32
+				&& /^index\.php\?r=live/.test(await page.locator('#live-drawer form.gp-quick input[name=back]').first().inputValue()));
+			const dbox = await page.locator('#live-drawer').boundingBox();
+			check(v.name + ' live: the drawer fits the screen', !!dbox && dbox.x >= -1 && dbox.x + dbox.width <= v.width + 1, JSON.stringify(dbox));
+			await page.locator('#live-drawer button:has-text("Watch")').first().click();
+			check(v.name + ' live: Watch pins an address or device (a chip in the watch bar, kept in this browser)', (await page.locator('#live-watchlist .gp-chip').count()) === 1 && (await page.locator('#live-rows .gp-live-watched').count()) >= 1);
+			await page.keyboard.press('Escape');
+			check(v.name + ' live: Escape closes the drawer', !(await page.locator('#live-drawer').isVisible()));
+			await page.locator('#live-watchlist .gp-chip').first().click();
+			// a click on a "top right now" entry becomes a filter
+			const ipEntry = page.locator('#live-toplists .gp-live-top-sec').first().locator('.gp-live-top-i').first();
+			const ipVal = (await ipEntry.locator('.gp-live-top-v').innerText()).trim();
+			await ipEntry.click();
+			await page.waitForTimeout(800);
+			check(v.name + ' live: pressing an entry of Top right now adds it as a filter (the field and the address bar) and reloads the view', (await page.locator('#lf-ip').inputValue()).indexOf(ipVal) >= 0 && page.url().indexOf('ip=') > 0);
+			const ips = await page.locator('#live-rows .gp-live-ip').allInnerTexts();
+			check(v.name + ' live: ...and only rows of that address remain', ips.length >= 1 && ips.every((t) => t.indexOf(ipVal) >= 0), ipVal + ' / ' + ips.slice(0, 3).join('|'));
+			await page.fill('#lf-ip', '');
+			await page.evaluate(() => { document.getElementById('lf-ip').value = ''; });
+			// quick toggle "Blocked" and the CSV
+			fs.appendFileSync(LOGF, rowJson({ rid: uid(), act: '403', p: '/live-blocked-' + sfx }) + '\n');
+			await page.check('[data-live-show=blocked]');
+			await page.click('#live-apply');
+			await page.waitForTimeout(900);
+			const classes = await page.locator('#live-rows .gp-live-row').evaluateAll((es) => es.map((e) => e.className));
+			check(v.name + ' live: the Blocked toggle shows only blocked requests', classes.length >= 1 && classes.every((c) => /gp-live-r-blocked/.test(c)), String(classes.length));
+			await page.uncheck('[data-live-show=blocked]');
+			await page.click('#live-apply');
+			await page.waitForTimeout(900);
+			const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#live-export')]);
+			const csv = fs.readFileSync(await dl.path(), 'utf8');
+			check(v.name + ' live: Export CSV downloads the rows on screen (short columns plus the reasons spelled out)', /^﻿ts,rid,ip,dev,m,p,q,act,sh,hold,ovr,tok,sc,esc,rs,rep,ml,clf,botv,cc,asn,st,by,dur,rs_names/.test(csv) && csv.split('\r\n').length >= 5 && /Rule matched/.test(csv));
+			// a fixed window
+			const off = await page.evaluate(() => JSON.parse(document.getElementById('live-cfg').textContent).tzOffset);
+			const loc = (t) => new Date((t + off) * 1000).toISOString().slice(0, 16);
+			const nowS = Math.floor(Date.now() / 1000);
+			await page.check('input[name=mode][value=window]');
+			await page.fill('#live-start', loc(nowS - 3000));
+			await page.fill('#live-end', loc(nowS - 600));
+			await page.click('#live-apply');
+			await page.waitForSelector('#live-rows .gp-live-row', { timeout: 8000 });
+			await page.waitForTimeout(600);
+			const wt = await page.locator('#live-rows .gp-live-time').allInnerTexts();
+			check(v.name + ' live: a fixed start / end window replays only that window and says when it is over', wt.length >= 5 && /End of the window/.test(await page.locator('#live-state').innerText()), wt.length + ' rows');
+			if (SHOTS) { await page.screenshot({ path: SHOTS + '/' + v.name + '-live-window.png', fullPage: false }); }
+			await page.check('input[name=mode][value=live]');
+			// the role view: a Monitoring operator has no quick actions (checked below in the role loop through the same config flag)
+		}
 		// ---- filters
 		await page.goto(ROOT + '?r=logs&act=403&act_op=not&path=admin&path_op=not');
 		const chips = page.locator('.gp-chip');
@@ -315,7 +423,7 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 	// ---- one sign-in per role: every page the role may see answers 200 without horizontal scroll, every other page 403;
 	// the Demo dashboard carries the banner and none of the sample traffic (addresses, User-Agents, paths, device ids, rule names).
 	if (OP_USER && DM_USER) {
-		const ALL = ['dashboard', 'logs', 'identity&id=203.0.113.5', 'overrides', 'rules', 'geo', 'iplists', 'replay', 'models', 'settings', 'config_file', 'jobs', 'audit', 'update', 'users', 'account'];
+		const ALL = ['dashboard', 'logs', 'live', 'identity&id=203.0.113.5', 'overrides', 'rules', 'geo', 'iplists', 'replay', 'models', 'settings', 'config_file', 'jobs', 'audit', 'update', 'users', 'account'];
 		const OP_DENIED = ['config_file', 'update', 'users'];
 		const DM_ALLOWED = ['dashboard', 'account'];
 		const SENSITIVE = ['203.0.113.', '198.51.100.', 'curl/8.4.0', 'Mozilla/5.0', '/shop/item-', 'dev3', 'st-curl', 'UA_SCRIPT', 'python-requests', 'r=logs', 'r=identity'];
@@ -335,6 +443,13 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 					const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
 					check(v.name + ' ' + role.name + ' ' + key + ': ' + (allowed ? '200' : '403'), st === (allowed ? 200 : 403), String(st));
 					check(v.name + ' ' + role.name + ' ' + key + ': no horizontal page scroll', over <= 1, 'overflow ' + over + ' px');
+				}
+				const pr = await page.goto(ROOT + '?r=live&poll=1&minutes=60');
+				const ptxt = await pr.text();
+				check(v.name + ' ' + role.name + ' live poll: ' + (role.name === 'operator' ? 'JSON for the operator (a GET, no-store)' : '403 for demo'), role.name === 'operator' ? (pr.status() === 200 && /json/.test(pr.headers()['content-type'] || '') && /no-store/.test(pr.headers()['cache-control'] || '') && JSON.parse(ptxt).ok === true) : pr.status() === 403);
+				if (role.name === 'operator') {
+					await page.goto(ROOT + '?r=live&minutes=60');
+					check(v.name + ' operator live: the page shows no quick actions (read only role)', (await page.evaluate(() => JSON.parse(document.getElementById('live-cfg').textContent).canQuick)) === false);
 				}
 				if (role.name === 'demo') {
 					await page.goto(ROOT + '?r=dashboard');
