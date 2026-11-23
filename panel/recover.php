@@ -12,6 +12,8 @@ $gp_rc_script = ((isset($_GET['a']) && $_GET['a'] === 'verify') ? 'verify' : 'ro
 if (!is_file($gp_rc_dir . '/' . $gp_rc_script)) {
 	http_response_code(404);
 	header('Content-Type: text/plain; charset=utf-8');
+	header('Cache-Control: no-store');
+	header('X-LiteSpeed-Cache-Control: no-cache');
 	exit;
 }
 define('GP_RECOVER_WEB', 1);

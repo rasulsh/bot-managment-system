@@ -232,7 +232,7 @@ run_checks() {   # <label> <panel path> <install dir>
 	log "$SERVER / $1: exposure-check.sh"
 	bash "$REPO/scripts/exposure-check.sh" "http://127.0.0.1:$PORT" "$2" || fail=1
 	log "$SERVER / $1: panel-smoke.sh"
-	bash "$REPO/scripts/panel-smoke.sh" "http://127.0.0.1:$PORT" "$2" admin "$PASSWORD" || fail=1
+	GP_EXPECT_ASSET_CACHE=1 GP_SERVER="$SERVER" bash "$REPO/scripts/panel-smoke.sh" "http://127.0.0.1:$PORT" "$2" admin "$PASSWORD" || fail=1
 	# The update flow through the REAL rewrite rules: recover.php (the web path of the health check) must be reachable.
 	log "$SERVER / $1: update-web-e2e.sh"
 	bash "$REPO/scripts/update-web-e2e.sh" "http://127.0.0.1:$PORT" "$2" "$3" "$PASSWORD" || fail=1

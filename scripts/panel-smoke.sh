@@ -24,6 +24,30 @@ csrf() { grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"
 page="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=login")"
 check "login page renders" "$(grep -q 'name="password"' <<<"$page" && echo 1 || echo 0)"
 
+# Cache busting: every asset URL is versioned, HTML is never cached (browser or LiteSpeed page cache), and a versioned asset may be
+# cached for a year. The asset headers are only expected from a REAL web server that honours .htaccess (GP_EXPECT_ASSET_CACHE=1, set
+# by .github/ci/webserver-test.sh): PHP's built-in server serves static files with no such header.
+hdr="$(curl -sk -D - -o /dev/null -c "$JAR" -b "$JAR" "$URL?r=login")"
+# (LiteSpeed itself consumes X-LiteSpeed-Cache-Control and does not pass it on, so on OpenLiteSpeed the header cannot be seen from outside: it is
+# checked everywhere else, and the PHP side is covered by panel-selftest.)
+check "the login page is never cached: Cache-Control no-store$([ "${GP_SERVER:-}" = ols ] || echo ' and X-LiteSpeed-Cache-Control no-cache')" "$(grep -qi '^cache-control: no-store' <<<"$hdr" && { [ "${GP_SERVER:-}" = ols ] || grep -qi '^x-litespeed-cache-control: no-cache' <<<"$hdr"; } && echo 1 || echo 0)"
+css_href="$(grep -o 'href="assets/app\.css?v=[^"]*"' <<<"$page" | head -1 | sed 's/^href="//; s/"$//')"
+check "the stylesheet URL carries ?v=<VERSION>-<hash of the file> ($css_href)" "$(grep -Eq '^assets/app\.css\?v=[0-9][0-9A-Za-z._-]*-[0-9a-f]{8}$' <<<"$css_href" && echo 1 || echo 0)"
+font_url="$(sed -n "s/.*url('\(assets\/vazirmatn-regular\.woff2?v=[^']*\)').*/\1/p" <<<"$page" | head -1)"
+check "both font URLs are versioned too" "$([ "$(grep -o "woff2?v=" <<<"$page" | wc -l | tr -d ' ')" = 2 ] && [ -n "$font_url" ] && echo 1 || echo 0)"
+check "no unversioned asset reference is left in the page" "$(grep -Eq "assets/[A-Za-z0-9._-]+[\"')]" <<<"$page" && echo 0 || echo 1)"
+if [ -n "$css_href" ]; then
+	ah="$(curl -sk -D - -o /dev/null "$BASE$PANEL/$css_href")"
+	check "the versioned stylesheet is served (200, text/css)" "$(head -1 <<<"$ah" | grep -q ' 200' && grep -qi '^content-type: text/css' <<<"$ah" && echo 1 || echo 0)"
+	if [ "${GP_EXPECT_ASSET_CACHE:-0}" = 1 ]; then
+		check "a versioned asset is cacheable for a year: Cache-Control public, max-age=31536000, immutable" "$(grep -qi '^cache-control: public, max-age=31536000, immutable' <<<"$ah" && echo 1 || echo 0)"
+		uh="$(curl -sk -D - -o /dev/null "$BASE$PANEL/assets/app.css")"
+		check "an UNversioned asset request must revalidate (no immutable, never a year)" "$(grep -qi '^cache-control: no-cache' <<<"$uh" && ! grep -qi 'immutable' <<<"$uh" && echo 1 || echo 0)"
+		fh="$(curl -sk -D - -o /dev/null "$BASE$PANEL/$font_url")"
+		check "a versioned font is cacheable for a year too" "$(grep -qi '^cache-control: public, max-age=31536000, immutable' <<<"$fh" && echo 1 || echo 0)"
+	fi
+fi
+
 code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "username=$USER_NAME" --data-urlencode "password=$PASS" "$URL?r=login")"
 check "login answers 303" "$([ "$code" = 303 ] && echo 1 || echo 0)"
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"

@@ -97,6 +97,7 @@ function gpv_finish($ok, $detail) {
 		header_remove();
 		http_response_code(303);
 		header('Cache-Control: no-store');
+		header('X-LiteSpeed-Cache-Control: no-cache');
 		header('Content-Type: text/html; charset=utf-8');
 		header('Location: ' . $next);
 	}

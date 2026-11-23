@@ -8,6 +8,7 @@ declare(strict_types=0);
 if (PHP_VERSION_ID < 80000) {
 	http_response_code(500);
 	header('Content-Type: text/plain; charset=utf-8');
+	header('X-LiteSpeed-Cache-Control: no-cache');
 	echo 'Bot Guard panel requires PHP 8.0 or newer (found ' . PHP_VERSION . ").\n";
 	exit;
 }
@@ -59,6 +60,9 @@ function gp_hardening_headers() {
 	// from ever reading this header.
 	header('X-Robots-Tag: noindex, nofollow, noarchive, nosnippet');
 	header('Cache-Control: no-store, no-cache, must-revalidate');
+	// LiteSpeed's page cache (LSCache) must never keep a panel page: it caches on its own header, not on Cache-Control. Every panel
+	// response carries this (the versioned static assets are the only cacheable thing, and they are served by the web server itself).
+	header('X-LiteSpeed-Cache-Control: no-cache');
 	// 'unsafe-inline' for scripts is required because every enhancement in this
 	// panel is a small inline block - there is no bundler and no external JS.
 	header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; "
@@ -79,6 +83,8 @@ function gp_bare_404() {
 		http_response_code(404);
 		header('Content-Type: text/plain; charset=utf-8');
 		header('X-Robots-Tag: noindex, nofollow');
+		header('Cache-Control: no-store');
+		header('X-LiteSpeed-Cache-Control: no-cache');
 	}
 	exit;
 }
@@ -170,7 +176,7 @@ function gp_redirect($route, $extra = array()) {
 		foreach (array_reverse($gp_flash) as $m) { if (!empty($m['section'])) { $url .= '#msg-' . $m['section']; break; } }
 	}
 	gp_flash_save_to_cookie();                 // carry any pending flash across the 303
-	if (!headers_sent()) { header('Location: ' . $url, true, 303); }
+	if (!headers_sent()) { header('Cache-Control: no-store'); header('X-LiteSpeed-Cache-Control: no-cache'); header('Location: ' . $url, true, 303); }
 	exit;
 }
 

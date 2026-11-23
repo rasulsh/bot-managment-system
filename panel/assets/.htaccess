@@ -1,0 +1,22 @@
+# Panel static assets (the stylesheet and the two fonts).
+#
+# The panel emits every asset URL with a version query string (gp_asset_url(): assets/app.css?v=<VERSION>-<hash of the file>), so the
+# URL changes whenever the file or the version does and a browser or a LiteSpeed / proxy cache can never show an old copy after an
+# update. A VERSIONED request may therefore be cached for a year and never revalidated; a request WITHOUT ?v= (a bookmark, an old
+# link) is only allowed to be cached if it is revalidated, so it can never pin a stale file. HTML is never cached (the PHP side sends
+# no-store and X-LiteSpeed-Cache-Control: no-cache). nginx: see docs/13-PANEL-WEB-ACCESS.md.
+#
+# The second mechanism of panel/.htaccess (only the entry point and these assets may be served, everything else 403) is repeated
+# here: a RewriteEngine in a subdirectory does not inherit the parent's rules.
+<IfModule mod_rewrite.c>
+	RewriteEngine On
+	RewriteCond %{QUERY_STRING} (^|&)v=[0-9A-Za-z._-]+(&|$)
+	RewriteRule ^[A-Za-z0-9._-]+\.(css|woff2)$ - [E=GP_ASSET_V:1,L]
+	RewriteRule ^[A-Za-z0-9._-]+\.(css|woff2)$ - [L]
+	RewriteRule ^ - [F,L]
+</IfModule>
+
+<IfModule mod_headers.c>
+	Header set Cache-Control "public, max-age=31536000, immutable" env=GP_ASSET_V
+	Header set Cache-Control "no-cache" env=!GP_ASSET_V
+</IfModule>

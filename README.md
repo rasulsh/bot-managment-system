@@ -804,6 +804,12 @@ exception for `index.php`, `recover.php` and static assets) `panel/`.
   location = /gv-admin/users.json       { return 404; }     # the user store
   # recover.php (the update recovery entry) must stay reachable: it answers an empty 404 unless a one-time token is given.
   location ^~ /gv-admin/views/          { return 404; }
+  # Versioned assets (the panel asks for assets/app.css?v=<VERSION>-<hash>): cache them for a year; an unversioned request must revalidate.
+  # (map goes in the http {} block)
+  #   map $arg_v $gp_asset_cache { default "public, max-age=31536000, immutable"; "" "no-cache"; }
+  location ^~ /gv-admin/assets/         { add_header Cache-Control $gp_asset_cache always; try_files $uri =404; }
+  # Never let a page cache keep panel HTML: the panel sends Cache-Control: no-store and X-LiteSpeed-Cache-Control: no-cache itself;
+  # do not add proxy_cache / fastcgi_cache for /gv-admin/ (or key it on nothing but static assets).
   ```
 
   Prefix (`^~`) and exact (`=`) locations are used so that a `location ~ \.php$` block cannot run these files first.
