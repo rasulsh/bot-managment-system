@@ -4,6 +4,11 @@ Newest first. Each entry is one version, written as `## <version>` (the same str
 The Update page of the panel shows the entries between the installed version and the one in the ZIP.
 Older history and upgrade steps: [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md).
 
+## 2026.11.35
+
+- **Fix: old CSS after an update.** Every asset URL the panel emits is versioned: `assets/app.css?v=<VERSION>-<8 hex of the file's contents>` through ONE helper (`gp_asset_url()`, computed once per request); the fonts moved from `app.css` into `views/layout.php` so their URLs are versioned too. `panel/assets/.htaccess` caches a versioned asset for a year on Apache (`public, max-age=31536000, immutable`) and makes an unversioned request revalidate; OpenLiteSpeed keeps its own static-file expiry (7 days by default, it ignores `.htaccess` there); nginx equivalent in README §2.6. HTML stays `no-store`, and every panel response now also sends `X-LiteSpeed-Cache-Control: no-cache` so LSCache cannot keep a panel page. The guard's challenge and CAPTCHA pages are self-contained (no static asset). panel-selftest fails on any unversioned asset reference; the webservers job checks the headers on Apache and OpenLiteSpeed.
+- One Ctrl+Shift+R is still needed once, in a browser that cached the OLD `app.css`, after this update.
+
 ## 2026.11.34
 
 - **Live requests page** (`?r=live`, Monitoring operators and administrators): the current daily log read as a tail from a byte-offset cursor (`panel/live.php`), polled as JSON (`?r=live&poll=1`, a GET, never cached, no Redis, no writes). A line still being written waits for its newline, the cursor crosses midnight and skips days without traffic, caps per poll are 500 rows and 1 MiB, **Live** (last 1 / 5 / 15 / 60 minutes, then follow) or a **fixed start / end** window (binary search on the time stamps); refresh 2 / 5 / 10 / 30 s or paused, paused while the pointer is over the table and stopped while the tab is hidden; 200 / 500 / 1000 rows kept.

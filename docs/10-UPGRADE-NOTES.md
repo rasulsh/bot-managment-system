@@ -2,6 +2,14 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Asset cache busting (2026.11.35)
+
+* **Fix:** after an update the panel kept showing old CSS until the operator pressed Ctrl+Shift+R several times (a fixed `assets/app.css` URL, cached by the browser and by LiteSpeed). Every asset URL now carries `?v=<VERSION>-<hash of the file>` (one helper, `gp_asset_url()`), the fonts moved from `app.css` into `views/layout.php` so they are versioned too, and `panel/assets/.htaccess` lets a versioned asset be cached for a year (an unversioned request must revalidate). Every panel response (pages, JSON, CSV, redirects, the recovery pages) also sends `X-LiteSpeed-Cache-Control: no-cache`.
+* **Upgrade:** a browser that cached the OLD `assets/app.css` needs one Ctrl+Shift+R after this update (the page it holds already points at the old URL); from then on updates are picked up at once. On nginx add the two lines from README §2.6 (`map $arg_v ...` and the `assets/` location); a CDN or proxy in front must honour `Cache-Control: no-store` for `/gv-admin/`.
+* A new file `panel/assets/.htaccess` ships with the update (the updater already allows `.htaccess`). On **Apache** it gives a versioned asset `public, max-age=31536000, immutable` and an unversioned one `no-cache`. **OpenLiteSpeed** answers static files itself and ignores `Header` / `Expires` from `.htaccess` (CI-verified): it keeps its own `max-age=604800` (7 days; raise the virtual host's *Expires Default* if you want longer). Apache with `AllowOverride None` ignores the file too. In every case the versioned URL is what fixes the stale-CSS problem; the long cache is only an optimisation.
+
+**Rollback.** Update page *Roll back* or `php updates/rollback.php`: the old layout references `assets/app.css` and the old `app.css` carries the fonts again, so nothing is left half-way.
+
 ## Live requests (2026.11.34)
 
 * **New page: Live requests** (side menu, for Monitoring operators and administrators; the Demo role cannot open it). It tails the current daily log from a byte-offset cursor and polls every 2 / 5 / 10 / 30 seconds (paused while the pointer is over the table or the tab is hidden): it reads only new bytes, uses no Redis and writes nothing. The same filters as Logs, quick toggles, a fixed start / end window, a per-second chart, Top right now, a details drawer with the quick actions of *Temporary blocks & allows* (administrators), Watch and CSV export. Needs `logs/` readable by the panel, like the Logs page.

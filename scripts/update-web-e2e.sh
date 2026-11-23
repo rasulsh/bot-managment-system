@@ -39,7 +39,9 @@ page() { curl -s -c "$JAR" -b "$JAR" "$URL?r=$1"; }
 login() {
 	curl -s -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "username=admin" --data-urlencode "password=$PASS" "$URL?r=login"
 	check "signed in; the Update page opens (version $CUR)" "$(has "$CUR" "$(page update)")"
+	CSS_BEFORE="$(css_of "$(page update)")"
 }
+css_of() { grep -o 'assets/app\.css?v=[^"]*' <<<"$1" | head -1; }
 upload() {   # <zip> -> plan id
 	local tok h
 	tok="$(page update | csrf)"
@@ -82,6 +84,8 @@ next="$(next_of "$raw")"
 res="$(curl -s -c "$JAR" -b "$JAR" "$BASE$PANEL/$next")"
 check "A: the result page says the new code passed the health check" "$(has 'passed the health check' "$res")"
 check "A: the files are the new version and guard.off is gone" "$([ "$(tr -d '[:space:]' < "$INST/VERSION")" = "$GOOD" ] && [ ! -e "$INST/guard.off" ] && echo 1 || echo 0)"
+CSS_AFTER="$(css_of "$(page update)")"
+check "A: the first page after the update already carries the NEW asset URLs (?v= changed from '$CSS_BEFORE')" "$([ -n "$CSS_BEFORE" ] && [ -n "$CSS_AFTER" ] && [ "$CSS_BEFORE" != "$CSS_AFTER" ] && grep -q "v=$GOOD-" <<<"$CSS_AFTER" && echo 1 || echo 0)"
 token="$(grep -o '<code class="gp-mono">[a-f0-9]\{32\}</code>' <<<"$res" | head -1 | sed 's/<[^>]*>//g')"
 check "A: the recovery token is shown once" "$([ ${#token} -eq 32 ] && echo 1 || echo 0)"
 tok="$(page update | csrf)"

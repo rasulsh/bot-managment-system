@@ -9,6 +9,35 @@ if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 // A "?" help button for a field. The text is lang.php key tip_<key>: what the
 // field does, a safe value, the risk of a wrong one. Returns '' for a key with no
 // text, so a missing tip never breaks a page (panel-selftest fails the build instead).
+// Static assets (the stylesheet, the fonts): ONE helper builds every URL the panel emits, with a version query string, so a browser or a
+// LiteSpeed / proxy cache can never serve an old copy after an update (and a versioned file may be cached for a year).
+//
+//     assets/app.css?v=<VERSION>-<8 hex of the file's contents>
+//
+// The hash is of the CONTENTS (not the mtime: a deploy tool may reset it), so the URL changes exactly when the file changes and also
+// whenever VERSION does. Computed once per request (static cache). $rel is a bare file name inside panel/assets/ ([A-Za-z0-9._-]).
+// No view, no stylesheet and no script may name an asset any other way (panel-selftest greps for it).
+function gp_asset_version() {
+	$p = dirname(__DIR__) . '/VERSION';
+	$v = is_file($p) ? trim((string)@file_get_contents($p)) : '';
+	return preg_match('/^[0-9][0-9A-Za-z._-]{0,31}$/', $v) ? $v : '0';
+}
+
+// $dir and $fresh are for the self-test (another directory, no cache).
+function gp_asset_url($rel, $dir = null, $fresh = false) {
+	static $cache = array();
+	$rel = (string)$rel;
+	if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/', $rel)) { return 'assets/invalid'; }
+	$base = $dir === null ? __DIR__ . '/assets' : rtrim((string)$dir, '/');
+	$key = $base . '|' . $rel;
+	if (!$fresh && isset($cache[$key])) { return $cache[$key]; }
+	$file = $base . '/' . $rel;
+	$h = is_file($file) ? substr((string)@md5_file($file), 0, 8) : '';
+	$url = 'assets/' . $rel . '?v=' . gp_asset_version() . ($h !== '' ? '-' . $h : '');
+	if (!$fresh) { $cache[$key] = $url; }
+	return $url;
+}
+
 // IP list colours, one place: allow = blue, block = red. The word is always printed too (never colour alone).
 function gp_ipl_badge_class($type) { return $type === 'block' ? 'gp-badge-ipl-block' : 'gp-badge-ipl-allow'; }
 

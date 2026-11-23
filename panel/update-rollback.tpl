@@ -161,6 +161,7 @@ function gprb_main_web() {
 		header('Content-Type: text/html; charset=utf-8');
 		header('X-Robots-Tag: noindex, nofollow');
 		header('Cache-Control: no-store');
+		header('X-LiteSpeed-Cache-Control: no-cache');
 	}
 	$token = '';
 	if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') { $token = is_string($_POST['token'] ?? null) ? $_POST['token'] : ''; }

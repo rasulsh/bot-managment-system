@@ -5034,6 +5034,62 @@ t_ok('every new field has a ? tooltip text' . ($lv_tips ? ' (missing: ' . implod
 putenv($lv_prev === false ? 'GV_CONFIG' : 'GV_CONFIG=' . $lv_prev);
 @unlink($lv_f(date('Ymd', $lv_t0)));
 
+
+t_section('Asset cache busting (fix/asset-cache-busting): one versioned URL helper, no bare asset reference, cache headers');
+$ab_root = dirname(__DIR__);
+$ab_ver = trim((string)file_get_contents($ab_root . '/VERSION'));
+$ab_url = gp_asset_url('app.css');
+t_ok('helper: assets/app.css?v=<VERSION>-<8 hex of the file contents>', (bool)preg_match('/^assets\/app\.css\?v=' . preg_quote($ab_ver, '/') . '-[0-9a-f]{8}$/', $ab_url) && substr($ab_url, -8) === substr(md5_file($ab_root . '/panel/assets/app.css'), 0, 8));
+t_ok('helper: the fonts are versioned too, and the same call twice gives the same URL (computed once per request)', (bool)preg_match('/^assets\/vazirmatn-regular\.woff2\?v=[0-9][0-9A-Za-z._-]*-[0-9a-f]{8}$/', gp_asset_url('vazirmatn-regular.woff2')) && gp_asset_url('app.css') === $ab_url);
+$ab_dir = sys_get_temp_dir() . '/gp-assets-' . bin2hex(random_bytes(4));
+mkdir($ab_dir, 0775, true);
+file_put_contents($ab_dir . '/x.css', 'a{color:red}');
+$ab_u1 = gp_asset_url('x.css', $ab_dir, true);
+$ab_u1b = gp_asset_url('x.css', $ab_dir, true);
+file_put_contents($ab_dir . '/x.css', 'a{color:blue}');
+$ab_u2 = gp_asset_url('x.css', $ab_dir, true);
+file_put_contents($ab_dir . '/x.css', 'a{color:red}');
+t_ok('helper: the URL changes when the file changes (contents, not mtime) and goes back when the contents do; unchanged = identical', $ab_u1 === $ab_u1b && $ab_u1 !== $ab_u2 && gp_asset_url('x.css', $ab_dir, true) === $ab_u1);
+$ab_c1 = gp_asset_url('c.css', $ab_dir);
+file_put_contents($ab_dir . '/c.css', 'one');
+t_ok('helper: a missing file still gets the version (no hash, never a warning); once cached the URL stays for the request', preg_match('/^assets\/c\.css\?v=' . preg_quote($ab_ver, '/') . '$/', $ab_c1) === 1 && gp_asset_url('c.css', $ab_dir) === $ab_c1);
+@unlink($ab_dir . '/x.css'); @unlink($ab_dir . '/c.css'); @rmdir($ab_dir);
+t_ok('helper: only a bare file name is accepted (no path, no traversal, no query, no space)', gp_asset_url('../index.php') === 'assets/invalid' && gp_asset_url('a/b.css') === 'assets/invalid' && gp_asset_url('a.css?x=1') === 'assets/invalid' && gp_asset_url('') === 'assets/invalid' && gp_asset_url('a b.css') === 'assets/invalid');
+// Every view uses it: no bare reference to an asset anywhere in the panel's PHP, templates or stylesheets.
+$ab_bad = array();
+foreach (array_merge(glob($ab_root . '/panel/*.php'), glob($ab_root . '/panel/views/*.php'), glob($ab_root . '/panel/*.tpl'), array($ab_root . '/prepend.php')) as $f) {
+	if (basename($f) === 'ui.php' || basename($f) === 'lang.php') { continue; }                  // the helper itself; the language file has no markup
+	$src = (string)file_get_contents($f);
+	if (preg_match('/(?:href|src)\s*=\s*["\'][^"\']*assets\//i', $src) || preg_match('/url\(\s*[\'"]?[^)\'"]*\.(?:woff2?|ttf|png|svg|css)\b/i', $src) && basename($f) !== 'layout.php' || preg_match('/<link[^>]+stylesheet[^>]+href\s*=\s*["\'](?!<\?=)/i', $src)) { $ab_bad[] = basename($f); }
+}
+$ab_lay = (string)file_get_contents($ab_root . '/panel/views/layout.php');
+t_ok('no view, template or entry point names an asset any other way than gp_asset_url()' . ($ab_bad ? ' (found in: ' . implode(', ', $ab_bad) . ')' : ''), !$ab_bad);
+t_ok('layout: the stylesheet and BOTH font files go through gp_asset_url() and nothing is a bare URL', substr_count($ab_lay, "gp_asset_url('app.css')") === 1 && substr_count($ab_lay, "gp_asset_url('vazirmatn-regular.woff2')") === 1 && substr_count($ab_lay, "gp_asset_url('vazirmatn-bold.woff2')") === 1
+	&& strpos($ab_lay, 'href="assets/') === false && strpos($ab_lay, "url('assets/") === false);
+t_ok('stylesheets: app.src.css and the built app.css contain no url() at all (fonts moved to the layout, which can version them)', strpos((string)file_get_contents($ab_root . '/panel/assets/app.src.css'), 'url(') === false && strpos((string)file_get_contents($ab_root . '/panel/assets/app.css'), 'url(') === false
+	&& strpos((string)file_get_contents($ab_root . '/panel/assets/app.src.css'), '@font-face') === false);
+t_ok('every file in panel/assets/ that the panel serves is referenced through the helper (css and woff2 files)', (function () use ($ab_root, $ab_lay) { foreach (glob($ab_root . '/panel/assets/*') as $f) { $n = basename($f); if (preg_match('/\.(woff2)$/', $n) && strpos($ab_lay, "gp_asset_url('" . $n . "')") === false) { return false; } } return strpos($ab_lay, "gp_asset_url('app.css')") !== false; })());
+// A rendered page: the head carries the versioned URLs (the real layout over the login view).
+$ab_html = (function () use ($model) { ob_start(); $user = ''; $role = ''; $route = 'login'; $flash = array(); $view_file = __DIR__ . '/../panel/views/login.php'; $error = ''; $locked = false; require __DIR__ . '/../panel/views/layout.php'; return ob_get_clean(); })();
+t_ok('rendered head: the stylesheet link and both @font-face urls are the versioned ones', strpos($ab_html, 'href="' . gp_e(gp_asset_url('app.css')) . '"') !== false && substr_count($ab_html, 'woff2?v=') === 2 && !preg_match('/(?:href|src)="assets\/[^"?]*"/', $ab_html) && !preg_match("/url\('assets\/[^?']*'\)/", $ab_html));
+// The guard's own pages load no static asset (there is nothing to version).
+$ab_guard_bad = array();
+foreach (array('challenge.php', 'captcha.php') as $gf) { $gs = (string)file_get_contents($ab_root . '/guard/' . $gf); if (preg_match('/<link\b|<script[^>]+\bsrc\s*=|@import|url\(\s*[\'"]?(?!data:)[^)\'"]/i', $gs)) { $ab_guard_bad[] = $gf; } }
+t_ok('the guard\'s challenge and CAPTCHA pages are self-contained (inline CSS and script, data: images): no <link>, no script src, no url() to a file' . ($ab_guard_bad ? ' (found in: ' . implode(', ', $ab_guard_bad) . ')' : ''), !$ab_guard_bad);
+// Headers.
+$ab_ix = (string)file_get_contents($ab_root . '/panel/index.php');
+t_ok('headers: every panel response (gp_hardening_headers) is Cache-Control no-store AND X-LiteSpeed-Cache-Control no-cache; so are redirects, the bare 404, recover.php and the recovery pages',
+	preg_match("/function gp_hardening_headers\(\).*?'Cache-Control: no-store, no-cache, must-revalidate'.*?'X-LiteSpeed-Cache-Control: no-cache'/s", $ab_ix) === 1 && substr_count($ab_ix, 'X-LiteSpeed-Cache-Control: no-cache') >= 4
+	&& strpos((string)file_get_contents($ab_root . '/panel/recover.php'), 'X-LiteSpeed-Cache-Control: no-cache') !== false && strpos((string)file_get_contents($ab_root . '/panel/update-verify.tpl'), 'X-LiteSpeed-Cache-Control: no-cache') !== false
+	&& strpos((string)file_get_contents($ab_root . '/panel/update-rollback.tpl'), 'X-LiteSpeed-Cache-Control: no-cache') !== false);
+$ab_ht = (string)@file_get_contents($ab_root . '/panel/assets/.htaccess');
+t_ok('panel/assets/.htaccess: a VERSIONED request is cached for a year and immutable, an unversioned one must revalidate, driven by the ?v= query string (an environment flag set in a rewrite rule), and only css / woff2 are served',
+	strpos($ab_ht, 'public, max-age=31536000, immutable') !== false && preg_match('/Header set Cache-Control "public, max-age=31536000, immutable" env=GP_ASSET_V/', $ab_ht) === 1 && strpos($ab_ht, 'Header set Cache-Control "no-cache" env=!GP_ASSET_V') !== false
+	&& strpos($ab_ht, 'RewriteCond %{QUERY_STRING} (^|&)v=') !== false && strpos($ab_ht, 'E=GP_ASSET_V:1') !== false && strpos($ab_ht, 'RewriteRule ^ - [F,L]') !== false);
+t_ok('panel/assets/.htaccess ships with an update (the updater allows .htaccess in the panel tree) and is inside the permission scan\'s set', in_array('.htaccess', gp_upd_names(), true) && in_array('panel', gp_upd_tree(), true) && !in_array('panel', gp_perm_skip(), true));
+t_ok('docs: the nginx equivalent, the one-time Ctrl+Shift+R after the first update, and the LSCache note are written down',
+	strpos((string)file_get_contents($ab_root . '/README.md'), 'map $arg_v $gp_asset_cache') !== false && strpos((string)file_get_contents($ab_root . '/docs/10-UPGRADE-NOTES.md'), 'Ctrl+Shift+R') !== false && strpos((string)file_get_contents($ab_root . '/docs/09-ADMIN-PANEL.md'), 'X-LiteSpeed-Cache-Control') !== false);
+
 echo "\n";
 // Say so out loud. A green run on a host missing the extension must never be
 // mistakable for full coverage.

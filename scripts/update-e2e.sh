@@ -77,6 +77,8 @@ for d in "$INST"/updates/[0-9]*-[0-9]*; do [ -d "$d" ] && stamp="$(basename "$d"
 again="$(curl -s -c "$JAR" -b "$JAR" "$URL?r=update&ts=$stamp&res=ok")"
 check "...and only once (a reload does not show it again)" "$([ "$(has "$token" "$again")" = 0 ] && echo 1 || echo 0)"
 page="$(curl -s -c "$JAR" -b "$JAR" "$URL?r=update")"
+css_now="$(grep -o 'assets/app\.css?v=[^"]*' <<<"$page" | head -1)"
+check "the first page after the update already carries the NEW asset URLs (?v=2026.02.02-<hash>, not the old version: $css_now)" "$(grep -q 'v=2026\.02\.02-[0-9a-f]\{8\}$' <<<"$css_now" && echo 1 || echo 0)"
 check "the footer and the page show the new version, the history lists the update" "$([ "$(has '2026.02.02' "$page")" = 1 ] && [ "$(has 'name="do" value="rollback"' "$page")" = 1 ] && echo 1 || echo 0)"
 
 # --- web recovery with the token

@@ -17,7 +17,12 @@
 })();
 </script>
 <title><?= gp_e(gp_t('app_name')) ?> — <?= gp_e(gp_t('app_sub')) ?></title>
-<link rel="stylesheet" href="assets/app.css">
+<link rel="stylesheet" href="<?= gp_e(gp_asset_url('app.css')) ?>">
+<style>
+/* The fonts are declared here, not in app.css: their URLs carry the same version query string as the stylesheet. */
+@font-face { font-family: 'Vazirmatn'; src: url('<?= gp_e(gp_asset_url('vazirmatn-regular.woff2')) ?>') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Vazirmatn'; src: url('<?= gp_e(gp_asset_url('vazirmatn-bold.woff2')) ?>') format('woff2'); font-weight: 700; font-style: normal; font-display: swap; }
+</style>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#128737;</text></svg>">
 </head>
 <body class="gp-body"<?= (!empty($user) && ($role ?? '') !== 'admin') ? ' data-readonly="1"' : '' ?>>
