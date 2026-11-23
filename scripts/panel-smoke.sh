@@ -40,8 +40,10 @@ if [ -n "$css_href" ]; then
 	ah="$(curl -sk -D - -o /dev/null "$BASE$PANEL/$css_href")"
 	check "the versioned stylesheet is served (200, text/css)" "$(head -1 <<<"$ah" | grep -q ' 200' && grep -qi '^content-type: text/css' <<<"$ah" && echo 1 || echo 0)"
 	if [ "${GP_EXPECT_ASSET_CACHE:-0}" = 1 ]; then
-		check "a versioned asset is cacheable for a year: Cache-Control public, max-age=31536000, immutable" "$(grep -qi '^cache-control: public, max-age=31536000, immutable' <<<"$ah" && echo 1 || echo 0)"
-		grep -qi '^cache-control: public, max-age=31536000, immutable' <<<"$ah" || { echo "  (headers seen: $(tr -d '\r' <<<"$ah" | tr '\n' '|'))"; }
+		# Apache: the .htaccess header, exactly. OpenLiteSpeed answers static files itself and only honours Expires: a year (max-age=31536000).
+		year='public, max-age=31536000, immutable'; [ "${GP_SERVER:-}" = ols ] && year='(public, )?max-age=31536000'
+		check "a versioned asset is cacheable for a year: Cache-Control $year" "$(grep -Eqi "^cache-control: $year" <<<"$ah" && echo 1 || echo 0)"
+		grep -Eqi "^cache-control: $year" <<<"$ah" || { echo "  (headers seen: $(tr -d '\r' <<<"$ah" | tr '\n' '|'))"; }
 		uh="$(curl -sk -D - -o /dev/null "$BASE$PANEL/assets/app.css")"
 		if [ "${GP_SERVER:-}" = ols ]; then
 			echo "NOTE  LiteSpeed has no per-query Header condition: an unversioned asset request is cached like a versioned one there (documented)"
@@ -49,7 +51,7 @@ if [ -n "$css_href" ]; then
 			check "an UNversioned asset request must revalidate (no immutable, never a year)" "$(grep -qi '^cache-control: no-cache' <<<"$uh" && ! grep -qi 'immutable' <<<"$uh" && echo 1 || echo 0)"
 		fi
 		fh="$(curl -sk -D - -o /dev/null "$BASE$PANEL/$font_url")"
-		check "a versioned font is cacheable for a year too" "$(grep -qi '^cache-control: public, max-age=31536000, immutable' <<<"$fh" && echo 1 || echo 0)"
+		check "a versioned font is cacheable for a year too" "$(grep -Eqi "^cache-control: $year" <<<"$fh" && echo 1 || echo 0)"
 	fi
 fi
 
