@@ -3484,6 +3484,9 @@ t_ok('status strip: the kill switch is a POST form with the CSRF token; the aler
 $dv_dm = gp_demo_model(array('snapshot' => $kpi_snap, 'cfg' => gv_cfg_defaults(array()), 'rules' => array(), 'lists' => array(), 'jobs' => array(), 'now' => $jh_now));
 t_ok('demo model: the chart rows hold the hour and counts only (nine integer fields), 24 h and 7 d', count($dv_dm['chart']['h24']) === 2 && (function () use ($dv_dm) { foreach ($dv_dm['chart']['h24'] as $b) { if (array_keys($b) !== array('t', 'n', 'a', 'c', 'p', 'b', 'r', 'm', 'ips')) { return false; } foreach ($b as $v) { if (!is_int($v)) { return false; } } } return true; })());
 
+list($dv_ho, $dv_eo) = $jh_render('dashboard', array('snapshot' => $kpi_snap), array('role' => 'operator'));
+t_ok('dashboard as an operator: no link to the Update page (admin only), the chip still shows the version', !$dv_eo && strpos($dv_ho, 'r=update') === false && strpos($dv_ho, 'data-chip="version"') !== false);
+
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');
 // The panel is English and left-to-right. No Persian or Arabic script (letters

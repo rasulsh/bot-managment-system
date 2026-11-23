@@ -74,7 +74,7 @@ $stale_badge = $snapshot_stale ? ' <span class="gp-badge gp-badge-warn">' . gp_e
 	<div class="gp-dchip" data-chip="version">
 		<span class="gp-dchip-k"><?= gp_e(gp_t('dash_version')) ?></span>
 		<span class="gp-dchip-v gp-mono"><?= gp_e($version === '' ? '-' : $version) ?></span>
-		<span class="gp-dchip-s"><a href="index.php?r=update"><?= gp_e(gp_t('nav_update')) ?></a></span>
+		<?php if (gp_acl_allows($role ?? 'admin', 'update', 'GET')): ?><span class="gp-dchip-s"><a href="index.php?r=update"><?= gp_e(gp_t('nav_update')) ?></a></span><?php endif; ?>
 	</div>
 	<?= gp_msg('killswitch') ?>
 </section>
