@@ -4,6 +4,13 @@ Newest first. Each entry is one version, written as `## <version>` (the same str
 The Update page of the panel shows the entries between the installed version and the one in the ZIP.
 Older history and upgrade steps: [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md).
 
+## 2026.11.29
+
+- **Fix: `nightly` never ran.** It started in the same second as the every-minute `worker`, both used `analyzer/.write.lock`, and `nightly` (`flock -n`) lost almost every night. `nightly`, `train` and `train-clf` now **wait** for the lock (`flock -w`, `GV_LOCK_WAIT` seconds, default 900); a run that still cannot get it is recorded as "skipped (lock busy after N s)" with the holder named.
+- The worker takes the write lock itself, only around a job that writes models or verdicts and only while it runs (`GV_WORKER_LOCK_WAIT`, default 45 s; the job goes back on the queue when the lock stays busy). An empty queue or a read-only job takes none.
+- Job health: a required job whose only runs were lock skips is **skipped by lock**, not "never ran (check the crontab)"; the alert says so and names the other job holding the lock. `cron-check.sh` accepts `sleep N;` prefixes and `PATH=` / `SHELL=` / `MAILTO=` lines (tests added).
+- UI: the dashboard *Cron setup* card no longer renders an empty code box; *File permissions* and the IP feeds table no longer show "20,780 days ago" for a zero or double-subtracted timestamp.
+
 ## 2026.11.28
 
 - **IP range feeds** (IP lists -> Feeds tab): a provider's IPv4 ranges fetched from an HTTPS URL into ONE destination, either a managed allow list or the trusted CDN ranges (`cdn_ranges_feed`, merged with the manual `cdn_ranges`). Presets: Google common crawlers and UptimeRobot -> allow list, ArvanCloud and Cloudflare -> CDN ranges, with strong warnings against putting a CDN in an allow list.

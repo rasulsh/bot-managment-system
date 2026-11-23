@@ -81,8 +81,8 @@ PATH=/usr/local/bin:/usr/bin:/bin
 41 5   * * 0 bash /full/path/bot-guard/scripts/analyzer-cron.sh train   >/dev/null 2>&1
 ```
 
-Each mode takes its own `flock`, so overlapping firings skip cleanly rather than
-writing partial verdicts. The weekly `train` run trains a **candidate** model,
+Each mode takes a `flock`, so overlapping firings never write partial verdicts: nightly / train / train-clf wait for the shared write lock
+(`GV_LOCK_WAIT`, default 900 s), the worker takes it only around a job that writes models or verdicts, the other modes skip when their lock is busy. The weekly `train` run trains a **candidate** model,
 never the live one; promote it explicitly (panel "promote" or `ctl.py promote`)
 to put it in force.
 

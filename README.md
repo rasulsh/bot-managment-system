@@ -819,10 +819,18 @@ Examples (the first two are in [docs/04-CMS-INTEGRATION.md](docs/04-CMS-INTEGRAT
 
 ## 2.8 Scheduled jobs
 
-Every cron run of `scripts/analyzer-cron.sh <mode>` takes its own `flock` (the modes that write
-verdicts or models share one lock), records `analyzer/.jobstatus-<mode>.json` and
+Every cron run of `scripts/analyzer-cron.sh <mode>` takes a `flock`, records `analyzer/.jobstatus-<mode>.json` and
 `logs/jobs.log`, and exits 3 with the fix in the message when its Python cannot import the
 packages it needs.
+
+**The write lock.** Everything that writes models or verdicts shares `analyzer/.write.lock`. `nightly`, `train` and `train-clf`
+(daily / weekly) **wait** for it (`flock -w`, `GV_LOCK_WAIT` seconds, default 900, `0` = no wait); a run that still cannot get it is
+recorded as `skipped (lock busy after N s)` (status `skipped`, `lock_holder` names the job that held it when known) and the panel calls
+the job **skipped by lock**, not "never ran". The `worker` (every minute) does not take the lock in the wrapper: `analyzer/worker.py` takes it
+only around a job that writes models or verdicts (`verify`, `nightly`, `train`, `train_clf`, `promote_ml`, `promote_clf`), waits up to
+`GV_WORKER_LOCK_WAIT` seconds (default 45), and puts the job back on the queue when the lock stays busy; an empty queue or a read-only job
+(snapshot, replay, GeoIP / IP list compile, pip sync) takes none. `.write.lock.holder` (`<mode> <pid> <start>`) names the holder while it runs.
+Before this change `nightly` started in the same second as the worker lost the race and was skipped almost every night.
 
 | Job | Command | Schedule | Required | If it does not run |
 |---|---|---|---|---|

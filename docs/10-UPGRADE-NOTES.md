@@ -2,6 +2,19 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Job lock waits: nightly never ran (2026.11.29)
+
+**Symptom.** `nightly` (and `train` / `train-clf`) never ran: at 04:17 cron starts `nightly` and `worker` in the same second, both used `analyzer/.write.lock`, the worker won and `nightly`
+(which used `flock -n`) was skipped ("another nightly run holds the lock"). With the worker on `* * * * *` that happened almost every night. The dashboard said "never ran (check the crontab)".
+
+**Fix.** `nightly`, `train` and `train-clf` wait for the lock (`flock -w`, `GV_LOCK_WAIT` seconds, default 900); the worker takes the lock itself only while it runs a job that writes models or
+verdicts (an empty queue or a read-only job takes none) and puts the job back on the queue if the lock stays busy for 45 s. A run that still cannot get the lock is recorded as *skipped (lock busy
+after N s)* and shown as **skipped by lock**, with the holder named. **What to do:** update; if you added a `sleep N;` in front of your entries as a workaround you may remove it (the check accepts both).
+To keep the old behaviour for one mode put `GV_LOCK_WAIT=0` in front of it. Also fixed: the dashboard *Cron setup* card no longer shows an empty code box, *File permissions* no longer says
+"20,780 days ago", and the IP feeds table showed the same wrong age for its last run.
+
+**Rollback.** Update page *Roll back* or `php updates/rollback.php`. The status files gain a `lock_holder` field that older code ignores.
+
 ## IP range feeds (2026.11.28)
 
 **New.** IP lists -> **Feeds**: provider IPv4 ranges (Google common crawlers, UptimeRobot, ArvanCloud, Cloudflare presets or your own URL) kept up to date into a managed allow list

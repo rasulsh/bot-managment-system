@@ -48,7 +48,7 @@ function gp_demo_model(array $in = array()) {
 	foreach ((array)$jobs as $h) {
 		$state = isset($h['state']) ? $h['state'] : '';
 		if ($state === 'ok') { $ok++; }
-		elseif (in_array($state, array('failing', 'late', 'warning'), true) || ($state === 'never' && !empty($h['required']))) { $bad++; }
+		elseif (in_array($state, array('failing', 'late', 'warning'), true) || ($state === 'skipped' && !empty($h['required'])) || ($state === 'never' && !empty($h['required']))) { $bad++; }
 	}
 	return array('generated' => (int)$gen, 'stale' => ($gen > 0 && ($now - $gen) > 3600), 'has_data' => ($cur !== array()),
 		'kpi' => $tiles, 'protection' => $protection,

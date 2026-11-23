@@ -81,7 +81,8 @@ function gp_job_health_one($job, array $def, $st, $marker_ts, $interval, $now, $
 	$h = array('job' => $job, 'label' => $def['label'], 'required' => $def['required'], 'interval' => (int)$interval,
 		'state' => 'never', 'source' => 'none', 'status' => '', 'last_start' => 0, 'last_end' => 0, 'last_success' => 0, 'last_failure' => 0,
 		'last_exit' => 0, 'duration' => 0, 'skipped' => 0, 'runs' => 0, 'failures' => 0, 'last_error' => '', 'first_line' => '',
-		'warnings' => array(), 'result' => null, 'next_expected' => 0, 'overdue' => 0, 'skew' => false, 'seen' => false, 'corrupt' => ($st === false));
+		'warnings' => array(), 'result' => null, 'next_expected' => 0, 'overdue' => 0, 'skew' => false, 'seen' => false, 'corrupt' => ($st === false),
+		'lock_holder' => '', 'lock_skipped' => false);
 	if (is_array($st)) {
 		$h['source'] = 'status';
 		$h['status'] = (string)($st['status'] ?? '');
@@ -89,6 +90,9 @@ function gp_job_health_one($job, array $def, $st, $marker_ts, $interval, $now, $
 			$h[$k] = isset($st[$k]) && is_numeric($st[$k]) ? (int)$st[$k] : 0;
 		}
 		$h['last_error'] = (string)($st['last_error'] ?? '');
+		// The last firing found the write lock busy (analyzer-cron.sh js_skipped): who held it, when known (a mode name, nothing else).
+		$h['lock_skipped'] = ($h['status'] === 'skipped');
+		$h['lock_holder'] = (isset($st['lock_holder']) && is_string($st['lock_holder']) && preg_match('/^[a-z][a-z0-9-]{0,20}$/', $st['lock_holder'])) ? $st['lock_holder'] : '';
 		$h['first_line'] = strtok($h['last_error'], "\n") ?: '';
 		$h['warnings'] = (isset($st['warnings']) && is_array($st['warnings'])) ? array_values(array_filter($st['warnings'], 'is_string')) : array();
 		if (isset($st['result_json']) && is_string($st['result_json']) && $st['result_json'] !== '') {
@@ -113,8 +117,10 @@ function gp_job_health_one($job, array $def, $st, $marker_ts, $interval, $now, $
 	// only skipped by the lock does not clear it.)
 	if ($h['source'] === 'status' && $h['last_failure'] > 0 && $h['last_failure'] >= $h['last_success']) {
 		$h['state'] = 'failing';
+	} elseif ($age === null && $h['status'] === 'skipped' && $h['skipped'] > 0 && $h['runs'] === 0) {
+		$h['state'] = 'skipped';               // the job DID start from cron, but every firing found the lock busy: not "never ran, check the crontab"
 	} elseif ($age === null) {
-		$h['state'] = 'never';                 // only skips / failures so far, never a success
+		$h['state'] = 'never';                 // only failures so far, never a success
 	} elseif ($age > GP_JOB_LATE_FACTOR * $interval) {
 		$h['state'] = 'late';
 		$h['overdue'] = $age - GP_JOB_LATE_FACTOR * $interval;
@@ -411,7 +417,8 @@ function gp_health_alerts(array $in) {
 	}
 	foreach ((array)($in['jobs'] ?? array()) as $job => $h) {
 		if ($h['state'] === 'failing' && !$h['seen']) { $add('job_failing_' . $job, $h['required'] ? 'critical' : 'warning', 'al_job_failing', $job . ': ' . $h['first_line'], 'jobs&job=' . $job); }
-		elseif ($h['state'] === 'late') { $add('job_late_' . $job, $h['required'] ? 'critical' : 'warning', 'al_job_late', $job, 'jobs&job=' . $job); }
+		elseif ($h['state'] === 'late') { $add('job_late_' . $job, $h['required'] ? 'critical' : 'warning', $h['lock_skipped'] ? 'al_job_late_lock' : 'al_job_late', $job . ($h['lock_skipped'] && $h['lock_holder'] !== '' ? ' (' . $h['lock_holder'] . ')' : ''), 'jobs&job=' . $job); }
+		elseif ($h['state'] === 'skipped' && $h['required']) { $add('job_skipped_' . $job, 'warning', 'al_job_skipped', $job . ($h['lock_holder'] !== '' ? ' (' . $h['lock_holder'] . ')' : ''), 'jobs&job=' . $job); }
 		elseif ($h['state'] === 'warning') { $add('job_warning_' . $job, 'warning', 'al_job_warning', $job . ': ' . $h['first_line'], 'jobs&job=' . $job); }
 		elseif ($h['state'] === 'never' && $h['required']) { $add('job_never_' . $job, 'warning', 'al_job_never', $job, 'jobs&job=' . $job); }
 	}
@@ -524,7 +531,7 @@ function gp_kpi_change($cur, $prev) {
 }
 
 function gp_job_badge($state) {
-	return array('ok' => 'gp-badge-on', 'warning' => 'gp-badge-warn', 'late' => 'gp-badge-bad', 'failing' => 'gp-badge-bad', 'never' => 'gp-badge-off')[$state] ?? 'gp-badge-off';
+	return array('ok' => 'gp-badge-on', 'warning' => 'gp-badge-warn', 'late' => 'gp-badge-bad', 'failing' => 'gp-badge-bad', 'skipped' => 'gp-badge-warn', 'never' => 'gp-badge-off')[$state] ?? 'gp-badge-off';
 }
 
 // The documented crontab: job => array(schedule, mode argument, script). Mirrors scripts/cron_check.py.

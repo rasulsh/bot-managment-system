@@ -13,7 +13,7 @@
 # "promote" or analyzer/ctl.py promote).
 #   scripts/analyzer-cron.sh report     period report, useful as a weekly mail
 #   scripts/analyzer-cron.sh snapshot   dashboard snapshot for the admin panel
-#   scripts/analyzer-cron.sh worker     drain the panel's job queue
+#   scripts/analyzer-cron.sh worker     drain the panel's job queue (takes the write lock itself, only around a job that writes)
 #   scripts/analyzer-cron.sh geo        compile geo/*.mmdb / geoip.dat into country.bin / asn.bin
 #   scripts/analyzer-cron.sh feeds      fetch the IP range feeds that are due (panel: IP lists -> Feeds; PHP only, hands over to feeds-cron.sh)
 #
@@ -64,12 +64,23 @@ case "$MODE" in
 		;;
 esac
 
-# Every mode that writes models or verdicts shares ONE lock: nightly, the two
-# training modes and the worker (which runs the same code in-process) must never
-# run side by side. Read-mostly modes keep a lock of their own.
+# Everything that writes models or verdicts shares ONE lock, analyzer/.write.lock: nightly, the two training modes and the worker's
+# write jobs (which run the same code in-process) must never run side by side.
+#   * nightly / train / train-clf are daily or weekly: when the lock is busy they WAIT for it (flock -w, GV_LOCK_WAIT seconds, default
+#     900) instead of skipping. The worker runs every minute and usually starts in the same second (04:17 for nightly), so skipping
+#     meant nightly almost never ran. If the lock is still busy after the wait the run is recorded as "skipped (lock busy after N s)".
+#   * worker does NOT take the lock here: analyzer/worker.py takes it itself, only while it runs a job that writes models or
+#     verdicts (an empty queue or a read-only job needs none). The wrapper only keeps two workers from overlapping (.worker.lock, -n).
+#   * every other mode keeps a lock of its own and skips (-n) when it is busy.
+WRITE_LOCK="${GV_LOCK_DIR:-$ROOT/analyzer}/.write.lock"
+LOCK_WAIT=0
 case "$MODE" in
-	nightly|train|train-clf|worker) LOCK="${GV_LOCK_DIR:-$ROOT/analyzer}/.write.lock" ;;
-	*)                              LOCK="${GV_LOCK_DIR:-$ROOT/analyzer}/.$MODE.lock" ;;
+	nightly|train|train-clf)
+		LOCK="$WRITE_LOCK"
+		LOCK_WAIT="${GV_LOCK_WAIT:-900}"
+		case "$LOCK_WAIT" in ''|*[!0-9]*) LOCK_WAIT=900 ;; esac
+		;;
+	*) LOCK="${GV_LOCK_DIR:-$ROOT/analyzer}/.$MODE.lock" ;;
 esac
 
 # Job status (scripts/lib-jobstatus.sh): every run records its start, end, exit code, duration, the last
@@ -99,6 +110,13 @@ run_job() {
 	fi
 	# -E 99 makes "could not take the lock" distinguishable from the job's own
 	# exit status, so an overlapping firing is a clean skip rather than an error.
+	if [ "$LOCK_WAIT" -gt 0 ]; then
+		# Wait for the write lock; once held, record who holds it ("<mode> <pid> <start>": the pid is this shell, which then
+		# becomes the job with exec, so it stays valid) for the run that has to give up, then run the job.
+		flock -w "$LOCK_WAIT" -E 99 "$LOCK" bash -c 'printf "%s %s %s\n" "$1" "$$" "$(date +%s)" > "$2" 2>/dev/null; shift 2; exec "$@"' _ \
+			"$MODE" "$WRITE_LOCK.holder" "$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
+		return $?
+	fi
 	flock -n -E 99 "$LOCK" "$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
 }
 
@@ -106,8 +124,14 @@ js_exec run_job
 status="$JS_EXIT"
 
 if [ "$status" -eq 99 ]; then
-	echo "Another $MODE run is already in progress; skipping this firing."
-	js_skipped
+	if [ "$LOCK_WAIT" -gt 0 ]; then
+		holder="$(js_lock_holder "$WRITE_LOCK.holder")"
+		echo "The write lock stayed busy for $LOCK_WAIT s${holder:+ (held by $holder)}; skipping this $MODE run."
+		js_skipped "$LOCK_WAIT" "$holder"
+	else
+		echo "Another $MODE run is already in progress; skipping this firing."
+		js_skipped
+	fi
 	JS_EXIT=0
 	exit 0
 fi

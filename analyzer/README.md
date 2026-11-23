@@ -47,8 +47,8 @@ panel's train jobs they pass `--candidate`, so the weekly cron cannot silently
 replace the live model. Promotion is a separate, explicit step (panel "promote"
 or `analyzer/ctl.py promote`).
 
-The wrapper takes a per-mode `flock`, so an overlapping cron firing skips
-cleanly instead of writing partial verdicts. Both entry points also accept
+The wrapper takes a `flock`, so overlapping cron firings never write partial verdicts: `nightly`, `train` and `train-clf` wait for the shared
+write lock (`GV_LOCK_WAIT`, default 900 s), the worker takes it itself only around a job that writes models or verdicts, the other modes skip when busy. Both entry points also accept
 `--config`, `--log-dir` and `--dry-run` directly.
 
 Cron:

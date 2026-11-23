@@ -32,7 +32,7 @@ function gp_perm_cache_clear() { @unlink(gp_perm_cache_path()); }
 // Scan the install. Pure apart from the file system. $root defaults to this install.
 function gp_perm_scan_now($root = null, $now = null) {
 	$root = rtrim($root === null ? dirname(__DIR__) : $root, '/');
-	$now = $now === null ? time() : (int)$now;
+	$now = ($now === null || (int)$now <= 0) ? time() : (int)$now;       // a zero "now" must never become the scan's timestamp (it showed as 20,780 days ago)
 	$out = array('v' => 1, 'time' => $now, 'root' => $root, 'scanned' => 0, 'truncated' => false,
 		'writable_dirs' => 0, 'writable_files' => 0, 'writable_sample' => array(), 'cron_not_exec' => array(), 'secret_readable' => array());
 	$skip = gp_perm_skip();
@@ -72,12 +72,12 @@ function gp_perm_scan_now($root = null, $now = null) {
 
 // The cached scan (an hour), or a fresh one. $force skips the cache. Never throws.
 function gp_perm_scan($force = false, $now = null, $root = null) {
-	$now = $now === null ? time() : (int)$now;
+	$now = ($now === null || (int)$now <= 0) ? time() : (int)$now;
 	$root = rtrim($root === null ? dirname(__DIR__) : $root, '/');
 	$cf = gp_perm_cache_path();
 	if (!$force && is_file($cf)) {
 		$d = json_decode((string)@file_get_contents($cf), true);
-		if (is_array($d) && isset($d['time'], $d['root']) && $d['root'] === $root && $now - (int)$d['time'] < GP_PERM_TTL && $now >= (int)$d['time'] - 60) { return $d; }
+		if (is_array($d) && isset($d['time'], $d['root']) && (int)$d['time'] > 0 && $d['root'] === $root && $now - (int)$d['time'] < GP_PERM_TTL && $now >= (int)$d['time'] - 60) { return $d; }
 	}
 	$s = gp_perm_scan_now($root, $now);
 	$tmp = $cf . '.tmp' . getmypid();

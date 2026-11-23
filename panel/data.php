@@ -71,7 +71,9 @@ function gp_plural($count, $unit) {
 }
 
 // A short relative age, e.g. "3 minutes".
+// How long ago a UNIX timestamp was ("3 minutes"). A missing or zero timestamp is not an age: it used to render as the time since 1970 ("20,780 days").
 function gp_age($timestamp) {
+	if ((int)$timestamp <= 0) { return '—'; }
 	$seconds = max(0, time() - (int)$timestamp);
 	if ($seconds < 60) { return gp_plural($seconds, 'second'); }
 	if ($seconds < 3600) { return gp_plural(intdiv($seconds, 60), 'minute'); }

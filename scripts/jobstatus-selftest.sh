@@ -148,6 +148,52 @@ ok "when quota does not exist it is skipped silently" "$(if [ -n "$(PATH=/usr/bi
 GV_PHP=/nonexistent GV_LOG_DIR="$WORK/nodir" GV_JOBLOG_DIR="$L" bash "$ROOT/scripts/guard-logrotate.sh" > /dev/null 2>&1
 ok "a missing log directory is a warning, not a silent success" "$(yes_if [ "$(status logrotate status)" = warning ])"
 
+echo "== write lock: nightly / train / train-clf wait, the worker takes it only around a write job"
+LK="$WORK/locks"
+# holder SECONDS: take analyzer/.write.lock through the real worker.WriteLock for SECONDS seconds (what a running write job of the worker does)
+holder() {
+	rm -f "$WORK/held"
+	( GV_LOCK_DIR="$LK" python3 - "$1" "$ROOT" "$WORK/held" <<'PY'
+import sys, time
+sys.path.insert(0, sys.argv[2])
+from analyzer import worker
+l = worker.WriteLock()
+assert l.acquire(0)
+open(sys.argv[3], 'w').write('held')
+time.sleep(float(sys.argv[1]))
+l.release()
+PY
+	) > /dev/null 2>&1 &
+	HPID=$!
+	for _ in $(seq 1 50); do [ -f "$WORK/held" ] && break; sleep 0.1; done
+}
+holder 3
+t0=$(date +%s)
+GV_LOCK_WAIT=20 FAKE_MODE=ok bash "$CRON" nightly > "$WORK/w1" 2>&1; rc=$?
+t1=$(date +%s)
+wait "$HPID" 2>/dev/null
+ok "worker + nightly start together: nightly WAITS for the lock, then runs (exit 0, status ok, it ran after about 3 s, nothing skipped)" "$(yes_if [ $rc -eq 0 ] && [ "$(status nightly status)" = ok ] && [ $((t1 - t0)) -ge 2 ] && [ "$(status nightly skipped)" = 0 ] && grep -qx 'did the work' "$WORK/w1")"
+holder 6
+FAKE_MODE=ok GV_LOCK_WAIT=1 bash "$CRON" nightly > "$WORK/w2" 2>&1; rc=$?
+ok "the wait runs out: exit 0, status skipped, 'skipped (lock busy after 1 s)', the holder (worker) is named and stored, no failure, the job did not run" \
+	"$(yes_if [ $rc -eq 0 ] && [ "$(status nightly status)" = skipped ] && status nightly last_error | grep -q 'lock busy after 1 s' && status nightly last_error | grep -q 'held by worker' && [ "$(status nightly lock_holder)" = worker ] && ! grep -qx 'did the work' "$WORK/w2" && [ "$(status nightly skipped)" = 1 ])"
+ok "...and the earlier successful run's last_success is kept (a skip never erases it)" "$(yes_if [ "$(status nightly last_success)" -gt 0 ])"
+FAKE_MODE=ok GV_LOCK_WAIT=1 bash "$CRON" train > /dev/null 2>&1
+FAKE_MODE=ok GV_LOCK_WAIT=1 bash "$CRON" train-clf > /dev/null 2>&1
+ok "train and train-clf wait too: both are recorded as skipped (lock busy after 1 s)" "$(yes_if [ "$(status train status)" = skipped ] && [ "$(status train-clf status)" = skipped ] && status train last_error | grep -q 'lock busy after 1 s')"
+GV_LOCK_WAIT=0 FAKE_MODE=ok bash "$CRON" nightly > /dev/null 2>&1
+ok "GV_LOCK_WAIT=0 means no wait: skipped at once with the plain note" "$(yes_if [ "$(status nightly status)" = skipped ] && status nightly last_error | grep -q 'holds the lock')"
+FAKE_MODE=ok bash "$CRON" worker > "$WORK/w3" 2>&1; rc=$?
+ok "the worker wrapper does not touch the write lock (python takes it only around a write job): it runs at once while a write job holds it" "$(yes_if [ $rc -eq 0 ] && [ "$(status worker status)" = ok ] && grep -qx 'did the work' "$WORK/w3")"
+wait "$HPID" 2>/dev/null
+GV_LOCK_WAIT=abc FAKE_MODE=ok bash "$CRON" nightly > /dev/null 2>&1
+ok "a garbage GV_LOCK_WAIT falls back to the 900 s default and still runs when the lock is free" "$(yes_if [ "$(status nightly status)" = ok ])"
+( exec 9>"$LK/.worker.lock"; flock -n 9; sleep 3 ) > /dev/null 2>&1 &
+sleep 0.5
+FAKE_MODE=ok bash "$CRON" worker > /dev/null 2>&1
+ok "two workers never overlap: a second worker firing is skipped by its own lock" "$(yes_if [ "$(status worker status)" = skipped ])"
+wait 2>/dev/null
+
 echo "== feeds (PHP job behind analyzer-cron.sh feeds)"
 FD="$WORK/feeds"; mkdir -p "$FD/lists" "$FD/logs"
 unset GV_PHP

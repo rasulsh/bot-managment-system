@@ -192,7 +192,12 @@ and `redis` match the guard's; you only need to override if you moved things.
 ## Step 4 — Schedule the analyzer (cron)
 
 Use the wrapper `scripts/analyzer-cron.sh`, which takes a `flock` so overlapping
-firings skip cleanly (the modes that write models or verdicts share one lock). If
+firings never run side by side. The jobs that write models or verdicts share ONE lock
+(`analyzer/.write.lock`): `nightly`, `train` and `train-clf` **wait** for it (up to 900 s, change it with
+`GV_LOCK_WAIT=<seconds>` in the crontab; `0` = do not wait), so starting `nightly` in the same second as the
+every-minute `worker` is fine, no `sleep N;` workaround is needed; the `worker` takes the lock itself only while it runs a
+job that writes models or verdicts. Every other mode skips when its own lock is busy. A run that still cannot get the
+lock after its wait is recorded as *skipped (lock busy after N s)* and shown as **skipped by lock** on the Jobs page. If
 you installed the Python packages in `.venv` as above, add this line at the top of
 the crontab, or the jobs run the system `python3`, find no packages and store
 nothing while exiting 0:

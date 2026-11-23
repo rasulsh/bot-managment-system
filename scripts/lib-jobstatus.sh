@@ -33,6 +33,7 @@ JS_EXIT=0
 JS_NOTE=""            # a reason set by the wrapper itself (preflight failure ...)
 JS_EXTRA_RESULT=""    # a result JSON object the wrapper itself produced (logrotate)
 JS_WARN_EXTRA=""      # wrapper-level warning text
+JS_LOCK_HOLDER=""     # who held the lock a skipped run found (e.g. "worker"), when known
 
 # js_php_check [php]: a php that is not the command-line build (cPanel cron's default PATH finds php-cgi first: it prints HTTP
 # headers and used to make every config read fail) gets ONE job warning naming the binary and the fix.
@@ -127,14 +128,30 @@ js_exec() {
 	return 0
 }
 
+# Who holds a write lock right now, from its holder file ("<mode> <pid> <start>"): prints the mode when that process is alive, else nothing.
+# The holder file is written by whoever takes the lock (analyzer-cron.sh for nightly / train / train-clf, analyzer/worker.py for a write job).
+js_lock_holder() {
+	local f="$1" mode pid
+	[ -r "$f" ] || return 0
+	read -r mode pid _ < "$f" 2>/dev/null || return 0
+	case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+	kill -0 "$pid" 2>/dev/null && printf '%s' "$mode"
+	return 0
+}
+
 # A run that found another run holding the lock: not a failure, but not invisible.
+#   js_skipped [waited-seconds] [holder-mode]
+# With no argument (a `flock -n` mode) the note says another run holds the lock; with the seconds waited (a mode that WAITS for the
+# lock, GV_LOCK_WAIT) it reads "skipped (lock busy after N s)". The holder, when known, is named and stored (lock_holder) so the panel can say who.
 js_skipped() {
-	local runs failures skipped ls lf
+	local runs failures skipped ls lf waited="${1:-}" holder="${2:-}"
 	ls="$(js_state_get last_success)"; lf="$(js_state_get last_failure)"
 	skipped=$(( $(js_state_get skipped) + 1 ))
 	runs="$(js_state_get runs)"; failures="$(js_state_get failures)"
 	js_state_write "$ls" "$lf" "$skipped" "$runs" "$failures"
-	JS_NOTE="skipped: another $JS_MODE run holds the lock"
+	if [ -n "$waited" ]; then JS_NOTE="skipped (lock busy after $waited s)"; else JS_NOTE="skipped: another run holds the lock"; fi
+	[ -n "$holder" ] && JS_NOTE="$JS_NOTE, held by $holder"
+	JS_LOCK_HOLDER="$holder"
 	JS_STATUS_OVERRIDE="skipped"
 }
 
@@ -201,9 +218,10 @@ js_write() {
 	done <<EOF
 $warns
 EOF
-	printf '{"v":1,"mode":"%s","status":"%s","last_start":%s,"last_end":%s,"last_success":%s,"last_failure":%s,"last_exit":%s,"duration":%s,"skipped":%s,"runs":%s,"failures":%s,"last_error":"%s","warnings":[%s],"result_json":"%s","python":"%s"}\n' \
+	printf '{"v":1,"mode":"%s","status":"%s","last_start":%s,"last_end":%s,"last_success":%s,"last_failure":%s,"last_exit":%s,"duration":%s,"skipped":%s,"runs":%s,"failures":%s,"last_error":"%s","warnings":[%s],"result_json":"%s","python":"%s","lock_holder":"%s"}\n' \
 		"$JS_MODE" "$status" "$JS_START" "$end" "$ls" "$lf" "$rc" "$dur" "$skipped" "$runs" "$failures" \
 		"$(printf '%s' "$err_text" | js_esc)" "$wj" "$(printf '%s' "$result" | js_redact | head -c 2000 | js_esc)" "$(printf '%s' "${PYTHON:-}" | js_esc)" \
+		"$(printf '%s' "$JS_LOCK_HOLDER" | js_esc)" \
 		> "$f.tmp$$" 2>/dev/null && mv -f "$f.tmp$$" "$f" 2>/dev/null
 
 	# jobs.log: one line per run; jobs-errors.log: the full stderr of a failure.

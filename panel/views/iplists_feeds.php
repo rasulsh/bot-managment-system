@@ -5,7 +5,7 @@ $fe_state = is_array($feeds_state ?? null) ? $feeds_state : array('state' => 'mi
 $fe_form = is_array($feed_edit ?? null) ? $feed_edit : null;
 $fe_sv = is_array($feed_save ?? null) ? $feed_save : null;
 $fe_err = $fe_sv ? $fe_sv['errors'] : array();
-$fe_age = function ($t) { return $t > 0 ? gp_e(gp_age(max(0, time() - (int)$t))) . ' ' . gp_e(gp_t('ago')) : gp_e(gp_t('never')); };
+$fe_age = function ($t) { return $t > 0 ? gp_e(gp_age((int)$t)) . ' ' . gp_e(gp_t('ago')) : gp_e(gp_t('never')); };
 ?>
 <div class="gp-card gp-form">
 	<div class="gp-card-title"><?= gp_e(gp_t('feed_title')) ?><?= gp_tip('feed_about') ?></div>

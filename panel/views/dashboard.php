@@ -70,8 +70,12 @@ $queue = isset($queue) && is_array($queue) ? $queue : array('length' => 0, 'olde
 <div class="gp-card" id="cron-setup">
 	<div class="gp-card-title"><?= gp_e(gp_t('cron_title')) ?></div>
 	<p class="gp-help"><?= gp_e(gp_t('cron_help')) ?></p>
+	<?php if ($cron_lines): ?>
 	<p class="gp-help"><?= gp_e(gp_t('cron_open')) ?> <code class="gp-mono">crontab -e</code></p>
 	<pre class="gp-mono gp-ltr gp-pre"><?= gp_e(implode("\n", $cron_lines)) ?></pre>
+	<?php else: ?>
+	<p class="gp-note" role="status"><?= gp_e(gp_t('cron_card_nolines')) ?></p>
+	<?php endif; ?>
 	<p class="gp-help"><?= gp_e(gp_t('cron_source_' . $cron['mode'])) ?><?php if (in_array($cron['mode'], array('file', 'cache'), true) && $cron['age'] !== null): ?> (<?= gp_e(gp_age(time() - (int)$cron['age'])) ?> <?= gp_e(gp_t('ago')) ?>)<?php endif; ?></p>
 </div>
 <?php endif; ?>
