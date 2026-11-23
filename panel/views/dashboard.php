@@ -7,6 +7,7 @@
 $s = is_array($snapshot) ? $snapshot : array();
 $isum = isset($isum) ? $isum : array('total' => 0, 'enabled' => 0, 'by' => array());
 $rules = isset($rules) && is_array($rules) ? $rules : array();
+$geo = isset($geo) && is_array($geo) ? $geo : null;
 $iplists = isset($iplists) && is_array($iplists) ? $iplists : array();
 $traffic = isset($s['traffic']) && is_array($s['traffic']) ? $s['traffic'] : array();
 $decisions = isset($s['decisions']) && is_array($s['decisions']) ? $s['decisions'] : array();
@@ -202,6 +203,8 @@ foreach ($iplists as $l) {
 		'logs' => 'index.php?r=logs&amp;ipln=' . gp_u($l['id']) . '&amp;ipl=' . gp_u($l['type']));
 }
 usort($rrows, function ($a, $b) { return $b['h']['d7'] <=> $a['h']['d7']; });
+$rr_hit = array_values(array_filter($rrows, function ($r) { return (int)$r['h']['d7'] > 0; }));
+$rr_quiet = array_values(array_filter($rrows, function ($r) { return (int)$r['h']['d7'] <= 0; }));
 ?>
 <section class="gp-dcard gp-dspan-7" id="dash-ready" aria-label="<?= gp_e(gp_t('dash_ready_title')) ?>">
 	<div class="gp-dcard-title"><?= gp_e(gp_t('dash_ready_title')) ?><?= gp_tip('dash_ready') ?><?= $snapshot_stale ? $stale_badge : '' ?>
@@ -209,6 +212,7 @@ usort($rrows, function ($a, $b) { return $b['h']['d7'] <=> $a['h']['d7']; });
 	<?php if (!$rrows): ?>
 	<p class="gp-note"><?= gp_e(gp_t('dash_ready_none')) ?> <a href="index.php?r=rules"><?= gp_e(gp_t('nav_rules')) ?></a> · <a href="index.php?r=iplists"><?= gp_e(gp_t('nav_iplists')) ?></a></p>
 	<?php else: ?>
+	<?php if ($rr_hit): ?>
 	<div class="gp-table-wrap"><table class="gp-table gp-dtable gp-dready">
 		<thead>
 			<tr><th rowspan="2"><?= gp_e(gp_t('dash_rd_name')) ?></th><th colspan="2" class="gp-num gp-dgroup"><?= gp_e(gp_t('dash_rd_hits')) ?></th>
@@ -216,17 +220,26 @@ usort($rrows, function ($a, $b) { return $b['h']['d7'] <=> $a['h']['d7']; });
 			<tr><th class="gp-num"><?= gp_e(gp_t('dash_rd_h24')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_d7')) ?></th></tr>
 		</thead>
 		<tbody>
-		<?php foreach ($rrows as $rw): $hint = gp_dash_ready_hint($rw['h']); ?>
+		<?php foreach ($rr_hit as $rw): $hint = gp_dash_ready_hint($rw['h'], $rw['kind'] === 'list' ? $rw['type'] : ''); ?>
 		<tr data-ready="<?= gp_e($hint[0]) ?>">
 			<td class="gp-dname"><a href="<?= $rw['logs'] ?>"><?= gp_e($rw['name']) ?></a>
 				<span class="gp-badge gp-badge-off" data-type="<?= $rw['kind'] === 'rule' ? 'rule' : 'list-' . gp_e($rw['type']) ?>"><?= gp_e($rw['kind'] === 'rule' ? gp_t('dash_rd_t_rule') : gp_t('dash_rd_t_list_' . $rw['type'])) ?></span></td>
 			<td class="gp-num"><?= gp_num((int)$rw['h']['h24']) ?></td><td class="gp-num"><?= gp_num((int)$rw['h']['d7']) ?></td>
 			<td class="gp-num"><?= gp_num((int)$rw['h']['ips']) ?> / <?= gp_num((int)$rw['h']['devs']) ?></td>
-			<td class="gp-num"><?= (int)$rw['h']['d7'] > 0 ? gp_e(gp_num((float)$rw['h']['tok'], 1)) . '%' : '—' ?></td>
+			<td class="gp-num"><?= ((int)$rw['h']['d7'] > 0 && $hint[0] !== 'allow') ? gp_e(gp_num((float)$rw['h']['tok'], 1)) . '%' : '—' ?></td>
 			<td><span class="gp-badge <?= gp_dash_ready_badge($hint[0]) ?>"><?= gp_e(gp_t($hint[1])) ?></span></td>
 		</tr>
 		<?php endforeach; ?>
 		</tbody></table></div>
+	<?php endif; ?>
+	<?php if (!$rr_hit): ?><p class="gp-note"><?= gp_e(gp_t('dash_rd_nohits_all')) ?></p><?php endif; ?>
+	<?php if ($rr_quiet): ?>
+	<details class="gp-dquiet" id="dash-ready-quiet">
+		<summary><?= gp_e(sprintf(gp_t(count($rr_quiet) === 1 ? 'dash_rd_quiet_one' : 'dash_rd_quiet'), gp_num(count($rr_quiet)))) ?> <span class="gp-dquiet-show">— <?= gp_e(gp_t('dash_rd_show')) ?></span><span class="gp-dquiet-hide">— <?= gp_e(gp_t('dash_rd_hide')) ?></span></summary>
+		<ul class="gp-dquiet-list"><?php foreach ($rr_quiet as $rw): ?><li data-ready="none"><a href="<?= $rw['logs'] ?>"><?= gp_e($rw['name']) ?></a>
+			<span class="gp-badge gp-badge-off" data-type="<?= $rw['kind'] === 'rule' ? 'rule' : 'list-' . gp_e($rw['type']) ?>"><?= gp_e($rw['kind'] === 'rule' ? gp_t('dash_rd_t_rule') : gp_t('dash_rd_t_list_' . $rw['type'])) ?></span></li><?php endforeach; ?></ul>
+	</details>
+	<?php endif; ?>
 	<p class="gp-help"><?= gp_e(gp_t('dash_ready_help')) ?></p>
 	<?php endif; ?>
 </section>
@@ -275,14 +288,14 @@ foreach ($kinds as $k => $lab) { $tl_tabs[$k] = gp_t($lab); }
 			$rows = isset($tl[$k]) && is_array($tl[$k]) ? $tl[$k] : array();
 			gp_tab_begin('dtop', $k, gp_t($lab)); ?>
 		<?php if (!$rows): ?>
-			<p class="gp-note"><?= gp_e(gp_t(in_array($k, array('countries', 'asns'), true) ? 'dash_top_nogeo2' : 'dash_top_none')) ?><?php if (in_array($k, array('countries', 'asns'), true)): ?> <a href="index.php?r=geo"><?= gp_e(gp_t('nav_geo')) ?></a><?php endif; ?></p>
+			<p class="gp-note"><?= in_array($k, array('countries', 'asns'), true) ? gp_dash_geo_empty_html($geo, $cfg) : gp_e(gp_t('dash_top_none')) ?></p>
 		<?php else: ?>
 		<div class="gp-table-wrap"><table class="gp-table gp-dtable" data-top="<?= gp_e($k) ?>">
 			<thead><tr><th><?= gp_e(gp_t($lab)) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_k_requests')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_share')) ?></th><th><?= gp_e(gp_t('dash_mix')) ?></th><th><?= gp_e(gp_t('dash_qa')) ?></th></tr></thead>
 			<tbody>
 			<?php foreach ($rows as $r): $key = (string)$r[0]; ?>
 			<tr>
-				<td class="gp-mono gp-ltr gp-truncate"><a href="<?= gp_dash_top_link($k, $key) ?>"><?= gp_e($k === 'asns' ? 'AS' . $key : $key) ?></a></td>
+				<td class="gp-mono gp-ltr"><a class="gp-dtrunc" href="<?= gp_dash_top_link($k, $key) ?>"><?= gp_e($k === 'asns' ? 'AS' . $key : $key) ?></a></td>
 				<td class="gp-num"><?= gp_num((int)$r[1]) ?></td>
 				<td class="gp-num"><?= $total_req > 0 ? gp_e(gp_num(100.0 * (int)$r[1] / $total_req, 1)) . '%' : '—' ?></td>
 				<td><?= gp_dash_mixbar($r) ?></td>
@@ -314,7 +327,8 @@ $perms = isset($perms) && is_array($perms) ? $perms : null;
 	<div class="gp-dcard-title"><?= gp_e(gp_t('dash_jobs')) ?> <a class="gp-btn gp-btn-ghost gp-btn-sm" href="index.php?r=jobs"><?= gp_e(gp_t('al_open')) ?></a></div>
 	<?php foreach ($jobs as $jn => $h): ?>
 	<div class="gp-stat-row"><span class="gp-stat-key gp-mono"><a href="index.php?r=jobs&amp;job=<?= gp_u($jn) ?>"><?= gp_e($jn) ?></a></span>
-		<span class="gp-stat-val"><span class="gp-badge <?= gp_job_badge($h['state']) ?>"><?= gp_e(gp_t('job_s_' . $h['state'])) ?></span>
+		<?php $jst = gp_dash_job_state($jn, $h, $cron); ?>
+		<span class="gp-stat-val"><span class="gp-badge <?= $jst === 'unscheduled' ? 'gp-badge-off' : gp_job_badge($h['state']) ?>" data-job-state="<?= gp_e($jst) ?>"><?= gp_e(gp_t($jst === 'unscheduled' ? 'job_s_unscheduled' : 'job_s_' . $h['state'])) ?></span>
 			<span class="gp-mono"><?= $h['last_success'] > 0 ? gp_e(gp_age($h['last_success'])) : '—' ?></span></span></div>
 	<?php endforeach; ?>
 	<p class="gp-help"><?= gp_e(gp_t('job_queue')) ?>: <span class="gp-mono"><?= gp_num((int)$queue['length']) ?></span><?= $queue['oldest_age'] !== null ? ' · ' . gp_e(gp_t('job_oldest')) . ' ' . gp_e(gp_age(time() - (int)$queue['oldest_age'])) : '' ?></p>
@@ -396,7 +410,7 @@ $perms = isset($perms) && is_array($perms) ? $perms : null;
 		<?php endif; ?>
 		<div class="gp-dcard gp-dspan-6">
 			<div class="gp-dcard-title"><?= gp_e(gp_t('dash_holdout_gap')) ?></div>
-			<?php if (empty($holdout['enabled'])): ?><p class="gp-help"><?= gp_e(gp_t('help_holdout_pct')) ?></p><?php else: ?>
+			<?php if (empty($holdout['enabled'])): ?><p class="gp-note"><?= gp_dash_holdout_empty_html($cfg) ?></p><?php else: ?>
 			<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('logs_holdout')) ?></span><span class="gp-stat-val"><?= gp_num((float)($holdout['holdout_challenge_rate'] ?? 0), 1) ?>%</span></div>
 			<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('dash_enforce')) ?></span><span class="gp-stat-val"><?= gp_num((float)($holdout['enforced_challenge_rate'] ?? 0), 1) ?>%</span></div>
 			<?php endif; ?>
@@ -415,7 +429,8 @@ $perms = isset($perms) && is_array($perms) ? $perms : null;
 		</div>
 		<div class="gp-dcard gp-dspan-6">
 			<div class="gp-dcard-title"><?= gp_e(gp_t('dash_chart_status')) ?></div>
-			<?= gp_chart_bars(isset($s['status']) && is_array($s['status']) ? $s['status'] : array(), array('color' => gp_chart_color('info'))) ?>
+			<?php $st_rows = isset($s['status']) && is_array($s['status']) ? $s['status'] : array();
+			if ($st_rows): ?><?= gp_chart_bars($st_rows, array('color' => gp_chart_color('info'))) ?><?php else: ?><p class="gp-note"><?= gp_dash_status_empty_html($cfg) ?></p><?php endif; ?>
 		</div>
 		<div class="gp-dcard gp-dspan-6">
 			<div class="gp-dcard-title"><?= gp_e(gp_t('dash_chart_reasons')) ?></div>

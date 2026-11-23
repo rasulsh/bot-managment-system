@@ -3456,7 +3456,7 @@ t_ok('the main chart has the 24 h and 7 d tabs and a legend, and the top lists h
 t_ok('top lists: requests, share of the 24 h total (4 of 120 = 3.3%), the outcome mix bar and a quick action per row', strpos($h_ok, '3.3%') !== false && strpos($h_ok, 'gp-mixbar') !== false && strpos($h_ok, 'index.php?r=identity&amp;id=203.0.113.5') !== false && strpos($h_ok, 'r=live&amp;ua=curl%2F8.4&amp;minutes=60') !== false);
 // Empty geo: the countries and ASN tabs say what to do
 list($dv_hg, $dv_eg) = $jh_render('dashboard', array('snapshot' => array_merge($kpi_snap, array('dash' => array_merge($kpi_snap['dash'], array('top' => array_merge($kpi_snap['dash']['top'], array('countries' => array(), 'asns' => array()))))))));
-t_ok('empty geo: the Countries and ASNs tabs say there is no data yet, to compile the GeoIP database, and link to the GeoIP page; the other tabs still show their rows', !$dv_eg && substr_count($dv_hg, 'compile the GeoIP database') === 2 && substr_count($dv_hg, 'index.php?r=geo') >= 2 && strpos($dv_hg, 'index.php?r=logs&amp;ip=203.0.113.5') !== false);
+t_ok('empty geo: the Countries and ASNs tabs say there is no data yet, to compile the GeoIP database, and link to the GeoIP page; the other tabs still show their rows', !$dv_eg && substr_count($dv_hg, 'compile a GeoIP database on the') === 2 && substr_count($dv_hg, 'index.php?r=geo') >= 2 && strpos($dv_hg, 'index.php?r=logs&amp;ip=203.0.113.5') !== false);
 // Rollout readiness: an all-monitor install
 $dv_rules = array(array('id' => 'r1', 'name' => 'Scrapers <b>', 'enabled' => true, 'mode' => 'monitor', 'action' => 'block'), array('id' => 'r2', 'name' => '', 'enabled' => true, 'mode' => 'monitor', 'action' => 'challenge'),
 	array('id' => 'r3', 'name' => 'Enforced one', 'enabled' => true, 'mode' => 'enforce', 'action' => 'block'), array('id' => 'r4', 'name' => 'Disabled rule x', 'enabled' => false, 'mode' => 'monitor', 'action' => 'block'));
@@ -3532,6 +3532,71 @@ t_ok('readiness table: the chips "Rule", "IP list · block" and "IP list · allo
 	&& strpos(file_get_contents(__DIR__ . '/../panel/assets/app.src.css'), '.gp-dready th { white-space: nowrap;') !== false);
 
 t_ok('bottom navigation: "Temporary blocks & allows" has the short label "Blocks" there (the side menu and page title keep the full name)', strpos(file_get_contents(__DIR__ . '/../panel/views/layout.php'), "'_short'") !== false && gp_t('nav_overrides_short') === 'Blocks' && gp_t('nav_overrides') === 'Temporary blocks & allows');
+
+// ---- Dashboard polish: allow lists, quiet rows, the hour in progress, border, empty states, job state, geo sentence
+t_section('Dashboard polish');
+$po_rules = array(array('id' => 'r1', 'name' => 'Scrapers', 'enabled' => true, 'mode' => 'monitor', 'action' => 'block'), array('id' => 'q1', 'name' => 'Quiet one', 'enabled' => true, 'mode' => 'monitor', 'action' => 'block'), array('id' => 'q2', 'name' => 'Quiet two', 'enabled' => true, 'mode' => 'monitor', 'action' => 'challenge'));
+$po_lists = array(array('id' => 'wl', 'name' => 'pspro whitelist ip', 'enabled' => true, 'type' => 'allow', 'mode' => 'monitor'), array('id' => 'bl', 'name' => 'Bad nets', 'enabled' => true, 'type' => 'block', 'mode' => 'monitor'), array('id' => 'ql', 'name' => 'Quiet list', 'enabled' => true, 'type' => 'block', 'mode' => 'monitor'));
+$po_snap = $kpi_snap; $po_snap['dash']['readiness'] = array('rules' => array('r1' => array('h24' => 5, 'd7' => 90, 'ips' => 12, 'devs' => 11, 'tok' => 12.5)), 'lists' => array('allow:wl' => array('h24' => 40, 'd7' => 200, 'ips' => 40, 'devs' => 38, 'tok' => 9.1), 'block:bl' => array('h24' => 1, 'd7' => 30, 'ips' => 3, 'devs' => 3, 'tok' => 0.0)));
+list($po_h, $po_e) = $jh_render('dashboard', array('snapshot' => $po_snap), array('rules' => $po_rules, 'iplists' => $po_lists));
+t_ok('allow list: shown with its hits and addresses, but no block-oriented hint (no "Review first", no valid-token share), badge "Allow list: no enforce hint"', !$po_e && preg_match('/data-ready="allow".*?pspro whitelist ip.*?(?=<\/tr>)/s', $po_h, $po_m) === 1
+	&& strpos($po_m[0], '200') !== false && strpos($po_m[0], '40 / 38') !== false && strpos($po_m[0], '9.1%') === false && strpos($po_m[0], 'Review first') === false && strpos($po_m[0], 'Allow list: no enforce hint') !== false);
+t_ok('a block list and a rule keep their hints (review first for the 12.5 % rule)', strpos($po_h, 'data-ready="review"') !== false && strpos($po_h, 'data-ready="ready"') !== false);
+t_ok('readiness: only rows WITH hits in 7 d are in the table, sorted by hits (allow list 200, rule 90, block list 30)', substr_count($po_h, '<tr data-ready=') === 3 && strpos($po_h, 'pspro whitelist ip') < strpos($po_h, 'Scrapers') && strpos($po_h, 'Scrapers') < strpos($po_h, 'Bad nets'));
+t_ok('readiness: the rows with no hit are ONE collapsed line "3 rules or lists with no hits in 7 d - show" with their names inside (singular for one)', strpos($po_h, '3 rules or lists with no hits in 7 d') !== false && strpos($po_h, 'id="dash-ready-quiet"') !== false && strpos($po_h, 'Quiet one') !== false && strpos($po_h, 'Quiet list') !== false
+	&& substr_count($po_h, 'id="dash-ready-quiet"') === 1 && strpos($po_h, '<details class="gp-dquiet" id="dash-ready-quiet" open') === false);
+list($po_h1, $po_e1) = $jh_render('dashboard', array('snapshot' => $po_snap), array('rules' => array($po_rules[0], $po_rules[1]), 'iplists' => array()));
+t_ok('readiness: one quiet row says "1 rule or list"', !$po_e1 && strpos($po_h1, '1 rule or list with no hits in 7 d') !== false);
+$po_none = $po_snap; $po_none['dash']['readiness'] = array('rules' => array(), 'lists' => array());
+list($po_h2, $po_e2) = $jh_render('dashboard', array('snapshot' => $po_none), array('rules' => $po_rules, 'iplists' => array()));
+t_ok('readiness: nothing hit at all: no table, one sentence, the collapsed list of all', !$po_e2 && strpos($po_h2, 'gp-dready') === false && strpos($po_h2, 'matched anything in the last 7 days') !== false && strpos($po_h2, '3 rules or lists with no hits in 7 d') !== false);
+t_ok('hint function: an allow list never gets a block hint, whatever its token share', gp_dash_ready_hint(array('d7' => 500, 'tok' => 40.0), 'allow')[0] === 'allow' && gp_dash_ready_hint(array('d7' => 500, 'tok' => 40.0), 'block')[0] === 'review' && gp_dash_ready_hint(array('d7' => 500, 'tok' => 40.0))[0] === 'review');
+// the hour in progress
+$po_now = 1700000000 + 1800; $po_b = array();
+for ($i = 0; $i < 24; $i++) { $po_b[] = array('t' => intdiv($po_now, 3600) * 3600 - (23 - $i) * 3600, 'n' => 60, 'a' => 50, 'c' => 5, 'p' => 0, 'b' => 5, 'r' => 0, 'm' => 0, 'ips' => 20); }
+$po_b[23] = array_merge($po_b[23], array('n' => 4, 'a' => 4, 'c' => 0, 'b' => 0, 'ips' => 3));
+$po_svg = gp_dash_main_chart($po_b, false, 'po', $po_now);
+preg_match('/<polyline points="([^"]+)"/', $po_svg, $po_pl);
+t_ok('chart: the current (partial) hour is drawn lighter and labelled "now", its title says it is partial, and it has no point on the distinct-addresses line (23 points, not 24)',
+	substr_count($po_svg, 'gp-dchart-partial') === 1 && strpos($po_svg, 'fill-opacity="0.45"') !== false && strpos($po_svg, 'gp-dchart-now" text-anchor="middle">now<') !== false && strpos($po_svg, 'Hour in progress') !== false && count(explode(' ', $po_pl[1])) === 23);
+$po_old = gp_dash_main_chart($po_b, false, 'po2', $po_now + 7200);
+t_ok('chart: when the newest bucket is not the current hour (an old snapshot), nothing is marked partial and the line has every point', strpos($po_old, 'gp-dchart-partial') === false && strpos($po_old, '>now<') === false && preg_match('/<polyline points="([^"]+)"/', $po_old, $po_p2) === 1 && count(explode(' ', $po_p2[1])) === 24);
+t_ok('chart: the 7 d view marks the hour in progress too, and the legend names it', strpos(gp_dash_main_chart(array_merge(array_fill(0, 144, array('t' => 1, 'n' => 5, 'a' => 5, 'c' => 0, 'p' => 0, 'b' => 0, 'r' => 0, 'm' => 0, 'ips' => 2)), $po_b), true, 'po3', $po_now), 'gp-dchart-partial') !== false && strpos(gp_dash_legend(), 'Hour in progress') !== false);
+// top list border
+t_ok('top lists: the first cell is a plain table cell (the truncation lives on the link inside it) so every cell shares the row border', strpos($h_ok, 'class="gp-mono gp-ltr gp-truncate"><a href') === false && strpos($h_ok, 'class="gp-mono gp-ltr"><a class="gp-dtrunc"') !== false
+	&& strpos(file_get_contents(__DIR__ . '/../panel/assets/app.src.css'), '.gp-dtable td > a.gp-dtrunc { display: block;') !== false);
+// empty states
+$po_cfg = gv_cfg_defaults(array());
+list($po_hs, $po_es) = $jh_render('dashboard', array('snapshot' => $po_snap), array('cfg' => array_merge($po_cfg, array('capture_outcomes' => false, 'holdout_pct' => 0))));
+t_ok('Response status, capture off: says why and links to the setting (Settings, Holdout and outcome capture)', !$po_es && strpos($po_hs, 'outcome capture is off') !== false && strpos($po_hs, 'index.php?r=settings#set-holdout') !== false && strpos($po_hs, 'Capture response outcomes') !== false);
+$po_snap_on = $po_snap; $po_snap_on['status'] = array();
+list($po_ho, $po_eo) = $jh_render('dashboard', array('snapshot' => $po_snap_on), array('cfg' => array_merge($po_cfg, array('capture_outcomes' => true, 'holdout_pct' => 2))));
+t_ok('Response status, capture on but no data: says no status was recorded yet (not "Nothing found")', !$po_eo && strpos($po_ho, 'Outcome capture is on, but no response status was recorded') !== false && strpos($po_ho, 'outcome capture is off') === false);
+t_ok('Holdout gap, holdout off: says it is off (0 %), suggests a share and links to the setting; holdout on without data says it fills in', strpos($po_hs, 'The holdout is off (0 %)') !== false && strpos($po_hs, 'Holdout percent') !== false && strpos($po_ho, 'The holdout is on, but no holdout request') !== false && strpos($po_ho, 'The holdout is off') === false);
+$po_st = $po_snap; $po_st['status'] = array('2xx' => 90, '4xx' => 5);
+list($po_hf, $po_ef) = $jh_render('dashboard', array('snapshot' => $po_st), array('cfg' => array_merge($po_cfg, array('capture_outcomes' => true))));
+t_ok('Response status with data still draws the bars', !$po_ef && strpos($po_hf, '2xx') !== false && strpos($po_hf, 'outcome capture is off') === false);
+// job state
+$po_cron = array('mode' => 'live', 'report' => array('jobs' => array(array('job' => 'report', 'state' => 'missing'), array('job' => 'geo', 'state' => 'ok'), array('job' => 'feeds', 'state' => 'disabled'), array('job' => 'train', 'state' => 'missing'))), 'age' => 0);
+t_ok('job state: a job that never ran and has no crontab entry (missing or disabled) is "unscheduled"; one that is scheduled and never ran stays "never"; a job that ran keeps its state',
+	gp_dash_job_state('report', array('state' => 'never'), $po_cron) === 'unscheduled' && gp_dash_job_state('feeds', array('state' => 'never'), $po_cron) === 'unscheduled' && gp_dash_job_state('geo', array('state' => 'never'), $po_cron) === 'never'
+	&& gp_dash_job_state('train', array('state' => 'ok'), $po_cron) === 'ok' && gp_dash_job_state('report', array('state' => 'never'), array('mode' => 'none', 'report' => null, 'age' => null)) === 'never');
+$po_jobs = $healthy['jobs']; $po_jobs['report'] = gp_job_health_one('report', gp_job_defs()['report'], null, 0, 600, $jh_now); $po_jobs['geo'] = gp_job_health_one('geo', gp_job_defs()['geo'], null, 0, 600, $jh_now);
+list($po_hj, $po_ej) = $jh_render('dashboard', array('snapshot' => $po_snap, 'jobs' => $po_jobs), array('cron' => $po_cron));
+t_ok('dashboard System, Background jobs: the report job without a crontab entry reads "not scheduled", the scheduled one that never ran still reads "never ran"', !$po_ej && preg_match('/data-job-state="unscheduled">not scheduled<.{0,400}?/s', $po_hj) === 1 && substr_count($po_hj, 'data-job-state="unscheduled"') === 1 && strpos($po_hj, 'data-job-state="never">never ran<') !== false);
+// geo empty-state sentence
+$po_geo_ok = array('country' => array('valid' => true, 'age_days' => 3), 'asn' => array('valid' => true, 'age_days' => 3));
+$po_geo_none = array('country' => null, 'asn' => null);
+$po_t = function ($geo, $cfg) { return gp_dash_geo_empty_html($geo, $cfg); };
+$po_g1 = $po_t($po_geo_ok, array('geo' => array('log' => false)));
+$po_g2 = $po_t($po_geo_none, array('geo' => array('log' => false)));
+$po_g3 = $po_t($po_geo_ok, array('geo' => array('log' => true)));
+t_ok('geo empty state, database compiled but logging off: ONE sentence ending in a full stop that links to Settings, GeoIP, Log the country (no stray "GeoIP" word after it)', substr_count($po_g1, '<a ') === 1 && strpos($po_g1, 'index.php?r=settings#set-geo') !== false && strpos($po_g1, 'compiled') !== false
+	&& substr(strip_tags($po_g1), -1) === '.' && substr_count(strip_tags($po_g1), '.') === 1 && preg_match('/GeoIP\s*$/', strip_tags($po_g1)) !== 1);
+t_ok('geo empty state, no database: one sentence, a link to the GeoIP page inline, then the Settings step', substr_count($po_g2, '<a ') === 1 && strpos($po_g2, 'index.php?r=geo') !== false && substr(strip_tags($po_g2), -1) === '.' && strpos(strip_tags($po_g2), 'GeoIP page') !== false);
+t_ok('geo empty state, logging on but no data yet: no link, says the next snapshot run brings it', strpos($po_g3, '<a ') === false && strpos($po_g3, 'next snapshot run') !== false);
+list($po_hg, $po_eg) = $jh_render('dashboard', array('snapshot' => array_merge($kpi_snap, array('dash' => array_merge($kpi_snap['dash'], array('top' => array_merge($kpi_snap['dash']['top'], array('countries' => array(), 'asns' => array()))))))), array('geo' => $po_geo_ok, 'cfg' => array_merge($po_cfg, array('geo' => array('log' => false)))));
+t_ok('Countries and ASNs tabs on the page: the sentence with the Settings link, twice (one per tab), and no lone "GeoIP" link text after it', !$po_eg && substr_count($po_hg, 'index.php?r=settings#set-geo') === 2 && strpos($po_hg, 'ASN of every request</a>.</p>') !== false && strpos($po_hg, '</a> <a href="index.php?r=geo">GeoIP</a>') === false);
 
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');

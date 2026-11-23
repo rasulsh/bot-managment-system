@@ -33,9 +33,12 @@ mkdir "$WORK/bg"
 	$r1 = gp_rule_blank(); $r1["id"]="r1a2b3c"; $r1["name"]="Scripted clients"; $r1["action"]="block"; $r1["ua"]["values"]=array("curl","python-requests");
 	$r2 = gp_rule_blank(); $r2["id"]="st-curl"; $r2["name"]="Headless browsers"; $r2["action"]="captcha"; $r2["ua"]["values"]=array("HeadlessChrome");
 	$r3 = gp_rule_blank(); $r3["id"]="enf1abc"; $r3["name"]="Known bad path"; $r3["action"]="block"; $r3["mode"]="enforce"; $r3["priority"]=200; $r3["ua"]=null; $r3["path"]=array("op"=>"include","type"=>"prefix","values"=>array("/wp-login"));
-	$w = gp_rules_write(array($r1,$r2,$r3));
+	$rs = array($r1,$r2,$r3);
+	for ($qi = 1; $qi <= 3; $qi++) { $q = gp_rule_blank(); $q["id"]="quiet-rule-$qi"; $q["name"]="Quiet rule $qi"; $q["action"]="challenge"; $q["priority"]=300+$qi; $q["ua"]["values"]=array("never-seen-agent-$qi"); $rs[] = $q; }
+	$w = gp_rules_write($rs);
+	$la = gp_iplists_save(array("name"=>"Partners allow","type"=>"allow","mode"=>"monitor","enabled"=>"1","text"=>"192.0.2.0/28\n"), null, "admin", "127.0.0.1");
 	$l = gp_iplists_save(array("name"=>"Hosting ranges","type"=>"block","mode"=>"monitor","enabled"=>"1","text"=>"198.51.100.0/24\n203.0.113.0/28\n"), null, "admin", "127.0.0.1");
-	exit(($w[0] && $l["ok"]) ? 0 : 1);') || { echo "ERROR: could not create the sample rules and list"; exit 2; }
+	exit(($w[0] && $l["ok"] && $la["ok"]) ? 0 : 1);') || { echo "ERROR: could not create the sample rules and list"; exit 2; }
 # Sample traffic so the log, identity and dashboard pages have something to show.
 mkdir -p "$WORK/bg/logs"
 # Two uploaded GeoIP sources that were never compiled (the GeoIP page warns and shows them in the table).
@@ -88,6 +91,7 @@ for h in range(168, -1, -1):
         if r < 0.10: act, rs = '403', ['SH_RULE:r1a2b3c']
         elif r < 0.14: act, sh, rs = '403', 1, ['SH_RULE:r1a2b3c']
         elif r < 0.22: act, sh, rs = 'challenge', 1, ['SH_IPL_BLOCK:hosting-ranges']
+        elif 0.60 < r < 0.64: rs = ['SH_IPL_ALLOW:partners-allow']
         elif r < 0.27: act = 'challenge'
         elif r < 0.29: act = '429'
         if act == 'challenge' and not sh and rnd.random() < 0.9:
