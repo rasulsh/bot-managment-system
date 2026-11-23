@@ -217,7 +217,7 @@ ok "run under cron's umask 002: the status file, the state file, the lock and th
 ok "...the status file that an older version left 0664 is corrected to 0644 on the run" "$(yes_if [ "$(modeof "$MD/status/.jobstatus-nightly.json")" = 644 ])"
 ok "...the marker left 0666 is corrected too (a file of this wrapper's)" "$(yes_if [ $(( 0$(modeof "$MD/status/.lastrun-run_nightly") & 022 )) -eq 0 ])"
 ok "...and a file the wrapper does not own (model.joblib) is left to the Python job, not changed by the shell" "$(yes_if [ "$(modeof "$MD/status/model.joblib")" = 664 ])"
-( umask 002; GV_JOBSTATUS_DIR="$MD/status" GV_JOBLOG_DIR="$MD/logs" GV_LOCK_DIR="$MD/locks" GV_PHP=/nonexistent bash "$ROOT/scripts/guard-logrotate.sh" > /dev/null 2>&1 )
+( umask 002; GV_JOBSTATUS_DIR="$MD/status" GV_JOBLOG_DIR="$MD/logs" GV_LOCK_DIR="$MD/locks" GV_PHP=/nonexistent GV_LOG_DIR="$MD/logs" bash "$ROOT/scripts/guard-logrotate.sh" > /dev/null 2>&1 )
 ok "guard-logrotate.sh under umask 002: its status file is not group-writable either" "$(yes_if [ $(( 0$(modeof "$MD/status/.jobstatus-logrotate.json") & 022 )) -eq 0 ])"
 grep -q '^umask 022' "$ROOT/scripts/analyzer-cron.sh" && grep -q '^umask 022' "$ROOT/scripts/guard-logrotate.sh" && grep -q '^umask 022' "$ROOT/scripts/feeds-cron.sh" && grep -q '^umask 022' "$ROOT/scripts/lib-jobstatus.sh"
 ok "every wrapper and the status library set umask 022 at the top" "$(yes_if [ $? -eq 0 ])"
