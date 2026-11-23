@@ -183,6 +183,27 @@ def has_expired(lists_dir, now=None):
     return False
 
 
+def expiry_due(lists_dir, now=None):
+    """Whether the last compile saw an entry whose `# expires=` time has now passed. ONE small file read (lists-status.json) and no
+    parsing of any source: this runs every minute from the worker. False when nothing is pending, the file is missing or unreadable."""
+    now = int(time.time() if now is None else now)
+    try:
+        with open(os.path.join(lists_dir, STATUS_FILE), 'rb') as handle:
+            nxt = int(json.loads(handle.read().decode('utf-8', 'replace')).get('next_expiry') or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    return 0 < nxt <= now
+
+
+def recompile_if_due(lists_dir=None, now=None):
+    """Recompile the lists when an expiry has passed since the last compile (the worker calls this every minute, so an expired entry
+    stops matching within about a minute). Returns the status dict of the compile, or None when nothing was due."""
+    lists_dir = lists_dir or default_dir()
+    if not expiry_due(lists_dir, now):
+        return None
+    return compile_lists(lists_dir, now=now)
+
+
 def prune_expired(path, raw, now):
     """Remove the lines whose `# expires=` time has passed from a list source. `raw` is what the compile read: a file that changed
     since is left alone (the next compile does it). Atomic replace, same mode. Returns the number of lines removed."""
@@ -335,7 +356,7 @@ def read_own(lists_dir):
 def compile_lists(lists_dir, now=None):
     """Build allow.bin / block.bin. Returns the status dict (also written to lists-status.json)."""
     now = int(time.time() if now is None else now)
-    status = {'v': 1, 'time': now, 'by': 'python', 'ok': True, 'errors': [], 'types': {'allow': None, 'block': None}, 'lists': {}}
+    status = {'v': 1, 'time': now, 'by': 'python', 'ok': True, 'errors': [], 'types': {'allow': None, 'block': None}, 'lists': {}, 'next_expiry': 0}
     lock = None
     if fcntl is not None:
         try:
@@ -385,6 +406,10 @@ def _compile_type(lists_dir, kind, lists, now, status, protected=()):
         entries, bad = parse_text(text, True)
         live = [e[:4] for e in entries if not (e[4] and e[4] <= now)]
         expired = len(entries) - len(live)
+        # The earliest future expiry, stored in the status so the worker (every minute) knows when to recompile.
+        for e in entries:
+            if e[4] and e[4] > now and (not status['next_expiry'] or e[4] < status['next_expiry']):
+                status['next_expiry'] = e[4]
         entries = live
         dropped = dict((reason, 0) for reason in REASONS)
         samples = []

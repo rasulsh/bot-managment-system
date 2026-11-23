@@ -7,6 +7,7 @@
 <div>
 	<h1 class="gp-page-title"><?= gp_e(gp_t('ovr_title')) ?></h1>
 	<p class="gp-page-sub"><?= gp_e(gp_t('ovr_intro')) ?></p>
+	<p class="gp-page-sub"><strong data-ovr-immediate><?= gp_e(gp_t('ovr_immediate')) ?></strong></p>
 </div>
 
 <div class="gp-grid-2">

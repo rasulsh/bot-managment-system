@@ -42,6 +42,7 @@ A code that starts with `SH_` (for example `SH_RULE:<id>`, `SH_IPL_BLOCK:<id>`, 
 | `RULE_SKIP_DEGRADED` | Rule skipped, no verdict (Redis down) | Degraded mode | Redis could not be read, so the crawler verdict was unknown; a known crawler kept its pass and a rule that skips verified crawlers did not apply. |
 | `OVR_CAPTCHA` | Temporary CAPTCHA (override) | Override | An operator set a temporary CAPTCHA on this address or device: it is shown the image test until it holds a CAPTCHA-level token. |
 | `OVR_CHALLENGE` | Temporary challenge (override) | Override | An operator set a temporary challenge on this address or device: it is shown the check page until it holds a valid token. |
+| `OVR_DENY` | Temporary block (override) | Override | An operator set a temporary block on this address or device: the request is refused with a 403, whatever the enforcement switches say. |
 | `TEST` | Test cookie | Other | The request carried the operator test cookie (Settings, test mode); it is challenged on purpose. |
 
 `SH_CAPT_ESC` is the monitor-only form of `CAPT_ESC` (the proof of work looked headless, but CAPTCHA escalation is not enforced).

@@ -403,6 +403,20 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
+def recompile_expired_lists(lists_dir=None, now=None):
+    """The worker's every-minute expiry check (analyzer/iplist.py recompile_if_due). Never fatal. Returns the number of entries removed."""
+    try:
+        status = iplist_mod.recompile_if_due(lists_dir, now)
+    except Exception as exc:
+        print('IP list expiry check failed: %s' % exc, file=sys.stderr)
+        return 0
+    if status is None:
+        return 0
+    n = sum(int(v.get('expired', 0)) for v in (status.get('lists') or {}).values())
+    print('IP lists: %d expired entr%s removed, lists recompiled.' % (n, 'y' if n == 1 else 'ies'))
+    return n
+
+
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
@@ -422,6 +436,10 @@ def main(argv=None):
     # serialized into Redis job status (handlers never put cfg there), so it is
     # safe to carry on the plain cfg dict.
     cfg['_config_path'] = args.config
+
+    # An IP list entry whose `# expires=` time has passed: recompile now (one small file read when nothing is pending), so the entry stops
+    # matching within about a minute. No Redis is needed for it.
+    recompile_expired_lists()
 
     client = redis_io.connect(cfg, write=True)
     if client is None:

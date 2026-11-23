@@ -4,6 +4,11 @@ Newest first. Each entry is one version, written as `## <version>` (the same str
 The Update page of the panel shows the entries between the installed version and the one in the ZIP.
 Older history and upgrade steps: [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md).
 
+## 2026.11.33
+
+- **Behaviour change: overrides always act.** A deny override no longer waits for `enforce.block`: allow, deny, challenge and CAPTCHA overrides act immediately, also in monitor mode and for a client in the holdout, like a rule in enforce mode. Only the kill switch (`guard.off`) stops them. A deny override now logs `OVR_DENY`. The Temporary blocks & allows page says "Overrides act immediately, also in monitor mode." Existing deny overrides that never acted will start blocking at once (docs/10).
+- **IP list expiry within a minute.** The compile stores the earliest future `# expires=` time as `next_expiry` in `lists/lists-status.json`; the every-minute `worker` recompiles when it has passed (one small file read when nothing is pending). The nightly check stays as a safety net.
+
 ## 2026.11.32
 
 - **Temporary blocks & allows.** The Overrides page is renamed (route unchanged) with an intro, presets 5 min / 15 min / 30 min / 1 h / 6 h / 24 h / 7 d / 30 d plus a custom number of minutes (max 30 days), the time left and the exact expiry per entry, and extend / shorten / remove.

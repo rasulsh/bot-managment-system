@@ -183,7 +183,7 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		await page.goto(ROOT + '?r=overrides&new=100.64.0.5');
 		check(v.name + ' overrides: the page is "Temporary blocks & allows", with four buttons, eight presets, a custom-minutes box and the shared-address warning prefilled from ?new=',
 			/Temporary blocks/.test(await page.locator('h1').innerText()) && (await page.locator('#override-add button[name=override]').count()) === 4 && (await page.locator('#override-add select[name=ttl] option').count()) === 8
-			&& (await page.locator('#override-add input[name=ttl_minutes]').count()) === 1 && (await page.locator('#override-add input[name=identity]').inputValue()) === '100.64.0.5' && (await page.locator('[data-shared-ip=cgnat]').count()) === 1);
+			&& /immediately, also in monitor mode/.test(await page.locator('[data-ovr-immediate]').innerText()) && (await page.locator('#override-add input[name=ttl_minutes]').count()) === 1 && (await page.locator('#override-add input[name=identity]').inputValue()) === '100.64.0.5' && (await page.locator('[data-shared-ip=cgnat]').count()) === 1);
 		await page.goto(ROOT + '?r=logs');
 		await page.locator('.gp-log').first().locator('[data-toggle]').first().click();
 		const qa = page.locator('.gp-log').first().locator('.gp-quick');

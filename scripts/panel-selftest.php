@@ -4804,6 +4804,11 @@ t_ok('views: the Logs detail and the Identity page draw quick actions for the ad
 t_ok('menu and page: renamed "Temporary blocks & allows" (route unchanged), with an intro that says it expires by itself and suits dynamic mobile addresses, the precedence and the challenge rule',
 	$tb_lang['nav_overrides'] === 'Temporary blocks & allows' && $tb_lang['ovr_title'] === 'Temporary blocks & allows' && strpos($tb_lang['ovr_intro'], 'expires by itself') !== false && strpos($tb_lang['ovr_intro'], 'mobile') !== false
 	&& strpos($tb_lang['ovr_precedence'], 'Allow beats everything') !== false && strpos($tb_lang['ovr_rule_chal'], 'challenge') !== false);
+t_ok('overrides act at once: the page says "Overrides act immediately, also in monitor mode.", the deny and challenge texts say so, no text still ties a deny to the block switch, OVR_DENY is a registered reason (no SH_ form is offered)',
+	$tb_lang['ovr_immediate'] === 'Overrides act immediately, also in monitor mode.' && strpos(file_get_contents($tb_root . '/panel/views/overrides.php'), 'data-ovr-immediate') !== false
+	&& strpos($tb_lang['ovr_rule_deny'], 'at once') !== false && strpos($tb_lang['ovr_rule_deny'], 'monitor mode') !== false && strpos($tb_lang['ovr_rule_chal'], 'monitor mode') !== false
+	&& strpos($tb_lang['ovr_rule_deny'], 'follows') === false && strpos($tb_lang['ovr_precedence'], 'kill switch') !== false
+	&& gp_reason_parse('OVR_DENY')[3] && gp_reason_registry()['OVR_DENY'] === 'override' && !isset(gp_reason_options()['SH_OVR_DENY']));
 $tb_tips = array();
 foreach (array('ovr_identity', 'ovr_ttl', 'ovr_custom', 'ovr_retime', 'ovr_quick') as $k) { if (empty($tb_lang['tip_' . $k])) { $tb_tips[] = $k; } }
 t_ok('every new field has a ? tooltip text' . ($tb_tips ? ' (missing: ' . implode(',', $tb_tips) . ')' : ''), !$tb_tips);
@@ -4849,6 +4854,9 @@ t_ok('compile: two expired entries are ignored (counted), the live ones compiled
 	$tb_status['lists']['tmp']['expired'] === 2 && $tb_status['lists']['tmp']['entries'] === 2 && $tb_after === "# my list\n203.0.113.8 # keep this one, expires=2999-01-01\n203.0.113.9\n");
 $tb_status2 = array('errors' => array(), 'lists' => array(), 'types' => array());
 gp_ipl_compile_type('block', $tb_lists, gmmktime(0, 0, 0, 6, 1, 2026), $tb_status2, array());
+t_ok('compile: next_expiry is the EARLIEST future expiry (the 2999 entry here; the expired ones never count) and 0 without any', $tb_status['next_expiry'] === gmmktime(0, 0, 0, 1, 1, 2999) + 86400 && (function () use ($tb_dir, $tb_lists) { file_put_contents($tb_dir . '/lists/tmp.txt', "1.1.1.1\n2.2.2.2 # note\n"); $s = array('errors' => array(), 'lists' => array(), 'types' => array(), 'next_expiry' => 0); gp_ipl_compile_type('block', $tb_lists, gmmktime(0, 0, 0, 6, 1, 2026), $s, array()); file_put_contents($tb_dir . '/lists/tmp.txt', "# my list\n203.0.113.8 # keep this one, expires=2999-01-01\n203.0.113.9\n"); return $s['next_expiry'] === 0; })());
+t_ok('compile: the earliest of several future expiries wins, in any order', (function () use ($tb_dir, $tb_lists) { file_put_contents($tb_dir . '/lists/tmp.txt', "1.1.1.1 # expires=2030-05-01\n2.2.2.2 # expires=2030-02-01T08:15\n3.3.3.3 # expires=2031-01-01\n"); $s = array('errors' => array(), 'lists' => array(), 'types' => array(), 'next_expiry' => 0); gp_ipl_compile_type('block', $tb_lists, gmmktime(0, 0, 0, 6, 1, 2026), $s, array()); file_put_contents($tb_dir . '/lists/tmp.txt', "# my list\n203.0.113.8 # keep this one, expires=2999-01-01\n203.0.113.9\n"); return $s['next_expiry'] === gmmktime(8, 15, 0, 2, 1, 2030); })());
+t_ok('compile: the full compile writes next_expiry into the status (the key the worker reads)', strpos(file_get_contents(__DIR__ . '/../panel/iplists.php'), "'next_expiry' => 0);") !== false);
 t_ok('compile: the next compile has nothing left to remove', $tb_status2['lists']['tmp']['expired'] === 0 && (string)file_get_contents($tb_dir . '/lists/tmp.txt') === $tb_after);
 file_put_contents($tb_dir . '/lists/tmp.txt', $tb_src_text);
 $tb_changed = "203.0.113.7 # expires=2026-01-01\n198.51.100.1\n";

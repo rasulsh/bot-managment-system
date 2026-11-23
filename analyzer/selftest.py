@@ -3605,6 +3605,53 @@ ok('nightly: a dry run changes nothing', run_nightly_mod.recompile_expired_lists
 os.environ.pop('GV_LISTS_DIR', None)
 shutil.rmtree(dx, ignore_errors=True)
 
+
+# --- IP list expiry within a minute: next_expiry in lists-status.json, the worker recompiles when it has passed ---------------------
+from analyzer import worker as worker_ne
+ne_text = '203.0.113.7 # expires=2026-01-01\n203.0.113.8 # expires=2026-03-01T10:30\n203.0.113.9 # expires=2026-02-01\n203.0.113.10\n'
+dn = il_dir('exp2', [il_list(1, 'block')], {'l1': ne_text})
+t0 = 1767000000                                      # 2025-12-29: every entry is still in the future
+stn = il_mod.compile_lists(dn, now=t0)
+exp_feb = il_mod.expiry(' expires=2026-02-01')[0]
+exp_jan = il_mod.expiry(' expires=2026-01-01')[0]
+ok('next_expiry: the compile stores the EARLIEST future expiry in lists-status.json (and in the returned status)', stn['next_expiry'] == exp_jan
+   and json_geo.load(open(os.path.join(dn, 'lists-status.json')))['next_expiry'] == exp_jan and geo_mod.lookup(open(os.path.join(dn, 'block.bin'), 'rb').read(), '203.0.113.7') == 1)
+ok('next_expiry: it is 0 when no entry has an expiry, and an already expired entry never sets it',
+   il_mod.compile_lists(il_dir('exp3', [il_list(1, 'block')], {'l1': '1.1.1.1\n2.2.2.2 # note\n'}), now=t0)['next_expiry'] == 0
+   and il_mod.compile_lists(il_dir('exp4', [il_list(1, 'block')], {'l1': '1.1.1.1 # expires=2025-01-01\n'}), now=t0)['next_expiry'] == 0)
+ok('expiry_due: false before the time, true from the time on; missing, garbage or odd files are quietly false',
+   il_mod.expiry_due(dn, exp_jan - 1) is False and il_mod.expiry_due(dn, exp_jan) is True and il_mod.expiry_due(dn, exp_jan + 10) is True
+   and il_mod.expiry_due(os.path.join(dn, 'nope'), exp_jan) is False)
+with open(os.path.join(dn, 'junk.json'), 'w') as handle: handle.write('not json')
+os.makedirs(os.path.join(dn, 'g'), exist_ok=True)
+with open(os.path.join(dn, 'g', 'lists-status.json'), 'w') as handle: handle.write('not json')
+with open(os.path.join(dn, 'g2.json'), 'w') as handle: handle.write('[]')
+ok('expiry_due: a damaged status file is false, never an exception', il_mod.expiry_due(os.path.join(dn, 'g'), exp_jan) is False)
+# The check is cheap: no source is parsed and nothing is compiled while nothing is due.
+calls = {'compile': 0, 'parse': 0}
+orig_compile, orig_parse = il_mod.compile_lists, il_mod.parse_text
+il_mod.compile_lists = lambda *a, **k: calls.__setitem__('compile', calls['compile'] + 1) or orig_compile(*a, **k)
+il_mod.parse_text = lambda *a, **k: calls.__setitem__('parse', calls['parse'] + 1) or orig_parse(*a, **k)
+try:
+    nothing = il_mod.recompile_if_due(dn, exp_jan - 60)
+    ok('worker check: nothing pending, nothing due: no compile, no source parsed, None', nothing is None and calls == {'compile': 0, 'parse': 0} and worker_ne.recompile_expired_lists(dn, exp_jan - 60) == 0)
+    due = il_mod.recompile_if_due(dn, exp_jan + 30)
+    ok('worker check: the minute after the expiry the lists are recompiled', due is not None and calls['compile'] == 1)
+finally:
+    il_mod.compile_lists, il_mod.parse_text = orig_compile, orig_parse
+blk_n = open(os.path.join(dn, 'block.bin'), 'rb').read()
+ok('worker check: the expired entry no longer matches, the others do, its line is gone and next_expiry moved to the next one',
+   geo_mod.lookup(blk_n, '203.0.113.7') is None and geo_mod.lookup(blk_n, '203.0.113.9') == 1 and geo_mod.lookup(blk_n, '203.0.113.10') == 1
+   and '203.0.113.7' not in open(os.path.join(dn, 'l1.txt')).read() and due['next_expiry'] == exp_feb
+   and json_geo.load(open(os.path.join(dn, 'lists-status.json')))['next_expiry'] == exp_feb)
+ok('worker check: right after it nothing is due again (no loop), and the last expiry empties next_expiry',
+   il_mod.recompile_if_due(dn, exp_jan + 90) is None and il_mod.recompile_if_due(dn, il_mod.expiry(' expires=2026-03-01T10:30')[0] + 1)['next_expiry'] == 0
+   and il_mod.recompile_if_due(dn, il_mod.expiry(' expires=2026-03-01T10:30')[0] + 2) is None)
+ok('worker check: the worker calls it BEFORE it needs Redis (a down Redis must not delay an expiry)',
+   open(os.path.join(IL_ROOT, 'analyzer', 'worker.py')).read().index('recompile_expired_lists()') < open(os.path.join(IL_ROOT, 'analyzer', 'worker.py')).read().index('redis_io.connect(cfg, write=True)'))
+for d_ in ('exp2', 'exp3', 'exp4'):
+    shutil.rmtree(os.path.join(il_work, d_), ignore_errors=True)
+
 # Replay: an operator challenge / CAPTCHA override is not a scoring decision.
 rp_ovr = [{'act': 'challenge', 'sc': 0, 'tok': 'm', 'gate': 1, 'ovr': 'challenge'}, {'act': 'challenge', 'sc': 0, 'tok': 'm', 'gate': 1, 'ovr': 'captcha'},
           {'act': 'challenge', 'sc': 0, 'tok': 'm', 'gate': 1, 'ovr': ''}]

@@ -51,6 +51,7 @@ function gp_reason_registry() {
 		'NO_SF'              => 'signal',
 		'FEW_HDR'            => 'signal',
 		'HP_HIST'            => 'signal',
+		'OVR_DENY'           => 'override',
 		'OVR_CHALLENGE'      => 'override',
 		'OVR_CAPTCHA'        => 'override',
 		'TEST'               => 'other',

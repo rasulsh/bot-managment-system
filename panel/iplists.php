@@ -427,7 +427,7 @@ function gp_iplists_status() {
 // analyzer/iplist.py. Returns the status array (also written to lists-status.json).
 function gp_iplists_compile($now = null) {
 	$now = $now === null ? time() : (int)$now;
-	$status = array('v' => 1, 'time' => $now, 'by' => 'php', 'ok' => true, 'errors' => array(), 'types' => array('allow' => null, 'block' => null), 'lists' => array());
+	$status = array('v' => 1, 'time' => $now, 'by' => 'php', 'ok' => true, 'errors' => array(), 'types' => array('allow' => null, 'block' => null), 'lists' => array(), 'next_expiry' => 0);
 	if (!gp_ipl_ensure_dir()) { $status['ok'] = false; $status['errors'][] = 'the lists directory is not writable: ' . gp_ipl_dir(); return $status; }
 	$lock = @fopen(gp_ipl_dir() . '/.compile.lock', 'c');
 	if ($lock) { @flock($lock, LOCK_EX); }
@@ -474,6 +474,8 @@ function gp_ipl_compile_type($type, array $lists, $now, array &$status, array $p
 		foreach ($entries as $k => $en) {
 			// An entry past its `# expires=` time is ignored here, and its line is removed from the source below.
 			if (isset($en['exp']) && $en['exp'] <= $now) { $expired++; unset($entries[$k]); continue; }
+			// The earliest future expiry, stored in the status so the worker (every minute) knows when to recompile.
+			if (isset($en['exp']) && ((int)($status['next_expiry'] ?? 0) === 0 || $en['exp'] < $status['next_expiry'])) { $status['next_expiry'] = (int)$en['exp']; }
 			$why = gp_ipl_refusal($en, $type, $protected, $l['force']);
 			if ($why !== '') {
 				$dropped[$why]++;

@@ -14,13 +14,11 @@ anomaly level, classifier level, bot verification, honeypot history and any
 override - which is usually enough to explain what happened without reading a
 single log line.
 
-An allow override is not gated by any enforce toggle: it can only ever make the
-guard less strict, so it takes effect on the customer's next request. A deny
-override is an enforcement action and respects enforce.block like everything
-else, so setting one in monitor mode records the intent without blocking.
+Every override is an explicit operator action and acts immediately on the client's next request,
+also in monitor mode and also for a client in the holdout: no enforce switch gates an allow, a
+deny, a challenge or a captcha override. Only the kill switch (guard.off) stops them.
 
-A challenge / captcha override challenges that ONE client until it holds a token (a CAPTCHA-level one for captcha) and, unlike a
-deny, does not wait for any enforce switch: it works while everything else is in monitor mode. Precedence: allow > deny >
+A challenge / captcha override challenges that ONE client until it holds a token (a CAPTCHA-level one for captcha). Precedence: allow > deny >
 captcha > challenge; a verified crawler keeps its pass; an enforced IP allow list is checked first.
 
 Every override carries a TTL. An override without an expiry is a config change
@@ -99,7 +97,7 @@ def cmd_deny(client, args):
         print('ERROR: could not write the deny override', file=sys.stderr)
         return 1
     print('Deny override set for %s, expires in %s.' % (args.identity, _fmt_ttl(args.ttl)))
-    print('It is an enforcement action, so it only blocks when enforce.block is on.')
+    print('It acts at once, also in monitor mode (no enforce switch gates an override).')
     return 0
 
 
@@ -110,7 +108,7 @@ def _cmd_chal(kind, what):
             return 1
         print('%s override set for %s, expires in %s.' % (kind.capitalize(), args.identity, _fmt_ttl(args.ttl)))
         print('The client is shown %s until it holds a valid token' % what
-              + (' (a CAPTCHA-level one)' if kind == 'captcha' else '') + '; it needs no enforce switch.')
+              + (' (a CAPTCHA-level one)' if kind == 'captcha' else '') + '; it acts at once, also in monitor mode.')
         return 0
     return run
 

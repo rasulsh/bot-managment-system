@@ -210,8 +210,7 @@ who steals the session.
 - **Identity drill-down** — every `gv:` verdict for one device or IP on one page:
   the `ctl.py show` output that answers "why was this customer blocked?".
 - **Temporary blocks & allows** (route `overrides`) — the `ctl.py allow` / `deny` / `challenge` / `captcha` five-second fix
-  for ONE address or ONE device, with a time limit that ends by itself (ceiling 30 days). Allow is ungated, deny respects
-  `enforce.block`, a challenge or CAPTCHA acts at once (an operator action like an enforced rule). Precedence: allow > deny >
+  for ONE address or ONE device, with a time limit that ends by itself (ceiling 30 days). **Every override acts immediately, also in monitor mode** (the page says so) and for a client in the holdout: deny, challenge and CAPTCHA need no enforce switch, like a rule in enforce mode; only the kill switch (and `guard.off`) stops them. Reasons `OVR_DENY`, `OVR_CHALLENGE`, `OVR_CAPTCHA`, never `SH_`. Precedence: allow > deny >
   CAPTCHA > challenge; a device key and an address key count the same; a verified crawler keeps its pass; an enforced allow list is
   checked first. The form has the presets 5 min, 15 min, 30 min, 1 h, 6 h, 24 h, 7 d, 30 d and a custom number of minutes (1 to 43200);
   every entry shows the time left and the absolute expiry (UTC) and can be **extended, shortened** (*Set time left*) or removed. For an
@@ -269,7 +268,7 @@ who steals the session.
 - **IP feeds** (IP lists -> **Feeds** tab) — provider ranges (Google crawlers, UptimeRobot, ArvanCloud, Cloudflare presets) fetched from an HTTPS URL into a managed allow list or into the trusted CDN ranges; see [IP feeds](#ip-feeds) below.
 - **IP lists** — named allow / block lists of addresses and CIDRs, kept as files and compiled into one range file per type
   that the guard searches without Redis (see [02-ARCHITECTURE.md](02-ARCHITECTURE.md#ip-allow--block-lists)). The single-address
-  overrides on the Temporary blocks & allows page stay as they are. An entry may carry `# expires=2026-11-30` (end of that day, UTC) or `# expires=2026-11-30T14:30`: the compile (panel and `iplist.py`) ignores an expired entry and removes its line, the Entries tab shows the expiry, and the nightly job recompiles when one has expired. Tabs: **Lists** (table with type, mode, enabled, entry and address counts,
+  overrides on the Temporary blocks & allows page stay as they are. An entry may carry `# expires=2026-11-30` (end of that day, UTC) or `# expires=2026-11-30T14:30`: the compile (panel and `iplist.py`) ignores an expired entry and removes its line, the Entries tab shows the expiry, and the `worker` job (every minute) recompiles as soon as the earliest expiry stored in `lists/lists-status.json` (`next_expiry`) has passed, so an expired entry stops matching within about a minute (one small file read per run when nothing is pending); the nightly job is the safety net. Tabs: **Lists** (table with type, mode, enabled, entry and address counts,
   hits 24 h / 7 d and last hit from the snapshot; filters name / type / mode / status, each include or exclude, as chips; enable /
   disable, switch monitor / enforce, edit, export, delete), **Editor** (name, type, mode, enabled, note; paste text or upload a
   file; the size is checked against `upload_max_filesize` / `post_max_size` and a bigger file is to be copied to `lists/` over SFTP),

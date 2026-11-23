@@ -1163,7 +1163,7 @@ function gv_override_from($allow_dev, $allow_ip, $deny_dev, $deny_ip, $chal_dev 
 // action like an ENFORCED RULE, so it does not depend on enforce.challenge (that switch is the guard's own challenge; an override
 // exists to challenge ONE client while the rest is in monitor mode). The client is challenged until it holds a valid token (a
 // CAPTCHA override: a CAPTCHA-level token); only gated requests are asked, a CAPTCHA only for a page request when it can be drawn.
-// A deny override, by contrast, still follows enforce.block.
+// A deny override acts like a challenge override: it needs no enforce switch (it is an explicit operator action).
 function gv_override_act($ovr, $tok, $gate, $page, $level, $nav, $cap_ok) {
 	if ($ovr !== 'challenge' && $ovr !== 'captcha') { return array('', ''); }
 	return gv_rule_act(array('mode' => 'enforce', 'action' => $ovr), $tok, $gate, $page, $level, $nav, $cap_ok);
@@ -1226,7 +1226,7 @@ function gv_served($esc, $over, $gate, $tok, $hard_block_score, $ovr, array $enf
 		$over && !empty($enforce['ratelimit']),
 		$gate && $page,
 		$tok, max(0, (int)$hard_block_score),
-		$block ? $ovr : '');                                   // an operator deny needs enforce.block
+		$ovr);                                                 // an operator deny is an explicit action: it needs no enforce switch
 	if ($a === 'challenge' && (empty($enforce['challenge']) || (int)$hold === 1)) { return 'allow'; }
 	return $a;
 }
@@ -1749,6 +1749,7 @@ function gv_run($t0) {
 		($st['dev'] !== '') ? $rv('allow_dev') : null, $rv('allow_ip'),
 		($st['dev'] !== '') ? $rv('deny_dev') : null, $rv('deny_ip'),
 		($st['dev'] !== '') ? $rv('chal_dev') : null, $rv('chal_ip'));
+	if ($st['ovr'] === 'deny') { $st['rs'][] = 'OVR_DENY'; }                  // acts at once, monitor mode or not
 	if ($st['ovr'] === 'allow') {
 		gv_finish($conn, $st);
 		gv_emit($f, $st, 'allow_override', 0, $t0, $log);
@@ -1890,7 +1891,7 @@ function gv_run($t0) {
 	// deny is passed through gv_served untouched by the holdout for that reason.
 	$served = gv_served($st['esc'], $over, $gate, $st['tok'], $cfg['hard_block_score'], $st['ovr'],
 		$cfg['enforce'], $st['hold'], $page);
-	if ($st['ovr'] === 'deny' && !empty($cfg['enforce']['block'])) { $served = '403'; }
+	if ($st['ovr'] === 'deny') { $served = '403'; }                // an operator action: acts in monitor mode too, and the holdout never suppresses it
 	if ($ra[1] === '403') { $served = '403'; }
 	elseif ($ra[1] === 'challenge' && $served === 'allow') { $served = 'challenge'; }
 	elseif ($ra[1] === 'captcha' && ($served === 'allow' || $served === 'challenge')) { $served = 'captcha'; }

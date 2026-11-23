@@ -99,7 +99,7 @@ enforcement is forced off, so a half-finished install cannot affect your site.
 | **A short "please wait" check page** | Only once the *challenge* is enforced, on a visitor's first page (then a cookie lasts 7 days by default) | The page runs a small test in the browser and reloads by itself. It is sent with HTTP status 503. A browser with JavaScript and cookies passes in about a second; a simple script does not. |
 | **An image CAPTCHA** (type the characters shown) | Only when a rule with the action *Image CAPTCHA* matches, or an optional escalation or budget feature is on | Needs the PHP GD extension. Without it, visitors get the short check page instead. |
 | **"429 Too Many Requests"** | Only once rate limiting is enforced and a client sends far too many requests | A plain text page; it asks the client to retry after 60 seconds. |
-| **"403 Forbidden"** (access denied) | A block rule, an enforced block list, an operator *deny* or a very high suspicion score, only when the matching feature is enforced | A plain text page. |
+| **"403 Forbidden"** (access denied) | A block rule, an enforced block list or a very high suspicion score (only when the matching feature is enforced), or an operator *deny* (always, also in monitor mode) | A plain text page. |
 
 > **The check page ships in Persian.** The sample file `guard/config.php` contains
 > Persian texts (right-to-left). Change them to your language in the panel under
@@ -214,8 +214,7 @@ the client holds a token. It expires by itself, which makes it the right tool fo
 addresses. Time presets are 5 min, 15 min, 30 min, 1 h, 6 h, 24 h, 7 d and 30 d, or your own
 number of minutes (at most 30 days); each entry shows the time left and the exact expiry, and
 can be extended, shortened or removed. *Safe to change:* yes. Adding an Allow is the five-second
-fix for a stuck customer. A Block acts only when blocking is enforced; a Challenge or CAPTCHA acts
-at once (it is an operator action like an enforced rule). **Allow beats Block, Block beats CAPTCHA,
+fix for a stuck customer. **Every override acts immediately, also in monitor mode** and for a client in the holdout (an operator action like a rule in enforce mode); only the kill switch stops them. **Allow beats Block, Block beats CAPTCHA,
 CAPTCHA beats Challenge**; a verified crawler keeps its pass and an enforced allow list is checked
 first. For an address many people share (a mobile network, carrier-grade NAT `100.64.0.0/10`) the
 page warns you: prefer a challenge and a short time. Every log row, the Identity page and the Live
@@ -395,7 +394,7 @@ Machines have no browser cookie, so they would be challenged. Two routes:
 
 ### Block a list of addresses from a file
 
-1. **IP lists → New block list.** Give it a name, keep **Mode: Monitor**, and **paste or upload** a plain text file: one IPv4/IPv6 address or range (for example `198.51.100.0/24`) per line, `#` for comments. A **temporary entry**: add `# expires=2026-11-30` (valid through the end of that day, UTC) or `# expires=2026-11-30T14:30` (UTC, to the minute); the compile ignores an expired entry and removes its line, and the nightly job recompiles when one has expired. A date that is not real refuses the line.
+1. **IP lists → New block list.** Give it a name, keep **Mode: Monitor**, and **paste or upload** a plain text file: one IPv4/IPv6 address or range (for example `198.51.100.0/24`) per line, `#` for comments. A **temporary entry**: add `# expires=2026-11-30` (valid through the end of that day, UTC) or `# expires=2026-11-30T14:30` (UTC, to the minute); the compile ignores an expired entry and removes its line, and the `worker` job (every minute) recompiles as soon as the earliest `expires=` time (stored as `next_expiry` in `lists/lists-status.json`) has passed, so an expired entry stops matching within about a minute; the nightly job is the safety net. A date that is not real refuses the line.
 2. Fix any lines the page reports (nothing is saved until you accept the valid ones). Entries covering private or your own addresses, or very wide ranges, are refused unless you tick "I know what I'm doing".
 3. Compile (small lists compile when you save; big ones need the `worker` cron job). Use the **Lookup tester** and read the hits as `SH_IPL_BLOCK:<id>` in Logs.
 4. Switch the list to **Enforce**. Block lists go stale and addresses are reassigned: refresh them.
@@ -635,7 +634,7 @@ network round trips, "files" counts file reads that are not OPcache hits.
 | 5b | **Link-preview pass** (`preview_bots`): site-wide budget `limits.preview` per name; needs Redis | +1 round trip | app (act `allow_preview`) |
 | 6 | **Honeypot** (`honeypot_path`): sets `hp:<ip>` for 7 days, serves a 404; fires regardless of `enforce.*` | 1 command | `404` (act `404_hp`) |
 | 7 | **Offline verdicts** (`rep`, `ml`, `clf`) read from step 5 | 0 | — |
-| 7c | **Operator overrides**: `allow` (device or IP) wins over `deny` and stops here; `deny` follows `enforce.block`; a temporary `captcha` / `challenge` (`gv:chal:`) feeds step 9 as an enforced rule would (reason `OVR_CAPTCHA` / `OVR_CHALLENGE`), needs no enforce switch and is read in the same pipeline | 0 | app (act `allow_override`) |
+| 7c | **Operator overrides**: `allow` (device or IP) wins over `deny` and stops here; `deny` acts at once (no enforce switch, no holdout; reason `OVR_DENY`); a temporary `captcha` / `challenge` (`gv:chal:`) feeds step 9 as an enforced rule would (reason `OVR_CAPTCHA` / `OVR_CHALLENGE`), needs no enforce switch and is read in the same pipeline | 0 | app (act `allow_override`) |
 | 8 | **Static score** `gv_score` (+ `BOT_FAKE`); rule reason appended | pure | — |
 | 9 | **Rule action** (`gv_rule_act`), escalation flag, CAPTCHA budget | pure | — |
 | 10 | **Rate counters**: device (`window`, hour, day), `ip_ua`, `ip`, in one pipeline | 1 round trip | — |

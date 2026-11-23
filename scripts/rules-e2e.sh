@@ -8,6 +8,9 @@
 # request flow with curl: block / challenge / log / monitor, and the whole
 # precedence chain (exempt path, kill switch, allow override, verified bot,
 # unverified and refuted bot, preview fetcher, holdout, expiry).
+# The servers run with OPcache off: the built-in server uses opcache.enable (not enable_cli) and revalidates a file only every
+# revalidate_freq (2) seconds, so a rules.json or cache rewritten within two seconds of a request was served stale and the test
+# raced; production has the same delay unless validate_timestamps is on (docs/06).
 # Every enforce toggle is OFF in this server on purpose: rule actions must not
 # depend on enforce.block / enforce.challenge.
 # GeoIP: a country.bin built by analyzer/geo.py maps 127.0.0.0/8 to US and 5.0.0.0/8 to IR; the
@@ -115,7 +118,17 @@ ilist() {
 }
 lists_compile() {
 	printf '{"v":1,"next_idx":99,"lists":[%s]}' "$(IFS=,; echo "${ILS[*]:-}")" > "$WORK/lists/lists.json"
-	python3 -I "$ROOT/analyzer/iplist.py" --dir "$WORK/lists" >/dev/null 2>&1
+	if [ -n "${LC_NOW:-}" ]; then
+		# compile as of an earlier time (the entries that have since expired are still live then)
+		python3 -I - "$ROOT" "$WORK/lists" "$LC_NOW" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from analyzer import iplist
+iplist.compile_lists(sys.argv[2], now=int(sys.argv[3]))
+PY
+	else
+		python3 -I "$ROOT/analyzer/iplist.py" --dir "$WORK/lists" >/dev/null 2>&1
+	fi
 	ILS=()
 }
 
@@ -123,7 +136,7 @@ redis-server --port "$RPORT" --save "" --appendonly no --dir "$WORK" >"$WORK/red
 PIDS+=($!)
 sleep 0.3
 write_rules
-GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "127.0.0.1:$PORT" "$ROOT/scripts/dev-router.php" >"$WORK/php.log" 2>&1 &
+GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -d opcache.enable=0 -S "127.0.0.1:$PORT" "$ROOT/scripts/dev-router.php" >"$WORK/php.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/t/404" 2>/dev/null && break; sleep 0.1; done
 # Second server: enforce.challenge and ratelimit ON, a low hourly device budget, CAPTCHA instead of the device 429.
@@ -138,10 +151,10 @@ if (!defined('GV_BOOT')) { http_response_code(404); exit; }
 \$c['captcha']['device_budget'] = true;
 return \$c;
 CFG
-GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config2.php" "$PHP_BIN" -S "127.0.0.1:$PORT2" "$ROOT/scripts/dev-router.php" >"$WORK/php2.log" 2>&1 &
+GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config2.php" "$PHP_BIN" -d opcache.enable=0 -S "127.0.0.1:$PORT2" "$ROOT/scripts/dev-router.php" >"$WORK/php2.log" 2>&1 &
 PIDS+=($!)
 # Third server: the same config as the first, but GD "missing" (GV_CAPTCHA_NO_GD): a captcha rule falls back to the PoW challenge.
-GV_CAPTCHA_NO_GD=1 GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -S "127.0.0.1:$PORT3" "$ROOT/scripts/dev-router.php" >"$WORK/php3.log" 2>&1 &
+GV_CAPTCHA_NO_GD=1 GV_GEO_DIR="$WORK/geo" GV_LISTS_DIR="$WORK/lists" GV_RULES="$RULES" GV_DEV_CONFIG="$WORK/config.php" "$PHP_BIN" -d opcache.enable=0 -S "127.0.0.1:$PORT3" "$ROOT/scripts/dev-router.php" >"$WORK/php3.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT2/t/404" 2>/dev/null && curl -s -o /dev/null "http://127.0.0.1:$PORT3/t/404" 2>/dev/null && break; sleep 0.1; done
 
@@ -719,6 +732,58 @@ eq "O28 an EXEMPT path is never challenged" "$(get 'x ovrbot' /exempt-me)" 200
 R del "gv:cpi:127.0.0.1"; R set "gv:chal:127.0.0.1" c EX 60
 eq "O29 enforced (server 2) the override acts the same: a CAPTCHA override shows the image test there too" "$(body2 'x ovrbot' /o29 | grep -c 'data:image/png;base64,' | tr -d ' ')" 1
 R del "gv:chal:127.0.0.1"
+
+echo "-- O: a deny override acts in monitor mode and in the holdout (server 1: every enforce switch OFF, 127.0.0.1 is in the 5% holdout)"
+R set "gv:deny:127.0.0.1" 1 EX 60
+eq "O40 a DENY override blocks with every enforce switch OFF: 403" "$(get 'x ovrbot' /o40)" 403
+has '"ovr":"deny"'; ok "O41 ...logged as a served 403 (sh 0) with OVR_DENY, no SH_ prefix, although the client is in the holdout" "$([ $? -eq 0 ] && has '"act":"403"' && has '"sh":0' && has '"OVR_DENY"' && ! has 'SH_OVR' && has '"hold":1' && echo 1 || echo 0)"
+eq "O42 ...also for a POST and for a non-page request" "$(get 'x ovrbot' /o42 -X POST)$(get 'x ovrbot' /o42b -H 'X-Requested-With: XMLHttpRequest')" 403403
+R set "gv:chal:127.0.0.1" 1 EX 60
+R set "gv:allow:127.0.0.1" 1 EX 60
+eq "O43 an ALLOW override still beats the deny" "$(get 'x ovrbot' /o43)" 200
+R del "gv:allow:127.0.0.1"
+eq "O44 deny beats a challenge override (403, not the check page)" "$(get 'x ovrbot' /o44)" 403
+R del "gv:chal:127.0.0.1"
+R set "gv:chal:127.0.0.1" c EX 60
+touch "$ROOT/guard.off"
+eq "O45 the KILL SWITCH stops deny, challenge and CAPTCHA overrides alike: 200" "$(get 'x ovrbot' /o45)$(get 'x ovrbot' /o45b -X POST)" 200200
+R set "gv:chal:127.0.0.1" 1 EX 60
+eq "O46 ...a challenge override too" "$(get 'x ovrbot' /o46)" 200
+R del "gv:chal:127.0.0.1"
+eq "O47 ...and the deny" "$(get 'x ovrbot' /o47)" 200
+rm -f "$ROOT/guard.off"
+eq "O48 the kill switch off again: the deny is back" "$(get 'x ovrbot' /o48)" 403
+R del "gv:deny:127.0.0.1"
+eq "O49 deny removed: served" "$(get 'x ovrbot' /o49)" 200
+
+echo "-- O: an expired IP-list entry stops matching within a minute, with no nightly compile (the worker's every-minute check)"
+FORCE=true ilist exp 1 block enforce true '127.0.0.1  # expires=2026-01-01'
+LC_NOW=1767000000 lists_compile
+nexp() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("next_expiry", "missing"))' "$WORK/lists/lists-status.json"; }
+eq "O50 the entry is live at compile time (2025-12-29): the enforced block list answers 403" "$(get 'x ovrbot' /o50)" 403
+ok "O51 ...and the compile stored the earliest future expiry in lists-status.json" "$([ "$(nexp)" -gt 0 ] 2>/dev/null && echo 1 || echo 0)"
+cnt=$(python3 -I - "$ROOT" "$WORK/lists" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from analyzer import worker
+print("COUNT", worker.recompile_expired_lists(sys.argv[2]))
+PY
+)
+cnt=${cnt##*COUNT }
+eq "O52 the worker's check (real time, long after the expiry) recompiles and removes one entry" "$cnt" 1
+eq "O53 ...and the very next request is served: the expired entry stopped matching, no nightly job needed" "$(get 'x ovrbot' /o53)" 200
+ok "O54 ...its line is gone from the source and next_expiry is 0 (nothing pending: the worker's check is one file read)" "$(! grep -q '127.0.0.1' "$WORK/lists/exp.txt" && [ "$(nexp)" = 0 ] && echo 1 || echo 0)"
+cnt2=$(python3 -I - "$ROOT" "$WORK/lists" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from analyzer import worker
+print("COUNT", worker.recompile_expired_lists(sys.argv[2]))
+PY
+)
+cnt2=${cnt2##*COUNT }
+eq "O55 a second check right after finds nothing to do" "$cnt2" 0
+ilist none 1 block enforce false 1.2.3.4
+lists_compile
 
 echo "-- O: expiry and cost"
 R set "gv:chal:127.0.0.1" 1 PX 400

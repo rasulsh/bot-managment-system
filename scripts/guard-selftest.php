@@ -232,16 +232,19 @@ t_ok('blocking in shadow no longer cancels the challenge for a high-scoring toke
 	gv_decide(90, false, true, 'm', 60, '') === '403'
 	&& gv_served(90, false, true, 'm', 60, '', $EN(false, true, true), 0, true) === 'challenge');
 t_ok('...nor the rate limit', gv_served(90, true, true, 'v', 60, '', $EN(false, true, true), 0, true) === '429');
-t_ok('everything off: always allow, whatever matched',
-	gv_served(90, true, true, 'm', 60, 'deny', $EN(false, false, false), 0, true) === 'allow');
+t_ok('everything off: always allow whatever the score and limits matched, EXCEPT an operator deny, which acts anyway',
+	gv_served(90, true, true, 'm', 60, '', $EN(false, false, false), 0, true) === 'allow'
+	&& gv_served(90, true, true, 'm', 60, 'deny', $EN(false, false, false), 0, true) === '403');
 t_ok('a valid token over a shadowed limit is allowed', gv_served(0, true, true, 'v', 60, '', $EN(true, true, false), 0, true) === 'allow');
 t_ok('holdout suppresses the score block and the challenge, never a 429 or a deny',
 	gv_served(90, false, true, 'm', 60, '', $EN(true, true, true), 1, true) === 'allow'
 	&& gv_served(90, true, true, 'm', 60, '', $EN(true, true, true), 1, true) === '429'
 	&& gv_served(0, false, true, 'v', 60, 'deny', $EN(true, true, true), 1, true) === '403');
-t_ok('an operator deny needs enforce.block and applies to any method',
+t_ok('an operator deny is an explicit action: it acts with every enforce switch off (monitor mode), applies to any method, and the holdout never suppresses it',
 	gv_served(0, false, true, 'v', 60, 'deny', $EN(true, false, false), 0, false) === '403'
-	&& gv_served(0, false, true, 'v', 60, 'deny', $EN(false, true, true), 0, false) === 'allow');
+	&& gv_served(0, false, true, 'v', 60, 'deny', $EN(false, true, true), 0, false) === '403'
+	&& gv_served(0, false, true, 'v', 60, 'deny', $EN(false, false, false), 0, false) === '403'
+	&& gv_served(0, false, true, 'v', 60, 'deny', $EN(false, false, false), 1, true) === '403');
 t_ok('page rules off for the method (a POST without gate_post): no challenge, no score block, still 429',
 	gv_served(90, false, true, 'm', 60, '', $EN(true, true, true), 0, false) === 'allow'
 	&& gv_served(90, true, true, 'm', 60, '', $EN(true, true, true), 0, false) === '429');
