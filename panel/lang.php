@@ -2038,7 +2038,7 @@ return array(
 	'dash_perms_attn' => 'needs attention',
 	'dash_perms_scanned' => 'Files scanned',
 	'dash_more' => 'More: scores, status codes, reasons, coverage, holdout',
-	'dash_rd_is_ready' => 'Ready to enforce',
+	'dash_rd_is_ready' => 'Ready',
 	'dash_kill_ask' => 'Stop the guard?',
 	'dash_kill_ask_sub' => 'This switches off all protection.',
 	'dash_kill_do' => 'Stop',

@@ -757,10 +757,11 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
 .gp-dtile-label .gp-tip-btn { margin: 0; width: 1.25rem; height: 1.25rem; }
 .gp-dtable { min-width: 0; }
 #dash-ready .gp-dtable th { white-space: nowrap; vertical-align: bottom; line-height: 1.2; }
-#dash-ready .gp-dtable th, #dash-ready .gp-dtable td { padding-inline: .5rem; }
+#dash-ready .gp-dtable th, #dash-ready .gp-dtable td { padding-inline: .375rem; }
+#dash-ready .gp-dtable { font-size: .8125rem; }
 #dash-ready .gp-dtable th:first-child, #dash-ready .gp-dtable td:first-child { padding-inline-start: 0; }
 .gp-dtable th { vertical-align: bottom; }
-.gp-dname { min-width: 9rem; overflow-wrap: anywhere; }
+.gp-dname { min-width: 6.5rem; overflow-wrap: anywhere; }
 .gp-kill-confirm { display: flex; flex-direction: column; gap: .4rem; }
 .gp-kill-ask { @apply text-xs; }
 .gp-kill-btns { display: flex; gap: .4rem; }
