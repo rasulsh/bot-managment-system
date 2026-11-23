@@ -43,6 +43,8 @@ JS_ROOT="$REPO"
 # shellcheck source=lib-jobstatus.sh
 . "$REPO/scripts/lib-jobstatus.sh"
 js_begin logrotate
+js_php_resolve                       # a non-CLI php on PATH: try /usr/local/bin/php before the warning
+PHP_BIN="${GV_PHP:-php}"
 js_php_check "$PHP_BIN"
 
 # One effective setting, or nothing when PHP or the key is unavailable.

@@ -372,6 +372,7 @@ def main(argv):
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     as_json = False
     default_path = None
+    get_env = None
     text = None
     source = ''
     i = 0
@@ -390,12 +391,20 @@ def main(argv):
         elif a == '--default-path' and i + 1 < len(argv):
             default_path = argv[i + 1]          # tests: what cron's PATH is when the crontab sets none
             i += 1
+        elif a == '--get-env' and i + 1 < len(argv):
+            get_env = argv[i + 1]               # print one environment line of the crontab (the wrappers use it for GV_PYTHON)
+            i += 1
         elif a in ('-h', '--help'):
             print(__doc__)
             return 0
         i += 1
     if text is None:
         text, source = read_live()
+    if get_env is not None:
+        # The same parser as the check itself: the value of NAME= in the crontab, or nothing (also when the crontab cannot be read).
+        value = parse_crontab(text)[0].get(get_env, '') if text is not None else ''
+        print(value)
+        return 0
     if text is None:
         report = {'v': 1, 'time': int(time.time()), 'source': '', 'root': root, 'jobs': [], 'gv_python': {'set': False, 'value': '', 'ok': False, 'suggest': ''},
                   'problems': 0, 'warnings': 0, 'ok': False, 'editor': 'crontab -e', 'unreadable': True}

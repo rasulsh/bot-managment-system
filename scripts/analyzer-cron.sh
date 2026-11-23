@@ -3,6 +3,10 @@
 # Bot Guard analyzer cron wrapper.
 #
 #   scripts/analyzer-cron.sh verify     fast reverse-DNS loop
+#
+# The Python is GV_PYTHON from the environment, else GV_PYTHON read from your crontab, else <install-dir>/.venv/bin/python, else python3
+# (the choice is recorded as "python" in analyzer/.jobstatus-<mode>.json), so `bash scripts/analyzer-cron.sh nightly` works from an SSH shell.
+#
 #   scripts/analyzer-cron.sh nightly    behavioural scoring + anomaly levels
 #   scripts/analyzer-cron.sh train      nightly run that trains a CANDIDATE model
 #   scripts/analyzer-cron.sh train-clf  nightly run that trains a CANDIDATE classifier
@@ -37,7 +41,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON="${GV_PYTHON:-python3}"
+PYTHON=""
 MODE="${1:-}"
 
 # feeds is a PHP job (it needs no Python): hand over before anything Python-specific runs.
@@ -91,7 +95,12 @@ JS_ROOT="$ROOT"
 # shellcheck source=lib-jobstatus.sh
 . "$ROOT/scripts/lib-jobstatus.sh"
 js_begin "$MODE"
-# The php the Python side runs to read the guard's settings: GV_PHP (exported, so analyzer/bridge.py sees it) or the first php on PATH.
+# Which Python: GV_PYTHON from the environment, else from the crontab, else <install-dir>/.venv/bin/python, else python3 (js_python_resolve).
+# A job run by hand from an SSH shell has no GV_PYTHON, and python3 alone has none of the packages.
+js_python_resolve
+# The php the Python side runs to read the guard's settings: GV_PHP (exported, so analyzer/bridge.py sees it) or the first php on PATH;
+# a php that is not the command-line build falls back to /usr/local/bin/php before the warning below (js_php_resolve).
+js_php_resolve
 [ -n "${GV_PHP:-}" ] && export GV_PHP
 js_php_check "${GV_PHP:-php}"
 [ "$MODE" = report ] && JS_PASS_STDOUT=1

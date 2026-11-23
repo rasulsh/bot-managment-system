@@ -34,6 +34,7 @@ JS_NOTE=""            # a reason set by the wrapper itself (preflight failure ..
 JS_EXTRA_RESULT=""    # a result JSON object the wrapper itself produced (logrotate)
 JS_WARN_EXTRA=""      # wrapper-level warning text
 JS_LOCK_HOLDER=""     # who held the lock a skipped run found (e.g. "worker"), when known
+JS_PYTHON_DESC=""     # "<python> (source: environment|crontab|venv|default)", recorded as "python" in the status file
 
 # js_php_check [php]: a php that is not the command-line build (cPanel cron's default PATH finds php-cgi first: it prints HTTP
 # headers and used to make every config read fail) gets ONE job warning naming the binary and the fix.
@@ -125,6 +126,68 @@ js_exec() {
 	fi
 	cat "$JS_ERR" >&2
 	JS_EXIT=$rc
+	return 0
+}
+
+# The value of NAME= in the user's crontab (the same parser as cron-check.sh), or nothing. Uses the SYSTEM python3 (standard library only),
+# never GV_PYTHON: it is asked exactly when GV_PYTHON is not set.
+js_crontab_env() {
+	local sys="" c
+	for c in /usr/bin/python3 /usr/local/bin/python3; do [ -x "$c" ] && { sys="$c"; break; }; done     # the system one first: python3 on PATH may be a virtualenv's or a stand-in
+	[ -n "$sys" ] || sys="$(command -v python3 || command -v python || true)"
+	[ -n "$sys" ] || return 0
+	"$sys" "$JS_ROOT/scripts/cron_check.py" --get-env "$1" 2>/dev/null | head -1
+	return 0
+}
+
+# Which Python runs the job, and why. Sets PYTHON and JS_PYTHON_DESC. Order:
+#   1. GV_PYTHON from the environment          (cron with GV_PYTHON= in its crontab, or an exported variable)
+#   2. GV_PYTHON from the user's crontab       (an operator running the job by hand over SSH has no GV_PYTHON, but the crontab names it)
+#   3. <install-dir>/.venv/bin/python          when it exists and is executable
+#   4. python3                                 whatever is first on PATH (usually without the packages: the preflight then says so)
+# A crontab value that is not an executable file is ignored (step 3 / 4 follow).
+js_python_resolve() {
+	local src cand
+	if [ -n "${GV_PYTHON:-}" ]; then
+		PYTHON="$GV_PYTHON"; src="environment"
+	else
+		cand="$(js_crontab_env GV_PYTHON)"
+		if [ -n "$cand" ] && [ -f "$cand" ] && [ -x "$cand" ]; then
+			PYTHON="$cand"; src="crontab"
+		elif [ -f "$JS_ROOT/.venv/bin/python" ] && [ -x "$JS_ROOT/.venv/bin/python" ]; then
+			PYTHON="$JS_ROOT/.venv/bin/python"; src="venv"
+		else
+			PYTHON="python3"; src="default"
+		fi
+	fi
+	JS_PYTHON_DESC="$PYTHON (source: $src)"
+}
+
+# The SAPI of a php binary ("cli", "cgi-fcgi", ...), or nothing when it cannot be run.
+js_php_sapi() {
+	local bin="$1" t
+	command -v "$bin" >/dev/null 2>&1 || return 0
+	t="$(mktemp 2>/dev/null)" || return 0
+	printf '<?php echo PHP_SAPI;' > "$t"
+	"$bin" -q "$t" 2>/dev/null | tail -n 1
+	rm -f "$t"
+	return 0
+}
+
+# When the php that would run (GV_PHP, else php on PATH) is not the command-line build (cPanel's default PATH finds php-cgi first), try
+# /usr/local/bin/php (GV_PHP_FALLBACK overrides it, for tests) before failing: if THAT is a CLI build, GV_PHP is set to it for this run
+# and the jobs it starts. Call before js_php_check, which warns when no CLI php is found.
+js_php_resolve() {
+	local cur="${GV_PHP:-php}" fb="${GV_PHP_FALLBACK:-/usr/local/bin/php}" sapi from
+	sapi="$(js_php_sapi "$cur")"
+	case "$sapi" in cli|'') return 0 ;; esac
+	[ -f "$fb" ] && [ -x "$fb" ] || return 0
+	from="$(command -v "$cur" 2>/dev/null)"
+	[ "$from" != "$fb" ] || return 0
+	[ "$(js_php_sapi "$fb")" = cli ] || return 0
+	GV_PHP="$fb"
+	export GV_PHP
+	echo "note: $from is the $sapi SAPI, not the command line build; using $fb (set GV_PHP or add PATH=/usr/local/bin:/usr/bin:/bin to the crontab to make this explicit)" >&2
 	return 0
 }
 
@@ -220,7 +283,7 @@ $warns
 EOF
 	printf '{"v":1,"mode":"%s","status":"%s","last_start":%s,"last_end":%s,"last_success":%s,"last_failure":%s,"last_exit":%s,"duration":%s,"skipped":%s,"runs":%s,"failures":%s,"last_error":"%s","warnings":[%s],"result_json":"%s","python":"%s","lock_holder":"%s"}\n' \
 		"$JS_MODE" "$status" "$JS_START" "$end" "$ls" "$lf" "$rc" "$dur" "$skipped" "$runs" "$failures" \
-		"$(printf '%s' "$err_text" | js_esc)" "$wj" "$(printf '%s' "$result" | js_redact | head -c 2000 | js_esc)" "$(printf '%s' "${PYTHON:-}" | js_esc)" \
+		"$(printf '%s' "$err_text" | js_esc)" "$wj" "$(printf '%s' "$result" | js_redact | head -c 2000 | js_esc)" "$(printf '%s' "${JS_PYTHON_DESC:-${PYTHON:-}}" | js_esc)" \
 		"$(printf '%s' "$JS_LOCK_HOLDER" | js_esc)" \
 		> "$f.tmp$$" 2>/dev/null && mv -f "$f.tmp$$" "$f" 2>/dev/null
 
@@ -247,13 +310,13 @@ js_preflight() {   # <python> <mode>
 	local py="$1" mode="$2" need="redis" out
 	case "$mode" in nightly|train|train-clf) need="redis, numpy, sklearn" ;; report|geo) need="" ;; esac
 	if ! command -v "$py" >/dev/null 2>&1 && [ ! -x "$py" ]; then
-		JS_NOTE="preflight: Python not found: $py (set GV_PYTHON=/path/to/venv/bin/python in the crontab)"
+		JS_NOTE="preflight: Python not found: ${JS_PYTHON_DESC:-$py} (set GV_PYTHON=/path/to/venv/bin/python in the crontab)"
 		echo "ERROR: $JS_NOTE" >&2
 		return 3
 	fi
 	[ -n "$need" ] || return 0
 	if ! out="$("$py" -c "import $need" 2>&1)"; then
-		JS_NOTE="preflight: $py cannot import: $(printf '%s' "$out" | tail -1 | cut -c1-160). Install analyzer/requirements.txt for it, or set GV_PYTHON to the virtualenv's python in the crontab."
+		JS_NOTE="preflight: ${JS_PYTHON_DESC:-$py} cannot import: $(printf '%s' "$out" | tail -1 | cut -c1-160). Install analyzer/requirements.txt for it, or set GV_PYTHON to the virtualenv's python in the crontab."
 		echo "ERROR: $JS_NOTE" >&2
 		return 3
 	fi

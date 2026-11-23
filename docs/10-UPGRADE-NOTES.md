@@ -13,7 +13,10 @@ after N s)* and shown as **skipped by lock**, with the holder named. **What to d
 To keep the old behaviour for one mode put `GV_LOCK_WAIT=0` in front of it. Also fixed: the dashboard *Cron setup* card no longer shows an empty code box, *File permissions* no longer says
 "20,780 days ago", and the IP feeds table showed the same wrong age for its last run.
 
-**Rollback.** Update page *Roll back* or `php updates/rollback.php`. The status files gain a `lock_holder` field that older code ignores.
+**Also in this release: running a job by hand.** `bash scripts/analyzer-cron.sh nightly` from an SSH shell used to fall back to the bare `python3` (no packages) and record a failed preflight. The Python is now
+`GV_PYTHON` from the environment, else `GV_PYTHON` read from your crontab, else `<install-dir>/.venv/bin/python`, else `python3`; the choice is recorded as `"python": "... (source: ...)"` in the status file. A non-CLI `php` falls back to `/usr/local/bin/php`.
+
+**Rollback.** Update page *Roll back* or `php updates/rollback.php`. The status files gain `lock_holder` and a longer `python` text that older code ignores.
 
 ## IP range feeds (2026.11.28)
 

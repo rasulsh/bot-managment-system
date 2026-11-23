@@ -2983,6 +2983,25 @@ ok('cron-check: a sleep-prefixed entry that is commented out is "disabled", not 
 ok('cron-check: PATH= (with the usual value) is what the php check searches, MAILTO="" and SHELL= are not entries', cron_check.parse_crontab(cc_sleep_crontab(lambda j: 'sleep 30; bash '))[0].get('PATH') == '/usr/local/bin:/usr/bin:/bin'
    and cron_check.parse_crontab('MAILTO=""\nSHELL=/bin/sh\n')[1] == [])
 
+# `cron_check.py --get-env NAME`: the wrappers read GV_PYTHON from the user's crontab with the SAME parser as the check
+import io as io_getenv
+import contextlib as ctx_getenv
+
+
+def cc_get_env(text, name):
+    path = os.path.join(tempfile.mkdtemp(), 'crontab.txt')
+    with open(path, 'w') as fh:
+        fh.write(text)
+    buf = io_getenv.StringIO()
+    with ctx_getenv.redirect_stdout(buf):
+        rc = cron_check.main(['--get-env', name, '--file', path])
+    shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+    return rc, buf.getvalue().strip()
+
+
+ok('cron-check --get-env: the value of GV_PYTHON (quotes stripped, among PATH / MAILTO lines and entries), exit 0', cc_get_env('PATH=/usr/bin\nMAILTO=""\nGV_PYTHON="/home/u/venv/bin/python"\n*/10 * * * * sleep 5; bash /x/scripts/analyzer-cron.sh verify\n', 'GV_PYTHON') == (0, '/home/u/venv/bin/python')
+   and cc_get_env('GV_PYTHON=/a/python\n', 'GV_PYTHON')[1] == '/a/python' and cc_get_env('PATH=/usr/bin\n', 'GV_PYTHON') == (0, '')
+   and cc_get_env('# GV_PYTHON=/commented/python\n', 'GV_PYTHON') == (0, '') and cc_get_env('', 'GV_PYTHON') == (0, '') and cc_get_env('PATH=/usr/local/bin:/usr/bin\n', 'PATH')[1] == '/usr/local/bin:/usr/bin')
 full = cron_check.evaluate(CC_FULL, CC_ROOT, geo_used=False, now=1)
 ok('a complete crontab: every required entry ok, exit-style ok flag, no problems', full['ok'] and full['problems'] == 0
    and all(cc_state(full, j)['state'] == 'ok' for j in ('verify', 'worker', 'snapshot', 'nightly', 'logrotate')))
