@@ -20,6 +20,7 @@ case "${FAKE_MODE:-ok}" in
 	ok) echo "did the work" ;;
 	result) echo "GV_JOB_RESULT: {\"ml_trained\":true,\"ml_samples\":321}" >&2 ;;
 	warn) echo "GV_JOB_WARN: no input rows" >&2; echo "ran" ;;
+	info) echo "GV_JOB_INFO: classifier waiting for labels: 0 / 50 positives" >&2; echo "ran" ;;
 	fail) echo "Traceback (most recent call last):" >&2; echo "  File x.py, line 1" >&2; echo "ValueError: boom" >&2; exit 1 ;;
 	secret) echo "connect failed: AUTH hunter2hunter2 password=letmein99 token: abc123456 and $FAKE_SECRET" >&2; exit 1 ;;
 	big) head -c 200000 /dev/zero | tr '\0' 'x' >&2; echo >&2; echo "tail-line" >&2; exit 1 ;;
@@ -193,6 +194,33 @@ sleep 0.5
 FAKE_MODE=ok bash "$CRON" worker > /dev/null 2>&1
 ok "two workers never overlap: a second worker firing is skipped by its own lock" "$(yes_if [ "$(status worker status)" = skipped ])"
 wait 2>/dev/null
+
+echo "== informational notes (GV_JOB_INFO) are not warnings"
+FAKE_MODE=info bash "$CRON" nightly > /dev/null 2>&1
+ok "a run that only reports an informational note stays 'ok' (not 'warning'), with the note stored in the notes array and no warnings" "$(yes_if [ "$(status nightly status)" = ok ] && status nightly notes | grep -q 'classifier waiting for labels: 0 / 50 positives' && [ "$(status nightly warnings)" = "[]" ])"
+FAKE_MODE=warn bash "$CRON" nightly > /dev/null 2>&1
+ok "...and a real warning still makes it 'warning' with an empty notes array" "$(yes_if [ "$(status nightly status)" = warning ] && [ "$(status nightly notes)" = "[]" ])"
+
+echo "== file modes: umask 022 in the wrappers, files created 0644, an old group-writable file corrected on the next run"
+modeof() { stat -c '%a' "$1" 2>/dev/null; }
+MD="$WORK/modes"; mkdir -p "$MD/status" "$MD/logs" "$MD/locks"
+printf '{}' > "$MD/status/.jobstatus-nightly.json"; chmod 664 "$MD/status/.jobstatus-nightly.json"
+printf 'x' > "$MD/status/.lastrun-run_nightly"; chmod 666 "$MD/status/.lastrun-run_nightly"
+printf 'x' > "$MD/status/model.joblib"; chmod 664 "$MD/status/model.joblib"          # not a wrapper file: the wrapper leaves it to the job
+( umask 002; GV_JOBSTATUS_DIR="$MD/status" GV_JOBLOG_DIR="$MD/logs" GV_LOCK_DIR="$MD/locks" FAKE_MODE=ok bash "$CRON" nightly > /dev/null 2>&1 )
+bad=""
+for f in "$MD/status/.jobstatus-nightly.json" "$MD/status/.jobstate-nightly" "$MD/locks/.write.lock" "$MD/locks/.write.lock.holder"; do
+	[ -f "$f" ] || { bad="$bad missing:$(basename "$f")"; continue; }
+	m="$(modeof "$f")"; [ $(( 0$m & 022 )) -eq 0 ] || bad="$bad $(basename "$f")=$m"
+done
+ok "run under cron's umask 002: the status file, the state file, the lock and the holder file are not group- or world-writable ($bad )" "$(yes_if [ -z "$bad" ])"
+ok "...the status file that an older version left 0664 is corrected to 0644 on the run" "$(yes_if [ "$(modeof "$MD/status/.jobstatus-nightly.json")" = 644 ])"
+ok "...the marker left 0666 is corrected too (a file of this wrapper's)" "$(yes_if [ $(( 0$(modeof "$MD/status/.lastrun-run_nightly") & 022 )) -eq 0 ])"
+ok "...and a file the wrapper does not own (model.joblib) is left to the Python job, not changed by the shell" "$(yes_if [ "$(modeof "$MD/status/model.joblib")" = 664 ])"
+( umask 002; GV_JOBSTATUS_DIR="$MD/status" GV_JOBLOG_DIR="$MD/logs" GV_LOCK_DIR="$MD/locks" GV_PHP=/nonexistent bash "$ROOT/scripts/guard-logrotate.sh" > /dev/null 2>&1 )
+ok "guard-logrotate.sh under umask 002: its status file is not group-writable either" "$(yes_if [ $(( 0$(modeof "$MD/status/.jobstatus-logrotate.json") & 022 )) -eq 0 ])"
+grep -q '^umask 022' "$ROOT/scripts/analyzer-cron.sh" && grep -q '^umask 022' "$ROOT/scripts/guard-logrotate.sh" && grep -q '^umask 022' "$ROOT/scripts/feeds-cron.sh" && grep -q '^umask 022' "$ROOT/scripts/lib-jobstatus.sh"
+ok "every wrapper and the status library set umask 022 at the top" "$(yes_if [ $? -eq 0 ])"
 
 echo "== which Python runs the job (environment, crontab, .venv, python3) and which php (CLI fallback)"
 INST="$WORK/inst"; mkdir -p "$INST/scripts" "$INST/analyzer" "$WORK/bin" "$WORK/cli"

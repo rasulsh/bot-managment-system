@@ -82,7 +82,7 @@ function gp_job_health_one($job, array $def, $st, $marker_ts, $interval, $now, $
 		'state' => 'never', 'source' => 'none', 'status' => '', 'last_start' => 0, 'last_end' => 0, 'last_success' => 0, 'last_failure' => 0,
 		'last_exit' => 0, 'duration' => 0, 'skipped' => 0, 'runs' => 0, 'failures' => 0, 'last_error' => '', 'first_line' => '',
 		'warnings' => array(), 'result' => null, 'next_expected' => 0, 'overdue' => 0, 'skew' => false, 'seen' => false, 'corrupt' => ($st === false),
-		'lock_holder' => '', 'lock_skipped' => false);
+		'lock_holder' => '', 'lock_skipped' => false, 'notes' => array());
 	if (is_array($st)) {
 		$h['source'] = 'status';
 		$h['status'] = (string)($st['status'] ?? '');
@@ -94,6 +94,7 @@ function gp_job_health_one($job, array $def, $st, $marker_ts, $interval, $now, $
 		$h['lock_skipped'] = ($h['status'] === 'skipped');
 		$h['lock_holder'] = (isset($st['lock_holder']) && is_string($st['lock_holder']) && preg_match('/^[a-z][a-z0-9-]{0,20}$/', $st['lock_holder'])) ? $st['lock_holder'] : '';
 		$h['first_line'] = strtok($h['last_error'], "\n") ?: '';
+		$h['notes'] = (isset($st['notes']) && is_array($st['notes'])) ? array_slice(array_values(array_filter($st['notes'], 'is_string')), 0, 5) : array();     // informational, never an alert
 		$h['warnings'] = (isset($st['warnings']) && is_array($st['warnings'])) ? array_values(array_filter($st['warnings'], 'is_string')) : array();
 		if (isset($st['result_json']) && is_string($st['result_json']) && $st['result_json'] !== '') {
 			$r = json_decode($st['result_json'], true);
@@ -454,6 +455,7 @@ function gp_health_alerts(array $in) {
 	if ($pm !== null) {
 		if (!empty($pm['secret_readable'])) { $add('perm_secret', 'critical', 'al_perm_secret', implode(', ', array_slice($pm['secret_readable'], 0, 4)), 'jobs'); }
 		if (!empty($pm['cron_not_exec'])) { $add('perm_cron_exec', 'warning', 'al_perm_cron_exec', implode(', ', array_slice($pm['cron_not_exec'], 0, 4)), 'jobs'); }
+		if (!empty($pm['unreadable']) || !empty($pm['truncated'])) { $add('perm_incomplete', 'warning', 'al_perm_incomplete', implode(', ', array_slice((array)($pm['unreadable'] ?? array()), 0, 3)), 'jobs'); }
 		if ($pm['writable_dirs'] + $pm['writable_files'] > 0) { $add('perm_writable', 'warning', 'al_perm_writable', $pm['writable_dirs'] . ' dir, ' . $pm['writable_files'] . ' file', 'jobs'); }
 	}
 	foreach ((array)($in['update_warn'] ?? array()) as $w) { $add('update_' . $w[0], $w[2], 'al_update_' . $w[0], $w[1], 'update'); }

@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import classifier as clf_mod
 from analyzer import config as config_mod
+from analyzer import fsmode
 from analyzer import features as features_mod
 from analyzer import jobreport
 from analyzer import labels as labels_mod
@@ -67,15 +68,8 @@ def _median(values):
     return (float(ordered[middle - 1]) + float(ordered[middle])) / 2.0
 
 
-def collect_training_set(devices, ground_truth):
-    """Build (X, y) from identities that carry a label independent of the guard.
-
-    Sessions of unlabelled identities are dropped entirely rather than assumed
-    human - see analyzer/labels.py for why challenge_unsolved in particular
-    never becomes a label.
-    """
-    X = []
-    y = []
+def _labelled(devices, ground_truth):
+    """Yield (entry, label, source) for every identity that carries a label independent of the guard."""
     for entry in devices.values():
         if entry.get('holdout'):
             continue
@@ -86,15 +80,53 @@ def collect_training_set(devices, ground_truth):
         median_dwell = _median([f.get('dur_s', 0.0) for f in entry['features']])
         merged = dict(entry['sessions'][0])
         merged['features'] = entry['features'][0] if entry['features'] else {}
-        label = labels_mod.bot_labels(merged, agg, rows, ground_truth,
-                                      session_count=len(entry['sessions']),
-                                      median_dwell=median_dwell)
+        label, source = labels_mod.bot_label_source(merged, agg, rows, ground_truth,
+                                                    session_count=len(entry['sessions']),
+                                                    median_dwell=median_dwell)
         if label is None:
             continue
+        yield entry, int(label), source
+
+
+def label_note(progress):
+    """One line for the job status and the Models page: where the classifier's labels stand."""
+    src = progress['sources']
+    return ('classifier waiting for labels: %d / %d positives (honeypot hits %d, refuted crawler claims %d, operator ground truth %d), %d human-labelled sessions'
+            % (progress['positives'], progress['needed'], src.get('honeypot', 0), src.get('refuted_claim', 0), src.get('ground_truth', 0), progress['humans']))
+
+
+def collect_training_set(devices, ground_truth):
+    """Build (X, y) from identities that carry a label independent of the guard.
+
+    Sessions of unlabelled identities are dropped entirely rather than assumed
+    human - see analyzer/labels.py for why challenge_unsolved in particular
+    never becomes a label.
+    """
+    X = []
+    y = []
+    for entry, label, _source in _labelled(devices, ground_truth):
         for feats in entry['features']:
             X.append(features_mod.feature_vector(feats))
-            y.append(int(label))
+            y.append(label)
     return X, y
+
+
+def label_progress(devices, ground_truth, needed):
+    """How far the supervised classifier is from having enough labels, counted the way training counts them (sessions of labelled
+    identities): positives and humans, and where the positives came from. The panel shows it on the Models page and the dashboard."""
+    sources = {labels_mod.SOURCE_HONEYPOT: 0, labels_mod.SOURCE_REFUTED: 0, labels_mod.SOURCE_GROUND_TRUTH: 0}
+    positives = humans = 0
+    identities = 0
+    for entry, label, source in _labelled(devices, ground_truth):
+        n = len(entry['features'])
+        if label == 1:
+            positives += n
+            identities += 1
+            if source in sources:
+                sources[source] += n
+        else:
+            humans += n
+    return {'positives': positives, 'humans': humans, 'needed': int(needed), 'positive_identities': identities, 'sources': sources}
 
 
 def collect_clean_vectors(devices):
@@ -131,6 +163,9 @@ def main(argv=None):
     except Exception as exc:
         print('ERROR: bad configuration: %s' % exc, file=sys.stderr)
         return 2
+    # Files an earlier run (cron umask 002) left group- or world-writable in the analyzer directory (the model, the markers, the status
+    # files) are corrected now; new files are created 0644 by analyzer/fsmode.py.
+    fsmode.tidy_for(cfg)
     if args.log_dir:
         cfg['log_dir'] = args.log_dir
     if not os.path.isdir(cfg['log_dir']):
@@ -217,6 +252,7 @@ def main(argv=None):
     clf_note = 'not requested'
     clf_bundle = None
     clf_written = 0
+    progress = label_progress(devices, ground_truth, cfg['clf_min_positive'])
 
     want_clf_train = args.train_clf or (not args.candidate
                                         and not os.path.isfile(cfg['clf_path']))
@@ -285,8 +321,15 @@ def main(argv=None):
         jobreport.warn('model missing: no usable anomaly model at %s (run train, then promote)' % os.path.basename(cfg['model_path']))
     if want_train and model_mod.SKLEARN_AVAILABLE and not trained:
         jobreport.warn('model training produced no candidate: %s' % train_note)
-    if want_clf_train and clf_mod.SKLEARN_AVAILABLE and clf_note.startswith(('skipped', 'failed')):
+    if want_clf_train and clf_mod.SKLEARN_AVAILABLE and clf_note.startswith('failed'):
         jobreport.warn('classifier training produced no candidate: %s' % clf_note)
+    elif want_clf_train and clf_mod.SKLEARN_AVAILABLE and clf_note.startswith('skipped'):
+        # Waiting for labels is not a failure of the run. When the rest of nightly did its work (devices scored, reputations written),
+        # it is an informational note with the progress; only a run that did nothing else keeps the "did nothing useful" warning.
+        if client is not None and rows and device_keys > 0:
+            jobreport.info(label_note(progress))
+        else:
+            jobreport.warn('classifier training produced no candidate: %s' % clf_note)
     if args.train or args.train_clf or want_train or want_clf_train:
         metrics = clf_bundle.get('metrics') if clf_bundle is not None and isinstance(clf_bundle.get('metrics'), dict) else None
         jobreport.result({
@@ -295,7 +338,11 @@ def main(argv=None):
             'clf_note': clf_note,
             'clf_metrics': {k: v for k, v in (metrics or {}).items() if isinstance(v, (int, float, str))},
             'rows': len(rows), 'devices_scored': sum(1 for e in devices.values() if e['is_device'] and not e.get('holdout')),
+            'clf_labels': progress,
         })
+    if not args.dry_run:
+        # The label progress for the Models page and the dashboard (snapshot.py copies it); every nightly run, trained or not.
+        snapshot_mod.record_stats(cfg, 'run_nightly', {'clf_labels': progress, 'devices_scored': device_keys, 'rows': len(rows)})
     if bundle is None and model_mod.SKLEARN_AVAILABLE:
         print('No usable model on disk: skipping ML verdicts. Run with --train.')
     if clf_bundle is None and clf_mod.SKLEARN_AVAILABLE:

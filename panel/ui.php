@@ -71,6 +71,28 @@ function gp_msg($id) {
 	return '<div class="gp-msg" id="msg-' . gp_e($id) . '" tabindex="-1" data-gp-msg>' . $h . '</div>';
 }
 
+// A link to a section of the project's documentation (the panel ships no docs of its own; the base address is the lang key docs_url, a link
+// the visitor follows, never something this page loads). The text always names the file and section too,
+// so it is useful offline. $anchor is the GitHub heading anchor.
+function gp_docs_link($file, $anchor, $label_key) {
+	$url = gp_t('docs_url') . rawurlencode($file) . ($anchor !== '' ? '#' . rawurlencode($anchor) : '');
+	return '<a href="' . gp_e($url) . '" target="_blank" rel="noopener noreferrer">' . gp_e(gp_t($label_key)) . '</a>';
+}
+
+// The classifier's label progress as markup, one block (Models page and dashboard details). Empty string when nothing is recorded yet.
+function gp_clf_labels_html($l) {
+	if (!is_array($l)) { return '<p class="gp-help">' . gp_e(gp_t('mdl_labels_none')) . '</p>'; }
+	$done = $l['positives'] >= $l['needed'];
+	$pct = (int)min(100, round(100 * $l['positives'] / max(1, $l['needed'])));
+	$h = '<div class="gp-stat-row"><span class="gp-stat-key">' . gp_e(gp_t('mdl_labels')) . '</span>'
+		. '<span class="gp-stat-val"><span class="gp-badge ' . ($done ? 'gp-badge-on' : 'gp-badge-info') . '" data-clf-labels="' . (int)$l['positives'] . '/' . (int)$l['needed'] . '">'
+		. gp_e(gp_num($l['positives']) . ' / ' . gp_num($l['needed'])) . ' ' . gp_e(gp_t('mdl_labels_positives')) . '</span> <span class="gp-help">(' . gp_e((string)$pct) . '%)</span></span></div>'
+		. '<p class="gp-help">' . gp_e(gp_t('mdl_labels_sources')) . ': ' . gp_e(gp_t('mdl_src_honeypot')) . ' <strong>' . gp_e(gp_num($l['sources']['honeypot'])) . '</strong>, '
+		. gp_e(gp_t('mdl_src_refuted')) . ' <strong>' . gp_e(gp_num($l['sources']['refuted_claim'])) . '</strong>, ' . gp_e(gp_t('mdl_src_truth')) . ' <strong>' . gp_e(gp_num($l['sources']['ground_truth'])) . '</strong>. '
+		. gp_e(gp_t('mdl_labels_humans')) . ': ' . gp_e(gp_num($l['humans'])) . '. ' . gp_docs_link('08-ANALYZER-PHASES.md', 'classifier-labels-how-each-source-is-set-up', 'mdl_labels_howto') . ' <span class="gp-mono gp-ltr">(docs/08-ANALYZER-PHASES.md, "Classifier labels")</span></p>';
+	return $h;
+}
+
 function gp_tip($key) {
 	static $n = 0;
 	$text = gp_t('tip_' . $key);

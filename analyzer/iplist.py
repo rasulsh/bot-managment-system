@@ -255,6 +255,10 @@ def compile_lists(lists_dir, now=None):
     if fcntl is not None:
         try:
             lock = open(os.path.join(lists_dir, '.compile.lock'), 'a')
+            try:
+                os.chmod(os.path.join(lists_dir, '.compile.lock'), 0o644)
+            except OSError:
+                pass                    # the panel's web user may own it: not ours to change, and not a reason to drop the lock
             fcntl.flock(lock, fcntl.LOCK_EX)
         except OSError:
             lock = None

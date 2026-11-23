@@ -199,6 +199,11 @@ every-minute `worker` is fine, no `sleep N;` workaround is needed; the `worker` 
 job that writes models or verdicts. Every other mode skips when its own lock is busy. A run that still cannot get the
 lock after its wait is recorded as *skipped (lock busy after N s)* and shown as **skipped by lock** on the Jobs page.
 
+**File modes of what the jobs write.** Cron often runs with umask 002, which used to make `analyzer/model.joblib`, the `.jobstatus-*`, `.jobstate-*` and `.lastrun-*` files and the lock holder
+group-writable. The wrappers (`analyzer-cron.sh`, `guard-logrotate.sh`, `feeds-cron.sh`, the status library) now run with `umask 022`, the Python writers create files **0644** whatever the umask (`analyzer/fsmode.py`;
+0600 is the mode for anything that could carry a secret), and each job corrects the files it owns on its next run (a group- or world-writable file in `analyzer/` loses the extra write bits). Logs keep the
+modes their own writers give them. If the panel's *File permissions* check still lists files after an update, run the `find ... -perm /022 -exec chmod go-w` line it prints once.
+
 **Running a job by hand over SSH** (`bash scripts/analyzer-cron.sh nightly`) works without exporting anything: the wrapper takes the Python from `GV_PYTHON` in
 the environment, else the `GV_PYTHON=` line of your crontab, else `<install-dir>/.venv/bin/python`, else `python3`, and records the choice in the job status (`python`:
 `"... (source: crontab)"`). A `php` on `PATH` that is the cgi-fcgi build falls back to `/usr/local/bin/php` when that is the command-line build. If

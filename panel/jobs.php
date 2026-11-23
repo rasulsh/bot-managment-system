@@ -140,6 +140,17 @@ function gp_job_list($limit = 50) {
 // Read what the analyzer knows about each model from the snapshot, which is
 // where the Python side records it. The panel does not open joblib bundles
 // itself - that would mean reading a pickle in the web tier.
+// Where the supervised classifier stands on its labels (written by every nightly run, copied into the snapshot): array(positives, humans,
+// needed, sources => honeypot / refuted_claim / ground_truth) or null before the first nightly run that records it. Whole numbers only.
+function gp_clf_labels(?array $snapshot = null) {
+	$snapshot = $snapshot === null ? gp_snapshot() : $snapshot;
+	$l = isset($snapshot['clf_labels']) && is_array($snapshot['clf_labels']) ? $snapshot['clf_labels'] : null;
+	if ($l === null || !isset($l['positives'], $l['needed'])) { return null; }
+	$src = isset($l['sources']) && is_array($l['sources']) ? $l['sources'] : array();
+	return array('positives' => max(0, (int)$l['positives']), 'humans' => max(0, (int)($l['humans'] ?? 0)), 'needed' => max(1, (int)$l['needed']),
+		'sources' => array('honeypot' => max(0, (int)($src['honeypot'] ?? 0)), 'refuted_claim' => max(0, (int)($src['refuted_claim'] ?? 0)), 'ground_truth' => max(0, (int)($src['ground_truth'] ?? 0))));
+}
+
 function gp_model_status() {
 	$snapshot = gp_snapshot();
 	$models = isset($snapshot['models']) && is_array($snapshot['models'])

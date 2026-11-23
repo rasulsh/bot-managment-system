@@ -21,6 +21,8 @@
 #
 # Status values: ok | warning (exit 0 but the job said it did nothing useful) | failed | skipped.
 
+umask 022   # whoever sources this library: its files are never group-writable, whatever cron's umask is (logs keep the modes of their own writers)
+
 JS_ROOT="${JS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 JS_STATUS_DIR="${GV_JOBSTATUS_DIR:-$JS_ROOT/analyzer}"
 JS_MODE=""
@@ -101,6 +103,16 @@ js_state_write() {   # last_success last_failure skipped runs failures
 
 # Begin a run: remember the mode and the start time, create the capture files, and arm the
 # traps so a crash or a signal still records a failure.
+# Correct the modes of the status files this wrapper owns: a run under cron's umask 002 (an earlier version) left them group-writable.
+# Only regular files in the status directory, only ours, only group / other write is removed (nothing under logs/ is touched).
+js_tidy_modes() {
+	[ -d "$JS_STATUS_DIR" ] || return 0
+	find "$JS_STATUS_DIR" -maxdepth 1 -type f -user "$(id -u)" -perm /022 \
+		\( -name '.jobstatus-*' -o -name '.jobstate-*' -o -name '.lastrun-*' -o -name '.laststats-*' -o -name '.write.lock*' -o -name '.cron-check*' -o -name '.perm-check*' \) \
+		-exec chmod go-w {} + 2>/dev/null
+	return 0
+}
+
 js_begin() {
 	JS_MODE="$1"
 	JS_START="$(date +%s)"
@@ -111,6 +123,7 @@ js_begin() {
 	trap 'exit 143' TERM
 	trap 'exit 130' INT
 	trap 'exit 129' HUP
+	js_tidy_modes
 }
 
 # Run a command with stderr (and stdout, unless $JS_PASS_STDOUT=1) captured, then replay both
@@ -230,14 +243,15 @@ js_on_exit() {
 
 # Write the status file, the state numbers and the log lines for this run.
 js_write() {
-	local rc="$1" end status dur ls lf skipped runs failures warns err_text first result log_dir
+	local rc="$1" end status dur ls lf skipped runs failures warns notes err_text first result log_dir
 	end="$(date +%s)"
 	dur=$((end - JS_START))
 	ls="$(js_state_get last_success)"; lf="$(js_state_get last_failure)"
 	skipped="$(js_state_get skipped)"; runs="$(js_state_get runs)"; failures="$(js_state_get failures)"
-	warns=""; result=""
+	warns=""; notes=""; result=""
 	if [ -n "$JS_TMP" ]; then
 		warns="$(cat "$JS_OUT" "$JS_ERR" 2>/dev/null | sed -n 's/^GV_JOB_WARN: //p' | head -5)"
+		notes="$(cat "$JS_OUT" "$JS_ERR" 2>/dev/null | sed -n 's/^GV_JOB_INFO: //p' | head -5)"      # informational: never a warning
 		result="$(cat "$JS_OUT" "$JS_ERR" 2>/dev/null | sed -n 's/^GV_JOB_RESULT: //p' | tail -1)"
 	fi
 	[ -n "$JS_WARN_EXTRA" ] && warns="${warns:+$warns
@@ -274,17 +288,23 @@ js_write() {
 	[ "${JS_STATUS_OVERRIDE:-}" = "skipped" ] || js_state_write "$ls" "$lf" "$skipped" "$runs" "$failures"
 
 	mkdir -p "$JS_STATUS_DIR" 2>/dev/null
-	local f="$JS_STATUS_DIR/.jobstatus-$JS_MODE.json" wj="" w
+	local f="$JS_STATUS_DIR/.jobstatus-$JS_MODE.json" wj="" w nj=""
 	while IFS= read -r w; do
 		[ -n "$w" ] || continue
 		wj="${wj:+$wj,}\"$(printf '%s' "$w" | js_redact | cut -c1-300 | js_esc)\""
 	done <<EOF
 $warns
 EOF
-	printf '{"v":1,"mode":"%s","status":"%s","last_start":%s,"last_end":%s,"last_success":%s,"last_failure":%s,"last_exit":%s,"duration":%s,"skipped":%s,"runs":%s,"failures":%s,"last_error":"%s","warnings":[%s],"result_json":"%s","python":"%s","lock_holder":"%s"}\n' \
+	while IFS= read -r w; do
+		[ -n "$w" ] || continue
+		nj="${nj:+$nj,}\"$(printf '%s' "$w" | js_redact | cut -c1-300 | js_esc)\""
+	done <<EOF
+$notes
+EOF
+	printf '{"v":1,"mode":"%s","status":"%s","last_start":%s,"last_end":%s,"last_success":%s,"last_failure":%s,"last_exit":%s,"duration":%s,"skipped":%s,"runs":%s,"failures":%s,"last_error":"%s","warnings":[%s],"result_json":"%s","python":"%s","lock_holder":"%s","notes":[%s]}\n' \
 		"$JS_MODE" "$status" "$JS_START" "$end" "$ls" "$lf" "$rc" "$dur" "$skipped" "$runs" "$failures" \
 		"$(printf '%s' "$err_text" | js_esc)" "$wj" "$(printf '%s' "$result" | js_redact | head -c 2000 | js_esc)" "$(printf '%s' "${JS_PYTHON_DESC:-${PYTHON:-}}" | js_esc)" \
-		"$(printf '%s' "$JS_LOCK_HOLDER" | js_esc)" \
+		"$(printf '%s' "$JS_LOCK_HOLDER" | js_esc)" "$nj" \
 		> "$f.tmp$$" 2>/dev/null && mv -f "$f.tmp$$" "$f" 2>/dev/null
 
 	# jobs.log: one line per run; jobs-errors.log: the full stderr of a failure.

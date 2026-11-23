@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import config as config_mod
 from analyzer import jobreport
+from analyzer import fsmode
 from analyzer import botverify
 from analyzer import logs as logs_mod
 from analyzer import redis_io
@@ -90,6 +91,9 @@ def main(argv=None, resolver=None):
     except Exception as exc:
         print('ERROR: bad configuration: %s' % exc, file=sys.stderr)
         return 2
+    # Files an earlier run (cron umask 002) left group- or world-writable in the analyzer directory (the model, the markers, the status
+    # files) are corrected now; new files are created 0644 by analyzer/fsmode.py.
+    fsmode.tidy_for(cfg)
     if args.log_dir:
         cfg['log_dir'] = args.log_dir
     if not os.path.isdir(cfg['log_dir']):

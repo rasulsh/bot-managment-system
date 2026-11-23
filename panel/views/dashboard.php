@@ -232,6 +232,11 @@ $lists = array(
 			</tbody></table></div>
 		<p class="gp-help"><?= gp_e(gp_t('job_queue')) ?>: <span class="gp-mono"><?= gp_num((int)$queue['length']) ?></span><?= $queue['oldest_age'] !== null ? ' · ' . gp_e(gp_t('job_oldest')) . ' ' . gp_e(gp_age(time() - (int)$queue['oldest_age'])) : '' ?></p>
 	</div>
+	<div class="gp-card" id="clf-labels">
+		<div class="gp-card-title"><?= gp_e(gp_t('mdl_labels_title')) ?><?= gp_tip('mdl_labels') ?>
+			<a class="gp-btn gp-btn-ghost gp-btn-sm" href="index.php?r=models#clf-labels"><?= gp_e(gp_t('nav_models')) ?></a></div>
+		<?= gp_clf_labels_html(isset($clf_labels) ? $clf_labels : null) ?>
+	</div>
 	<?php if (!empty($pipeline) && is_array($pipeline)):
 		$pv = (string)$pipeline['verdict']; ?>
 	<div class="gp-card">

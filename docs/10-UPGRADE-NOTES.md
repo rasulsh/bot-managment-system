@@ -2,6 +2,17 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## File modes of job output, permission scan, classifier labels (2026.11.30)
+
+* **Modes.** On a host whose cron runs with umask 002 the analyzer's files (`analyzer/model.joblib`, `.jobstatus-*.json`, `.jobstate-*`, `.lastrun-*`, `.write.lock.holder`) were group-writable. All wrappers now use
+  `umask 022`, Python creates files 0644 explicitly, and every job corrects the files it owns on its next run. Nothing to do; the File permissions check goes quiet after the next nightly / worker run.
+* **File permissions scan.** It scans the same set every time (everything except `.venv`, `.git`, `logs/`; dotfiles and analyzer data files included), no longer skips a directory named `venv`, and an unreadable
+  directory or a truncated scan is reported as an incomplete scan instead of "No permission problems found".
+* **Nightly "did nothing useful".** A classifier that only waits for labels is now an informational note, with the progress (`0 / 50 positives`, per source) on the Models page and the dashboard details.
+  How to produce labels: [08-ANALYZER-PHASES.md, Classifier labels](08-ANALYZER-PHASES.md#classifier-labels-how-each-source-is-set-up). Job status files gain a `notes` array.
+
+**Rollback.** Update page *Roll back* or `php updates/rollback.php`; older code ignores the `notes` field and the `clf_labels` entry of the snapshot.
+
 ## Job lock waits: nightly never ran (2026.11.29)
 
 **Symptom.** `nightly` (and `train` / `train-clf`) never ran: at 04:17 cron starts `nightly` and `worker` in the same second, both used `analyzer/.write.lock`, the worker won and `nightly`

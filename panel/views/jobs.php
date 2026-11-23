@@ -35,6 +35,7 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 		<?php if ($h['skew']): ?><div class="gp-prop"><dt class="gp-prop-name"><?= gp_e(gp_t('job_skew')) ?></dt><dd class="gp-prop-val"><?= gp_e(gp_t('job_skew_text')) ?></dd></div><?php endif; ?>
 	</dl>
 	<?php foreach ($h['warnings'] as $w): ?><p class="gp-note gp-note-strong"><?= gp_e(gp_t('job_s_warning')) ?>: <?= gp_e($w) ?></p><?php endforeach; ?>
+	<?php foreach ($h['notes'] as $w): ?><p class="gp-note" role="status"><?= gp_e(gp_t('job_notes')) ?>: <?= gp_e($w) ?></p><?php endforeach; ?>
 	<?php if (is_array($h['result'])): ?>
 	<div class="gp-card-title" style="margin-top:.75rem"><?= gp_e(gp_t('job_result')) ?></div>
 	<dl class="gp-props"><?php foreach ($h['result'] as $rk => $rv): ?>
@@ -153,8 +154,14 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 	<p class="gp-help"><?= gp_e(gp_t('perm_help')) ?><?= gp_tip('perm_check') ?></p>
 	<p class="gp-help"><?= gp_e(gp_t('perm_scanned')) ?>: <span class="gp-mono"><?= gp_num((int)$perms['scanned']) ?></span>
 		(<?= (int)($perms['time'] ?? 0) > 0 ? gp_e(gp_age((int)$perms['time'])) . ' ' . gp_e(gp_t('ago')) . '; ' . gp_e(gp_t('perm_cached')) : gp_e(gp_t('perm_not_scanned')) ?>)</p>
+	<?php $perm_inc = !empty($perms['unreadable']) || !empty($perms['truncated']);
+	if ($perm_inc): ?>
+	<div class="gp-note gp-note-strong" role="alert"><?= gp_e(gp_t('perm_incomplete')) ?>
+		<?php if (!empty($perms['unreadable'])): ?><?= gp_e(gp_t('perm_unreadable')) ?>: <span class="gp-mono"><?= gp_e(implode(', ', $perms['unreadable'])) ?><?= !empty($perms['unreadable_more']) ? ', ...' : '' ?></span><?php endif; ?>
+		<?php if (!empty($perms['truncated'])): ?><?= gp_e(gp_t('perm_truncated')) ?><?php endif; ?></div>
+	<?php endif; ?>
 	<?php if (!$perm_bad): ?>
-	<p><span class="gp-badge gp-badge-on"><?= gp_e(gp_t('perm_ok')) ?></span></p>
+	<?php if (!$perm_inc): ?><p><span class="gp-badge gp-badge-on"><?= gp_e(gp_t('perm_ok')) ?></span></p><?php endif; ?>
 	<?php else: ?>
 	<?php if ($perms['secret_readable']): ?><div class="gp-note gp-note-strong" role="alert"><?= gp_e(gp_t('perm_secret')) ?>: <span class="gp-mono"><?= gp_e(implode(', ', $perms['secret_readable'])) ?></span></div><?php endif; ?>
 	<?php if ($perms['cron_not_exec']): ?><div class="gp-note gp-note-strong" role="alert"><?= gp_e(gp_t('perm_cron')) ?>: <span class="gp-mono"><?= gp_e(implode(', ', $perms['cron_not_exec'])) ?></span></div><?php endif; ?>
@@ -162,7 +169,6 @@ $cron_lines = isset($cron_lines) && is_array($cron_lines) ? $cron_lines : array(
 		<pre class="gp-mono gp-ltr gp-pre"><?= gp_e(implode("\n", $perms['writable_sample'])) ?></pre></div><?php endif; ?>
 	<p class="gp-help"><?= gp_e(gp_t('perm_fix')) ?></p>
 	<pre class="gp-mono gp-ltr gp-pre"><?= gp_e(implode("\n", gp_perm_fix_commands($perms))) ?></pre>
-	<?php if ($perms['truncated']): ?><p class="gp-help"><?= gp_e(gp_t('perm_truncated')) ?></p><?php endif; ?>
 	<?php endif; ?>
 </div>
 <?php endif; ?>

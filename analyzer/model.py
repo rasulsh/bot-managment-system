@@ -16,6 +16,7 @@ scraping is normal and quietly neutralise the signal.
 
 import os
 
+from analyzer import fsmode
 from analyzer.features import FEATURE_ORDER
 
 try:
@@ -85,6 +86,7 @@ def _dump_atomic(bundle, path):
     tmp = '%s.tmp.%d' % (path, os.getpid())
     try:
         joblib.dump(bundle, tmp)
+        fsmode.set_mode(tmp, fsmode.FILE_MODE)       # a model is a pickle: never group-writable, whatever the umask
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):

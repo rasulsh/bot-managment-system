@@ -65,9 +65,16 @@ def load_ground_truth(path):
     return truth
 
 
-def bot_labels(session, labels, rows, ground_truth=None, session_count=1,
-               median_dwell=None):
-    """Return 1 (bot), 0 (human) or None (excluded from training).
+SOURCE_GROUND_TRUTH = 'ground_truth'
+SOURCE_HONEYPOT = 'honeypot'
+SOURCE_REFUTED = 'refuted_claim'
+SOURCE_HUMAN = 'human'
+
+
+def bot_label_source(session, labels, rows, ground_truth=None, session_count=1,
+                     median_dwell=None):
+    """(label, source): label is 1 (bot), 0 (human) or None (excluded from training); source says which rule decided it:
+    'ground_truth' (the operator), 'honeypot', 'refuted_claim' (reverse DNS refuted a known-bot claim), 'human', or None.
 
     session: a session dict from logs.sessionize
     labels:  the outcome labels from features.session_labels
@@ -85,17 +92,17 @@ def bot_labels(session, labels, rows, ground_truth=None, session_count=1,
     for identity in (session.get('dev') or '', session.get('key') or '',
                      session.get('ip') or ''):
         if identity and identity in ground_truth:
-            return int(ground_truth[identity])
+            return int(ground_truth[identity]), SOURCE_GROUND_TRUTH
 
     # Positive: a link no human can see.
     if int(labels.get('hp_any') or 0) == 1:
-        return 1
+        return 1, SOURCE_HONEYPOT
 
     # Positive: reverse DNS refuted a known-bot claim. The guard never does
     # this lookup in band, so the label owes nothing to its decisions.
     for row in rows:
         if str(row.get('botv') or '') == 'bad':
-            return 1
+            return 1, SOURCE_REFUTED
 
     # Negative: evidence of a person. Solved the handshake, browsed for a
     # while, came back more than once, and never announced itself as a client
@@ -112,10 +119,16 @@ def bot_labels(session, labels, rows, ground_truth=None, session_count=1,
             and float(median_dwell) >= MIN_HUMAN_DWELL_S
             and int(session_count) >= MIN_HUMAN_SESSIONS
             and script_ratio == 0.0):
-        return 0
+        return 0, SOURCE_HUMAN
 
     # Everything else, including challenge_unsolved on its own.
-    return None
+    return None, None
+
+
+def bot_labels(session, labels, rows, ground_truth=None, session_count=1,
+               median_dwell=None):
+    """Return 1 (bot), 0 (human) or None (excluded from training). See bot_label_source for the arguments."""
+    return bot_label_source(session, labels, rows, ground_truth, session_count, median_dwell)[0]
 
 
 def holdout_outcomes(sessions):

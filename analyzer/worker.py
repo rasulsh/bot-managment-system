@@ -37,6 +37,7 @@ except ImportError:        # pragma: no cover
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import config as config_mod
+from analyzer import fsmode
 from analyzer import geo as geo_mod
 from analyzer import iplist as iplist_mod
 from analyzer import jobreport
@@ -201,7 +202,7 @@ class WriteLock(object):
         if fcntl is None:
             return True
         try:
-            fh = open(self.path, 'a')
+            fh = fsmode.open_append(self.path)
         except OSError:
             return True            # an unwritable lock directory must not stop the queue: nothing else can hold what cannot be created
         deadline = time.time() + max(0.0, float(wait))
@@ -216,7 +217,7 @@ class WriteLock(object):
                 time.sleep(0.25)
         self.fh = fh
         try:
-            with open(self.path + '.holder', 'w') as hf:
+            with fsmode.open_text(self.path + '.holder') as hf:
                 hf.write('%s %d %d\n' % (self.mode, os.getpid(), int(time.time())))
         except OSError:
             pass
@@ -379,7 +380,7 @@ def run_one(client, cfg, raw):
     # The same fields a cron run records in .jobstatus-<mode>.json: exit code, duration,
     # warnings ("succeeded but did nothing useful") and the result of a training run.
     warnings, result = jobreport.parse(''.join(captured.parts))
-    extra = {'warnings': warnings[:5]}
+    extra = {'warnings': warnings[:5], 'notes': jobreport.parse_notes(''.join(captured.parts))[:5]}
     if result is not None:
         extra['result'] = result
     if status == 'done' and warnings:
@@ -409,6 +410,9 @@ def main(argv=None):
     except Exception as exc:
         print('ERROR: bad configuration: %s' % exc, file=sys.stderr)
         return 2
+    # Files an earlier run (cron umask 002) left group- or world-writable in the analyzer directory (the model, the markers, the status
+    # files) are corrected now; new files are created 0644 by analyzer/fsmode.py.
+    fsmode.tidy_for(cfg)
 
     # Jobs shell into other entry points in-process; without the worker's own
     # config path they would re-resolve config from GV_ANALYZER_CONFIG/defaults
