@@ -83,7 +83,33 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 			check(label + ': HTTP 200', resp && resp.status() === 200, resp && String(resp.status()));
 			check(label + ': no horizontal page scroll', m.over <= 1, 'overflow ' + m.over + ' px');
 			if (v.name === 'desktop' && p === 'dashboard') { check('desktop: the wide layout uses the screen (shell >= 1500 px at 1600)', m.shell >= 1500, 'shell ' + m.shell); }
-			if (SHOTS && ['dashboard', 'update', 'users', 'settings', 'rules&new=1', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'geo'].indexOf(p) >= 0) {
+			if (p === 'dashboard') {
+				// Dashboard v2 grid (docs/15-DASHBOARD.md): tiles, readiness | funnel, system cards.
+				const g = await page.evaluate(() => {
+					const box = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top + window.scrollY), w: Math.round(r.width), h: Math.round(r.height) }; };
+					const all = (sel) => Array.prototype.slice.call(document.querySelectorAll(sel)).map(box);
+					return { tiles: all('[data-tile]'), ready: all('#dash-ready'), funnel: all('#dash-funnel'), sys: all('[id^=dash-sys-], #clf-labels'), main: all('#dash-main'), strip: all('#dash-strip'), chips: all('.gp-dchip'),
+						svgW: (document.querySelector('#dash-main svg') || { getBoundingClientRect: () => ({ width: 0 }) }).getBoundingClientRect().width };
+				});
+				const rows = (list) => { const m = {}; list.forEach((b) => { (m[b.y] = m[b.y] || []).push(b); }); return Object.keys(m).map((k) => m[k]); };
+				check(label + ': six KPI tiles', g.tiles.length === 6, String(g.tiles.length));
+				const perRow = v.name === 'desktop' ? 6 : 2;
+				check(label + ': KPI tiles ' + perRow + ' per row, equal width and height', rows(g.tiles).every((r) => r.length === perRow && r.every((b) => Math.abs(b.w - r[0].w) <= 1 && Math.abs(b.h - r[0].h) <= 1)), JSON.stringify(g.tiles.map((b) => [b.x, b.y, b.w, b.h])));
+				check(label + ': status strip has 6 chips, ' + (v.name === 'desktop' ? 'one row' : 'two per row'), g.chips.length === 6 && rows(g.chips).length === (v.name === 'desktop' ? 1 : 3), String(rows(g.chips).length));
+				if (g.ready.length && g.funnel.length) {
+					if (v.name === 'desktop') { check(label + ': readiness and funnel side by side, equal height, 7:5', g.ready[0].y === g.funnel[0].y && g.ready[0].h === g.funnel[0].h && Math.abs(g.ready[0].w / g.funnel[0].w - 7 / 5) < 0.12, JSON.stringify([g.ready[0], g.funnel[0]])); }
+					else { check(label + ': readiness and funnel stacked full width', g.funnel[0].y > g.ready[0].y && Math.abs(g.ready[0].w - g.funnel[0].w) <= 1, JSON.stringify([g.ready[0], g.funnel[0]])); }
+				}
+				check(label + ': system cards equal height per row', rows(g.sys).every((r) => r.every((b) => b.h === r[0].h)), JSON.stringify(g.sys.map((b) => [b.y, b.h])));
+				check(label + ': main chart fills its card (' + Math.round(g.svgW) + ' px)', g.svgW > (v.name === 'desktop' ? 1000 : 300), String(g.svgW));
+			}
+			if (SHOTS && p === 'dashboard') {
+				for (const scheme of ['light', 'dark']) {
+					await page.emulateMedia({ colorScheme: scheme }); await page.waitForTimeout(500);
+					await page.screenshot({ path: SHOTS + '/' + v.name + '-dashboard-' + scheme + '.png', fullPage: true });
+				}
+				await page.emulateMedia({ colorScheme: 'light' });
+			} else if (SHOTS && ['update', 'users', 'settings', 'rules&new=1', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'geo'].indexOf(p) >= 0) {
 				await page.screenshot({ path: SHOTS + '/' + v.name + '-' + p.split('&')[0] + (p.indexOf('new=1') > 0 ? '-form' : '') + (p.indexOf('act_op') > 0 ? '-filters' : '') + '.png', fullPage: false });
 			}
 		}

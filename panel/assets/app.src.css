@@ -665,3 +665,87 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
 .gp-drawer[hidden] { display: none; }
 .gp-drawer-head { @apply mb-3 flex items-center justify-between gap-2; }
 .gp-live-d-head, .gp-live-d-rs, .gp-live-d-links { @apply mb-3 flex flex-wrap items-center gap-2; }
+
+/* --- dashboard v2 (spec: docs/15-DASHBOARD.md) ---------------------------------------------------------------------------------
+ * One 12-column grid, one gap, equal-height cards per row. Spans per breakpoint (mobile < 768, tablet 768-1279, desktop >= 1280):
+ *   span-2 (KPI tile) 6 / 4 / 2     span-4 (system card) 12 / 6 / 4     span-5, span-7 (readiness | funnel) 12 / 12 / 5 and 7
+ *   span-6 (More cards) 12 / 12 / 6     span-12 12 / 12 / 12 */
+.gp-dash { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 1rem; align-items: stretch; }
+.gp-dash > * { min-width: 0; }
+.gp-dspan-2 { grid-column: span 6; } .gp-dspan-4 { grid-column: span 12; } .gp-dspan-5 { grid-column: span 12; }
+.gp-dspan-6 { grid-column: span 12; } .gp-dspan-7 { grid-column: span 12; } .gp-dspan-12 { grid-column: span 12; }
+@media (min-width: 768px) {
+	.gp-dspan-2 { grid-column: span 4; } .gp-dspan-4 { grid-column: span 6; }
+}
+@media (min-width: 1280px) {
+	.gp-dspan-2 { grid-column: span 2; } .gp-dspan-4 { grid-column: span 4; } .gp-dspan-5 { grid-column: span 5; }
+	.gp-dspan-6 { grid-column: span 6; } .gp-dspan-7 { grid-column: span 7; }
+}
+.gp-dcard { @apply flex min-w-0 flex-col gap-2 rounded-xl border border-line bg-surface p-4 shadow-sm; }
+.gp-dcard-flat { @apply shadow-none; }
+.gp-dcard-title { @apply mb-1 flex flex-wrap items-center justify-between gap-2 text-sm font-bold text-ink; }
+.gp-dcard > .gp-table-wrap, .gp-dcard > .gp-tabs { @apply min-w-0; }
+.gp-dsub { @apply mb-0 mt-1 text-xs text-muted; }
+.gp-dsys-title { @apply mt-2 text-xs font-bold uppercase tracking-wide text-subtle; }
+.gp-dmore { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 1rem; align-items: stretch; @apply pt-3; }
+.gp-dmore > * { min-width: 0; }
+.gp-dcov { @apply mb-2; }
+
+/* status strip: 6 chips on desktop, 3 on tablet, 2 on mobile */
+.gp-dstrip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; @apply rounded-xl border border-line bg-surface p-3; }
+@media (min-width: 768px) { .gp-dstrip { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 1280px) { .gp-dstrip { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+.gp-dstrip > .gp-msg { grid-column: 1 / -1; }
+.gp-dchip { @apply flex min-w-0 flex-col gap-1 rounded-lg border border-line bg-sunken px-3 py-2; }
+.gp-dchip-k { @apply text-[11px] font-bold uppercase tracking-wide text-subtle; }
+.gp-dchip-v { @apply flex flex-wrap items-center gap-1.5 text-sm font-bold text-ink; }
+.gp-dchip-s { @apply mt-auto text-xs text-muted; }
+.gp-dchip-armed { @apply border-ok-line bg-ok-bg; } .gp-dchip-armed .gp-dchip-k, .gp-dchip-armed .gp-dchip-v { color: rgb(var(--gp-ok-fg)); }
+.gp-dchip-stopped { @apply border-danger bg-bad-bg; } .gp-dchip-stopped .gp-dchip-k, .gp-dchip-stopped .gp-dchip-v { color: rgb(var(--gp-bad-fg)); }
+
+/* KPI tiles */
+.gp-dtile { @apply gap-1 no-underline hover:border-field; color: inherit; }
+.gp-dtile:focus-visible { @apply outline-none ring-2 ring-accent/60; }
+.gp-dtile-label { @apply flex items-center gap-1 text-xs font-bold text-muted; }
+.gp-dtile-value { @apply text-2xl font-bold leading-tight text-ink; }
+.gp-dtile-delta { @apply text-[11px] text-subtle; }
+.gp-dtile-extra { @apply text-[11px] text-subtle; }
+.gp-dspark { margin-top: auto; width: 100%; height: 28px; display: block; }
+.gp-dspark-line { fill: none; stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+
+/* the main chart */
+.gp-dchart-wrap { width: 100%; overflow: hidden; }
+.gp-dchart { display: block; width: 100%; height: auto; }
+.gp-dchart-grid { stroke: rgb(var(--gp-line)); stroke-width: 1; }
+.gp-dchart-tick { fill: rgb(var(--gp-subtle)); font-size: 11px; }
+.gp-dchart-unit { fill: rgb(var(--gp-subtle)); font-size: 11px; font-weight: 700; }
+.gp-dchart-line { fill: none; stroke: rgb(var(--gp-ink)); stroke-width: 2; stroke-dasharray: 5 3; stroke-linejoin: round; }
+.gp-dlegend { list-style: none; @apply m-0 flex flex-wrap gap-x-4 gap-y-1 p-0 text-xs text-muted; }
+.gp-dlegend li { @apply inline-flex items-center gap-1.5; }
+.gp-dlegend-sw { @apply inline-block h-3 w-3 rounded-sm; }
+.gp-dlegend-sw-hatch { background-image: repeating-linear-gradient(45deg, rgba(0,0,0,.45) 0 2px, transparent 2px 5px); }
+.gp-dlegend-line { display: inline-block; width: 1.25rem; border-top: 2px dashed rgb(var(--gp-ink)); }
+
+/* tables inside dashboard cards */
+.gp-dtable { @apply w-full text-sm; }
+.gp-dtable th { @apply whitespace-nowrap text-xs; }
+.gp-dtable th, .gp-dtable td { @apply px-3 py-2; }
+.gp-dtable th:first-child, .gp-dtable td:first-child { @apply ps-0; }
+.gp-dtable .gp-num { text-align: end; font-variant-numeric: tabular-nums; }
+.gp-dqa { @apply whitespace-nowrap; }
+.gp-qa { @apply relative inline-block; }
+.gp-qa > summary { list-style: none; cursor: pointer; }
+.gp-qa > summary::-webkit-details-marker { display: none; }
+.gp-qa[open] > .gp-quick { @apply absolute z-20 mt-1 w-72 flex-wrap rounded-lg border border-line bg-surface p-3 shadow-lg; inset-inline-end: 0; white-space: normal; }
+.gp-mixbar { @apply flex h-2.5 w-full min-w-[6rem] overflow-hidden rounded-full bg-sunken; }
+.gp-mixbar > span { display: block; height: 100%; }
+
+/* funnel */
+.gp-funnel { @apply mb-3; }
+.gp-funnel-h { @apply mb-1 flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-ink; }
+.gp-funnel-row { @apply grid items-center gap-2 py-0.5 text-sm; grid-template-columns: 5.5rem minmax(0, 1fr) 6.5rem; }
+.gp-funnel-k { @apply text-muted; }
+.gp-funnel-bar { @apply block h-3 overflow-hidden rounded-full bg-sunken; }
+.gp-funnel-bar > span { display: block; height: 100%; }
+.gp-funnel-v { font-variant-numeric: tabular-nums; @apply text-end; }
+.gp-dtable .gp-badge { white-space: nowrap; }

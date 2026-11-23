@@ -2,6 +2,12 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Dashboard v2 (2026.11.36)
+
+* **What changed:** the dashboard layout, charts and reports (README 1.5, docs/15). Nothing in the guard, the configuration or the log format changed.
+* **Upgrade:** just update. The new reports fill in after the next snapshot run (at most 15 minutes; **Jobs -> snapshot**): until then the cards say "the next snapshot run adds this report". The snapshot job reads 9 days of logs (it read 3), so on a very busy site its run takes a little longer; it stays read-only.
+* **Rollback:** Update page *Roll back*. The old dashboard ignores the extra `dash` block in `snapshot.json`.
+
 ## Asset cache busting (2026.11.35)
 
 * **Fix:** after an update the panel kept showing old CSS until the operator pressed Ctrl+Shift+R several times (a fixed `assets/app.css` URL, cached by the browser and by LiteSpeed). Every asset URL now carries `?v=<VERSION>-<hash of the file>` (one helper, `gp_asset_url()`), the fonts moved from `app.css` into `views/layout.php` so they are versioned too, and `panel/assets/.htaccess` lets a versioned asset be cached for a year (an unversioned request must revalidate). Every panel response (pages, JSON, CSV, redirects, the recovery pages) also sends `X-LiteSpeed-Cache-Control: no-cache`.

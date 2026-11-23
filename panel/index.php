@@ -28,6 +28,7 @@ require_once __DIR__ . '/ui.php';
 require_once __DIR__ . '/reasons.php';
 require_once __DIR__ . '/overrides.php';
 require_once __DIR__ . '/live.php';
+require_once __DIR__ . '/dash.php';
 require_once __DIR__ . '/health.php';
 require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/rules.php';
@@ -272,6 +273,7 @@ switch ($gp_route) {
 		$hjobs = $hin['jobs'];
 		$hcfg = gv_cfg_load();
 		$hrules = gp_rules_state();
+		$hlists = gp_iplists_state()['lists'];
 		gp_render('dashboard', array(
 			'snapshot' => $hin['snapshot'], 'clf_labels' => gp_clf_labels(),
 			'cfg'      => $hcfg,
@@ -292,7 +294,12 @@ switch ($gp_route) {
 			'cron_lines' => gp_cron_setup_lines($hjobs, $hin['cron']),
 			'protection' => gp_protection_mode($hcfg, $hrules['rules']),
 			'rsum'     => gp_rules_summary($hrules['rules']),
-			'isum'     => gp_iplists_summary(gp_iplists_state()['lists']),
+			'isum'     => gp_iplists_summary($hlists),
+			'rules'    => $hrules['rules'],
+			'iplists'  => $hlists,
+			'geo'      => gp_geo_status(),
+			'feeds'    => $hin['feeds'],
+			'perms'    => $hin['perms'],
 		));
 
 	case 'logs':

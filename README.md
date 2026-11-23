@@ -321,6 +321,17 @@ nothing changes until you review the list of files and enter your password
 
 ## 1.5 Reading the dashboard
 
+The page runs top to bottom (full layout and numbers: [docs/15-DASHBOARD.md](docs/15-DASHBOARD.md)):
+
+1. **Status strip:** protection mode (*monitor only*, *partly enforcing*, *enforcing*), the kill switch and its button, open alerts (critical / warning; the list below it opens by itself when something is critical), how many jobs are healthy, the age of the snapshot and the version.
+2. **Six tiles**, each for the last 24 hours with the change against the 24 hours before and a sparkline, each a link to **Logs** with the same filter: requests, allowed, challenged (with the solve rate), blocked, rate-limited and **would act if enforced**. The last one counts requests a rule, list or score would have blocked, limited or challenged if it were enforced: while you are in monitor mode it is the number to watch.
+3. **Requests per hour** (24 h, or the **7 d** tab): each column is one hour, stacked by outcome; the dashed line is the number of different addresses.
+4. **Rollout readiness** lists every enabled rule and IP list that is in **Monitor** mode with its hits in 24 h and 7 d, the addresses and devices it touched and the share of hits that carried a valid token (people who passed the check). *Ready to enforce* = at least 20 hits in 7 d and under 5 % with a valid token; *Review first* = 5 % or more; *Too few hits* and *No hits in 7 d* mean there is not enough evidence. It is a hint, not a verdict. Next to it the **funnel** shows, for the check page and the image CAPTCHA, how many were served, solved, passed and failed, and the median CAPTCHA solve time.
+5. **Top lists** (tabs: IPs, devices, User-Agents, paths, countries, ASNs): requests, share of the 24 h total, an outcome mix bar, and a quick action (Identity and Block / allow for an address or a device, Logs and Live for the rest). Operators and administrators only; the Demo role sees only the tiles and the chart.
+6. **System** and a collapsed **More**: jobs, Redis and the enforce switches, log storage, models and classifier label progress, GeoIP and feeds, file permissions; score histograms, status codes, reasons, coverage and holdout.
+
+The heavy numbers come from the snapshot (the `dash` block, built by the analyzer every 15 minutes), so a card shows **Stale** when the snapshot is older than an hour. Alerts are still read live.
+
 The **Needs attention** box lists problems, **critical** (red) first, then **warning** (amber).
 Whether an alert fires is decided from live checks (file reads and one cheap Redis command), not from numbers in the possibly stale snapshot. Job rows use the same
 colours plus green (ok) and grey (never ran).
@@ -1032,7 +1043,7 @@ Out of band, never in the request path. Settings: `analyzer/config.py` defaults 
 | Anomaly model | `model.py` | Isolation Forest on clean sessions (needs `ml_min_train`, 200) → `ml` level 0–100. |
 | Classifier | `classifier.py` | Histogram gradient boosting tuned for precision (needs `clf_min_positive` 50 positives; target precision 0.98) → `clf` level. Labels come only from signals independent of the guard's own gating (honeypot, `botv=bad`, operator ground truth); `challenge_unsolved` is deliberately **not** a label. |
 | Outcomes | `outcomes.py` | Joins outcome rows (404 walks, bulk transfer, server errors) into features. |
-| Snapshot | `snapshot.py` | Folds recent logs into `analyzer/snapshot.json` for the dashboard (KPIs, top lists, rule and list hits). |
+| Snapshot | `snapshot.py` | Folds recent logs into `analyzer/snapshot.json` for the dashboard (KPIs, top lists, rule and list hits, and the `dash` block: hourly buckets by outcome for 24 h and 7 d, rollout readiness per rule and list, the challenge funnel by level, top lists with the outcome mix; reads 9 days of logs). |
 | Compile | `geo.py`, `iplist.py` | Build the compiled range files. |
 | Replay / control | `replay.py`, `ctl.py` | Counterfactual replay; `ctl.py show|allow|deny|clear|list|promote-model`. |
 

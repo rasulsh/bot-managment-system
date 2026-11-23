@@ -1,7 +1,7 @@
 <?php if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 // Demo role dashboard. The only variable is $demo (gp_demo_model(): numbers and fixed words, nothing else).
-$kt = array('requests' => 'dash_k_requests', 'allowed' => 'dash_k_allowed', 'blocked' => 'dash_k_blocked', 'limited' => 'dash_k_limited',
-	'challenged' => 'dash_k_challenged', 'challenge_success' => 'dash_k_success', 'rule_hits' => 'dash_k_rules', 'honeypot' => 'dash_k_honeypot', 'degraded' => 'dash_k_degraded');
+$kt = array('requests' => 'dash_k_requests', 'allowed' => 'dash_k_allowed', 'challenged' => 'dash_k_challenged', 'blocked' => 'dash_k_blocked', 'limited' => 'dash_k_limited',
+	'would_act' => 'dash_k_would', 'challenge_success' => 'dash_k_success', 'rule_hits' => 'dash_k_rules', 'honeypot' => 'dash_k_honeypot', 'degraded' => 'dash_k_degraded');
 $ct = array('captcha_shown' => 'dash_c_shown', 'captcha_solved' => 'dash_c_solved', 'captcha_failed' => 'dash_c_failed', 'captcha_expired' => 'dash_c_expired', 'captcha_solve_rate' => 'dash_c_rate');
 $pct = array('challenge_success', 'captcha_solve_rate');
 $tile = function ($k, $label) use ($demo, $pct) {
@@ -34,6 +34,17 @@ $c = $demo['counts'];
 	<?php if (!$demo['has_data']): ?><div class="gp-note"><?= gp_e(gp_t('dash_k_none')) ?></div><?php else: ?>
 	<div class="gp-grid-kpi"><?php foreach ($kt as $k => $label) { echo $tile($k, $label); } ?></div>
 	<?php endif; ?>
+</section>
+
+<section class="gp-dcard" aria-label="<?= gp_e(gp_t('dash_main_title')) ?>" id="dash-main">
+	<div class="gp-dcard-title"><?= gp_e(gp_t('dash_main_title')) ?> <span class="gp-card-sub"><?= gp_e(gp_t('dash_main_sub')) ?></span></div>
+	<?php if (!$demo['chart']['h24']): ?><p class="gp-note"><?= gp_e(gp_t($demo['generated'] > 0 ? 'dash_no_dash' : 'dash_no_snapshot')) ?></p><?php else:
+		gp_tabs_begin('dmain', array('h24' => gp_t('dash_range_24h'), 'd7' => gp_t('dash_range_7d')));
+		gp_tab_begin('dmain', 'h24', gp_t('dash_main_24h')); echo '<div class="gp-dchart-wrap">' . gp_dash_main_chart($demo['chart']['h24'], false, 'h24') . '</div>'; gp_tab_end();
+		gp_tab_begin('dmain', 'd7', gp_t('dash_main_7d')); echo '<div class="gp-dchart-wrap">' . gp_dash_main_chart($demo['chart']['d7'], true, 'd7') . '</div>'; gp_tab_end();
+		gp_tabs_end();
+		echo gp_dash_legend();
+	endif; ?>
 </section>
 
 <?php if ($demo['has_data'] && $cap_any): ?>

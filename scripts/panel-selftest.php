@@ -687,6 +687,8 @@ if (!function_exists('gp_t')) {
 	}
 }
 require_once __DIR__ . '/../panel/ui.php';
+require_once __DIR__ . '/../panel/dash.php';
+require_once __DIR__ . '/../panel/demo.php';
 require_once __DIR__ . '/../panel/reasons.php';
 require_once __DIR__ . '/../panel/overrides.php';
 if (!function_exists('gp_csrf_token_stub')) {
@@ -2617,16 +2619,19 @@ t_ok('the Jobs page job detail shows the note (escaped) and not as a "did nothin
 
 $kpi_snap = array('generated_at' => $jh_now, 'tz' => array('offset' => 0, 'name' => 'UTC'), 'traffic' => array('requests' => 10, 'devices' => 3, 'addresses' => 4, 'degraded' => 0), 'decisions' => array('allow' => 9, '403' => 1),
 	'kpi' => array('cur' => array('requests' => 120, 'allowed' => 100, 'blocked' => 10, 'limited' => 2, 'challenged' => 8, 'challenge_success' => 91.5, 'rule_hits' => 7, 'honeypot' => 1, 'degraded' => 0), 'prev' => array('requests' => 100, 'allowed' => 90, 'blocked' => 5, 'limited' => 2, 'challenged' => 8, 'challenge_success' => 95.0, 'rule_hits' => 0, 'honeypot' => 1, 'degraded' => 0)),
-	'top' => array('rules' => array(array('r1', 5)), 'reasons' => array(array('UA_SCRIPT', 9)), 'ips' => array(array('203.0.113.5', 4)), 'devices' => array(), 'uas' => array(array('curl/8.4', 4)), 'paths' => array(array('/shop?x=<b>', 3)), 'countries' => array(array('IR', 6))));
+	'top' => array('rules' => array(array('r1', 5)), 'reasons' => array(array('UA_SCRIPT', 9)), 'ips' => array(array('203.0.113.5', 4)), 'devices' => array(), 'uas' => array(array('curl/8.4', 4)), 'paths' => array(array('/shop?x=<b>', 3)), 'countries' => array(array('IR', 6))),
+	'dash' => array('v' => 1, 'hours' => array(array('t' => $jh_now - 3600, 'n' => 50, 'a' => 40, 'c' => 4, 'p' => 1, 'b' => 3, 'r' => 1, 'm' => 1, 'ips' => 9), array('t' => $jh_now, 'n' => 70, 'a' => 60, 'c' => 4, 'p' => 0, 'b' => 4, 'r' => 1, 'm' => 1, 'ips' => 12)), 'days7' => array(),
+		'readiness' => array('rules' => array(), 'lists' => array()), 'funnel' => array('js' => array('served' => 10, 'solved' => 9, 'passed' => 8, 'failed' => 1, 'median_s' => null), 'captcha' => array('served' => 0, 'solved' => 0, 'passed' => 0, 'failed' => 0, 'median_s' => null)),
+		'top' => array('ips' => array(array('203.0.113.5', 4, 1, 1, 2, 0, 0)), 'devices' => array(), 'uas' => array(array('curl/8.4', 4, 0, 4, 0, 0, 0)), 'paths' => array(array('/shop?x=<b>', 3, 1, 1, 1, 0, 0)), 'countries' => array(array('IR', 6, 6, 0, 0, 0, 0)), 'asns' => array(array('12880', 5, 5, 0, 0, 0, 0)))));
 list($h_nosnap, $e_nosnap) = $jh_render('dashboard', array('snapshot' => null));
-t_ok('dashboard with no snapshot: renders without a PHP warning, raises the snapshot alert, says the 24 h numbers are missing', !$e_nosnap && strpos($h_nosnap, 'data-alert="snapshot_missing"') !== false && strpos($h_nosnap, 'gp-grid-kpi') === false);
+t_ok('dashboard with no snapshot: renders without a PHP warning, raises the snapshot alert, says the 24 h numbers are missing', !$e_nosnap && strpos($h_nosnap, 'data-alert="snapshot_missing"') !== false && strpos($h_nosnap, 'data-tile=') === false);
 list($h_stale, $e_stale) = $jh_render('dashboard', array('snapshot' => array_merge($kpi_snap, array('generated_at' => $jh_now - 9999))));
-t_ok('dashboard with a stale snapshot: the stale alert is raised from a LIVE judgement and the old numbers are still shown', !$e_stale && strpos($h_stale, 'data-alert="snapshot_stale"') !== false && strpos($h_stale, 'gp-grid-kpi') !== false);
+t_ok('dashboard with a stale snapshot: the stale alert is raised from a LIVE judgement and the old numbers are still shown', !$e_stale && strpos($h_stale, 'data-alert="snapshot_stale"') !== false && strpos($h_stale, 'data-tile="requests"') !== false);
 list($h_ok, $e_ok) = $jh_render('dashboard', array('snapshot' => $kpi_snap));
-t_ok('dashboard, everything healthy: no alert strip, no cron card; protection state, 9 KPI tiles with change vs the previous 24 h, top lists linking to the Logs filters', !$e_ok && strpos($h_ok, 'gp-alerts') === false && strpos($h_ok, 'id="cron-setup"') === false
-	&& substr_count($h_ok, 'gp-kpi-label') === 9 && strpos($h_ok, '+20 %') !== false && strpos($h_ok, '-3.5 pt') !== false && strpos($h_ok, 'dash_protection') === false && strpos($h_ok, 'Protection state') !== false);
+t_ok('dashboard, everything healthy: no alert strip, no cron card; protection state, 6 KPI tiles with change vs the previous 24 h, top lists linking to the Logs filters', !$e_ok && strpos($h_ok, 'gp-alerts') === false && strpos($h_ok, 'id="cron-setup"') === false
+	&& substr_count($h_ok, 'data-tile="') === 6 && strpos($h_ok, '+20 %') !== false && strpos($h_ok, '-3.5 pt') !== false && strpos($h_ok, 'dash_protection') === false && strpos($h_ok, 'Protection state') !== false);
 t_ok('top lists link to the matching Logs filter, with the value escaped and URL-encoded', strpos($h_ok, 'index.php?r=logs&amp;reason=RULE%3Ar1%2CSH_RULE%3Ar1') !== false && strpos($h_ok, 'index.php?r=logs&amp;ip=203.0.113.5') !== false
-	&& strpos($h_ok, 'index.php?r=logs&amp;cc=IR') !== false && strpos($h_ok, 'index.php?r=logs&amp;path=%2Fshop%3Fx%3D%3Cb%3E') !== false && strpos($h_ok, '<b>') === false);
+	&& strpos($h_ok, 'index.php?r=logs&amp;cc=IR') !== false && strpos($h_ok, 'index.php?r=logs&amp;path=%2Fshop%3Fx%3D%3Cb%3E') !== false && strpos($h_ok, 'x=<b>') === false);
 $jh_bad = array();
 foreach (gp_job_defs() as $jn => $jd) { $jh_bad[$jn] = gp_job_health_one($jn, $jd, array_merge($st(), array('mode' => $jn, 'status' => 'failed', 'last_exit' => 1, 'last_failure' => $jh_now - 5, 'last_success' => 0, 'last_error' => "Traceback <script>\nValueError: boom")), 0, 600, $jh_now); }
 $jh_bad['worker'] = gp_job_health_one('worker', gp_job_defs()['worker'], null, 0, 60, $jh_now);       // one job that never ran: the cron setup card
@@ -2918,7 +2923,7 @@ t_ok('alerts: nothing wrong, nothing raised', !array_filter(gp_health_alerts(arr
 list($h_dal, $e_dal) = $jh_render('dashboard', array(), array('alerts' => $ha, 'isum' => array('total' => 2, 'enabled' => 2, 'by' => array('block/enforce' => 1, 'allow/monitor' => 1))));
 t_ok('dashboard: the IP list alerts render with their text, the compiled file / job in the detail, a link to the IP lists page, and the protection card counts enabled lists',
 	!$e_dal && strpos($h_dal, 'data-alert="iplist_file_missing_block"') !== false && strpos($h_dal, 'data-alert="iplist_compile_failed"') !== false && strpos($h_dal, 'compiled IP list file is missing') !== false
-	&& strpos($h_dal, 'job j1') !== false && strpos($h_dal, 'index.php?r=iplists') !== false && strpos($h_dal, 'Enabled IP lists') !== false && strpos($h_dal, 'Block') !== false);
+	&& strpos($h_dal, 'job j1') !== false && strpos($h_dal, 'index.php?r=iplists') !== false && strpos($h_dal, '2 / 2 IP lists') !== false);
 t_ok('summary: enabled lists by type / mode for the dashboard', gp_iplists_summary(array(array('enabled' => true, 'type' => 'block', 'mode' => 'enforce'), array('enabled' => true, 'type' => 'block', 'mode' => 'enforce'), array('enabled' => false, 'type' => 'allow', 'mode' => 'monitor'), array('enabled' => true, 'type' => 'allow', 'mode' => 'monitor')))
 	=== array('total' => 4, 'enabled' => 3, 'by' => array('block/enforce' => 2, 'allow/monitor' => 1)));
 
@@ -3385,18 +3390,99 @@ $ck_snap = array('generated_at' => time(), 'tz' => array('offset' => 0, 'name' =
 		'prev' => array('requests' => 100, 'allowed' => 90, 'blocked' => 5, 'limited' => 2, 'challenged' => 8, 'challenge_success' => 95.0, 'rule_hits' => 0, 'honeypot' => 1, 'degraded' => 0,
 		'captcha_shown' => 20, 'captcha_solved' => 18, 'captcha_failed' => 4, 'captcha_expired' => 1, 'captcha_solve_rate' => 90.0, 'captcha_median_s' => 8.0)),
 	'top' => array('rules' => array(), 'reasons' => array(), 'ips' => array(), 'devices' => array(), 'uas' => array(), 'paths' => array(), 'countries' => array()));
+$ck_snap['dash'] = array('v' => 1, 'hours' => array(array('t' => time(), 'n' => 5, 'a' => 5, 'c' => 0, 'p' => 0, 'b' => 0, 'r' => 0, 'm' => 0, 'ips' => 2)), 'days7' => array(), 'readiness' => array('rules' => array(), 'lists' => array()), 'top' => array(),
+	'funnel' => array('js' => array('served' => 50, 'solved' => 40, 'passed' => 30, 'failed' => 5, 'median_s' => null), 'captcha' => array('served' => 40, 'solved' => 30, 'passed' => 20, 'failed' => 15, 'median_s' => 6.5)));
 list($ck_h, $ck_e) = $jh_render('dashboard', array('snapshot' => $ck_snap));
-t_ok('dashboard: the CAPTCHA KPIs (shown, solved, failed, expired, solve rate, median time) with the change against the previous 24 h; a rising failure count is marked',
-	!$ck_e && strpos($ck_h, 'id="dash-captcha"') !== false && substr_count($ck_h, 'data-captcha-kpi=') === 6 && strpos($ck_h, 'CAPTCHAs shown') !== false && strpos($ck_h, '+100 %') !== false && strpos($ck_h, '-15.0 pt') !== false
-	&& strpos($ck_h, '6.5 s') !== false && strpos($ck_h, '75.0%') !== false && strpos($ck_h, 'solving service') !== false && substr_count($ck_h, 'gp-kpi-label') === 9 + 6);
-$ck_none = $ck_snap; $ck_none['kpi']['cur'] = array_merge($ck_none['kpi']['cur'], array('captcha_shown' => 0, 'captcha_solved' => 0, 'captcha_failed' => 0, 'captcha_expired' => 0, 'captcha_solve_rate' => null, 'captcha_median_s' => null));
+t_ok('dashboard funnel: the check page and the image CAPTCHA each show served, solved, passed and failed with the share of served, and the CAPTCHA median solve time',
+	!$ck_e && strpos($ck_h, 'id="dash-funnel"') !== false && strpos($ck_h, 'data-level="js"') !== false && strpos($ck_h, 'data-level="captcha"') !== false && strpos($ck_h, '(75%)') !== false && strpos($ck_h, '(80%)') !== false
+	&& strpos($ck_h, '6.5 s') !== false && strpos($ck_h, 'Median solve time') !== false);
+$ck_none = $ck_snap; $ck_none['dash']['funnel']['captcha'] = array('served' => 0, 'solved' => 0, 'passed' => 0, 'failed' => 0, 'median_s' => null);
 list($ck_h2, $ck_e2) = $jh_render('dashboard', array('snapshot' => $ck_none));
-t_ok('dashboard: no CAPTCHA activity in the 24 h: no CAPTCHA section at all (no empty tiles, no 0 %)', !$ck_e2 && strpos($ck_h2, 'id="dash-captcha"') === false);
-$ck_only = $ck_snap; $ck_only['kpi']['cur']['captcha_solve_rate'] = null; $ck_only['kpi']['cur']['captcha_median_s'] = null; $ck_only['kpi']['cur']['captcha_solved'] = 0; $ck_only['kpi']['prev'] = array('requests' => 1);
-list($ck_h3, $ck_e3) = $jh_render('dashboard', array('snapshot' => $ck_only));
-t_ok('dashboard: a missing rate or median is a dash; a missing previous window shows no change', !$ck_e3 && strpos($ck_h3, 'data-captcha-kpi="captcha_median_s"') !== false && preg_match('/data-captcha-kpi="captcha_solve_rate".*?gp-kpi-value">—</s', $ck_h3) === 1);
-list($ck_h4, $ck_e4) = $jh_render('dashboard', array('snapshot' => $kpi_snap));
-t_ok('dashboard: an older snapshot without CAPTCHA keys renders exactly as before (9 tiles, no CAPTCHA section)', !$ck_e4 && strpos($ck_h4, 'id="dash-captcha"') === false && substr_count($ck_h4, 'gp-kpi-label') === 9);
+t_ok('dashboard funnel: no CAPTCHA served in the period: one line says so (no empty bars, no 0 %)', !$ck_e2 && strpos($ck_h2, 'data-level="captcha"') === false && strpos($ck_h2, 'No CAPTCHA was served in this period.') !== false);
+$ck_nothing = $ck_snap; $ck_nothing['dash']['funnel']['js']['served'] = 0; $ck_nothing['dash']['funnel']['captcha']['served'] = 0;
+list($ck_h3, $ck_e3) = $jh_render('dashboard', array('snapshot' => $ck_nothing));
+t_ok('dashboard funnel: nothing served at all: the empty state says what is missing and links to the Rules page', !$ck_e3 && strpos($ck_h3, 'No challenge or CAPTCHA was served in this period') !== false && strpos($ck_h3, 'data-level=') === false);
+$ck_old = $ck_snap; unset($ck_old['dash']);
+list($ck_h4, $ck_e4) = $jh_render('dashboard', array('snapshot' => $ck_old));
+t_ok('dashboard: a snapshot from before this version (no dash block) renders, with the KPI tiles and an empty state that says the next snapshot run adds the reports', !$ck_e4 && strpos($ck_h4, 'data-tile="requests"') !== false && strpos($ck_h4, 'next snapshot run adds this report') !== false && strpos($ck_h4, 'data-level=') === false);
+
+// ---- Dashboard v2: helpers, layout spec, empty states, rollout readiness, protection modes
+t_section('Dashboard v2');
+t_ok('dash helpers: nice axis maximum and short numbers', gp_dash_nice_max(0) === 1 && gp_dash_nice_max(7) === 10 && gp_dash_nice_max(120) === 200 && gp_dash_nice_max(1000) === 1000 && gp_dash_nice_max(4300) === 5000
+	&& gp_dash_short(950) === '950' && gp_dash_short(1500) === '1.5k' && gp_dash_short(2000000) === '2M');
+$dv_hours = array(); for ($i = 0; $i < 24; $i++) { $dv_hours[] = array('t' => 1700000000 + $i * 3600, 'n' => 10 + $i, 'a' => 8, 'c' => 1, 'p' => 0, 'b' => 1 + $i, 'r' => 0, 'm' => 1, 'ips' => 5); }
+$dv_svg = gp_dash_main_chart($dv_hours, false, 'x1');
+t_ok('main chart: inline SVG with three Y ticks, the unit, a distinct-address line, a hatched monitor-only pattern, one column per outcome part and a title on each (no script, no link, no external reference)',
+	strpos($dv_svg, '<svg') === 0 && substr_count($dv_svg, 'gp-dchart-tick') >= 3 + 6 && strpos($dv_svg, 'requests / hour') !== false && strpos($dv_svg, '<polyline') !== false && strpos($dv_svg, 'id="dch-h-x1"') !== false && substr_count($dv_svg, '<title') >= 24
+	&& stripos($dv_svg, '<script') === false && stripos($dv_svg, 'http') === false && strpos($dv_svg, 'href') === false);
+t_ok('main chart: the 7 d view labels days, an empty bucket list draws nothing, two charts on one page do not share an id', strpos(gp_dash_main_chart($dv_hours, true, 'x2'), 'id="dch-h-x2"') !== false && gp_dash_main_chart(array(), false, 'x3') === '' && strpos($dv_svg, 'dch-h-x2') === false);
+t_ok('main chart and legend: the six outcome colours are the shared chart tokens (light and dark values), the legend names every series including the address line', preg_match_all('/--gp-chart-(ok|warn|info|bad|accent|neutral)/', gp_dash_legend() . $dv_svg) >= 6 && strpos(gp_dash_legend(), 'Distinct addresses') !== false && strpos(gp_dash_legend(), 'Monitor-only') !== false
+	&& strpos(file_get_contents(__DIR__ . '/../panel/assets/app.src.css'), '--gp-chart-neutral: 148 163 184') !== false);
+t_ok('sparkline: a polyline with a label, nothing for fewer than two points', strpos(gp_dash_spark(array(1, 3, 2), 'ok', 'Requests'), '<polyline') !== false && strpos(gp_dash_spark(array(1, 3, 2), 'ok', 'Requests'), 'aria-label="Requests: 1 - 2"') !== false && gp_dash_spark(array(5), 'ok', 'x') === '');
+t_ok('outcome mix bar: widths add up, the words are in the title, an empty row draws no segment', strpos(gp_dash_mixbar(array('k', 10, 5, 3, 1, 1, 0)), 'width:50.00%') !== false && strpos(gp_dash_mixbar(array('k', 10, 5, 3, 1, 1, 0)), 'Blocked 1') !== false && strpos(gp_dash_mixbar(array('k', 0, 0, 0, 0, 0, 0)), '<span style') === false);
+t_ok('ready-to-enforce hint: no hits, too few, many valid-token hits, ready',
+	gp_dash_ready_hint(array('d7' => 0))[0] === 'none' && gp_dash_ready_hint(array('d7' => 19, 'tok' => 0))[0] === 'more' && gp_dash_ready_hint(array('d7' => 50, 'tok' => 5.0))[0] === 'review' && gp_dash_ready_hint(array('d7' => 50, 'tok' => 4.9))[0] === 'ready' && gp_dash_ready_hint(array('d7' => 20, 'tok' => 0))[0] === 'ready');
+$dv_sc = gp_dash_strip_counts(array(array('level' => 'critical'), array('level' => 'warning'), array('level' => 'warning')), array('a' => array('state' => 'ok'), 'b' => array('state' => 'failing'), 'c' => array('state' => 'never', 'required' => false), 'd' => array('state' => 'never', 'required' => true)));
+t_ok('status strip counts: alerts by level, jobs healthy / unhealthy / total', $dv_sc === array('critical' => 1, 'warning' => 2, 'jobs_ok' => 1, 'jobs_bad' => 2, 'jobs_total' => 4));
+
+// The layout spec (docs/15) and the CSS agree: every card class the view uses has a span at each breakpoint.
+$dv_css = file_get_contents(__DIR__ . '/../panel/assets/app.src.css');
+$dv_view = file_get_contents(__DIR__ . '/../panel/views/dashboard.php');
+preg_match_all('/gp-dspan-(\d+)/', $dv_view, $dv_sp);
+$dv_used = array_unique($dv_sp[1]); sort($dv_used);
+t_ok('layout spec: the view uses only the spans of the spec (2, 4, 5, 6, 7, 12) and the CSS defines each for mobile, tablet and desktop', $dv_used === array('12', '2', '4', '5', '6', '7') || $dv_used === array('2', '4', '5', '6', '7', '12'));
+$dv_ok = true;
+foreach (array(2, 4, 5, 6, 7, 12) as $n) { if (strpos($dv_css, '.gp-dspan-' . $n . ' { grid-column: span') === false) { $dv_ok = false; } }
+t_ok('layout spec: desktop 12 columns with KPI tiles 2, readiness 7 + funnel 5, system cards 4; tablet tiles 4 and cards 6; mobile tiles 6 and everything else full width',
+	$dv_ok && strpos($dv_css, 'repeat(12, minmax(0, 1fr))') !== false && strpos($dv_css, '@media (min-width: 1280px)') !== false && strpos($dv_css, '.gp-dspan-2 { grid-column: span 2; } .gp-dspan-4 { grid-column: span 4; } .gp-dspan-5 { grid-column: span 5; }') !== false
+	&& strpos($dv_css, '.gp-dspan-2 { grid-column: span 4; } .gp-dspan-4 { grid-column: span 6; }') !== false && strpos($dv_css, '.gp-dspan-2 { grid-column: span 6; }') !== false && strpos($dv_css, 'align-items: stretch') !== false);
+t_ok('dashboard view: no external script, style, font or image, and no chart library', !preg_match('~(src|href)="https?://~i', $dv_view) && stripos($dv_view, 'chart.js') === false && stripos($dv_view, 'd3.') === false && stripos($dv_view, '<script') === false);
+t_ok('dashboard: the page request never reads a log (the numbers come from the snapshot): no log reader is called from the view or the helpers',
+	strpos($dv_view . file_get_contents(__DIR__ . '/../panel/dash.php'), 'gp_read_log') === false && strpos($dv_view . file_get_contents(__DIR__ . '/../panel/dash.php'), 'gp_tail_lines') === false && strpos($dv_view . file_get_contents(__DIR__ . '/../panel/dash.php'), 'glob(') === false);
+
+// No snapshot, a stale snapshot, an old snapshot without the dash block
+list($dv_h0, $dv_e0) = $jh_render('dashboard', array('snapshot' => null));
+t_ok('no snapshot: every report card has an empty state that says what is missing and how to fix it (the Jobs page), and nothing is drawn',
+	!$dv_e0 && strpos($dv_h0, 'No snapshot has been built yet') !== false && strpos($dv_h0, 'Check the snapshot job') !== false && strpos($dv_h0, '<svg class="gp-dchart"') === false && strpos($dv_h0, 'data-tile=') === false);
+list($dv_h1, $dv_e1) = $jh_render('dashboard', array('snapshot' => array_merge($kpi_snap, array('generated_at' => $jh_now - 9999))));
+t_ok('stale snapshot: the Stale badge shows in the status strip and on the report cards, the old numbers stay', !$dv_e1 && substr_count($dv_h1, 'Stale') >= 4 && strpos($dv_h1, 'data-tile="requests"') !== false);
+t_ok('fresh snapshot: no Stale badge anywhere', strpos($h_ok, 'Stale') === false);
+t_ok('the page has the six tiles in order, each a link to Logs with the filter it counts (would act = monitor-only rows)', (function () use ($h_ok) {
+	preg_match_all('/data-tile="([a-z_]+)"/', $h_ok, $m); return $m[1] === array('requests', 'allowed', 'challenged', 'blocked', 'limited', 'would_act'); })()
+	&& strpos($h_ok, 'href="index.php?r=logs&amp;act=403&amp;sh=0" data-tile="blocked"') !== false && strpos($h_ok, 'href="index.php?r=logs&amp;act=403,429,challenge&amp;sh=1" data-tile="would_act"') !== false);
+t_ok('every tile names its period and its comparison, the challenged tile adds the solve rate, and the sparklines come from the snapshot hours', strpos($h_ok, 'vs previous 24 h') !== false && substr_count($h_ok, 'last 24 h') >= 4 && strpos($h_ok, 'solve rate: <b>91.5%</b>') !== false && substr_count($h_ok, 'gp-dspark-line') === 6);
+t_ok('the main chart has the 24 h and 7 d tabs and a legend, and the top lists have the six tabs', strpos($h_ok, 'data-tabs="dmain"') !== false && strpos($h_ok, 'data-tabs="dtop"') !== false && substr_count($h_ok, 'data-tab="') >= 8
+	&& preg_match('/data-tab="(ips|devices|uas|paths|countries|asns)"/', $h_ok) === 1 && strpos($h_ok, 'gp-dlegend') !== false);
+t_ok('top lists: requests, share of the 24 h total (4 of 120 = 3.3%), the outcome mix bar and a quick action per row', strpos($h_ok, '3.3%') !== false && strpos($h_ok, 'gp-mixbar') !== false && strpos($h_ok, 'index.php?r=identity&amp;id=203.0.113.5') !== false && strpos($h_ok, 'r=live&amp;ua=curl%2F8.4&amp;minutes=60') !== false);
+// Empty geo: the countries and ASN tabs say what to do
+list($dv_hg, $dv_eg) = $jh_render('dashboard', array('snapshot' => array_merge($kpi_snap, array('dash' => array_merge($kpi_snap['dash'], array('top' => array_merge($kpi_snap['dash']['top'], array('countries' => array(), 'asns' => array()))))))));
+t_ok('empty geo: the Countries and ASNs tabs say there is no data yet, to compile the GeoIP database, and link to the GeoIP page; the other tabs still show their rows', !$dv_eg && substr_count($dv_hg, 'compile the GeoIP database') === 2 && substr_count($dv_hg, 'index.php?r=geo') >= 2 && strpos($dv_hg, 'index.php?r=logs&amp;ip=203.0.113.5') !== false);
+// Rollout readiness: an all-monitor install
+$dv_rules = array(array('id' => 'r1', 'name' => 'Scrapers <b>', 'enabled' => true, 'mode' => 'monitor', 'action' => 'block'), array('id' => 'r2', 'name' => '', 'enabled' => true, 'mode' => 'monitor', 'action' => 'challenge'),
+	array('id' => 'r3', 'name' => 'Enforced one', 'enabled' => true, 'mode' => 'enforce', 'action' => 'block'), array('id' => 'r4', 'name' => 'Disabled rule x', 'enabled' => false, 'mode' => 'monitor', 'action' => 'block'));
+$dv_lists = array(array('id' => 'l1', 'name' => 'Bad nets', 'enabled' => true, 'type' => 'block', 'mode' => 'monitor'), array('id' => 'l2', 'name' => 'Enforced list', 'enabled' => true, 'type' => 'block', 'mode' => 'enforce'));
+$dv_snap = $kpi_snap; $dv_snap['dash']['readiness'] = array('rules' => array('r1' => array('h24' => 30, 'd7' => 90, 'ips' => 12, 'devs' => 11, 'tok' => 12.5), 'r2' => array('h24' => 2, 'd7' => 4, 'ips' => 1, 'devs' => 1, 'tok' => 0.0)), 'lists' => array('block:l1' => array('h24' => 40, 'd7' => 200, 'ips' => 40, 'devs' => 38, 'tok' => 0.5)));
+list($dv_hm, $dv_em) = $jh_render('dashboard', array('snapshot' => $dv_snap), array('rules' => $dv_rules, 'iplists' => $dv_lists, 'protection' => gp_protection_mode(gv_cfg_defaults(array()), $dv_rules), 'rsum' => gp_rules_summary($dv_rules)));
+t_ok('rollout readiness, all-monitor install: one row per ENABLED monitor-mode rule and list (not the enforced or disabled ones), hits 24 h / 7 d, addresses, devices, valid-token share, and the hint',
+	!$dv_em && substr_count($dv_hm, 'data-ready="') === 3 && strpos($dv_hm, 'Enforced one') === false && strpos($dv_hm, 'Enforced list') === false && strpos($dv_hm, 'Disabled rule x') === false
+	&& strpos($dv_hm, 'data-ready="review"') !== false && strpos($dv_hm, 'data-ready="ready"') !== false && strpos($dv_hm, 'data-ready="more"') !== false && strpos($dv_hm, '12.5%') !== false && strpos($dv_hm, 'Review first') !== false && strpos($dv_hm, 'Ready to enforce</span>') !== false);
+t_ok('rollout readiness: names are escaped, each row links to the Logs filter of its rule or list, the order is by hits in 7 d', strpos($dv_hm, 'Scrapers &lt;b&gt;') !== false && strpos($dv_hm, 'Scrapers <b>') === false && strpos($dv_hm, 'reason=SH_RULE%3Ar1%2CRULE%3Ar1') !== false && strpos($dv_hm, 'ipln=l1&amp;ipl=block') !== false
+	&& strpos($dv_hm, 'Bad nets') < strpos($dv_hm, 'Scrapers') && strpos($dv_hm, 'Scrapers') < strpos($dv_hm, 'data-ready="more"'));
+list($dv_hn, $dv_en) = $jh_render('dashboard', array('snapshot' => $kpi_snap), array('rules' => array($dv_rules[2]), 'iplists' => array($dv_lists[1])));
+t_ok('rollout readiness, nothing in monitor mode: the card says so and links to Rules and IP lists', !$dv_en && strpos($dv_hn, 'Nothing is in monitor mode') !== false && substr_count($dv_hn, 'data-ready="') === 0);
+// Protection mode in the strip
+$dv_cfg_p = gv_cfg_defaults(array()); $dv_cfg_p['secret'] = 'REAL-SECRET'; $dv_cfg_p['enforce'] = array('block' => true, 'challenge' => false, 'ratelimit' => false);
+list($dv_hp, $dv_ep) = $jh_render('dashboard', array('snapshot' => $kpi_snap), array('cfg' => $dv_cfg_p, 'protection' => gp_protection_mode($dv_cfg_p, array())));
+$dv_cfg_e = $dv_cfg_p; $dv_cfg_e['enforce'] = array('block' => true, 'challenge' => true, 'ratelimit' => true);
+list($dv_he, $dv_ee) = $jh_render('dashboard', array('snapshot' => $kpi_snap), array('cfg' => $dv_cfg_e, 'protection' => gp_protection_mode($dv_cfg_e, array())));
+t_ok('status strip: monitor only, partly enforcing and enforcing are each shown as a word, and the strip has the kill switch, alerts, jobs, snapshot age and version chips',
+	!$dv_ep && !$dv_ee && strpos($h_ok, 'monitor only') !== false && strpos($dv_hp, 'partly enforcing') !== false && strpos($dv_he, 'enforcing') !== false && strpos($dv_he, 'partly enforcing') === false
+	&& (function () use ($h_ok) { foreach (array('mode', 'kill', 'alerts', 'jobs', 'snapshot', 'version') as $c) { if (strpos($h_ok, 'data-chip="' . $c . '"') === false) { return false; } } return true; })());
+t_ok('status strip: the kill switch is a POST form with the CSRF token; the alerts list is collapsible and open when something is critical', substr_count($h_ok, 'name="killswitch"') === 1 && strpos($h_ok, 'name="csrf"') !== false
+	&& strpos($h_bad, 'id="dash-alerts"') !== false && strpos($h_bad, 'id="dash-alerts" aria-label="Needs attention" role="alert" open') !== false);
+// Demo role: aggregate tiles and the main chart, no identities
+$dv_dm = gp_demo_model(array('snapshot' => $kpi_snap, 'cfg' => gv_cfg_defaults(array()), 'rules' => array(), 'lists' => array(), 'jobs' => array(), 'now' => $jh_now));
+t_ok('demo model: the chart rows hold the hour and counts only (nine integer fields), 24 h and 7 d', count($dv_dm['chart']['h24']) === 2 && (function () use ($dv_dm) { foreach ($dv_dm['chart']['h24'] as $b) { if (array_keys($b) !== array('t', 'n', 'a', 'c', 'p', 'b', 'r', 'm', 'ips')) { return false; } foreach ($b as $v) { if (!is_int($v)) { return false; } } } return true; })());
 
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');
@@ -4210,6 +4296,8 @@ t_ok('Update page: after 2 minutes it says the guard is OFF, shows the shell com
 // ==========================================================================
 t_section('Users and roles: ACL matrix, demo leakage, sessions, safety rules, migration, fail closed, concurrency, CLI recovery');
 require_once __DIR__ . '/../panel/acl.php';
+require_once __DIR__ . '/../panel/dash.php';
+require_once __DIR__ . '/../panel/demo.php';
 require_once __DIR__ . '/../panel/demo.php';
 putenv('GV_AUDIT=' . $UT . '/audit-users.jsonl');
 putenv('GV_USERS=' . $UT . '/users-main.json');
@@ -4365,6 +4453,9 @@ $snap_seed = array('generated_at' => time() - 60, 'tz' => array('name' => 'Zone/
 	'cur' => array('requests' => 1840, 'allowed' => 1500, 'blocked' => 210, 'limited' => 12, 'challenged' => 96, 'challenge_success' => 91.4, 'rule_hits' => 140, 'honeypot' => 6, 'degraded' => 0, 'captcha_shown' => 30, 'captcha_solved' => 20, 'captcha_failed' => 5, 'captcha_expired' => 5, 'captcha_solve_rate' => 66.7, 'secret_extra' => $seed['ua']),
 	'prev' => array('requests' => 1500, 'allowed' => 1320, 'blocked' => 120, 'limited' => 12, 'challenged' => 40, 'challenge_success' => 96.0, 'rule_hits' => 100, 'honeypot' => 9, 'degraded' => 0, 'captcha_shown' => 10, 'captcha_solved' => 8, 'captcha_failed' => 1, 'captcha_expired' => 1, 'captcha_solve_rate' => 80.0)),
 	'top' => array('ips' => array(array($seed['ips'][0], 80), array($seed['ips'][1], 60)), 'uas' => array(array($seed['ua'], 120)), 'paths' => array(array($seed['path'], 40)), 'devices' => array(array($seed['dev'], 30)), 'countries' => array(array($seed['country'], 900))),
+	'dash' => array('v' => 1, 'hours' => array(array('t' => time() - 3600, 'n' => 100, 'a' => 80, 'c' => 5, 'p' => 5, 'b' => 6, 'r' => 2, 'm' => 2, 'ips' => 30, 'ip' => $seed['ips'][0], 'ua' => $seed['ua']), array('t' => time(), 'n' => 120, 'a' => 100, 'c' => 5, 'p' => 5, 'b' => 6, 'r' => 2, 'm' => 2, 'ips' => 33)), 'days7' => array(array('t' => time(), 'n' => 7, 'a' => 7, 'c' => 0, 'p' => 0, 'b' => 0, 'r' => 0, 'm' => 0, 'ips' => 1)),
+		'readiness' => array('rules' => array($seed['pattern'] => array('h24' => 5, 'd7' => 9, 'ips' => 2, 'devs' => 2, 'tok' => 1.0)), 'lists' => array()), 'funnel' => array('js' => array('served' => 5)),
+		'top' => array('ips' => array(array($seed['ips'][0], 80, 80, 0, 0, 0, 0)), 'uas' => array(array($seed['ua'], 120, 120, 0, 0, 0, 0)), 'paths' => array(array($seed['path'], 40, 40, 0, 0, 0, 0)), 'devices' => array(array($seed['dev'], 30, 30, 0, 0, 0, 0)), 'countries' => array(array($seed['country'], 900, 900, 0, 0, 0, 0)), 'asns' => array(array('64500', 3, 3, 0, 0, 0, 0)))),
 	'decisions' => array('allow' => 1500), 'host' => $seed['host']);
 $rules_seed = array(array('id' => 'r1', 'name' => $seed['pattern'], 'enabled' => true, 'mode' => 'enforce', 'action' => 'block', 'pattern' => $seed['pattern']), array('id' => 'r2', 'name' => 'x', 'enabled' => false, 'mode' => 'monitor', 'action' => 'log'));
 $lists_seed = array(array('id' => 'l1', 'name' => $seed['ips'][0], 'enabled' => true, 'type' => 'block', 'mode' => 'enforce', 'entries' => array($seed['ips'][1])));
@@ -4384,6 +4475,10 @@ foreach (array_merge($seed['ips'], array($seed['ua'], $seed['path'], $seed['dev'
 	if (stripos($demo_html, $needle) !== false) { $leak[] = $needle; }
 }
 t_ok('demo: the demo dashboard rendered with seeded sensitive data contains none of it (IPs, User-Agents, paths, device ids, rule patterns, file paths, host names, errors, other users, secrets)' . ($leak ? ' LEAKED: ' . implode(', ', $leak) : ''), !$leak && strlen($demo_html) > 2000);
+t_ok('demo (dashboard v2): the demo page has the aggregate tiles and the main chart (24 h and 7 d), and none of the identity cards: no top lists, no rollout readiness, no funnel, no system cards, no quick actions, no Logs link',
+	strpos($demo_html, 'id="dash-main"') !== false && strpos($demo_html, '<svg class="gp-dchart"') !== false && strpos($demo_html, 'data-tabs="dmain"') !== false && strpos($demo_html, 'Would act if enforced') !== false
+	&& strpos($demo_html, 'id="dash-top"') === false && strpos($demo_html, 'id="dash-ready"') === false && strpos($demo_html, 'id="dash-funnel"') === false && strpos($demo_html, 'dash-sys') === false && strpos($demo_html, 'gp-quick') === false && strpos($demo_html, 'r=identity') === false
+	&& strpos($demo_html, '64500') === false);
 t_ok('demo: the page shows the banner, the numbers, and no other nav entry than Dashboard and My account', strpos($demo_html, 'Demo mode') !== false && strpos($demo_html, 'sensitive data hidden') !== false && strpos($demo_html, '1,840') !== false
 	&& strpos($demo_html, 'r=logs') === false && strpos($demo_html, 'r=settings') === false && strpos($demo_html, 'r=users') === false && strpos($demo_html, 'r=account') !== false && strpos($demo_html, $demo_user) !== false);
 t_ok('demo: the view model is a plain array of numbers and fixed words (no string from the data survives json_encode)', (function () use ($model, $seed) { $j = json_encode($model); foreach (array_merge($seed['ips'], array($seed['ua'], $seed['path'], $seed['dev'], $seed['pattern'], $seed['err'])) as $n) { if (strpos($j, $n) !== false) { return false; } } return true; })());
@@ -4731,7 +4826,7 @@ t_ok('fields: the pick list of a short field is value => label', gp_field_option
 // 6. Rendering the real log view: a row with reasons and short fields shows names and codes.
 $rc_ix = file_get_contents($rc_root . '/panel/index.php');
 t_ok('csv: the export keeps the short columns and adds a last column with the reasons spelled out', strpos($rc_ix, "array('rs_names')") !== false && strpos($rc_ix, "'gp_reason_label'") !== false);
-t_ok('dashboard: the top reasons and the reasons chart draw badges, not bare codes', strpos(file_get_contents($rc_root . '/panel/views/dashboard.php'), "gp_reason_badge((string)\$r[0], false)") !== false
+t_ok('dashboard: the rules list and the reasons chart draw badges, not bare codes', strpos(file_get_contents($rc_root . '/panel/views/dashboard.php'), "gp_reason_badge('RULE:' . (string)\$r[0], false)") !== false
 	&& strpos(file_get_contents($rc_root . '/panel/views/dashboard.php'), "'reasons' => true") !== false && strpos(gp_chart_bars(array('UA_SCRIPT' => 3), array('reasons' => true)), 'Script or library User-Agent') !== false);
 t_ok('identity view: reasons are badges', strpos(file_get_contents($rc_root . '/panel/views/identity.php'), 'gp_reason_badge($reason)') !== false);
 // 7. The generated docs are in step with the registry.

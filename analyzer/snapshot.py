@@ -175,7 +175,7 @@ SERVED_ACTS = ('403', '429', 'challenge')
 def kpi_counts(rows):
     """The dashboard's headline numbers over one window of decision rows. Pure."""
     out = {'requests': 0, 'allowed': 0, 'blocked': 0, 'limited': 0, 'challenged': 0, 'token_issued': 0,
-           'rule_hits': 0, 'honeypot': 0, 'degraded': 0,
+           'rule_hits': 0, 'honeypot': 0, 'degraded': 0, 'would_act': 0,
            'captcha_shown': 0, 'captcha_solved': 0, 'captcha_failed': 0, 'captcha_expired': 0}
     solve_times = []
     for row in rows:
@@ -186,6 +186,8 @@ def kpi_counts(rows):
             out[{'403': 'blocked', '429': 'limited', 'challenge': 'challenged'}[act]] += 1
         elif act in ALLOW_ACTS or (act in SERVED_ACTS and shadow):
             out['allowed'] += 1
+            if act in SERVED_ACTS:
+                out['would_act'] += 1             # monitor-only: it WOULD have been blocked, limited or challenged
         if logs_mod.token_was_issued(row):
             out['token_issued'] += 1
         if rule_ids(row):
@@ -247,6 +249,183 @@ def top_lists(rows):
             bump(paths, str(row.get('p') or ''))
     return {'rules': _top(rules), 'reasons': _top(reasons), 'ips': _top(ips), 'devices': _top(devs),
             'uas': _top(uas), 'paths': _top(paths), 'countries': _top(countries)}
+
+
+# ---------------------------------------------------------------------------- dashboard v2 data (key "dash")
+# Everything the redesigned dashboard shows beyond the KPI tiles is computed HERE, never in the page request.
+
+OUTCOMES = ('a', 'c', 'p', 'b', 'r', 'm')       # allowed, challenged, CAPTCHA, blocked, rate limited, monitor-only (would act)
+HOUR = 3600
+SET_CAP = 2000                                    # distinct-set size cap per rule / list (the count stops growing there)
+TOP_KINDS = (('ips', 'ip'), ('devices', 'dev'), ('uas', 'ua'), ('paths', 'p'), ('countries', 'cc'), ('asns', 'asn'))
+
+
+def outcome_class(row):
+    """One of OUTCOMES for a decision row (the same classes as the panel's Live page). Pure."""
+    act = str(row.get('act') or '')
+    if int(row.get('sh') or 0) == 1 and act in SERVED_ACTS:
+        return 'm'
+    if act in ('403', '404_hp'):
+        return 'b'
+    if act in ('429', 'mint_limited'):
+        return 'r'
+    if act == 'challenge':
+        return 'p' if str(row.get('cap') or '') in ('show', 'esc') else 'c'
+    if act in ('nonce_bad', 'nonce_replay', 'pow_bad'):
+        return 'c'
+    return 'a'
+
+
+def _row_ts(row):
+    try:
+        return float(row.get('ts') or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def hour_buckets(rows, now, hours):
+    """`hours` hourly buckets ending with the current hour, oldest first, zero-filled. Pure."""
+    end = int(now) // HOUR * HOUR
+    start = end - (hours - 1) * HOUR
+    out = [dict({'t': start + i * HOUR, 'n': 0, 'ips': 0}, **dict((k, 0) for k in OUTCOMES)) for i in range(hours)]
+    sets = [set() for _ in range(hours)]
+    for row in rows:
+        ts = _row_ts(row)
+        idx = int(ts) // HOUR * HOUR
+        if idx < start or idx > end:
+            continue
+        i = (idx - start) // HOUR
+        out[i]['n'] += 1
+        out[i][outcome_class(row)] += 1
+        ip = str(row.get('ip') or '')
+        if ip and len(sets[i]) < SET_CAP:
+            sets[i].add(ip)
+    for i, b in enumerate(out):
+        b['ips'] = len(sets[i])
+    return out
+
+
+def readiness(rows, now):
+    """Per access-rule id and per IP list ('allow:<id>' / 'block:<id>'): the numbers that say whether it is safe to enforce. Pure.
+
+    h24 / d7 = hits in the last 24 h / 7 d (rows are the 7 d window), ips / devs = distinct addresses / devices over 7 d,
+    tok = hits that carried a valid token (tok = 'v'): a person who solved the check, i.e. the false-positive risk.
+    """
+    rules, lists = {}, {}
+
+    def slot(table, key):
+        if key not in table:
+            if len(table) >= 500:
+                return None
+            table[key] = {'h24': 0, 'd7': 0, 'tok': 0, 'ips': set(), 'devs': set()}
+        return table[key]
+    for row in rows:
+        ts = _row_ts(row)
+        targets = [(rules, rid) for rid in rule_ids(row)] + [(lists, lid) for lid in list_ids(row)]
+        for table, key in targets:
+            sl = slot(table, key)
+            if sl is None:
+                continue
+            sl['d7'] += 1
+            if ts >= now - 86400:
+                sl['h24'] += 1
+            if str(row.get('tok') or '') == 'v':
+                sl['tok'] += 1
+            ip = str(row.get('ip') or '')
+            dev = str(row.get('dev') or '')
+            if ip and len(sl['ips']) < SET_CAP:
+                sl['ips'].add(ip)
+            if dev and len(sl['devs']) < SET_CAP:
+                sl['devs'].add(dev)
+
+    def fin(table):
+        return dict((k, {'h24': v['h24'], 'd7': v['d7'], 'ips': len(v['ips']), 'devs': len(v['devs']),
+                         'tok': round(100.0 * v['tok'] / v['d7'], 1) if v['d7'] else 0.0}) for k, v in table.items())
+    return {'rules': fin(rules), 'lists': fin(lists)}
+
+
+def funnel_by_level(rows):
+    """Challenge funnel per level over one window: served -> solved -> passed, failures, median solve time. Pure.
+
+    js = the short check page, captcha = the image CAPTCHA. passed = devices that were served and afterwards made an allowed
+    request with a valid token.
+    """
+    lv = dict((k, {'served': 0, 'solved': 0, 'failed': 0, 'passed': 0, 'median_s': None}) for k in ('js', 'captcha'))
+    first = {'js': {}, 'captcha': {}}
+    times = []
+    for row in rows:
+        act = str(row.get('act') or '')
+        cap = str(row.get('cap') or '')
+        dev = str(row.get('dev') or '')
+        ts = _row_ts(row)
+        level = None
+        if cap == 'show':
+            lv['captcha']['served'] += 1
+            level = 'captcha'
+        elif act == 'challenge' and int(row.get('sh') or 0) != 1 and cap != 'esc':
+            lv['js']['served'] += 1
+            level = 'js'
+        if level and dev and (dev in first[level] or len(first[level]) < 5000):
+            first[level][dev] = min(ts, first[level].get(dev, ts))
+        if cap == 'ok':
+            lv['captcha']['solved'] += 1
+            try:
+                times.append(float(row.get('ct')))
+            except (TypeError, ValueError):
+                pass
+        elif cap in ('wrong', 'fail', 'inv', 'exp'):
+            lv['captcha']['failed'] += 1
+        if logs_mod.token_was_issued(row):
+            lv['js']['solved'] += 1
+        if logs_mod.handshake_rejected(row):
+            lv['js']['failed'] += 1
+    passed = {'js': set(), 'captcha': set()}
+    for row in rows:
+        if str(row.get('tok') or '') != 'v' or str(row.get('act') or '') not in ALLOW_ACTS:
+            continue
+        dev = str(row.get('dev') or '')
+        ts = _row_ts(row)
+        for level in ('js', 'captcha'):
+            if dev in first[level] and ts > first[level][dev]:
+                passed[level].add(dev)
+    for level in ('js', 'captcha'):
+        lv[level]['passed'] = len(passed[level])
+    times.sort()
+    if times:
+        mid = len(times) // 2
+        lv['captcha']['median_s'] = times[mid] if len(times) % 2 else (times[mid - 1] + times[mid]) / 2.0
+    return lv
+
+
+def top_mix(rows, n=10):
+    """Top lists over one window with the outcome mix per entry: [key, requests, a, c(+captcha), b, r, m]. Pure."""
+    tables = dict((name, {}) for name, _ in TOP_KINDS)
+    for row in rows:
+        cls = outcome_class(row)
+        for name, field in TOP_KINDS:
+            val = row.get(field)
+            if name == 'asns':
+                val = str(int(val)) if isinstance(val, (int, float)) and int(val) > 0 else ''
+            else:
+                val = str(val or '')
+            if not val:
+                continue
+            tab = tables[name]
+            if val not in tab:
+                if len(tab) >= 5000:
+                    continue
+                tab[val] = [0, 0, 0, 0, 0, 0]
+            rec = tab[val]
+            rec[0] += 1
+            rec[{'a': 1, 'c': 2, 'p': 2, 'b': 3, 'r': 4, 'm': 5}[cls]] += 1
+    return dict((name, [[k] + v for k, v in sorted(tab.items(), key=lambda kv: (-kv[1][0], kv[0]))[:n]])
+                for name, tab in tables.items())
+
+
+def build_dash(rows24, rows7, now):
+    """The dashboard v2 report block (snapshot key 'dash'). Pure."""
+    return {'v': 1, 'hours': hour_buckets(rows24, now, 24), 'days7': hour_buckets(rows7, now, 168),
+            'readiness': readiness(rows7, now), 'funnel': funnel_by_level(rows24), 'top': top_mix(rows24)}
 
 
 def local_tz():
@@ -536,7 +715,7 @@ def main(argv=None):
     # enough daily files for the window and the one before it, then cut by ts.
     now = time.time()
     window = days * 86400
-    all_rows = list(logs_mod.read_lines(cfg['log_dir'], days * 2 + 1))
+    all_rows = list(logs_mod.read_lines(cfg['log_dir'], max(days * 2 + 1, 9)))   # 9 days: 24 h + 24 h before it, and 7 d for the dashboard
 
     def ts_of(row):
         try:
@@ -548,6 +727,8 @@ def main(argv=None):
     payload = build(rows, cfg)
     payload['kpi'] = {'cur': kpi_counts(rows), 'prev': kpi_counts(prev_rows), 'window_h': days * 24}
     payload['top'] = top_lists(rows)
+    payload['dash'] = build_dash([r for r in all_rows if ts_of(r) >= now - 86400],
+                                 [r for r in all_rows if ts_of(r) >= now - 7 * 86400], now)
     payload['tz'] = local_tz()
     payload['redis'] = redis_io.connect(cfg) is not None
     if not payload['redis']:

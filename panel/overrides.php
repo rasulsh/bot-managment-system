@@ -85,10 +85,10 @@ function gp_quick_specs() {
 	);
 }
 
-// A same-site place to return to after a quick action: only the Logs, Identity and Live pages, a short query of plain characters.
+// A same-site place to return to after a quick action: only the Logs, Identity, Live and Dashboard pages, a short query of plain characters.
 // Returns array(route, params) or null.
 function gp_quick_back($back) {
-	if (!is_string($back) || strlen($back) > 600 || !preg_match('/^index\.php\?r=(logs|identity|live)(?:&[A-Za-z0-9_\[\]=%.,:+~-]*)*$/', $back, $m)) { return null; }
+	if (!is_string($back) || strlen($back) > 600 || !preg_match('/^index\.php\?r=(logs|identity|live|dashboard)(?:&[A-Za-z0-9_\[\]=%.,:+~-]*)*$/', $back, $m)) { return null; }
 	$q = array();
 	parse_str((string)substr($back, strlen('index.php?')), $q);
 	unset($q['r']);
