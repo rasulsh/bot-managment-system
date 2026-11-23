@@ -188,14 +188,21 @@ function gp_filter_chips_html(array $chips) {
 // JavaScript; the checkboxes carry no name. Replaces the browser datalist, which is not a multi-select and looks different in every
 // browser. $options: values offered (include GP_FILTER_NONE where the field offers "(none)"). $attr: extra input attributes
 // (already escaped), e.g. a placeholder.
+// Whether a pick list is value => label (true) or a plain list of values (false).
+function gp_is_labelled(array $options) { return $options && array_keys($options) !== range(0, count($options) - 1); }
+
 function gp_multi_input($id, $name, $value, array $options, $attr = '') {
 	$h = '<div class="gp-ms" data-gp-ms>'
 		. '<input class="gp-input gp-ltr" type="text" id="' . gp_e($id) . '" name="' . gp_e($name) . '" value="' . gp_e($value) . '" spellcheck="false" autocomplete="off"' . ($attr !== '' ? ' ' . $attr : '') . '>';
 	if ($options) {
-		$h .= '<button type="button" class="gp-ms-toggle" data-gp-ms-toggle hidden aria-haspopup="true" aria-expanded="false" aria-controls="' . gp_e($id) . '-ms">' . gp_e(gp_t('flt_pick')) . ' &#9662;</button>'
+		$h .= '<button type="button" class="gp-ms-toggle" data-gp-ms-toggle hidden aria-haspopup="true" aria-expanded="false" aria-controls="' . gp_e($id) . '-ms" aria-label="' . gp_e(gp_t('flt_pick')) . '" title="' . gp_e(gp_t('flt_pick')) . '">&#9662;</button>'
 			. '<div class="gp-ms-panel" id="' . gp_e($id) . '-ms" role="group" aria-label="' . gp_e(gp_t('flt_pick')) . '" data-gp-ms-panel hidden>';
-		foreach ($options as $o) {
-			$h .= '<label class="gp-ms-opt"><input type="checkbox" value="' . gp_e($o) . '"> <span class="gp-ltr">' . gp_e($o) . '</span></label>';
+		// A list of values, or value => label: the box submits the VALUE; the label is what the operator reads (reason codes).
+		$labelled = gp_is_labelled($options);
+		foreach ($options as $k => $o) {
+			$v = $labelled ? (string)$k : (string)$o;
+			$h .= '<label class="gp-ms-opt"><input type="checkbox" value="' . gp_e($v) . '"> <span class="gp-ltr">'
+				. ($labelled ? gp_e($o) . ' <code class="gp-reason-code">' . gp_e($v) . '</code>' : gp_e($o)) . '</span></label>';
 		}
 		$h .= '</div>';
 	}

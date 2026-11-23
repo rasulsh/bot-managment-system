@@ -245,17 +245,20 @@
 	// inside the screen when it would be cut off at an edge.
 	(function () {
 		var tips = document.querySelectorAll('.gp-tip');
+		// The bubble is position:fixed and placed from the button's rectangle, so a scrolling table or a card with overflow can never
+		// clip it: below the button, flipped above when there is no room, and kept inside the screen sideways.
 		var place = function (tip) {
 			var box = tip.querySelector('.gp-tip-box');
-			if (!box) { return; }
-			box.style.insetInlineStart = '';
-			box.style.transform = '';
-			var r = box.getBoundingClientRect();
-			var w = document.documentElement.clientWidth;
-			var shift = 0;
-			if (r.right > w - 8) { shift = (w - 8) - r.right; }
-			if (r.left + shift < 8) { shift = 8 - r.left; }
-			if (shift) { box.style.transform = 'translateX(' + Math.round(shift) + 'px)'; }
+			var btn = tip.querySelector('.gp-tip-btn');
+			if (!box || !btn) { return; }
+			var b = btn.getBoundingClientRect();
+			var vw = document.documentElement.clientWidth, vh = window.innerHeight || document.documentElement.clientHeight;
+			var w = box.offsetWidth, h = box.offsetHeight;
+			var left = Math.min(Math.max(8, b.left), Math.max(8, vw - w - 8));
+			var top = b.bottom + 4;
+			if (top + h > vh - 8 && b.top - 4 - h >= 8) { top = b.top - 4 - h; }
+			box.style.left = Math.round(left) + 'px';
+			box.style.top = Math.round(top) + 'px';
 		};
 		var closeAll = function (except) {
 			tips.forEach(function (t) { if (t !== except) { t.classList.remove('gp-open'); } });
@@ -273,6 +276,8 @@
 			btn.addEventListener('focus', function () { place(tip); });
 		});
 		document.addEventListener('click', function (e) { if (!e.target.closest || !e.target.closest('.gp-tip')) { closeAll(null); } });
+		window.addEventListener('scroll', function () { closeAll(null); }, true);     // a fixed bubble would stay behind a scrolled button
+		window.addEventListener('resize', function () { closeAll(null); });
 		document.addEventListener('keydown', function (e) {
 			if (e.key !== 'Escape') { return; }
 			closeAll(null);
@@ -341,6 +346,7 @@
 				if (open) { closeAll(box); fromInput(); }
 			};
 			toggle.hidden = false;
+			box.classList.add('gp-ms-on');                  // the button sits inside the text box; leave room for it
 			toggle.addEventListener('click', function () { setOpen(panel.hidden); });
 			checks.forEach(function (c) { c.addEventListener('change', toInput); });
 			input.addEventListener('input', fromInput);
@@ -354,6 +360,28 @@
 			closeAll(own);                                   // every list except the one that was clicked in
 		});
 	})();
+	// Upload size check (data-gp-max-bytes on a file input): the web server answers a body over ITS limit with its own error page,
+	// which the panel never sees, so the size is checked here before anything is sent. The message text comes from the page
+	// (data-gp-too-big, with {size} and {max} placeholders); without JavaScript the server-side checks still apply.
+	document.querySelectorAll('input[type=file][data-gp-max-bytes]').forEach(function (input) {
+		var max = parseInt(input.getAttribute('data-gp-max-bytes'), 10);
+		var form = input.form;
+		var msg = form ? form.querySelector('[data-gp-upload-msg]') : null;
+		var send = form ? form.querySelector('[data-gp-upload-send]') : null;
+		var mib = function (n) { return (n / 1048576).toFixed(1) + ' MiB'; };
+		var check = function () {
+			var f = input.files && input.files[0];
+			var big = !!(f && max > 0 && f.size > max);
+			if (msg) {
+				msg.hidden = !big;
+				msg.textContent = big ? (input.getAttribute('data-gp-too-big') || '').replace('{size}', mib(f.size)).replace('{max}', mib(max)) : '';
+			}
+			if (send) { send.disabled = big; }
+			if (big) { input.value = ''; if (msg) { msg.setAttribute('role', 'alert'); } }
+		};
+		input.addEventListener('change', check);
+		if (form) { form.addEventListener('submit', function (e) { check(); if (send && send.disabled) { e.preventDefault(); } }); }
+	});
 	// Live slider read-outs on the replay page.
 	document.querySelectorAll('input[type=range][data-output]').forEach(function (input) {
 		var out = document.getElementById(input.getAttribute('data-output'));

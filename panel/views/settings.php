@@ -23,7 +23,7 @@ $groups = array(
 	'network'  => array('set_group_network', '', array('cdn_ranges', 'cdn_ranges_feed')),
 	'bots'     => array('set_group_bots', '', array('known_bots', 'preview_bots', 'bot_suffixes')),
 	'logs'     => array('set_group_logs', 'set_group_logs_sub', array('log_skip_paths', 'log_retention_days', 'log_max_mb', 'log_min_free_mb', 'log_floor_delete', 'log_floor_keep_days')),
-	'geo'      => array('set_group_geo', 'set_group_geo_sub', array('geo.log')),
+	'geo'      => array('set_group_geo', 'set_group_geo_sub', array('geo.log', 'geo.upload_max_mb')),
 	'captcha'  => array('set_group_captcha', 'set_group_captcha_sub', array('captcha.level', 'captcha.length', 'captcha.charset', 'captcha.warp', 'captcha.noise', 'captcha.overlap',
 		'captcha.time_limit', 'captcha.max_attempts', 'captcha.ip_budget', 'captcha.ip_window', 'captcha.require_pow', 'captcha.escalate_score', 'captcha.device_budget',
 		'captcha.w_webdriver', 'captcha.w_ua_headless', 'captcha.w_ua_mismatch', 'captcha.w_no_languages', 'captcha.w_no_chrome', 'captcha.w_no_plugins', 'captcha.w_webgl_soft',

@@ -5,12 +5,9 @@
 // was written by the clients this system is fighting. Every single value goes
 // through gp_e(). There is no field here that is "safe".
 $f = is_array($filter) ? $filter : array();
-$act_options = array('', 'allow', 'challenge', '403', '429', 'exempt', 'allow_bot',
-	'allow_preview', 'allow_override', '404_hp', 'token_issued', 'nonce_bad', 'nonce_replay', 'pow_bad',
-	'mint_limited');
+$act_options = array('') + gp_field_options('act');
 $ipl_names = array_map(function ($l) { return (string)$l['id']; }, function_exists('gp_iplists_state') ? gp_iplists_state()['lists'] : array());
-$reason_options = array('', 'UA_EMPTY', 'UA_SCRIPT', 'NO_AL', 'NO_SF', 'FEW_HDR',
-	'HP_HIST', 'BOT_FAKE');
+$reason_options = array('' => '') + gp_reason_options();
 ?>
 
 <?php
@@ -19,6 +16,7 @@ $dash = '—';
 
 <div>
 	<h1 class="gp-page-title"><?= gp_e(gp_t('logs_title')) ?></h1>
+	<p class="gp-page-sub"><?= gp_docs_link('14-REASON-CODES.md', '', 'logs_reason_docs') ?></p>
 	<p class="gp-page-sub gp-latin">
 		<bdi class="gp-mono"><?= gp_e($meta['file']) ?></bdi>
 		<span class="gp-sep">·</span>
@@ -41,11 +39,11 @@ $flt = array(
 	'cc'     => array('geo_cc', 'is', array()),
 	'asn'    => array('geo_asn', 'is', array()),
 	'reason' => array('logs_reason', 'is', $reason_options),
-	'botv'   => array('id_botv', 'is', array('ok', 'bad')),
+	'botv'   => array('id_botv', 'is', gp_field_options('botv')),
 	'dev'    => array('logs_device', 'is', array()),
-	'tok'    => array('logs_token', 'is', array('v', 'm', 'b')),
-	'sh'     => array('logs_shadow', 'is', array('1', '0')),
-	'hold'   => array('logs_holdout', 'is', array('1', '0')),
+	'tok'    => array('logs_token', 'is', gp_field_options('tok')),
+	'sh'     => array('logs_shadow', 'is', gp_field_options('sh')),
+	'hold'   => array('logs_holdout', 'is', gp_field_options('hold')),
 	'method' => array('logs_method', 'is', array('GET', 'POST', 'HEAD', 'PUT', 'PATCH', 'DELETE', 'OPTIONS')),
 	'ipl'    => array('logs_ipl', 'is', array('allow', 'block')),
 	'ipln'   => array('logs_ipln', 'is', $ipl_names),
@@ -53,8 +51,10 @@ $flt = array(
 $flt_field = function ($key) use ($flt, $f) {
 	$d = $flt[$key];
 	$v = isset($f[$key]) ? $f[$key] : null;
-	$dl = array_values(array_filter($d[2], 'strlen'));
-	if (!empty(gp_log_filter_spec()[$key][4])) { $dl[] = GP_FILTER_NONE; }      // (none) = empty value
+	$dl = array_filter($d[2], 'strlen');
+	if (gp_is_labelled($d[2])) { $dl = array_filter($dl, function ($v, $k) { return (string)$k !== ''; }, ARRAY_FILTER_USE_BOTH); }
+	else { $dl = array_values($dl); }
+	if (!empty(gp_log_filter_spec()[$key][4])) { if (gp_is_labelled($dl)) { $dl[GP_FILTER_NONE] = gp_t('flt_none'); } else { $dl[] = GP_FILTER_NONE; } }      // (none) = empty value
 	ob_start(); ?>
 	<div class="gp-field">
 		<label class="gp-label" for="flt-<?= gp_e($key) ?>"><?= gp_e(gp_t($d[0])) ?><?= gp_tip('flt_' . $key) ?></label>
@@ -156,7 +156,7 @@ $chips = gp_filter_chips($f, array_map(function ($d) { return gp_t($d[0]); }, $f
 			<time class="gp-log-time gp-ltr" datetime="<?= gp_e(gmdate('c', $ts)) ?>"
 				title="<?= gp_e(date('Y-m-d H:i:s', $ts)) ?>"><?= gp_e(date('H:i:s', $ts)) ?></time>
 			<div class="gp-log-acts">
-				<span class="gp-badge <?= $badge ?> gp-ltr"><?= gp_e($act) ?></span>
+				<span class="gp-badge <?= $badge ?> gp-ltr" title="<?= gp_e(gp_field_name('act')) ?>"><?= gp_e(gp_field_value('act', $act)) ?> <code class="gp-reason-code"><?= gp_e($act) ?></code></span>
 				<?php if ((int)($row['sh'] ?? 0) === 1): ?>
 					<span class="gp-badge gp-badge-info"><?= gp_e(gp_t('logs_shadow')) ?></span>
 				<?php endif; ?>
@@ -164,7 +164,7 @@ $chips = gp_filter_chips($f, array_map(function ($d) { return gp_t($d[0]); }, $f
 					<span class="gp-badge gp-badge-info"><?= gp_e(gp_t('logs_holdout')) ?></span>
 				<?php endif; ?>
 				<?php if ((string)($row['ovr'] ?? '') !== ''): ?>
-					<span class="gp-badge gp-badge-warn gp-ltr"><?= gp_e($row['ovr']) ?></span>
+					<span class="gp-badge gp-badge-warn gp-ltr" title="<?= gp_e(gp_field_name('ovr')) ?>"><?= gp_e(gp_field_value('ovr', $row['ovr'])) ?> <code class="gp-reason-code"><?= gp_e($row['ovr']) ?></code></span>
 				<?php endif; ?>
 			</div>
 			<div class="gp-log-req gp-ltr">
@@ -202,7 +202,7 @@ $chips = gp_filter_chips($f, array_map(function ($d) { return gp_t($d[0]); }, $f
 		<?php if ($reasons): ?>
 		<div class="gp-log-reasons gp-ltr">
 			<?php foreach ($reasons as $reason): ?>
-				<span class="gp-badge <?= gp_e(gp_reason_badge_class($reason)) ?>"><?= gp_e($reason) ?></span>
+				<?= gp_reason_badge($reason) ?>
 			<?php endforeach; ?>
 		</div>
 		<?php endif; ?>
@@ -231,9 +231,9 @@ $chips = gp_filter_chips($f, array_map(function ($d) { return gp_t($d[0]); }, $f
 				array('logs_sec_identity', '', array(
 					'ip'   => array(gp_t('logs_ip'), 'str'),
 					'dev'  => array(gp_t('logs_device'), 'str'),
-					'tok'  => array(gp_t('logs_token'), 'str'),
+					'tok'  => array(gp_field_name('tok'), 'fld:tok'),
 					'bot'  => array(gp_t('logs_bot'), 'str'),
-					'botv' => array(gp_t('id_botv'), 'str'),
+					'botv' => array(gp_field_name('botv'), 'fld:botv'),
 					'hp'   => array(gp_t('id_honeypot'), 'bool'),
 					'cc'   => array(gp_t('geo_cc'), 'str'),
 					'asn'  => array(gp_t('geo_asn'), 'int'),
@@ -245,6 +245,12 @@ $chips = gp_filter_chips($f, array_map(function ($d) { return gp_t($d[0]); }, $f
 					'ml'  => array(gp_t('id_ml'), 'int'),
 					'clf' => array(gp_t('id_clf'), 'int'),
 					'rs'  => array(gp_t('logs_reason'), 'list'),
+					'act' => array(gp_field_name('act'), 'fld:act'),
+					'sh'  => array(gp_field_name('sh'), 'fld:sh'),
+					'hold' => array(gp_field_name('hold'), 'fld:hold'),
+					'ovr' => array(gp_field_name('ovr'), 'fld:ovr'),
+					'cap' => array(gp_field_name('cap'), 'fld:cap'),
+					'tl'  => array(gp_field_name('tl'), 'fld:tl'),
 				)),
 				array('logs_sec_counters', '', array(
 					'cd'  => array(gp_t('logs_c_cd'), 'int'),
@@ -278,7 +284,7 @@ $chips = gp_filter_chips($f, array_map(function ($d) { return gp_t($d[0]); }, $f
 								$items = is_array($value) ? array_values(array_filter($value, 'is_string')) : array();
 								if (!$items) { echo '<span class="gp-prop-empty">—</span>'; }
 								foreach ($items as $item): ?>
-							<span class="gp-badge gp-badge-off"><?= gp_e($item) ?></span>
+							<?= gp_reason_badge($item) ?>
 								<?php endforeach;
 								break;
 							case 'query':
@@ -295,7 +301,10 @@ $chips = gp_filter_chips($f, array_map(function ($d) { return gp_t($d[0]); }, $f
 							case 'time':  echo gp_log_value(date('Y-m-d H:i:s', (int)$value)); break;
 							case 'int':   echo gp_log_value(gp_latin((int)$value)); break;
 							case 'float': echo gp_log_value(gp_latin((float)$value, 2, true)); break;
-							default:      echo gp_log_value(is_scalar($value) ? (string)$value : '');
+							default:
+								echo strncmp($def[1], 'fld:', 4) === 0 && is_scalar($value)
+									? gp_log_value(gp_field_value_full(substr($def[1], 4), (string)$value))
+									: gp_log_value(is_scalar($value) ? (string)$value : '');
 						endswitch; ?>
 						</dd>
 					</div>

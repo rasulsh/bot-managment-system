@@ -202,7 +202,11 @@ who steals the session.
 - **Log explorer** — the replacement for `grep` and `jq`. Filters on date, `act`,
   `sh`, `hold`, `ovr`, `tok`, device, IP, path substring, reason, response status
   and score ranges; reverse-streamed with a hard cap of 200 rows per page. It
-  never loads a whole log file into memory, and CSV export of the current filter.
+  never loads a whole log file into memory, and CSV export of the current filter. Reasons are shown as badges with the **full
+  name**, the logged code in small monospace, the explanation as a tooltip and a "monitor only" marker for `SH_` codes; a rule or
+  IP-list id is resolved to its name and links to it. The Reason filter's pick list shows the full names (the value is the code),
+  and so do the Action, Token, Crawler, Monitor and Holdout lists. The detail view spells out `act`, `tok`, `ovr`, `botv`, `sh`,
+  `hold`, `cap`. The CSV keeps the short columns and adds `rs_names`. All codes: [14-REASON-CODES.md](14-REASON-CODES.md) (generated from `panel/reasons.php`).
 - **Identity drill-down** — every `gv:` verdict for one device or IP on one page:
   the `ctl.py show` output that answers "why was this customer blocked?".
 - **Overrides** — the `ctl.py allow` / `deny` five-second fix, with the same TTL
@@ -234,8 +238,12 @@ who steals the session.
   for a single match on the stress and real-browser test strings (`regex_slow`). If `guard/rules.json` is
   invalid the page says so and refuses writes until it is fixed or the invalid part discarded.
 - **GeoIP** — the active databases (source file, build date, age, IPv4 / IPv6 range counts), the source files in
-  `geo/`, upload (checked against `upload_max_filesize` / `post_max_size`; a bigger file: copy it to `geo/` over
-  SFTP), **Compile now** (queues the `geo_compile` job; the worker cron runs it), the last compile result with
+  `geo/`, upload (the browser refuses a file larger than `geo.upload_max_mb`, default 32 MiB, before sending it, because a web
+  server answers a body over ITS limit with its own 413 page that PHP never sees: on LiteSpeed raise **Max Request Body Size**, on Apache
+  `LimitRequestBody`, on nginx `client_max_body_size`; PHP's `upload_max_filesize` / `post_max_size` still apply; a bigger file: copy it
+  to `geo/` over SFTP). Country + ASN are enough for every rule: the City database (60-70 MB) is not needed. After an upload the page
+  says "press Compile now" and a banner shows while any source file is "not compiled yet" (the same warning is on the dashboard).
+  **Compile now** (queues the `geo_compile` job; the worker cron runs it), the last compile result with
   its errors and the **ignored geoip.dat tags**, one-click **rollback** to the previous compiled file, delete of
   a source file, and a **lookup tester** (address -> country / ASN, and which rule would act on that client, with
   optional UA, path and "verified crawler"). Everything is audited (`geo_upload`, `geo_delete`, `geo_rollback`,
@@ -371,8 +379,9 @@ one place, with an argv array, to run `scripts/cron-check.sh`.
   shown, stacked. Keyboard: arrow keys, Home and End (`role="tablist"`).
 * **Tooltips.** A `?` next to every setting, rule field, GeoIP field and filter. The text (lang.php key
   `tip_<name>`) says what the field does, a safe value, and the risk of a wrong one. It opens on hover, on keyboard
-  focus and on tap; Esc or a tap elsewhere closes it; it is moved back inside the screen at an edge
-  (`aria-describedby`, `role="tooltip"`). panel-selftest fails if a field has no text.
+  focus and on tap; Esc or a tap elsewhere closes it. The bubble is `position: fixed` and placed from the button's rectangle, so a
+  scrolling table or a card never clips it, and it stays inside the screen (`aria-describedby`, `role="tooltip"`). A filter's pick list is
+  a button inside the value box; the operator and the box share one height. panel-selftest fails if a field has no text.
 * **Include / exclude filters.** Every list with filters (Logs, Rules, Overrides, Identity, Audit, GeoIP sources)
   has an operator next to each field: choice fields (action, token, status, reason, country, ASN, ...) are
   **is / is not** and take several values separated by commas (OR inside a field); text fields (path, User-Agent,

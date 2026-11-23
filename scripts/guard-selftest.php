@@ -1387,9 +1387,12 @@ t_ok('log row: cc and asn when a lookup ran', $row_geo['cc'] === 'IR' && $row_ge
 $row_unk = gv_log_row(array_merge($row_f, array('cc' => '', 'asn' => 0)), gv_state_new(), 'allow', 0, microtime(true));
 t_ok('log row: an unknown country is logged as "" (looked up, not placed)', $row_unk['cc'] === '' && $row_unk['asn'] === 0);
 t_ok('config: geo.log defaults to off and is a whitelisted bool',
-	gv_cfg_defaults(array())['geo'] === array('log' => false) && gv_overlay_validate('geo.log', true)[0] === true && gv_overlay_validate('geo.log', 'yes')[0] === false);
+	gv_cfg_defaults(array())['geo'] === array('log' => false, 'upload_max_mb' => 32) && gv_overlay_validate('geo.log', true)[0] === true && gv_overlay_validate('geo.log', 'yes')[0] === false);
 t_ok('config: "off" / "false" in a hand-edited geo block read as off', gv_cfg_defaults(array('geo' => array('log' => 'off')))['geo']['log'] === false && gv_cfg_defaults(array('geo' => array('log' => 'true')))['geo']['log'] === true);
-t_ok('config: a damaged geo value falls back to the default', gv_cfg_defaults(array('geo' => 'x'))['geo'] === array('log' => false));
+t_ok('config: a damaged geo value falls back to the default', gv_cfg_defaults(array('geo' => 'x'))['geo'] === array('log' => false, 'upload_max_mb' => 32));
+t_ok('config: geo.upload_max_mb is a number, not a switch: "64" stays 64, junk falls back to 32, the range is clamped',
+	gv_cfg_defaults(array('geo' => array('upload_max_mb' => '64')))['geo']['upload_max_mb'] === 64 && gv_cfg_defaults(array('geo' => array('upload_max_mb' => 'x')))['geo']['upload_max_mb'] === 32
+	&& gv_cfg_defaults(array('geo' => array('upload_max_mb' => 99999)))['geo']['upload_max_mb'] === 2048 && gv_cfg_defaults(array('geo' => array('upload_max_mb' => 0)))['geo']['upload_max_mb'] === 1);
 putenv('GV_GEO_DIR');
 gv_geo_state(true);
 

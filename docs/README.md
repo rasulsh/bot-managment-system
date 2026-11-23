@@ -33,6 +33,7 @@ summarises and links to these files.
 | [11-TESTING-PIPELINE.md](11-TESTING-PIPELINE.md) | "Nothing shows in the panel": how data flows, why it may not arrive, how to test it end to end | [1.9](../README.md#19-troubleshooting-by-symptom), [2.14](../README.md#214-testing-and-ci) |
 | [12-CHALLENGE-TEST.md](12-CHALLENGE-TEST.md) | Show the real check page to yourself (`challenge.test_key`) | |
 | [13-PANEL-WEB-ACCESS.md](13-PANEL-WEB-ACCESS.md) | Making the panel reachable: symlink, permissions, Apache, LiteSpeed, troubleshooting, what was verified | [1.4](../README.md#14-first-login-and-a-tour-of-the-panel), [2.6](../README.md#26-installation-by-environment) |
+| [14-REASON-CODES.md](14-REASON-CODES.md) | Every log reason code and short field (`act`, `tok`, `ovr`, `botv`, `sh`, ...) with its full name and meaning; generated from the panel's registry | [1.5](../README.md#reading-the-logs) |
 | [CODE-REVIEW.md](CODE-REVIEW.md) | Performance and workflow review notes | |
 | [../ROLLOUT.md](../ROLLOUT.md) | The operational, day-by-day rollout checklist | [1.6](../README.md#16-safe-rollout-plan) |
 

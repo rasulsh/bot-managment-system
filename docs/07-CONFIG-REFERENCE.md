@@ -66,6 +66,7 @@ See [09-ADMIN-PANEL.md](09-ADMIN-PANEL.md#where-each-setting-lives).
 | `ml_weight` | Phase 2. Multiplier turning an anomaly level of 0..100 into a score contribution. Default 0.4. |
 | `bot_suffixes` | Phase 2. Reverse-DNS suffixes per known bot. Consumed by the Python verifier; kept here as one source of truth. |
 | `analyzer.interval_verify`, `_worker`, `_snapshot`, `_nightly`, `_logrotate`, `_train`, `_train_clf`, `_geo`, `_report` | Expected run interval of each background job in minutes (defaults 10, 1, 15, 1440, 1440, 10080, 10080, 43200, 10080). Read by the panel's job health only: a job is late after twice its interval. Settings -> Analyzer. |
+| `geo.upload_max_mb` | Default 32 (1 to 2048). The largest source file the GeoIP page uploads from the browser; a bigger file is refused in the browser with the "copy it over SFTP" hint. Never above PHP's own limit. Settings -> GeoIP. |
 | `geo.log` | Default false. Add the country (`cc`) and, when `geo/asn.bin` exists, the AS number (`asn`) to every log row. Without it the lookup only runs for a rule that needs it. Settings -> GeoIP. |
 | `capture_outcomes` | Phase 4. Record what the application did with each allowed request as a second tiny log line. Default off. |
 

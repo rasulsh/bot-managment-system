@@ -188,7 +188,7 @@ function gp_chart_palette() {
 		gp_chart_color('bad'), gp_chart_color('accent'), gp_chart_color('neutral'));
 }
 
-// A horizontal bar chart. $items is array(label => value).
+// A horizontal bar chart. $items is array(label => value). option 'reasons' => true: the labels are reason codes, drawn as badges.
 function gp_chart_bars(array $items, $options = array()) {
 	if (!$items) { return '<p class="gp-help">' . gp_e(gp_t_or('no_results')) . '</p>'; }
 	$max = max(1, max(array_map('intval', array_values($items))));
@@ -200,7 +200,7 @@ function gp_chart_bars(array $items, $options = array()) {
 		$color = isset($colors[$label]) ? $colors[$label] : $default;
 		$out .= '<div>'
 			. '<div class="gp-row-head" style="justify-content:space-between">'
-			. '<span class="gp-mono">' . gp_e($label) . '</span>'
+			. (isset($options['reasons']) ? gp_reason_badge((string)$label, false) : '<span class="gp-mono">' . gp_e($label) . '</span>')
 			. '<span class="gp-stat-val">' . gp_num($value) . '</span>'
 			. '</div>'
 			. '<div class="gp-bar-track"><div class="gp-bar-fill" style="width:'

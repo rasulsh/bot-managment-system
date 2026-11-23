@@ -148,6 +148,37 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		const r2 = await page.locator('[data-panel=limits] .gp-tip-box').last().boundingBox();
 		check(v.name + ' tooltip: the last field of a row is not cut off at the right edge', !!r2 && r2.x >= 0 && r2.x + r2.width <= v.width + 1, JSON.stringify(r2));
 
+		// ---- GeoIP sources (PR F): the file column keeps a readable width, the tooltip in a scrolling table is never clipped, the filter
+		// controls share one height with the pick button inside the box, and a file over the limit is refused in the browser
+		await page.goto(ROOT + '?r=geo#geo-sources');
+		const gcell = page.locator('[data-panel=sources] td.gp-col-name').first();
+		const gcw = await gcell.evaluate((e) => e.getBoundingClientRect().width);
+		check(v.name + ' geo: the File column is at least 150 px wide (not squeezed to a character)', gcw >= 150, String(gcw));
+		await page.locator('[data-panel=sources] .gp-table .gp-tip-btn').first().click();
+		const gtb = await page.locator('[data-panel=sources] .gp-table .gp-tip-box').first().boundingBox();
+		const gvis = await page.locator('[data-panel=sources] .gp-table .gp-tip-box').first().evaluate((e) => {
+			const r = e.getBoundingClientRect(); const cx = r.left + r.width / 2, cy = r.top + Math.min(r.height - 2, 20);
+			const top = document.elementFromPoint(cx, cy); return !!top && (top === e || e.contains(top));
+		});
+		check(v.name + ' geo: the Delete tooltip is fully on screen and is the topmost element at its own centre (not clipped by the table)', !!gtb && gtb.x >= 0 && gtb.x + gtb.width <= v.width + 1 && gvis, JSON.stringify(gtb));
+		await page.keyboard.press('Escape');
+		const gh = await page.evaluate(() => {
+			const row = document.querySelector('[data-panel=sources] .gp-fgroup');
+			if (!row) { return null; }
+			const sel = row.querySelector('select'), inp = row.querySelector('input[type=text]'), tg = row.querySelector('[data-gp-ms-toggle]');
+			const a = sel.getBoundingClientRect(), b = inp.getBoundingClientRect(), t = tg && !tg.hidden ? tg.getBoundingClientRect() : null;
+			return { sel: a.height, inp: b.height, selTop: a.top, inpTop: b.top, toggleInside: !t || (t.left >= b.left - 1 && t.right <= b.right + 1 && t.top >= b.top - 1 && t.bottom <= b.bottom + 1) };
+		});
+		check(v.name + ' geo: the filter operator and value box have the same height and top (a pick button, when shown, sits inside the box)',
+			!!gh && Math.abs(gh.sel - gh.inp) <= 1 && (v.width < 640 || Math.abs(gh.selTop - gh.inpTop) <= 1) && gh.toggleInside, JSON.stringify(gh));
+		const big = Buffer.alloc(40 * 1048576, 0x61);
+		await page.setInputFiles('[data-panel=sources] input[type=file]', { name: 'GeoLite2-City.mmdb', mimeType: 'application/octet-stream', buffer: big });
+		const gmsg = await page.locator('[data-panel=sources] [data-gp-upload-msg]').innerText();
+		check(v.name + ' geo: a 40 MiB file is refused in the browser with the SFTP hint, Upload is disabled and nothing was sent',
+			/40\.0 MiB/.test(gmsg) && /SFTP/.test(gmsg) && (await page.locator('[data-panel=sources] [data-gp-upload-send]').isDisabled()) && (await page.locator('[data-panel=sources] input[type=file]').inputValue()) === '' && /r=geo/.test(page.url()));
+		await page.setInputFiles('[data-panel=sources] input[type=file]', { name: 'GeoLite2-Country.mmdb', mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024, 0x61) });
+		check(v.name + ' geo: a small file clears the message and enables Upload again', !(await page.locator('[data-panel=sources] [data-gp-upload-msg]').isVisible()) && !(await page.locator('[data-panel=sources] [data-gp-upload-send]').isDisabled()));
+		check(v.name + ' geo: the "not compiled yet" banner is shown while a source is uncompiled', /not compiled yet|never compiled|not compiled/i.test(await page.locator('main .gp-note-strong').first().innerText()));
 		// ---- filters
 		await page.goto(ROOT + '?r=logs&act=403&act_op=not&path=admin&path_op=not');
 		const chips = page.locator('.gp-chip');
