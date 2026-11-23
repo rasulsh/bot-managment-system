@@ -90,6 +90,14 @@ for h in range(168, -1, -1):
         elif r < 0.22: act, sh, rs = 'challenge', 1, ['SH_IPL_BLOCK:hosting-ranges']
         elif r < 0.27: act = 'challenge'
         elif r < 0.29: act = '429'
+        if act == 'challenge' and not sh and rnd.random() < 0.9:
+            t0 = now - h * 3600 + rnd.random() * 3400
+            dv, ipx = 'dev%d' % rnd.randint(81, 400), '198.51.100.%d' % rnd.randint(1, 250)
+            syn.append({'ts': t0, 'act': 'challenge', 'ip': ipx, 'dev': dv, 'tok': 'm', 'rs': []})
+            if rnd.random() < 0.7:
+                syn.append({'ts': t0 + 2, 'act': 'token_issued', 'ip': ipx, 'dev': dv, 'tok': 'm', 'rs': []})
+                if rnd.random() < 0.8:
+                    syn.append({'ts': t0 + 6, 'act': 'allow', 'ip': ipx, 'dev': dv, 'tok': 'v', 'rs': []})
         syn.append({'ts': now - h * 3600 + rnd.random() * 3500, 'act': act, 'sh': sh, 'rs': rs, 'ip': '203.0.113.%d' % rnd.randint(1, 60), 'dev': 'dev%d' % rnd.randint(1, 80), 'ua': ua,
                     'p': '/shop/item-%d' % rnd.randint(1, 9), 'cc': rnd.choice(['IR', 'US', 'DE', 'IR']), 'asn': rnd.choice([12880, 15169, 24940]), 'tok': 'v' if r > 0.5 else 'm',
                     'cap': 'show' if 0.27 < r < 0.28 else ''})

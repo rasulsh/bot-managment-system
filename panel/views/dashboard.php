@@ -46,14 +46,27 @@ $stale_badge = $snapshot_stale ? ' <span class="gp-badge gp-badge-warn">' . gp_e
 		<span class="gp-dchip-s"><a href="index.php?r=rules"><?= gp_num($rsum['enabled']) ?> / <?= gp_num($rsum['total']) ?> <?= gp_e(gp_t('dash_rules_short')) ?></a>
 			· <a href="index.php?r=iplists"><?= gp_num($isum['enabled']) ?> / <?= gp_num($isum['total']) ?> <?= gp_e(gp_t('dash_lists_short')) ?></a></span>
 	</div>
-	<div class="gp-dchip <?= $kill ? 'gp-dchip-stopped' : 'gp-dchip-armed' ?>" data-chip="kill">
+	<div class="gp-dchip <?= $kill ? 'gp-dchip-stopped' : 'gp-dchip-armed' ?>" data-chip="kill" id="dash-kill">
 		<span class="gp-dchip-k"><?= gp_e(gp_t('dash_killswitch')) ?></span>
 		<span class="gp-dchip-v"><span class="gp-pulse <?= $kill ? 'gp-pulse-bad' : 'gp-pulse-ok' ?>"></span> <?= gp_e($kill ? gp_t('dash_kill_on') : gp_t('dash_kill_off')) ?></span>
-		<form method="post" action="index.php?r=dashboard" class="gp-dchip-s" data-confirm="<?= gp_e(gp_t('dash_kill_confirm')) ?>">
+		<?php if ($kill): ?>
+		<form method="post" action="index.php?r=dashboard" class="gp-dchip-s">
 			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
-			<input type="hidden" name="killswitch" value="<?= $kill ? 'start' : 'stop' ?>">
-			<button type="submit" class="gp-btn gp-btn-sm <?= $kill ? 'gp-btn-primary' : 'gp-btn-danger' ?>"><?= gp_e($kill ? gp_t('dash_kill_start') : gp_t('dash_kill_stop')) ?></button>
+			<input type="hidden" name="killswitch" value="start">
+			<button type="submit" class="gp-btn gp-btn-sm gp-btn-primary"><?= gp_e(gp_t('dash_kill_start')) ?></button>
 		</form>
+		<?php elseif (!empty($kill_confirm)): /* the confirmation step: a plain page state (GET), no browser dialog */ ?>
+		<form method="post" action="index.php?r=dashboard" class="gp-dchip-s gp-kill-confirm" role="alertdialog" aria-label="<?= gp_e(gp_t('dash_kill_ask')) ?>">
+			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
+			<input type="hidden" name="killswitch" value="stop">
+			<input type="hidden" name="confirm" value="1">
+			<span class="gp-kill-ask"><b><?= gp_e(gp_t('dash_kill_ask')) ?></b> <?= gp_e(gp_t('dash_kill_ask_sub')) ?></span>
+			<span class="gp-kill-btns"><button type="submit" class="gp-btn gp-btn-sm gp-btn-danger"><?= gp_e(gp_t('dash_kill_do')) ?></button>
+				<a class="gp-btn gp-btn-sm gp-btn-ghost" href="index.php?r=dashboard#dash-kill"><?= gp_e(gp_t('cancel')) ?></a></span>
+		</form>
+		<?php else: ?>
+		<span class="gp-dchip-s"><a class="gp-btn gp-btn-sm gp-btn-danger" href="index.php?r=dashboard&amp;kill_confirm=1#dash-kill"><?= gp_e(gp_t('dash_kill_stop')) ?></a></span>
+		<?php endif; ?>
 	</div>
 	<div class="gp-dchip" data-chip="alerts">
 		<span class="gp-dchip-k"><?= gp_e(gp_t('al_title')) ?></span>
@@ -79,24 +92,32 @@ $stale_badge = $snapshot_stale ? ' <span class="gp-badge gp-badge-warn">' . gp_e
 	<?= gp_msg('killswitch') ?>
 </section>
 
-<?php if ($pm['forced']): ?><div class="gp-note gp-note-strong gp-dspan-12"><?= gp_e(gp_t('dash_mode_forced')) ?></div><?php endif; ?>
 <?php if (!empty($ip_open)): ?><div class="gp-note gp-dspan-12"><?= gp_e(gp_t('dash_ip_open')) ?></div><?php endif; ?>
 
-<?php /* alerts: collapsible, open when there is a critical one */ ?>
-<?php if ($alerts): ?>
-<details class="gp-dcard gp-dcard-flat gp-dspan-12 gp-alerts" id="dash-alerts" aria-label="<?= gp_e(gp_t('al_title')) ?>" role="alert"<?= $sc['critical'] ? ' open' : '' ?>>
-	<summary class="gp-dcard-title"><?= gp_e(gp_t('al_title')) ?> <span class="gp-card-sub"><?= gp_num(count($alerts)) ?></span></summary>
-	<ul class="gp-alert-list">
-	<?php foreach ($alerts as $al): $crit = ($al['level'] === 'critical'); ?>
+<?php /* alerts: the first critical one (else the first) is always shown; the rest sit in a collapsible list that opens by itself on wide screens */ ?>
+<?php if ($alerts):
+	$al_first = 0;
+	foreach ($alerts as $i => $al0) { if ($al0['level'] === 'critical') { $al_first = $i; break; } }
+	$al_role = isset($role) ? $role : 'admin';
+	$al_row = function ($al) use ($al_role) { $crit = ($al['level'] === 'critical'); ob_start(); ?>
 		<li class="gp-alert gp-alert-<?= $crit ? 'critical' : 'warning' ?>" data-alert="<?= gp_e($al['id']) ?>">
 			<span class="gp-badge <?= $crit ? 'gp-badge-bad' : 'gp-badge-warn' ?>"><?= gp_e(gp_t($crit ? 'al_critical' : 'al_warning')) ?></span>
 			<span class="gp-alert-text"><?= gp_e(gp_t($al['key'])) ?><?php if ($al['detail'] !== ''): ?>
 				<span class="gp-mono gp-ltr"> — <?= gp_e($al['detail']) ?></span><?php endif; ?></span>
-			<?php if ($al['link'] !== '' && gp_acl_allows($role ?? 'admin', preg_split('/[&#]/', $al['link'])[0], 'GET')): ?><a class="gp-btn gp-btn-ghost gp-btn-sm" href="index.php?r=<?= gp_e($al['link']) ?>"><?= gp_e(gp_t('al_open')) ?></a><?php endif; ?>
+			<?php if ($al['link'] !== '' && gp_acl_allows($al_role, preg_split('/[&#]/', $al['link'])[0], 'GET')): ?><a class="gp-btn gp-btn-ghost gp-btn-sm" href="index.php?r=<?= gp_e($al['link']) ?>"><?= gp_e(gp_t('al_open')) ?></a><?php endif; ?>
 		</li>
-	<?php endforeach; ?>
-	</ul>
-</details>
+	<?php return ob_get_clean(); };
+	$al_summary = ($sc['critical'] ? gp_num($sc['critical']) . ' ' . gp_t('al_critical') : '') . ($sc['critical'] && $sc['warning'] ? ' · ' : '') . ($sc['warning'] ? gp_num($sc['warning']) . ' ' . gp_t('al_warning') : ''); ?>
+<section class="gp-dcard gp-dcard-flat gp-dspan-12 gp-alerts" id="dash-alerts" aria-label="<?= gp_e(gp_t('al_title')) ?>" role="alert">
+	<div class="gp-dcard-title"><?= gp_e(gp_t('al_title')) ?> <span class="gp-card-sub"><?= gp_num(count($alerts)) ?></span></div>
+	<ul class="gp-alert-list" data-alerts-first="1"><?= $al_row($alerts[$al_first]) ?></ul>
+	<?php if (count($alerts) > 1): ?>
+	<details class="gp-alerts-more" data-open-wide="1">
+		<summary><span class="gp-alerts-sum"><?= gp_e($al_summary) ?></span> <span class="gp-alerts-show">— <?= gp_e(sprintf(gp_t('dash_alerts_show'), gp_num(count($alerts) - 1))) ?></span><span class="gp-alerts-hide">— <?= gp_e(gp_t('dash_alerts_hide')) ?></span></summary>
+		<ul class="gp-alert-list"><?php foreach ($alerts as $i => $al) { if ($i !== $al_first) { echo $al_row($al); } } ?></ul>
+	</details>
+	<?php endif; ?>
+</section>
 <?php endif; ?>
 
 <?php if (!empty($cron_card)): ?>
@@ -135,7 +156,7 @@ $tiles = array(
 	$chg = gp_kpi_change($cv, $pv);
 	$bad = in_array($k, array('blocked', 'limited'), true) && $chg !== '' && $chg[0] === '+'; ?>
 <a class="gp-dcard gp-dtile gp-dspan-2" href="<?= gp_dash_tile_link($k) ?>" data-tile="<?= gp_e($k) ?>">
-	<span class="gp-dtile-label"><?= gp_e(gp_t($td[0])) ?><?= $k === 'would_act' ? gp_tip('dash_would') : '' ?></span>
+	<span class="gp-dtile-label"><span class="gp-dtile-name"><?= gp_e(gp_t($td[0])) ?></span><?= $k === 'would_act' ? gp_tip('dash_would') : '' ?></span>
 	<span class="gp-dtile-value"><?= $cv === null ? '—' : gp_e(gp_num((int)$cv)) ?></span>
 	<span class="gp-dtile-delta <?= $bad ? 'gp-text-bad' : '' ?>"><?= $chg === '' ? '' : gp_e($chg) . ' ' . gp_e(gp_t('dash_vs_prev')) ?></span>
 	<?php if ($k === 'challenged'): $cs = $kcur['challenge_success'] ?? null; $cp = $kprev['challenge_success'] ?? null; ?>
@@ -152,7 +173,7 @@ $tiles = array(
 <?php /* ------------------------------------------------------------ 3. main chart */ ?>
 <section class="gp-dcard gp-dspan-12" id="dash-main" aria-label="<?= gp_e(gp_t('dash_main_title')) ?>">
 	<div class="gp-dcard-title"><?= gp_e(gp_t('dash_main_title')) ?><?= gp_tip('dash_chart') ?><?= $snapshot_stale ? $stale_badge : '' ?>
-		<span class="gp-card-sub"><?= gp_e(gp_t('dash_main_sub')) ?></span></div>
+		<span class="gp-card-sub"><?= gp_e(sprintf(gp_t('dash_main_sub'), date('T P'))) ?></span></div>
 	<?php if (!$dash): ?>
 	<p class="gp-note"><?= gp_e(gp_t($generated > 0 ? 'dash_no_dash' : 'dash_no_snapshot')) ?> <a href="index.php?r=jobs"><?= gp_e(gp_t('dash_fix_jobs')) ?></a></p>
 	<?php else:
@@ -189,13 +210,13 @@ usort($rrows, function ($a, $b) { return $b['h']['d7'] <=> $a['h']['d7']; });
 	<p class="gp-note"><?= gp_e(gp_t('dash_ready_none')) ?> <a href="index.php?r=rules"><?= gp_e(gp_t('nav_rules')) ?></a> · <a href="index.php?r=iplists"><?= gp_e(gp_t('nav_iplists')) ?></a></p>
 	<?php else: ?>
 	<div class="gp-table-wrap"><table class="gp-table gp-dtable">
-		<thead><tr><th><?= gp_e(gp_t('dash_rd_name')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_h24')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_d7')) ?></th>
+		<thead><tr><th><?= gp_e(gp_t('dash_rd_name')) ?></th><th><?= gp_e(gp_t('dash_rd_type')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_h24')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_d7')) ?></th>
 			<th class="gp-num"><?= gp_e(gp_t('dash_rd_ips')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_devs')) ?></th><th class="gp-num"><?= gp_e(gp_t('dash_rd_tok')) ?></th><th><?= gp_e(gp_t('dash_rd_ready')) ?></th></tr></thead>
 		<tbody>
 		<?php foreach ($rrows as $rw): $hint = gp_dash_ready_hint($rw['h']); ?>
 		<tr data-ready="<?= gp_e($hint[0]) ?>">
-			<td><a href="<?= $rw['logs'] ?>"><?= gp_e($rw['name']) ?></a>
-				<span class="gp-badge gp-badge-off"><?= gp_e($rw['kind'] === 'rule' ? gp_t('dash_rd_kind_rule') : gp_t('ipl_type_' . $rw['type'])) ?></span></td>
+			<td class="gp-dname"><a href="<?= $rw['logs'] ?>"><?= gp_e($rw['name']) ?></a></td>
+			<td><span class="gp-badge gp-badge-off" data-type="<?= $rw['kind'] === 'rule' ? 'rule' : 'list-' . gp_e($rw['type']) ?>"><?= gp_e($rw['kind'] === 'rule' ? gp_t('dash_rd_t_rule') : gp_t('dash_rd_t_list_' . $rw['type'])) ?></span></td>
 			<td class="gp-num"><?= gp_num((int)$rw['h']['h24']) ?></td><td class="gp-num"><?= gp_num((int)$rw['h']['d7']) ?></td>
 			<td class="gp-num"><?= gp_num((int)$rw['h']['ips']) ?></td><td class="gp-num"><?= gp_num((int)$rw['h']['devs']) ?></td>
 			<td class="gp-num"><?= (int)$rw['h']['d7'] > 0 ? gp_e(gp_num((float)$rw['h']['tok'], 1)) . '%' : '—' ?></td>

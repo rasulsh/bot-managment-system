@@ -257,6 +257,8 @@ switch ($gp_route) {
 		if ($gp_role === 'demo') { gp_render('demo', array('demo' => gp_demo_model())); }
 		if ($gp_post && isset($_POST['killswitch'])) {
 			$stop = $_POST['killswitch'] === 'stop';
+			// Stopping all protection takes a confirmation step: the form that carries confirm=1 is only drawn by the confirmation state.
+			if ($stop && (($_POST['confirm'] ?? '') !== '1')) { gp_redirect('dashboard', array('kill_confirm' => 1)); }
 			if (gp_killswitch_set($stop)) {
 				gp_audit_append(array('event' => 'killswitch', 'actor' => $gp_user,
 					'ip' => $gp_ip, 'key' => 'guard.off',
@@ -278,6 +280,7 @@ switch ($gp_route) {
 			'snapshot' => $hin['snapshot'], 'clf_labels' => gp_clf_labels(),
 			'cfg'      => $hcfg,
 			'kill'     => gp_killswitch_on(),
+			'kill_confirm' => (($_GET['kill_confirm'] ?? '') === '1'),
 			'redis_up' => $hin['redis_up'],
 			'health'   => gp_guard_health(),
 			'rinfo'    => gp_redis_info(),

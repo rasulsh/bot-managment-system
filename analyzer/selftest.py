@@ -10,6 +10,7 @@ when those are not installed.
 from __future__ import print_function
 
 import os
+import random
 import re
 import shutil
 import sys
@@ -3690,12 +3691,45 @@ ok('readiness: hits in 24 h and 7 d, distinct addresses and devices, the share w
 dv_big = [{'ts': dv_now - 10, 'act': 'allow', 'ip': '10.0.%d.%d' % (i // 250, i % 250), 'dev': 'x%d' % i, 'rs': ['RULE:r9']} for i in range(2600)]
 ok('readiness: the distinct sets are bounded (a flood cannot grow the snapshot without limit)', dv_snap.readiness(dv_big, dv_now)['rules']['r9']['ips'] == dv_snap.SET_CAP and dv_snap.readiness(dv_big, dv_now)['rules']['r9']['d7'] == 2600)
 dv_f = dv_d['funnel']
-ok('funnel: served, solved, failed and passed per level; passed = a served device that later made an allowed request with a valid token',
-   dv_f['js']['served'] == 1 and dv_f['js']['passed'] == 1 and dv_f['captcha']['served'] == 1 and dv_f['captcha']['passed'] == 0 and dv_f['js']['failed'] == 0)
-dv_f2 = dv_snap.funnel_by_level([{'ts': 1, 'act': 'challenge', 'cap': 'show', 'dev': 'a'}, {'ts': 2, 'cap': 'ok', 'ct': 4, 'dev': 'a', 'act': 'allow', 'tok': 'v'}, {'ts': 3, 'cap': 'ok', 'ct': 8, 'dev': 'b', 'act': 'allow'},
-                                 {'ts': 4, 'cap': 'wrong', 'dev': 'c', 'act': 'challenge'}, {'ts': 5, 'cap': 'exp', 'dev': 'd', 'act': 'challenge'}, {'ts': 6, 'act': 'token_issued', 'dev': 'e'}, {'ts': 7, 'act': 'nonce_bad', 'dev': 'f'}])
-ok('funnel: CAPTCHA solved / failed / expired and the median solve time, check page solved / failed',
-   dv_f2['captcha']['solved'] == 2 and dv_f2['captcha']['failed'] == 2 and dv_f2['captcha']['median_s'] == 6.0 and dv_f2['captcha']['passed'] == 1 and dv_f2['js']['solved'] == 1 and dv_f2['js']['failed'] == 1)
+ok('funnel: the sample has one visitor served the check page and one served a CAPTCHA, and nobody solved either (so nobody passed)',
+   dv_f['js']['served'] == 1 and dv_f['js']['solved'] == 0 and dv_f['js']['passed'] == 0 and dv_f['captcha']['served'] == 1 and dv_f['captcha']['solved'] == 0 and dv_f['captcha']['passed'] == 0)
+dv_f2 = dv_snap.funnel_by_level([
+    {'ts': 1, 'act': 'challenge', 'cap': 'show', 'dev': 'a', 'ip': '9.9.9.1'}, {'ts': 2, 'cap': 'ok', 'ct': 4, 'dev': 'a', 'ip': '9.9.9.1', 'act': 'allow'}, {'ts': 3, 'act': 'allow', 'tok': 'v', 'dev': 'a', 'ip': '9.9.9.1'},
+    {'ts': 1, 'act': 'challenge', 'cap': 'show', 'dev': 'b', 'ip': '9.9.9.2'}, {'ts': 3, 'cap': 'ok', 'ct': 8, 'dev': 'b', 'ip': '9.9.9.2', 'act': 'allow'},
+    {'ts': 1, 'act': 'challenge', 'cap': 'show', 'dev': 'c', 'ip': '9.9.9.3'}, {'ts': 4, 'cap': 'wrong', 'dev': 'c', 'ip': '9.9.9.3', 'act': 'challenge'},
+    {'ts': 1, 'act': 'challenge', 'cap': 'show', 'dev': 'd', 'ip': '9.9.9.4'}, {'ts': 5, 'cap': 'exp', 'dev': 'd', 'ip': '9.9.9.4', 'act': 'challenge'},
+    {'ts': 1, 'act': 'challenge', 'ip': '8.8.8.1'}, {'ts': 2, 'act': 'token_issued', 'dev': 'e', 'ip': '8.8.8.1'}, {'ts': 3, 'act': 'allow', 'tok': 'v', 'dev': 'e', 'ip': '8.8.8.1'},
+    {'ts': 1, 'act': 'challenge', 'ip': '8.8.8.2'}, {'ts': 2, 'act': 'nonce_bad', 'ip': '8.8.8.2'},
+    {'ts': 2, 'cap': 'ok', 'ct': 1, 'dev': 'ghost', 'ip': '7.7.7.7', 'act': 'allow'}, {'ts': 2, 'act': 'token_issued', 'dev': 'ghost2', 'ip': '7.7.7.8'}])
+ok('funnel: served -> solved -> passed count distinct visitors, each stage a subset of the one before (a solve or a pass with no served page is not counted)',
+   dv_f2['captcha'] == {'served': 4, 'solved': 2, 'passed': 1, 'failed': 2, 'median_s': 6.0} and dv_f2['js'] == {'served': 2, 'solved': 1, 'passed': 1, 'failed': 1, 'median_s': None})
+ok('funnel: a solve at the same time as the served page counts, one BEFORE it does not; a pass must come after the solve',
+   dv_snap.funnel_by_level([{'ts': 5, 'act': 'challenge', 'ip': '1.1.1.1'}, {'ts': 4, 'act': 'token_issued', 'ip': '1.1.1.1'}])['js']['solved'] == 0
+   and dv_snap.funnel_by_level([{'ts': 5, 'act': 'challenge', 'ip': '1.1.1.1'}, {'ts': 5, 'act': 'token_issued', 'ip': '1.1.1.1'}])['js']['solved'] == 1
+   and dv_snap.funnel_by_level([{'ts': 5, 'act': 'challenge', 'ip': '1.1.1.1'}, {'ts': 6, 'act': 'token_issued', 'ip': '1.1.1.1'}, {'ts': 6, 'act': 'allow', 'tok': 'v', 'ip': '1.1.1.1'}])['js']['passed'] == 0)
+dv_rng = random.Random(11)
+dv_mono = True
+dv_acts = ['challenge', 'token_issued', 'allow', 'nonce_bad', '403', 'allow_bot']
+for dv_i in range(300):
+    dv_rows = []
+    for dv_j in range(dv_rng.randint(0, 60)):
+        dv_row = {'ts': dv_rng.randint(1, 40), 'act': dv_rng.choice(dv_acts), 'ip': '10.0.0.%d' % dv_rng.randint(1, 6)}
+        if dv_rng.random() < 0.7:
+            dv_row['dev'] = 'd%d' % dv_rng.randint(1, 5)
+        if dv_rng.random() < 0.4:
+            dv_row['cap'] = dv_rng.choice(['show', 'ok', 'wrong', 'fail', 'exp', 'inv', 'esc'])
+            dv_row['ct'] = dv_rng.randint(1, 30)
+        if dv_rng.random() < 0.5:
+            dv_row['tok'] = dv_rng.choice(['v', 'm', 'b'])
+        if dv_rng.random() < 0.15:
+            dv_row['sh'] = 1
+        dv_rows.append(dv_row)
+    dv_ff = dv_snap.funnel_by_level(dv_rows)
+    for dv_lv in ('js', 'captcha'):
+        dv_x = dv_ff[dv_lv]
+        if not (0 <= dv_x['passed'] <= dv_x['solved'] <= dv_x['served'] and 0 <= dv_x['failed'] <= dv_x['served']):
+            dv_mono = False
+ok('funnel: for any input (300 random logs) passed <= solved <= served and failed <= served, per level', dv_mono)
 dv_t = dv_d['top']
 ok('top lists: every outcome counted (not only served ones), with the outcome mix per entry, an AS number as text, an empty value skipped',
    dv_t['ips'][0][:2] == ['2.2.2.2', 3] and dv_t['ips'][0][2:] == [1, 1, 0, 0, 1] and dv_t['asns'] == [['123', 1, 1, 0, 0, 0, 0]] and dv_t['countries'] == [['IR', 1, 1, 0, 0, 0, 0]]

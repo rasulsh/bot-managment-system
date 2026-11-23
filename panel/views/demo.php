@@ -37,7 +37,7 @@ $c = $demo['counts'];
 </section>
 
 <section class="gp-dcard" aria-label="<?= gp_e(gp_t('dash_main_title')) ?>" id="dash-main">
-	<div class="gp-dcard-title"><?= gp_e(gp_t('dash_main_title')) ?> <span class="gp-card-sub"><?= gp_e(gp_t('dash_main_sub')) ?></span></div>
+	<div class="gp-dcard-title"><?= gp_e(gp_t('dash_main_title')) ?> <span class="gp-card-sub"><?= gp_e(sprintf(gp_t('dash_main_sub'), date('T P'))) ?></span></div>
 	<?php if (!$demo['chart']['h24']): ?><p class="gp-note"><?= gp_e(gp_t($demo['generated'] > 0 ? 'dash_no_dash' : 'dash_no_snapshot')) ?></p><?php else:
 		gp_tabs_begin('dmain', array('h24' => gp_t('dash_range_24h'), 'd7' => gp_t('dash_range_7d')));
 		gp_tab_begin('dmain', 'h24', gp_t('dash_main_24h')); echo '<div class="gp-dchart-wrap">' . gp_dash_main_chart($demo['chart']['h24'], false, 'h24') . '</div>'; gp_tab_end();

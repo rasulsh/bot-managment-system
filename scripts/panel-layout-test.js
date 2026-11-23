@@ -103,12 +103,47 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 				check(label + ': system cards equal height per row', rows(g.sys).every((r) => r.every((b) => b.h === r[0].h)), JSON.stringify(g.sys.map((b) => [b.y, b.h])));
 				check(label + ': main chart fills its card (' + Math.round(g.svgW) + ' px)', g.svgW > (v.name === 'desktop' ? 1000 : 300), String(g.svgW));
 			}
-			if (SHOTS && p === 'dashboard') {
+			if (p === 'dashboard') {
+				// review fixes: tiles aligned, readiness table not run together, alerts on a phone, active tab readable in both themes
+				const r = await page.evaluate(() => {
+					const rect = (el) => { const b = el.getBoundingClientRect(); return { x: b.left, y: Math.round(b.top + window.scrollY), w: b.width, h: b.height, r: b.right }; };
+					const th = Array.prototype.slice.call(document.querySelectorAll('#dash-ready thead th')).map((e) => Object.assign(rect(e), { clip: e.scrollWidth > e.clientWidth + 1, t: e.innerText }));
+					const badges = Array.prototype.slice.call(document.querySelectorAll('#dash-ready [data-ready] .gp-badge')).map((e) => rect(e).h);
+					const det = document.querySelector('#dash-alerts details');
+					const first = document.querySelector('#dash-alerts [data-alerts-first] .gp-alert');
+					const tile0 = document.querySelector('[data-tile]');
+					return { vals: Array.prototype.slice.call(document.querySelectorAll('[data-tile] .gp-dtile-value')).map((e) => rect(e).y), sparks: Array.prototype.slice.call(document.querySelectorAll('[data-tile] .gp-dspark')).map((e) => rect(e).y),
+						labels: Array.prototype.slice.call(document.querySelectorAll('[data-tile] .gp-dtile-label')).map((e) => Math.round(rect(e).h)), th, badges,
+						open: det ? det.hasAttribute('open') : null, firstVisible: first ? (rect(first).h > 20 && rect(first).y < 900) : null, alertsH: Math.round(rect(document.querySelector('#dash-alerts')).h), tileY: tile0 ? rect(tile0).y : 0 };
+				});
+				const rowsOf = (ys) => { const m = {}; ys.forEach((y, i) => { (m[Math.round(y / 50)] = m[Math.round(y / 50)] || []).push(i); }); return Object.keys(m).length; };
+				check(label + ': KPI values start at the same height in every tile of a row (the help icon does not push one down)', new Set(r.vals.slice(0, v.name === 'desktop' ? 6 : 2)).size === 1 && new Set(r.labels).size === 1, JSON.stringify([r.vals, r.labels]));
+				check(label + ': KPI sparklines line up across a row', new Set(r.sparks.slice(0, v.name === 'desktop' ? 6 : 2)).size === 1, JSON.stringify(r.sparks));
+				check(label + ': readiness headers do not run together (no clipped header, none overlapping its neighbour)', r.th.length >= 8 && r.th.every((t, i) => !t.clip && (i === 0 || r.th[i - 1].y !== t.y || r.th[i - 1].r <= t.x + 0.5)), JSON.stringify(r.th.map((t) => [t.t, Math.round(t.x), Math.round(t.r), t.clip])));
+				const wrapFits = await page.evaluate(() => { const w = document.querySelector('#dash-ready .gp-table-wrap'); return w ? [w.scrollWidth, w.clientWidth] : null; });
+				if (v.name === 'desktop') { check(label + ': the readiness table fits its card (no horizontal scroll, every column visible)', !!wrapFits && wrapFits[0] <= wrapFits[1] + 1, JSON.stringify(wrapFits)); }
+				check(label + ': the "Ready to enforce" and type badges never wrap (one line high)', r.badges.length > 0 && r.badges.every((h) => h < 30), JSON.stringify(r.badges));
+				if (v.name === 'mobile') {
+					check(label + ': the alert list is collapsed on a phone, the first critical alert is still shown, the KPIs start high on the page', r.open === false && r.firstVisible === true && r.alertsH < 330 && r.tileY < 1100, JSON.stringify([r.open, r.firstVisible, r.alertsH, r.tileY]));
+				} else {
+					check(label + ': the alert list is open on a wide screen', r.open === true, String(r.open));
+				}
 				for (const scheme of ['light', 'dark']) {
 					await page.emulateMedia({ colorScheme: scheme }); await page.waitForTimeout(500);
-					await page.screenshot({ path: SHOTS + '/' + v.name + '-dashboard-' + scheme + '.png', fullPage: true });
+					const ct = await page.evaluate(() => {
+						const lum = (c) => { const m = c.match(/[\d.]+/g).map(Number); const f = (x) => { x /= 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); }; return 0.2126 * f(m[0]) + 0.7152 * f(m[1]) + 0.0722 * f(m[2]); };
+						const bg = (el) => { while (el) { const c = getComputedStyle(el).backgroundColor; if (c && !/rgba?\(0, 0, 0, 0\)/.test(c) && !/, 0\)$/.test(c)) { return c; } el = el.parentElement; } return 'rgb(255, 255, 255)'; };
+						const on = document.querySelector('#dash-main .gp-tab[aria-selected="true"]'), off = document.querySelector('#dash-main .gp-tab[aria-selected="false"]');
+						if (!on || !off) { return null; }
+						const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+						return { on: ratio(getComputedStyle(on).color, bg(on)), off: ratio(getComputedStyle(off).color, bg(off)), onW: getComputedStyle(on).fontWeight, same: getComputedStyle(on).color !== getComputedStyle(off).color || getComputedStyle(on).fontWeight !== getComputedStyle(off).fontWeight };
+					});
+					check(label + ' ' + scheme + ': the active "24 h" tab is readable (contrast >= 4.5) and looks active, not disabled', !!ct && ct.on >= 4.5 && ct.off >= 3 && ct.same, JSON.stringify(ct));
+					if (SHOTS) { await page.screenshot({ path: SHOTS + '/' + v.name + '-dashboard-' + scheme + '.png', fullPage: true }); }
 				}
 				await page.emulateMedia({ colorScheme: 'light' });
+			}
+			if (false) {
 			} else if (SHOTS && ['update', 'users', 'settings', 'rules&new=1', 'logs&act=403,429&act_op=not&ua=curl&ua_op=not&cc=ir', 'geo'].indexOf(p) >= 0) {
 				await page.screenshot({ path: SHOTS + '/' + v.name + '-' + p.split('&')[0] + (p.indexOf('new=1') > 0 ? '-form' : '') + (p.indexOf('act_op') > 0 ? '-filters' : '') + '.png', fullPage: false });
 			}
@@ -419,10 +454,20 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 		await Promise.all([page.waitForNavigation(), page.click('button[name=override][value=allow]')]);
 		await ctxCheck('override', 'msg-override-add', '.gp-card');
 		await page.goto(ROOT + '?r=dashboard');
-		await Promise.all([page.waitForNavigation(), page.click('form[action$="r=dashboard"] button[type=submit]')]);
+		let dialogs = 0; const onDialog = () => { dialogs++; }; page.on('dialog', onDialog);
+		await Promise.all([page.waitForNavigation(), page.click('#dash-kill a[href*="kill_confirm=1"]')]);
+		const ask = await page.locator('#dash-kill .gp-kill-confirm').innerText();
+		check(v.name + ' kill switch: one click only asks ("Stop the guard? This switches off all protection." Stop / Cancel), inline, no browser dialog, nothing stopped yet',
+			/Stop the guard\?/.test(ask) && /switches off all protection/.test(ask) && /Cancel/.test(ask) && dialogs === 0 && (await page.locator('#dash-kill .gp-pulse-ok').count()) === 1, ask.replace(/\s+/g, ' '));
+		await Promise.all([page.waitForNavigation(), page.click('#dash-kill a:has-text("Cancel")')]);
+		check(v.name + ' kill switch: Cancel leaves the guard running and the Stop link back', (await page.locator('#dash-kill .gp-pulse-ok').count()) === 1 && (await page.locator('#dash-kill .gp-kill-confirm').count()) === 0);
+		await Promise.all([page.waitForNavigation(), page.click('#dash-kill a[href*="kill_confirm=1"]')]);
+		await Promise.all([page.waitForNavigation(), page.click('#dash-kill .gp-kill-confirm button[type=submit]')]);
+		check(v.name + ' kill switch: the confirmed Stop stopped the guard (no dialog)', (await page.locator('#dash-kill .gp-pulse-bad').count()) === 1 && dialogs === 0);
 		await ctxCheck('kill switch stop', 'msg-killswitch', 'div');
-		await Promise.all([page.waitForNavigation(), page.click('form[action$="r=dashboard"] button[type=submit]')]);
+		await Promise.all([page.waitForNavigation(), page.click('#dash-kill form button[type=submit]')]);
 		await ctxCheck('kill switch start', 'msg-killswitch', 'div');
+		page.off('dialog', onDialog);
 		// ---- IP feeds tab: presets, create, a refused fetch (SSRF guard, no network needed), messages in context, delete
 		await page.goto(ROOT + '?r=iplists&new_feed=1&preset=uptimerobot#ipl-feeds');
 		check(v.name + ' feeds: the Feeds tab opens on the hash, the preset fills the form (name, URL, allow-list destination), the CDN warning is visible',

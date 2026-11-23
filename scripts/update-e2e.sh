@@ -109,7 +109,7 @@ resp="$(curl -s -c "$JAR" -b "$JAR" "http://127.0.0.1:$PORT/panel/$rloc")"
 check "a broken update is rolled back automatically and the result page says so" "$(has 'rolled back automatically' "$resp")"
 check "...the old version is running again and guard.off is gone" "$([ "$(cat "$INST/VERSION")" = "2026.01.01" ] && [ ! -f "$INST/guard.off" ] && ! grep -q 'function gv_log_policy() {}' "$INST/guard/log.php" && echo 1 || echo 0)"
 page="$(curl -s -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
-check "the panel still works after the automatic rollback" "$(has 'name="killswitch"' "$page")"
+check "the panel still works after the automatic rollback" "$(has 'data-chip="kill"' "$page")"
 audit="$(cat "$INST/panel/audit.jsonl" 2>/dev/null)"
 check "the audit trail has the upload, apply, verified, rollback and refusal events" "$([ "$(has 'update_upload' "$audit")" = 1 ] && [ "$(has 'update_apply' "$audit")" = 1 ] && [ "$(has 'update_verified' "$audit")" = 1 ] && [ "$(has 'reauth_failed' "$audit")" = 1 ] && echo 1 || echo 0)"
 

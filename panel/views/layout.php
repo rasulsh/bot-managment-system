@@ -202,6 +202,10 @@
 			button.setAttribute('aria-expanded', hidden ? 'true' : 'false');
 		});
 	});
+	// Collapsible lists that start open on wide screens and closed on a phone (the dashboard's alert list).
+	document.querySelectorAll('details[data-open-wide]').forEach(function (d) {
+		if (window.matchMedia && window.matchMedia('(min-width: 768px)').matches) { d.setAttribute('open', ''); }
+	});
 	// Tabs: the markup already contains every panel, stacked. With the script the
 	// strip appears, only the active panel shows, the arrow keys move between tabs
 	// (role=tablist), and the URL hash (#group-tab) remembers the tab. A server-side

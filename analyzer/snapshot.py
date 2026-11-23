@@ -344,57 +344,92 @@ def readiness(rows, now):
     return {'rules': fin(rules), 'lists': fin(lists)}
 
 
-def funnel_by_level(rows):
-    """Challenge funnel per level over one window: served -> solved -> passed, failures, median solve time. Pure.
+def _idents(row):
+    """Who a funnel row belongs to: the device id and the address (a visitor with no token has no device id yet). Pure."""
+    out = []
+    dev = str(row.get('dev') or '')
+    ip = str(row.get('ip') or '')
+    if dev:
+        out.append('d:' + dev)
+    if ip:
+        out.append('i:' + ip)
+    return out
 
-    js = the short check page, captcha = the image CAPTCHA. passed = devices that were served and afterwards made an allowed
-    request with a valid token.
+
+def _find(table, row):
+    """The key of `table` this row belongs to (device first, then address), or None."""
+    for key in _idents(row):
+        if key in table:
+            return key
+    return None
+
+
+def funnel_by_level(rows):
+    """Challenge funnel per level over one window. Pure.
+
+    Every stage counts DISTINCT visitors (a device, else an address), and each stage is a subset of the one before it, so the
+    numbers can only go down from left to right:
+      served  = visitors who were sent the check page (js: act challenge, not monitor-only) or the image CAPTCHA (cap = show);
+      solved  = served visitors with a LATER accepted answer: a token was issued (js: act token_issued, or a monitor-only issue)
+                or the CAPTCHA was answered correctly (cap = ok);
+      passed  = solved visitors with a LATER allowed request carrying a valid token (tok = v).
+    failed = served visitors with a refused attempt (js: nonce_bad and the other rejections; captcha: wrong, fail, inv, exp);
+    it is not a stage of the chain, only a count of those served. median_s = median seconds a solved CAPTCHA took.
     """
-    lv = dict((k, {'served': 0, 'solved': 0, 'failed': 0, 'passed': 0, 'median_s': None}) for k in ('js', 'captcha'))
-    first = {'js': {}, 'captcha': {}}
+    levels = ('js', 'captcha')
+    served = dict((lv, {}) for lv in levels)      # key -> first served ts
+    solved = dict((lv, {}) for lv in levels)      # key -> first solved ts after being served
+    failed = dict((lv, set()) for lv in levels)
     times = []
-    for row in rows:
+    ordered = sorted(rows, key=_row_ts)
+    for row in ordered:
+        ids = _idents(row)
+        if not ids:
+            continue
+        ts = _row_ts(row)
         act = str(row.get('act') or '')
         cap = str(row.get('cap') or '')
-        dev = str(row.get('dev') or '')
-        ts = _row_ts(row)
-        level = None
-        if cap == 'show':
-            lv['captcha']['served'] += 1
-            level = 'captcha'
-        elif act == 'challenge' and int(row.get('sh') or 0) != 1 and cap != 'esc':
-            lv['js']['served'] += 1
-            level = 'js'
-        if level and dev and (dev in first[level] or len(first[level]) < 5000):
-            first[level][dev] = min(ts, first[level].get(dev, ts))
+        if cap == 'show' or (act == 'challenge' and int(row.get('sh') or 0) != 1 and cap == ''):
+            lv = 'captcha' if cap == 'show' else 'js'
+            if _find(served[lv], row) is None and len(served[lv]) < 20000:
+                served[lv][ids[0]] = ts
         if cap == 'ok':
-            lv['captcha']['solved'] += 1
-            try:
-                times.append(float(row.get('ct')))
-            except (TypeError, ValueError):
-                pass
+            k = _find(served['captcha'], row)
+            if k is not None and ts >= served['captcha'][k] and k not in solved['captcha']:
+                solved['captcha'][k] = ts
+                try:
+                    times.append(float(row.get('ct')))
+                except (TypeError, ValueError):
+                    pass
         elif cap in ('wrong', 'fail', 'inv', 'exp'):
-            lv['captcha']['failed'] += 1
+            k = _find(served['captcha'], row)
+            if k is not None:
+                failed['captcha'].add(k)
         if logs_mod.token_was_issued(row):
-            lv['js']['solved'] += 1
+            k = _find(served['js'], row)
+            if k is not None and ts >= served['js'][k] and k not in solved['js']:
+                solved['js'][k] = ts
         if logs_mod.handshake_rejected(row):
-            lv['js']['failed'] += 1
-    passed = {'js': set(), 'captcha': set()}
-    for row in rows:
+            k = _find(served['js'], row)
+            if k is not None:
+                failed['js'].add(k)
+    passed = dict((lv, set()) for lv in levels)
+    for row in ordered:
         if str(row.get('tok') or '') != 'v' or str(row.get('act') or '') not in ALLOW_ACTS:
             continue
-        dev = str(row.get('dev') or '')
         ts = _row_ts(row)
-        for level in ('js', 'captcha'):
-            if dev in first[level] and ts > first[level][dev]:
-                passed[level].add(dev)
-    for level in ('js', 'captcha'):
-        lv[level]['passed'] = len(passed[level])
+        for lv in levels:
+            k = _find(solved[lv], row)
+            if k is not None and ts > solved[lv][k]:
+                passed[lv].add(k)
+    out = {}
+    for lv in levels:
+        out[lv] = {'served': len(served[lv]), 'solved': len(solved[lv]), 'passed': len(passed[lv]), 'failed': len(failed[lv]), 'median_s': None}
     times.sort()
     if times:
         mid = len(times) // 2
-        lv['captcha']['median_s'] = times[mid] if len(times) % 2 else (times[mid - 1] + times[mid]) / 2.0
-    return lv
+        out['captcha']['median_s'] = times[mid] if len(times) % 2 else (times[mid - 1] + times[mid]) / 2.0
+    return out
 
 
 def top_mix(rows, n=10):

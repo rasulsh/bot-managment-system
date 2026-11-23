@@ -706,7 +706,6 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
 /* KPI tiles */
 .gp-dtile { @apply gap-1 no-underline hover:border-field; color: inherit; }
 .gp-dtile:focus-visible { @apply outline-none ring-2 ring-accent/60; }
-.gp-dtile-label { @apply flex items-center gap-1 text-xs font-bold text-muted; }
 .gp-dtile-value { @apply text-2xl font-bold leading-tight text-ink; }
 .gp-dtile-delta { @apply text-[11px] text-subtle; }
 .gp-dtile-extra { @apply text-[11px] text-subtle; }
@@ -749,3 +748,24 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
 .gp-funnel-bar > span { display: block; height: 100%; }
 .gp-funnel-v { font-variant-numeric: tabular-nums; @apply text-end; }
 .gp-dtable .gp-badge { white-space: nowrap; }
+
+/* --- dashboard v2, review fixes --- */
+.gp-tab { transition: none; }
+.gp-dtile-label { align-items: flex-start; min-height: 2.5rem; @apply flex gap-1 text-xs font-bold text-muted; }
+.gp-dtile-name { min-width: 0; @apply leading-5; }
+.gp-dtile-label .gp-tip { flex: none; }
+.gp-dtile-label .gp-tip-btn { margin: 0; width: 1.25rem; height: 1.25rem; }
+.gp-dtable { min-width: 0; }
+#dash-ready .gp-dtable th { white-space: nowrap; vertical-align: bottom; line-height: 1.2; }
+#dash-ready .gp-dtable th, #dash-ready .gp-dtable td { padding-inline: .5rem; }
+#dash-ready .gp-dtable th:first-child, #dash-ready .gp-dtable td:first-child { padding-inline-start: 0; }
+.gp-dtable th { vertical-align: bottom; }
+.gp-dname { min-width: 9rem; overflow-wrap: anywhere; }
+.gp-kill-confirm { display: flex; flex-direction: column; gap: .4rem; }
+.gp-kill-ask { @apply text-xs; }
+.gp-kill-btns { display: flex; gap: .4rem; }
+.gp-alerts-more > summary { cursor: pointer; @apply py-2 text-sm font-bold text-ink; }
+.gp-alerts-more[open] .gp-alerts-show, .gp-alerts-more:not([open]) .gp-alerts-hide { display: none; }
+.gp-alerts-more > .gp-alert-list { @apply mt-1; }
+.gp-alerts > .gp-alert-list { @apply mb-1; }
+#dash-ready .gp-dtable th:nth-child(7) { white-space: normal; }

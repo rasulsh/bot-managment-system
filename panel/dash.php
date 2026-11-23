@@ -17,12 +17,16 @@ function gp_dash_block($snap) {
 	return (isset($d['v']) && (int)$d['v'] >= 1 && isset($d['hours']) && is_array($d['hours'])) ? $d : array();
 }
 
-// A rounded-up axis maximum: 1, 2, 5 x 10^k.
+// A rounded-up axis maximum with four equal, round steps: the step is 1, 2, 2.5, 3, 4, 5, 6, 8 or 10 x 10^k, the maximum is four steps
+// (115 -> 120 in steps of 30, 7 -> 8 in steps of 2, 4300 -> 4400 in steps of 1100 is not offered, so 4800 in steps of 1200).
 function gp_dash_nice_max($v) {
-	$v = max(1, (float)$v);
-	$p = pow(10, floor(log10($v)));
-	foreach (array(1, 2, 5, 10) as $m) { if ($v <= $m * $p) { return (int)($m * $p); } }
-	return (int)(10 * $p);
+	$v = max(1.0, (float)$v);
+	$p = pow(10, floor(log10($v / 4)));
+	foreach (array(1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10) as $m) {
+		$step = $m * $p;
+		if ($step * 4 >= $v - 1e-9) { return max(4, (int)round($step * 4)); }
+	}
+	return (int)round(40 * $p);
 }
 
 // "1.2k" / "34" for an axis tick.
@@ -38,7 +42,7 @@ function gp_dash_short($n) {
 function gp_dash_main_chart(array $buckets, $days, $uid) {
 	if (!$buckets) { return ''; }
 	$cl = gp_dash_classes();
-	$W = 960; $H = 280; $L = 46; $R = 12; $T = 14; $B = 30;
+	$W = 960; $H = 292; $L = 46; $R = 12; $T = 28; $B = 30;
 	$pw = $W - $L - $R; $ph = $H - $T - $B;
 	$n = count($buckets);
 	$max = 1;
@@ -51,12 +55,13 @@ function gp_dash_main_chart(array $buckets, $days, $uid) {
 		. '<defs><pattern id="dch-h-' . gp_e($uid) . '" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
 		. '<rect width="5" height="5" style="fill:' . gp_chart_color('neutral') . ';fill-opacity:.35"/><line x1="0" y1="0" x2="0" y2="5" style="stroke:' . gp_chart_color('neutral') . ';stroke-width:2"/></pattern></defs>';
 	// Y axis: three ticks and the unit.
-	foreach (array(0, 0.5, 1) as $f) {
+	foreach (array(0, 0.25, 0.5, 0.75, 1) as $f) {
 		$y = $T + $ph - $ph * $f;
 		$svg .= '<line x1="' . $L . '" x2="' . ($W - $R) . '" y1="' . round($y, 1) . '" y2="' . round($y, 1) . '" class="gp-dchart-grid"/>'
 			. '<text x="' . ($L - 6) . '" y="' . round($y + 3.5, 1) . '" class="gp-dchart-tick" text-anchor="end">' . gp_e(gp_dash_short($top * $f)) . '</text>';
 	}
-	$svg .= '<text x="' . $L . '" y="9" class="gp-dchart-unit">' . gp_e(gp_t('dash_main_unit')) . '</text>';
+	// The unit is the axis title, above the plot area (never on a gridline).
+	$svg .= '<text x="2" y="12" class="gp-dchart-unit">' . gp_e(gp_t('dash_main_unit')) . '</text>';
 	$line = array();
 	$prev_day = '';
 	foreach ($buckets as $i => $b) {

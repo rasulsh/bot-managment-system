@@ -58,6 +58,23 @@ that row (grid `align-items: stretch`, card body is a flex column); no card sets
 
 Older snapshots (no `dash`) still render: the cards show an empty state that says the snapshot job has not produced the new data yet.
 
+## 15.4b Funnel stages
+
+Each stage counts distinct visitors (the device id, else the address, because a visitor with no token has no device yet) and is a subset of the stage before, so a number can only go down from left to right:
+
+| Stage | Definition from the log fields |
+|---|---|
+| Served | `act = challenge` and not monitor-only (check page), or `cap = show` (image CAPTCHA) |
+| Solved | a served visitor with a later (or same-time) accepted answer: `act = token_issued` (or a monitor-only issue), or `cap = ok` |
+| Passed | a solved visitor with a later allowed request carrying a valid token (`tok = v`) |
+| Failed | a served visitor with a refused attempt (`nonce_bad` and the other rejections; `cap` = wrong, fail, inv, exp); not a stage of the chain, always at most Served |
+
+Percentages are of Served. `analyzer/selftest.py` checks `passed <= solved <= served` and `failed <= served` on 300 random logs.
+
+## 15.4c Kill switch and alerts
+
+Stopping the guard needs a confirmation step on the page itself (no browser dialog): *Stop the guard? This switches off all protection.* [Stop] [Cancel]; the server refuses a stop POST that lacks `confirm=1` by redirecting to the confirmation. Starting needs no confirmation. The alert card always shows the first critical alert; the rest is a list that opens by itself from 768 px upward and stays collapsed on a phone behind *5 critical · 5 warning - show all (N more)*.
+
 ## 15.5 Empty and stale states
 
 | Situation | What the page says |

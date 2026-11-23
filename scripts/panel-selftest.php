@@ -3408,7 +3408,7 @@ t_ok('dashboard: a snapshot from before this version (no dash block) renders, wi
 
 // ---- Dashboard v2: helpers, layout spec, empty states, rollout readiness, protection modes
 t_section('Dashboard v2');
-t_ok('dash helpers: nice axis maximum and short numbers', gp_dash_nice_max(0) === 1 && gp_dash_nice_max(7) === 10 && gp_dash_nice_max(120) === 200 && gp_dash_nice_max(1000) === 1000 && gp_dash_nice_max(4300) === 5000
+t_ok('dash helpers: nice axis maximum and short numbers', gp_dash_nice_max(0) === 4 && gp_dash_nice_max(7) === 8 && gp_dash_nice_max(115) === 120 && gp_dash_nice_max(120) === 120 && gp_dash_nice_max(121) === 160 && gp_dash_nice_max(200) === 200 && gp_dash_nice_max(1000) === 1000 && gp_dash_nice_max(4300) === 4800
 	&& gp_dash_short(950) === '950' && gp_dash_short(1500) === '1.5k' && gp_dash_short(2000000) === '2M');
 $dv_hours = array(); for ($i = 0; $i < 24; $i++) { $dv_hours[] = array('t' => 1700000000 + $i * 3600, 'n' => 10 + $i, 'a' => 8, 'c' => 1, 'p' => 0, 'b' => 1 + $i, 'r' => 0, 'm' => 1, 'ips' => 5); }
 $dv_svg = gp_dash_main_chart($dv_hours, false, 'x1');
@@ -3478,14 +3478,58 @@ list($dv_he, $dv_ee) = $jh_render('dashboard', array('snapshot' => $kpi_snap), a
 t_ok('status strip: monitor only, partly enforcing and enforcing are each shown as a word, and the strip has the kill switch, alerts, jobs, snapshot age and version chips',
 	!$dv_ep && !$dv_ee && strpos($h_ok, 'monitor only') !== false && strpos($dv_hp, 'partly enforcing') !== false && strpos($dv_he, 'enforcing') !== false && strpos($dv_he, 'partly enforcing') === false
 	&& (function () use ($h_ok) { foreach (array('mode', 'kill', 'alerts', 'jobs', 'snapshot', 'version') as $c) { if (strpos($h_ok, 'data-chip="' . $c . '"') === false) { return false; } } return true; })());
-t_ok('status strip: the kill switch is a POST form with the CSRF token; the alerts list is collapsible and open when something is critical', substr_count($h_ok, 'name="killswitch"') === 1 && strpos($h_ok, 'name="csrf"') !== false
-	&& strpos($h_bad, 'id="dash-alerts"') !== false && strpos($h_bad, 'id="dash-alerts" aria-label="Needs attention" role="alert" open') !== false);
+t_ok('status strip: the alerts list is collapsible (open by itself on wide screens)', strpos($h_ok, 'data-chip="kill"') !== false
+	&& strpos($h_bad, 'id="dash-alerts"') !== false && strpos($h_bad, 'data-open-wide="1"') !== false);
 // Demo role: aggregate tiles and the main chart, no identities
 $dv_dm = gp_demo_model(array('snapshot' => $kpi_snap, 'cfg' => gv_cfg_defaults(array()), 'rules' => array(), 'lists' => array(), 'jobs' => array(), 'now' => $jh_now));
 t_ok('demo model: the chart rows hold the hour and counts only (nine integer fields), 24 h and 7 d', count($dv_dm['chart']['h24']) === 2 && (function () use ($dv_dm) { foreach ($dv_dm['chart']['h24'] as $b) { if (array_keys($b) !== array('t', 'n', 'a', 'c', 'p', 'b', 'r', 'm', 'ips')) { return false; } foreach ($b as $v) { if (!is_int($v)) { return false; } } } return true; })());
 
 list($dv_ho, $dv_eo) = $jh_render('dashboard', array('snapshot' => $kpi_snap), array('role' => 'operator'));
 t_ok('dashboard as an operator: no link to the Update page (admin only), the chip still shows the version', !$dv_eo && strpos($dv_ho, 'r=update') === false && strpos($dv_ho, 'data-chip="version"') !== false);
+
+// ---- Dashboard v2 review fixes: funnel, axis, kill switch confirmation, alerts on a phone, readiness table
+t_section('Dashboard v2 review');
+// the chart axis: scaled to the data with round ticks, the unit is the axis title outside the plot area
+$rv_b = array(); for ($i = 0; $i < 24; $i++) { $rv_b[] = array('t' => 1700000000 + $i * 3600, 'n' => 60 + $i * 2, 'a' => 50, 'c' => 5, 'p' => 0, 'b' => 5, 'r' => 0, 'm' => 0, 'ips' => 20); }
+$rv_b[7]['n'] = 115; $rv_b[7]['a'] = 105;
+$rv_svg = gp_dash_main_chart($rv_b, false, 'rv');
+preg_match_all('/class="gp-dchart-tick" text-anchor="end">([0-9.kM]+)</', $rv_svg, $rv_t);
+t_ok('chart axis: a maximum of 115 gives the axis 0, 30, 60, 90, 120 (not 200)', $rv_t[1] === array('0', '30', '60', '90', '120'));
+preg_match('/<text x="2" y="(\d+)" class="gp-dchart-unit">requests \/ hour/', $rv_svg, $rv_u); preg_match_all('/class="gp-dchart-grid"/', $rv_svg, $rv_g); preg_match('/<line x1="46" x2="948" y1="([0-9.]+)"/', $rv_svg, $rv_l);
+t_ok('chart axis: the unit text sits at the left, above the top gridline, not on it', !empty($rv_u) && !empty($rv_l) && (float)$rv_u[1] + 6 < (float)$rv_l[1] && count($rv_g[0]) === 5);
+t_ok('chart: the subtitle names the panel time zone ("hours in UTC +00:00"), not "UTC hours shown in"', strpos($h_ok, 'hours in ') !== false && strpos($h_ok, 'UTC hours shown') === false && strpos(gp_t('dash_main_sub'), '%s') !== false);
+// the funnel: the numbers the page shows only go down, percentages are of Served, the tooltip defines every stage
+$rv_snap = $kpi_snap; $rv_snap['dash']['funnel'] = array('js' => array('served' => 93, 'solved' => 60, 'passed' => 47, 'failed' => 5, 'median_s' => null), 'captcha' => array('served' => 18, 'solved' => 16, 'passed' => 14, 'failed' => 2, 'median_s' => 5.0));
+list($rv_h, $rv_e) = $jh_render('dashboard', array('snapshot' => $rv_snap));
+preg_match_all('/gp-funnel-v">([0-9,]+)(?: <small>\((\d+)%\)<\/small>)?</', $rv_h, $rv_f);
+t_ok('funnel page: Served 93, Solved 60 (65%), Passed 47 (51%), Failed 5, then the CAPTCHA 18, 16 (89%), 14 (78%), 2: percentages are of Served', !$rv_e && $rv_f[1] === array('93', '60', '47', '5', '18', '16', '14', '2') && $rv_f[2] === array('', '65', '51', '', '', '89', '78', ''));
+t_ok('funnel tooltip: defines served, solved, passed and failed and says each stage is a subset of the one before', (function () { $t = gp_t('tip_dash_funnel'); foreach (array('Served =', 'Solved =', 'Passed =', 'Failed =', 'subset', 'Percentages are of Served') as $w) { if (strpos($t, $w) === false) { return false; } } return true; })());
+// kill switch: a confirmation step, no browser dialog, enforced by the server
+$rv_ix = file_get_contents(__DIR__ . '/../panel/index.php');
+list($rv_k0, $rv_ke0) = $jh_render('dashboard', array('snapshot' => $kpi_snap));
+list($rv_k1, $rv_ke1) = $jh_render('dashboard', array('snapshot' => $kpi_snap), array('kill_confirm' => true));
+list($rv_k2, $rv_ke2) = $jh_render('dashboard', array('snapshot' => $kpi_snap), array('kill' => true));
+t_ok('kill switch, armed: the strip has a Stop link that only opens the confirmation (a GET), no form that stops, no browser dialog', !$rv_ke0 && strpos($rv_k0, 'kill_confirm=1#dash-kill') !== false && strpos($rv_k0, 'name="killswitch"') === false && strpos($rv_k0, 'data-confirm') === false);
+t_ok('kill switch, confirmation: "Stop the guard? This switches off all protection." with a Stop button (POST, CSRF, confirm=1) and a Cancel link', !$rv_ke1 && strpos($rv_k1, 'Stop the guard?') !== false && strpos($rv_k1, 'This switches off all protection.') !== false
+	&& strpos($rv_k1, 'name="killswitch" value="stop"') !== false && strpos($rv_k1, 'name="confirm" value="1"') !== false && strpos($rv_k1, 'name="csrf"') !== false && strpos($rv_k1, '>Cancel<') !== false && strpos($rv_k1, 'data-confirm') === false);
+t_ok('kill switch, stopped: one click starts the guard again (no confirmation needed to restore protection)', !$rv_ke2 && strpos($rv_k2, 'name="killswitch" value="start"') !== false && strpos($rv_k2, 'name="confirm"') === false);
+t_ok('kill switch: the server refuses a stop POST without confirm=1 (it redirects to the confirmation) and audits the real stop as before', strpos($rv_ix, "(\$_POST['confirm'] ?? '') !== '1'") !== false && strpos($rv_ix, "gp_redirect('dashboard', array('kill_confirm' => 1))") !== false
+	&& strpos($rv_ix, "'event' => 'killswitch'") !== false && strpos($rv_ix, "'kill_confirm' => (") !== false);
+// alerts on a phone: the first critical one is always shown, the rest is a collapsible list that opens by itself on wide screens
+list($rv_a, $rv_ea) = $jh_render('dashboard', array('snapshot' => null, 'redis_up' => false, 'jobs' => $jh_bad, 'exposed' => array('/x/logs'), 'storage' => array('warnings' => array('disk_low')), 'queue' => array('stuck' => true, 'oldest_age' => 900, 'length' => 3),
+	'cron' => array('mode' => 'none', 'report' => null, 'age' => null), 'secret_default' => true, 'noeviction' => false, 'rules_state' => 'invalid', 'geo_warn' => array('missing'), 'geo_rules' => 1, 'degraded' => array(10, 10), 'guard_errors' => array('redis_connect' => 4)));
+$rv_pos_first = strpos($rv_a, 'data-alerts-first="1"'); $rv_pos_more = strpos($rv_a, 'class="gp-alerts-more"');
+t_ok('alerts: the first CRITICAL alert sits outside the collapsible list, the list has a summary line with the counts and "show all (N more)", every other alert is inside it, none is lost',
+	!$rv_ea && $rv_pos_first !== false && $rv_pos_more !== false && $rv_pos_first < $rv_pos_more && substr_count(substr($rv_a, $rv_pos_first, $rv_pos_more - $rv_pos_first), 'data-alert=') === 1 && strpos(substr($rv_a, $rv_pos_first, $rv_pos_more - $rv_pos_first), 'gp-alert-critical') !== false
+	&& preg_match('/gp-alerts-sum">\d+ Critical( · \d+ Warning)?</', $rv_a) === 1 && strpos($rv_a, 'show all (') !== false && substr_count($rv_a, 'data-alert=') === count(gp_health_alerts(array_merge($healthy, array('snapshot' => null, 'redis_up' => false, 'jobs' => $jh_bad, 'exposed' => array('/x/logs'), 'storage' => array('warnings' => array('disk_low')), 'queue' => array('stuck' => true, 'oldest_age' => 900, 'length' => 3),
+	'cron' => array('mode' => 'none', 'report' => null, 'age' => null), 'secret_default' => true, 'noeviction' => false, 'rules_state' => 'invalid', 'geo_warn' => array('missing'), 'geo_rules' => 1, 'degraded' => array(10, 10), 'guard_errors' => array('redis_connect' => 4))))));
+t_ok('alerts: the layout script opens a [data-open-wide] list on wide screens only', strpos(file_get_contents(__DIR__ . '/../panel/views/layout.php'), "details[data-open-wide]") !== false && strpos(file_get_contents(__DIR__ . '/../panel/views/layout.php'), "(min-width: 768px)") !== false);
+// the placeholder-secret warning appears once (in the alert list), not also as a banner
+t_ok('the "secret is still the placeholder" warning is shown once', substr_count($rv_a, 'secret is still the placeholder') === 1 && strpos($rv_a, gp_t('dash_mode_forced')) === false);
+// the readiness table: a type column with consistent chips
+list($rv_r, $rv_re) = $jh_render('dashboard', array('snapshot' => $dv_snap), array('rules' => $dv_rules, 'iplists' => array_merge($dv_lists, array(array('id' => 'l3', 'name' => 'Partners', 'enabled' => true, 'type' => 'allow', 'mode' => 'monitor')))));
+t_ok('readiness table: a Type column with the chips "Rule", "IP list · block" and "IP list · allow", and the hint badge never wraps (nowrap rule in the CSS)', !$rv_re && strpos($rv_r, '>Type<') !== false && strpos($rv_r, 'data-type="rule">Rule<') !== false && strpos($rv_r, 'data-type="list-block">IP list · block<') !== false && strpos($rv_r, 'data-type="list-allow">IP list · allow<') !== false
+	&& strpos(file_get_contents(__DIR__ . '/../panel/assets/app.src.css'), '.gp-dtable .gp-badge { white-space: nowrap; }') !== false);
 
 t_section('Translations');
 $tr_lang = file_get_contents(__DIR__ . '/../panel/lang.php');
