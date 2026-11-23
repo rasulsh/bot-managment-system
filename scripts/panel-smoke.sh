@@ -124,7 +124,7 @@ code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" -F "csrf=$to
 rm -f "$smoke_mmdb"
 check "uploading a source file answers 303" "$([ "$code" = 303 ] && echo 1 || echo 0)"
 gp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=geo")"
-check "the uploaded source is listed as not compiled yet" "$(grep -q 'gp-ltr">smoke-test-upload.mmdb</td>' <<<"$gp" && grep -q 'not compiled yet' <<<"$gp" && echo 1 || echo 0)"
+check "the uploaded source is listed as not compiled yet" "$(grep -q 'gp-ltr gp-col-name">smoke-test-upload.mmdb</td>' <<<"$gp" && grep -q 'not compiled yet' <<<"$gp" && echo 1 || echo 0)"
 tp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'test=1' --data-urlencode 'ip=203.0.113.7' "$URL?r=geo")"
 check "the lookup tester answers for an address (unknown without a database)" "$(grep -q '203.0.113.7' <<<"$tp" && grep -q 'unknown' <<<"$tp" && echo 1 || echo 0)"
 tp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'test=1' --data-urlencode 'ip=not-an-ip' "$URL?r=geo")"
@@ -132,7 +132,7 @@ check "the tester refuses something that is not an address" "$(grep -q 'not an I
 tok="$(printf '%s' "$gp" | csrf)"
 curl -sk -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=delete' -d 'name=smoke-test-upload.mmdb' "$URL?r=geo"
 gp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=geo")"
-check "deleting the source removes it from the list" "$(grep -q 'gp-ltr">smoke-test-upload.mmdb</td>' <<<"$gp" && echo 0 || echo 1)"
+check "deleting the source removes it from the list" "$(grep -q 'gp-ltr gp-col-name">smoke-test-upload.mmdb</td>' <<<"$gp" && echo 0 || echo 1)"
 rp="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=rules")"
 tok="$(printf '%s' "$rp" | csrf)"
 code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=save' -d 'name=Smoke geo rule' -d 'enabled=1' -d 'mode=monitor' -d 'action=log' \
