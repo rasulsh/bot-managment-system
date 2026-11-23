@@ -19,6 +19,7 @@ if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 //   account      demo      demo: do=password (own password) other actions admin
 //   logout       demo      demo
 //   logs         operator  admin   (CSV export and share links are GETs: operator yes, demo no because demo cannot open Logs)
+//   live         operator  admin   (the page and its JSON poll are GETs that only read the log; the quick actions POST to overrides)
 //   identity     operator  admin   (quick block, mark seen)
 //   overrides    operator  admin
 //   rules        operator  admin   (the impact / test boxes are GET reads and stay open to the operator)
@@ -44,6 +45,7 @@ function gp_acl_map() {
 		'account'     => array('GET' => 'demo',     'POST' => array('*' => 'admin', 'password' => 'demo')),
 		'logout'      => array('GET' => 'demo',     'POST' => 'demo'),
 		'logs'        => array('GET' => 'operator', 'POST' => 'admin'),
+		'live'        => array('GET' => 'operator', 'POST' => 'admin'),
 		'identity'    => array('GET' => 'operator', 'POST' => 'admin'),
 		'overrides'   => array('GET' => 'operator', 'POST' => 'admin'),
 		'rules'       => array('GET' => 'operator', 'POST' => 'admin'),

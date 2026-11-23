@@ -4316,7 +4316,7 @@ $ui_src = file_get_contents(__DIR__ . '/../panel/index.php');
 preg_match_all("/^\tcase '([a-z_]+)':/m", $ui_src, $mm);
 $routes = array_values(array_unique(array_merge($mm[1], array('logout'))));
 $expect = array(   // route => array(GET min role, POST min role)   (the decision table, written out independently of acl.php)
-	'dashboard' => array('demo', 'admin'), 'account' => array('demo', 'admin'), 'logout' => array('demo', 'demo'), 'logs' => array('operator', 'admin'), 'identity' => array('operator', 'admin'),
+	'dashboard' => array('demo', 'admin'), 'account' => array('demo', 'admin'), 'logout' => array('demo', 'demo'), 'logs' => array('operator', 'admin'), 'live' => array('operator', 'admin'), 'identity' => array('operator', 'admin'),
 	'overrides' => array('operator', 'admin'), 'rules' => array('operator', 'admin'), 'geo' => array('operator', 'admin'), 'iplists' => array('operator', 'admin'), 'replay' => array('operator', 'admin'),
 	'models' => array('operator', 'admin'), 'settings' => array('operator', 'admin'), 'captcha_preview' => array('operator', 'admin'), 'jobs' => array('operator', 'admin'), 'audit' => array('operator', 'admin'),
 	'config_file' => array('admin', 'admin'), 'update' => array('admin', 'admin'), 'users' => array('admin', 'admin'));
@@ -4866,6 +4866,173 @@ putenv('GV_LISTS_DIR');
 foreach ((array)glob($tb_dir . '/lists/*') as $f) { @unlink($f); }
 @rmdir($tb_dir . '/lists'); @rmdir($tb_dir);
 t_ok('editor and entries: the help says how to write an expiry, the table has an Expires column', strpos($tb_lang['ipl_h_expires'], '# expires=2026-11-30') !== false && strpos(file_get_contents($tb_root . '/panel/views/iplists.php'), "ipl_c_expires") !== false);
+
+
+t_section('Live requests (PR H): cursor tail, rotation, caps, window, filters, ACL');
+require_once __DIR__ . '/../panel/live.php';
+$lv_root = dirname(__DIR__);
+$lv_dir = sys_get_temp_dir() . '/gp-live-' . bin2hex(random_bytes(4));
+mkdir($lv_dir, 0775, true);
+$lv_cfg = sys_get_temp_dir() . '/gp-live-cfg-' . bin2hex(random_bytes(4)) . '.php';
+file_put_contents($lv_cfg, "<?php\nif (!defined('GV_BOOT')) { exit; }\n\$c = require " . var_export(realpath(__DIR__ . '/../scripts/config.dev.php'), true) . ";\n\$c['log_dir'] = " . var_export($lv_dir, true) . ";\nreturn \$c;\n");
+$lv_prev = getenv('GV_CONFIG');
+putenv('GV_CONFIG=' . $lv_cfg);
+register_shutdown_function(function () use ($lv_dir, $lv_cfg) { foreach ((array)glob($lv_dir . '/*') as $f) { @unlink($f); } @rmdir($lv_dir); @unlink($lv_cfg); });
+$lv_row = function ($i, $extra = array()) { return json_encode(array_merge(array('v' => 5, 'rid' => sprintf('%012x', $i), 'ts' => 1000000000 + $i, 'ip' => '203.0.113.' . (1 + $i % 5), 'ua' => 'ua' . $i, 'm' => 'GET', 'p' => '/p' . $i,
+	'act' => 'allow', 'sh' => 0, 'tok' => 'v', 'dev' => '', 'sc' => 0, 'esc' => 0, 'rs' => array()), $extra)) . "\n"; };
+$lv_f = function ($date) use ($lv_dir) { return $lv_dir . '/guard-' . $date . '.jsonl'; };
+// cursor
+t_ok('cursor: "YYYYMMDD.OFFSET" round-trips, anything else is refused', gp_live_cursor_parse('20010101.15') === array('20010101', 15) && gp_live_cursor_format('20010101', 15) === '20010101.15'
+	&& gp_live_cursor_parse('x') === null && gp_live_cursor_parse('2001.5') === null && gp_live_cursor_parse('20010101.-1') === null && gp_live_cursor_parse('20010101.1e3') === null && gp_live_cursor_parse(array()) === null);
+// partial last line
+file_put_contents($lv_f('20010101'), $lv_row(1) . $lv_row(2) . '{"v":5,"rid":"part');
+list($lv_l, $lv_off, $lv_hit) = gp_live_read_lines($lv_f('20010101'), 0, 1048576, 100);
+t_ok('tail: a line still being written (no newline yet) is not delivered, and the offset stops before it', count($lv_l) === 2 && $lv_off === strlen($lv_row(1) . $lv_row(2)) && !$lv_hit);
+file_put_contents($lv_f('20010101'), 'ial","ts":1000000099,"ip":"1.1.1.1","act":"allow","sh":0}' . "\n", FILE_APPEND);
+list($lv_l2, $lv_off2) = gp_live_read_lines($lv_f('20010101'), $lv_off, 1048576, 100);
+t_ok('tail: once the line is complete the next read delivers it exactly once', count($lv_l2) === 1 && strpos($lv_l2[0], '"rid":"partial"') !== false && $lv_off2 === filesize($lv_f('20010101')));
+// forward polling, no duplicates
+@unlink($lv_f('20010101'));
+file_put_contents($lv_f('20010101'), $lv_row(1) . $lv_row(2) . $lv_row(3));
+list($lv_r, $lv_o, $lv_c, $lv_more) = gp_live_poll_raw(array('20010101', 0));
+t_ok('poll: from byte 0 all rows, a cursor at the end, nothing more', count($lv_r) === 3 && $lv_c === '20010101.' . filesize($lv_f('20010101')) && !$lv_more);
+list($lv_r, , $lv_c2) = gp_live_poll_raw(gp_live_cursor_parse($lv_c));
+t_ok('poll: from the end nothing comes back and the cursor does not move', $lv_r === array() && $lv_c2 === $lv_c);
+file_put_contents($lv_f('20010101'), $lv_row(4) . $lv_row(5), FILE_APPEND);
+list($lv_r, , $lv_c3) = gp_live_poll_raw(gp_live_cursor_parse($lv_c2));
+t_ok('poll: only the appended rows are returned (never a re-read of the file)', count($lv_r) === 2 && $lv_r[0]['rid'] === sprintf('%012x', 4) && $lv_r[1]['rid'] === sprintf('%012x', 5));
+// caps: rows and bytes; paging through them delivers every row exactly once
+@unlink($lv_f('20010101'));
+$lv_all = ''; for ($i = 1; $i <= 120; $i++) { $lv_all .= $lv_row($i); }
+file_put_contents($lv_f('20010101'), $lv_all);
+$lv_seen = array(); $lv_cur = array('20010101', 0); $lv_loops = 0; $lv_hit_more = false;
+do { list($lv_r, , $lv_cs, $lv_more) = gp_live_poll_raw($lv_cur, 0, 25, 1048576); foreach ($lv_r as $x) { $lv_seen[] = $x['rid']; } $lv_cur = gp_live_cursor_parse($lv_cs); $lv_hit_more = $lv_hit_more || $lv_more; $lv_loops++; } while ($lv_more && $lv_loops < 20);
+t_ok('caps: a row cap pages through 120 rows in poll after poll, `more` set until the end, every row once and in order', count($lv_seen) === 120 && count(array_unique($lv_seen)) === 120 && $lv_seen[0] === sprintf('%012x', 1) && $lv_seen[119] === sprintf('%012x', 120) && $lv_hit_more && $lv_loops === 5);
+$lv_seen = array(); $lv_cur = array('20010101', 0); $lv_loops = 0;
+do { list($lv_r, , $lv_cs, $lv_more) = gp_live_poll_raw($lv_cur, 0, 500, 2000); foreach ($lv_r as $x) { $lv_seen[] = $x['rid']; } $lv_cur = gp_live_cursor_parse($lv_cs); $lv_loops++; } while ($lv_more && $lv_loops < 200);
+t_ok('caps: a byte cap of 2000 per poll still delivers every row exactly once (a line cut by the cap waits for the next poll)', count($lv_seen) === 120 && count(array_unique($lv_seen)) === 120 && $lv_loops > 3);
+t_ok('caps: the shipped caps are 500 rows and 1 MiB per poll', GP_LIVE_MAX_ROWS === 500 && GP_LIVE_MAX_BYTES === 1048576);
+// truncation
+list($lv_r) = gp_live_poll_raw(array('20010101', filesize($lv_f('20010101')) + 5000));
+t_ok('tail: a file shorter than the cursor (replaced or truncated) is read again from the start', count($lv_r) === 120);
+// midnight
+@unlink($lv_f('20010101')); @unlink($lv_f('20010102'));
+file_put_contents($lv_f('20010101'), $lv_row(1) . $lv_row(2));
+list(, , $lv_c) = gp_live_poll_raw(array('20010101', 0));
+file_put_contents($lv_f('20010102'), $lv_row(10) . $lv_row(11));
+list($lv_r, , $lv_c2) = gp_live_poll_raw(gp_live_cursor_parse($lv_c));
+t_ok('midnight: at the end of its day the cursor continues at byte 0 of the next day\'s file, in the same poll', count($lv_r) === 2 && $lv_r[0]['rid'] === sprintf('%012x', 10) && strpos($lv_c2, '20010102.') === 0);
+file_put_contents($lv_f('20010101'), $lv_row(3), FILE_APPEND);
+list($lv_r, , $lv_c3) = gp_live_poll_raw(gp_live_cursor_parse($lv_c2));
+t_ok('midnight: a late line appended to yesterday\'s file after the switch is not re-read, today continues', $lv_r === array() && strpos($lv_c3, '20010102.') === 0);
+@unlink($lv_f('20010101')); @unlink($lv_f('20010102'));
+file_put_contents($lv_f('20010101'), $lv_row(1));
+file_put_contents($lv_f('20010104'), $lv_row(40));
+list($lv_r, , $lv_c) = gp_live_poll_raw(array('20010101', 0));
+t_ok('midnight: days without traffic (no file) are skipped', count($lv_r) === 2 && strpos($lv_c, '20010104.') === 0);
+file_put_contents($lv_f('20010101'), '{"v":5,"rid":"half', FILE_APPEND);
+list($lv_r) = gp_live_poll_raw(array('20010101', strlen($lv_row(1))));
+t_ok('midnight: a half line left at the end of a finished day does not block the next day for ever (dropped)', $lv_r === array() || count($lv_r) >= 1);
+list($lv_r, , $lv_c) = gp_live_poll_raw(array('20010101', strlen($lv_row(1))));
+t_ok('midnight: ...the cursor has moved on to the next file', strpos($lv_c, '20010104.') === 0 && count($lv_r) === 1 && $lv_r[0]['rid'] === sprintf('%012x', 40));
+// initial load
+@unlink($lv_f('20010101')); @unlink($lv_f('20010104'));
+$lv_now = 1700000000.0;
+$lv_txt = ''; for ($i = 0; $i < 100; $i++) { $lv_txt .= $lv_row($i, array('ts' => $lv_now - 600 + $i * 6)); }
+file_put_contents($lv_f('20010101'), $lv_txt . '{"v":5,"half');
+list($lv_r, , $lv_c) = gp_live_initial(5, 300, $lv_now);
+t_ok('initial: the last N minutes only (rows 50..99 here), oldest first, the cursor before the half line', count($lv_r) === 50 && $lv_r[0]['rid'] === sprintf('%012x', 50) && $lv_r[49]['rid'] === sprintf('%012x', 99) && $lv_c === '20010101.' . strlen($lv_txt));
+list($lv_r) = gp_live_initial(60, 30, $lv_now);
+t_ok('initial: the row cap keeps the NEWEST rows', count($lv_r) === 30 && $lv_r[29]['rid'] === sprintf('%012x', 99));
+@unlink($lv_f('20010101'));
+file_put_contents($lv_f('20010101'), $lv_row(1, array('ts' => $lv_now - 100)) . $lv_row(2, array('ts' => $lv_now - 50)));
+file_put_contents($lv_f('20010102'), $lv_row(3, array('ts' => $lv_now - 10)));
+list($lv_r) = gp_live_initial(5, 300, $lv_now);
+t_ok('initial: a window that crosses midnight also reads the day before', count($lv_r) === 3 && $lv_r[0]['rid'] === sprintf('%012x', 1) && $lv_r[2]['rid'] === sprintf('%012x', 3));
+@unlink($lv_f('20010101')); @unlink($lv_f('20010102'));
+list($lv_r, , $lv_c) = gp_live_initial(5, 300, $lv_now);
+t_ok('initial: no log at all is an empty answer with a cursor, not an error', $lv_r === array() && gp_live_cursor_parse($lv_c) !== null);
+// window: binary search and paging
+$lv_txt = ''; for ($i = 0; $i < 3000; $i++) { $lv_txt .= $lv_row($i, array('ts' => 1000000000 + $i * 2)); }
+$lv_wd = date('Ymd', 1000000000 + 2000 * 2);        // a window finds its file by the date of its start
+file_put_contents($lv_f($lv_wd), $lv_txt);
+$lv_t = 1000000000 + 2000 * 2;
+$lv_off = gp_live_seek($lv_f($lv_wd), $lv_t);
+$lv_fh = fopen($lv_f($lv_wd), 'rb'); fseek($lv_fh, $lv_off); $lv_first = json_decode(fgets($lv_fh), true); fclose($lv_fh);
+t_ok('seek: the binary search lands on a line start just BEFORE the first row of the window (never after it; the row filter drops the few earlier rows), without reading the file', $lv_first['ts'] <= $lv_t && $lv_first['ts'] >= $lv_t - 40 && ($lv_off === 0 || $lv_txt[$lv_off - 1] === "\n"));
+t_ok('seek: before the first row it is 0, after the last it is the size', gp_live_seek($lv_f($lv_wd), 1) === 0 && gp_live_seek($lv_f($lv_wd), 2000000000) <= filesize($lv_f($lv_wd)) && gp_live_seek($lv_f($lv_wd), 1000000000) === 0);
+// a window through the answer function: rows between start and end only, paged by the cursor
+$lv_req = array('mode' => 'window', 'start' => 1000000000 + 2000 * 2, 'end' => 1000000000 + 2100 * 2, 'filter' => array(), 'show' => array(), 'watch' => array());
+$lv_a = gp_live_answer($lv_req);
+t_ok('window: the first answer is exactly the rows from start to end (101 here), then done', $lv_a['ok'] && count($lv_a['rows']) === 101 && $lv_a['rows'][0]['rid'] === sprintf('%012x', 2000) && $lv_a['rows'][100]['rid'] === sprintf('%012x', 2100) && $lv_a['done'] === true);
+@unlink($lv_f($lv_wd));
+t_ok('window: a bad window (no start, end before start, longer than two days) is refused', gp_live_answer(array('mode' => 'window', 'start' => 0, 'end' => 5))['ok'] === false && gp_live_answer(array('mode' => 'window', 'start' => 100, 'end' => 50))['ok'] === false
+	&& gp_live_answer(array('mode' => 'window', 'start' => 100, 'end' => 100 + 3 * 86400))['ok'] === false);
+// filters in a poll
+$lv_t0 = 1000000000;
+file_put_contents($lv_f(date('Ymd', $lv_t0)),
+	$lv_row(1, array('ts' => $lv_t0 + 1, 'act' => '403', 'ip' => '198.51.100.7', 'rs' => array('RULE:r1', 'UA_SCRIPT'))) . $lv_row(2, array('ts' => $lv_t0 + 2, 'act' => 'allow', 'ip' => '203.0.113.9', 'dev' => 'devA'))
+	. $lv_row(3, array('ts' => $lv_t0 + 3, 'act' => '429', 'ip' => '203.0.113.9')) . $lv_row(4, array('ts' => $lv_t0 + 4, 'act' => 'challenge', 'cap' => 'show', 'ip' => '203.0.113.10'))
+	. $lv_row(5, array('ts' => $lv_t0 + 5, 'act' => '403', 'sh' => 1, 'ip' => '203.0.113.11', 'rs' => array('SH_RULE:r2'))) . $lv_row(6, array('ts' => $lv_t0 + 6, 'act' => 'allow_bot', 'botv' => 'ok', 'ip' => '66.249.1.1'))
+	. $lv_row(7, array('ts' => $lv_t0 + 7, 'act' => 'challenge', 'ip' => '203.0.113.12')) . '{"o":1,"rid":"' . sprintf('%012x', 1) . '","st":403,"by":13,"dur":1.5}' . "\n");
+t_ok('classes: allowed, challenged, captcha, blocked, rate limited, monitor (a shadow row is monitor whatever its act)',
+	gp_live_class(array('act' => 'allow')) === 'allowed' && gp_live_class(array('act' => '403')) === 'blocked' && gp_live_class(array('act' => '429')) === 'ratelimited'
+	&& gp_live_class(array('act' => 'challenge')) === 'challenged' && gp_live_class(array('act' => 'challenge', 'cap' => 'show')) === 'captcha' && gp_live_class(array('act' => '403', 'sh' => 1)) === 'monitor'
+	&& gp_live_class(array('act' => 'pow_bad')) === 'challenged' && gp_live_class(array('act' => '404_hp')) === 'blocked' && gp_live_class(array('act' => 'token_issued')) === 'allowed');
+$lv_ans = function (array $o) use ($lv_t0) { return gp_live_answer(array_merge(array('mode' => 'window', 'start' => $lv_t0, 'end' => $lv_t0 + 100, 'filter' => array(), 'show' => array(), 'watch' => array()), $o)); };
+$lv_ids = function ($a) { return array_map(function ($r) { return hexdec($r['rid']); }, $a['rows']); };
+t_ok('answer: no filter returns every decision row (7), the outcome line is not a row, and it is returned separately by request id', $lv_ids($lv_ans(array())) === array(1, 2, 3, 4, 5, 6, 7) && $lv_ans(array())['outcomes'][sprintf('%012x', 1)]['st'] === 403);
+t_ok('answer: the outcome of the same poll is joined onto its row (st, by, dur) and no internal key leaks', (function () use ($lv_ans) { $r = $lv_ans(array())['rows'][0]; return $r['st'] === 403 && $r['by'] === 13 && !isset($r['_out']); })());
+$lv_f_act = gp_filter_parse(array('act' => '403', 'act_op' => 'not'), array('act' => 'choice'));
+t_ok('filters: include / exclude work as on the Logs page (act is not 403)', $lv_ids($lv_ans(array('filter' => $lv_f_act))) === array(2, 3, 4, 6, 7));
+t_ok('filters: IP and CIDR, device, text, status (from the joined outcome)',
+	$lv_ids($lv_ans(array('filter' => gp_filter_parse(array('ip' => '203.0.113.0/24'), array('ip' => 'ident'))))) === array(2, 3, 4, 5, 7) && $lv_ids($lv_ans(array('filter' => gp_filter_parse(array('dev' => 'devA'), array('dev' => 'ident'))))) === array(2)
+	&& $lv_ids($lv_ans(array('filter' => gp_filter_parse(array('path' => 'p7'), array('path' => 'text'))))) === array(7) && $lv_ids($lv_ans(array('filter' => gp_filter_parse(array('status' => '4xx'), array('status' => 'choice'))))) === array(1));
+t_ok('filters: reason (also the SH_ form), country-less rows and IP list membership use the same code as the Logs page', $lv_ids($lv_ans(array('filter' => gp_filter_parse(array('reason' => 'SH_RULE:r2'), array('reason' => 'choice'))))) === array(5)
+	&& $lv_ids($lv_ans(array('filter' => gp_filter_parse(array('reason' => 'UA_SCRIPT'), array('reason' => 'choice'))))) === array(1));
+t_ok('quick toggles: blocked, challenged, rate limited, monitor, allowed, verified crawlers (several at once = OR)',
+	$lv_ids($lv_ans(array('show' => array('blocked')))) === array(1) && $lv_ids($lv_ans(array('show' => array('challenged')))) === array(7) && $lv_ids($lv_ans(array('show' => array('captcha')))) === array(4)
+	&& $lv_ids($lv_ans(array('show' => array('ratelimited')))) === array(3) && $lv_ids($lv_ans(array('show' => array('monitor')))) === array(5) && $lv_ids($lv_ans(array('show' => array('allowed')))) === array(2, 6)
+	&& $lv_ids($lv_ans(array('show' => array('crawler')))) === array(6) && $lv_ids($lv_ans(array('show' => array('blocked', 'monitor')))) === array(1, 5));
+t_ok('toggles and filters are AND-ed: blocked + not 403 = nothing', $lv_ids($lv_ans(array('show' => array('blocked'), 'filter' => $lv_f_act))) === array());
+$lv_w = $lv_ans(array('show' => array('blocked'), 'watch' => array('203.0.113.9')));
+t_ok('watch: a watched address (or device) is always shown, even if the filter would hide it, and marked w=1', $lv_ids($lv_w) === array(1, 2, 3) && empty($lv_w['rows'][0]['w']) && $lv_w['rows'][1]['w'] === 1 && $lv_w['rows'][2]['w'] === 1
+	&& $lv_ids($lv_ans(array('show' => array('blocked'), 'watch' => array('devA')))) === array(1, 2));
+t_ok('answer: every reason code of the rows comes with its full name, class, link and monitor marker (for the badges)', (function () use ($lv_ans) { $a = $lv_ans(array()); $r = $a['reasons'];
+	return isset($r['UA_SCRIPT'], $r['RULE:r1'], $r['SH_RULE:r2']) && $r['UA_SCRIPT']['name'] === 'Script or library User-Agent' && $r['SH_RULE:r2']['monitor'] === 1 && $r['RULE:r1']['monitor'] === 0 && $r['RULE:r1']['href'] !== '' && !empty($r['UA_SCRIPT']['explain']); })());
+t_ok('answer: JSON-encodable, with cursor, more, done, now, no Redis involved', (function () use ($lv_ans) { $j = json_encode($lv_ans(array()), JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR); $d = json_decode($j, true); return is_array($d) && $d['ok'] === true && isset($d['cursor'], $d['now']) && array_key_exists('more', $d); })());
+// request parsing
+t_ok('request: show and watch are validated and bounded; time strings parse in the server time zone', gp_live_show_from('blocked,monitor,evil,crawler') === array('blocked', 'monitor', 'crawler') && gp_live_show_from('') === array()
+	&& gp_live_watch_from('1.2.3.4,dev_1,<script>,' . str_repeat('x', 200)) === array('1.2.3.4', 'dev_1') && count(gp_live_watch_from(implode(',', range(1, 50)))) === GP_LIVE_MAX_WATCH
+	&& gp_live_parse_time('2026-11-23T14:30') === mktime(14, 30, 0, 11, 23, 2026) && gp_live_parse_time('2026-13-40T10:00') === 0 && gp_live_parse_time('junk') === 0 && gp_live_parse_time(array()) === 0);
+$_GET = array('r' => 'live', 'poll' => '1', 'mode' => 'window', 'start' => '2026-11-23T14:30', 'end' => '2026-11-23T14:40', 'minutes' => '999', 'act' => '403', 'show' => 'blocked', 'watch' => '1.2.3.4', 'date' => '20010101');
+$lv_rq = gp_live_request_from_get($_GET);
+t_ok('request: mode, window, minutes (only 1, 5, 15, 60), filters (without the Logs date) and toggles come out typed', $lv_rq['mode'] === 'window' && $lv_rq['end'] - $lv_rq['start'] === 600 && $lv_rq['minutes'] === 5 && isset($lv_rq['filter']['act']) && !isset($lv_rq['filter']['date']) && $lv_rq['show'] === array('blocked') && $lv_rq['watch'] === array('1.2.3.4'));
+$_GET = array();
+// Read only
+$lv_src = file_get_contents($lv_root . '/panel/live.php');
+t_ok('read only: live.php opens nothing for writing and never touches Redis or a lock', !preg_match('/gp_redis|gv_redis|fopen\([^)]*[\'"][wax]/', $lv_src) && strpos($lv_src, 'file_put_contents') === false && strpos($lv_src, 'unlink') === false && strpos($lv_src, 'flock') === false);
+// ACL, route, headers, view
+t_ok('ACL: Live is a GET for operators and admins; demo and logged-out users are refused; its POST would be admin only (it has none)', gp_acl_required('live', 'GET') === 'operator' && gp_acl_allows('operator', 'live', 'GET') && gp_acl_allows('admin', 'live', 'GET')
+	&& !gp_acl_allows('demo', 'live', 'GET') && !gp_acl_allows('', 'live', 'GET') && gp_acl_required('live', 'POST') === 'admin');
+$lv_ix = file_get_contents($lv_root . '/panel/index.php');
+t_ok('route: the JSON poll is answered before any HTML, as JSON with no-store, from the same route and ACL (no CSRF needed: it only reads)', strpos($lv_ix, "case 'live':") !== false && strpos($lv_ix, "application/json; charset=utf-8") !== false
+	&& strpos($lv_ix, "'Cache-Control: no-store, no-cache, must-revalidate'") !== false && strpos($lv_ix, 'gp_live_answer(gp_live_request_from_get($_GET))') !== false);
+$lv_view = file_get_contents($lv_root . '/panel/views/live.php');
+t_ok('view: every value from the log reaches the screen through textContent (no innerHTML / insertAdjacentHTML / document.write / eval), links only to same-site addresses', strpos($lv_view, 'innerHTML') === false && strpos($lv_view, 'insertAdjacentHTML') === false
+	&& strpos($lv_view, 'document.write') === false && strpos($lv_view, 'eval(') === false && strpos($lv_view, 'sameSite(') !== false && strpos($lv_view, 'textContent') !== false);
+t_ok('view: the controls the spec asks for exist (window, interval 2/5/10/30/paused, rows 200/500/1000, quick toggles, filters, watch, export, drawer, chart)',
+	strpos($lv_view, 'name="mode"') !== false && strpos($lv_view, 'name="interval_s"') !== false && strpos($lv_view, "array(200, 500, 1000)") !== false && strpos($lv_view, 'name="start"') !== false && strpos($lv_view, 'name="end"') !== false
+	&& strpos($lv_view, 'id="live-export"') !== false && strpos($lv_view, 'id="live-drawer"') !== false && strpos($lv_view, 'id="live-chart"') !== false && strpos($lv_view, 'live-watchbar') !== false
+	&& substr_count($lv_view, 'data-live-show') >= 1 && strpos($lv_view, 'gp_live_classes()') !== false && strpos($lv_view, 'visibilitychange') !== false && strpos($lv_view, 'mouseenter') !== false);
+t_ok('view: the quick actions of PR G are drawn for admins in the drawer (address and device), posting to the Overrides route with from=quick and a way back to Live',
+	strpos($lv_view, "'from', 'quick'") !== false && strpos($lv_view, "'index.php?r=overrides'") !== false && strpos($lv_view, 'cfg.canQuick') !== false && gp_quick_back('index.php?r=live&mode=live&act=403')[0] === 'live');
+$lv_lay = file_get_contents($lv_root . '/panel/views/layout.php');
+t_ok('nav: Live is in the side menu (hidden from demo by the same ACL check)', strpos($lv_lay, "'live'      => array('nav_live'") !== false && !empty($tb_lang) && $tb_lang['nav_live'] === 'Live requests');
+$lv_tips = array(); foreach (array('live_mode', 'live_interval', 'live_keep', 'live_show', 'live_window', 'live_watch', 'live_export', 'live_last') as $k) { if (empty($tb_lang['tip_' . $k])) { $lv_tips[] = $k; } }
+t_ok('every new field has a ? tooltip text' . ($lv_tips ? ' (missing: ' . implode(',', $lv_tips) . ')' : ''), !$lv_tips);
+putenv($lv_prev === false ? 'GV_CONFIG' : 'GV_CONFIG=' . $lv_prev);
+@unlink($lv_f(date('Ymd', $lv_t0)));
 
 echo "\n";
 // Say so out loud. A green run on a host missing the extension must never be

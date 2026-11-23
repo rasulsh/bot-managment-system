@@ -202,6 +202,23 @@ A row with **shadow** `sh = 1` is something that was *only logged*, not done.
 *Safe to change:* everything: filters and the CSV export only read. From a row you can
 open a **Quick block** (a pre-filled monitor rule).
 
+### Live requests
+*What it is for:* watching requests **as they arrive**, instead of reloading Logs. It follows
+today's log (the last 1, 5, 15 or 60 minutes first, then every new row) or replays a fixed
+**start / end** (server time zone shown). *Controls:* refresh every 2, 5, 10 or 30 seconds or
+paused (it also pauses while the pointer is over the table and stops while the tab is hidden),
+200, 500 or 1000 rows on screen, quick toggles (**blocked, challenged, CAPTCHA, rate limited,
+monitor-only would-act, allowed, verified crawlers**) and every Logs filter with include / exclude.
+*Reading it:* rows are coloured by outcome (and always say the word), reasons are the same badges as
+in Logs; a strip shows requests per second, the count of each outcome, distinct addresses and devices
+and a per-second chart; **Top right now** lists the busiest addresses, devices, User-Agents, paths and
+countries (press one to filter). A row opens a **details drawer** (all fields, the rule or list that
+matched, the identity history, and the quick actions of *Temporary blocks & allows* for the address
+and the device); **Watch** pins an address or device so its rows are always shown and marked;
+**Export CSV** saves the rows on screen. *Safe to change:* everything: the page only reads the log
+(no Redis, no writes). Monitoring operators and administrators only (never the Demo role); the
+quick actions are administrator only.
+
 ### Identity
 *What it is for:* everything Bot Guard knows about **one visitor** (an IP address or a
 device id). *Look at first:* this page, whenever someone says they were blocked.
@@ -1097,8 +1114,9 @@ first, with a self-test. Tests must not write into the repository tree.
 1. `panel/index.php`: add a `case '<route>':` to the route table (POST → `gp_csrf_check` is done for you; redirect after POST with `gp_redirect`), pass data to `gp_render('<view>', ...)`. No include path may derive from the request.
 2. `panel/views/<route>.php` (start with the `GP_BOOT` guard); add the route to `$gp_nav` in `panel/views/layout.php` and `nav_<route>` to `panel/lang.php`.
 3. Tabs: `gp_tabs_begin($group, $labels, $errors)`, `gp_tab_begin()`, `gp_tab_end()`, `gp_tabs_end()` (`panel/ui.php`). Tooltips: `gp_tip('<key>')` with `tip_<key>` in `lang.php`.
-4. Reason codes: a new code written to the `rs` list of a log row needs an entry in `gp_reason_registry()` (`panel/reasons.php`) and `rsn_<code>` / `rsn_<code>_x` in `panel/lang.php`, then `php scripts/gen-reason-docs.php`; the self-test fails otherwise. Codes are never renamed.
-5. Filters: declare a spec for `gp_filter_parse($_GET, $spec)` (`panel/filters.php`: types `choice`, `ident`, `text`, `num`) and test rows with `gp_filter_test()`; empty values on optional fields use `(none)`.
+4. Live page: it tails `logs/guard-<date>.jsonl` from a byte offset (`panel/live.php`, answered as JSON by `?r=live&poll=1`); a new log field needs no change there (every field is passed on and shown in the drawer); a new outcome class belongs in `gp_live_class()` and in the toggles / colours.
+5. Reason codes: a new code written to the `rs` list of a log row needs an entry in `gp_reason_registry()` (`panel/reasons.php`) and `rsn_<code>` / `rsn_<code>_x` in `panel/lang.php`, then `php scripts/gen-reason-docs.php`; the self-test fails otherwise. Codes are never renamed.
+6. Filters: declare a spec for `gp_filter_parse($_GET, $spec)` (`panel/filters.php`: types `choice`, `ident`, `text`, `num`) and test rows with `gp_filter_test()`; empty values on optional fields use `(none)`.
 4b. Pick lists on a choice field: `gp_multi_input($id, $name, $value, $options, $attr)` (never a `<datalist>`). Messages: every POST action needs a section id in `gp_post_section()` (`panel/ui.php`) and a `gp_msg('<section>')` next to its button in the view (the self-test fails when a POST form has none); `gp_flash()` then lands in that section and `gp_redirect()` ends in `#msg-<section>`. IP list colours: `gp_ipl_badge_class()` / `gp_reason_badge_class()`.
 5. Data readers must be bounded (`GP_MAX_ROWS`, scan caps in `panel/data.php`). Test in `scripts/panel-selftest.php` and `scripts/panel-layout-test.sh` (390 px, no horizontal scroll).
 

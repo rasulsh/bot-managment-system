@@ -191,11 +191,11 @@ check "delete removes the list" "$(grep -q 'Smoke list' <<<"$ip" && echo 0 || ec
 # identity, settings and config file pages are checked for direction only: they
 # show request data or operator-written values (the challenge page text, which
 # ships in Persian) as they are, and those may contain any script.
-for r in dashboard logs identity overrides rules geo iplists replay models settings config_file jobs audit update; do
+for r in dashboard logs live identity overrides rules geo iplists replay models settings config_file jobs audit update; do
 	page="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=$r")"
 	check "page $r has the viewport meta tag" "$(grep -q 'name="viewport"' <<<"$page" && echo 1 || echo 0)"
 	check "page $r is English and left-to-right" "$(grep -q '<html lang="en" dir="ltr">' <<<"$page" && echo 1 || echo 0)"
-	case "$r" in logs|identity|settings|config_file) continue ;; esac
+	case "$r" in logs|live|identity|settings|config_file) continue ;; esac
 	check "page $r shows no Persian or Arabic script or digits" "$(LC_ALL=C.UTF-8 grep -qP '[\x{0600}-\x{06FF}]' <<<"$page" && echo 0 || echo 1)"
 done
 
@@ -238,16 +238,19 @@ rlogin() { curl -sk -o /dev/null -w '%{http_code}' -c "$1" -b "$1" --data-urlenc
 check "the operator signs in (303)" "$([ "$(rlogin "$OPJ" "$OP_NAME" "$OP_PASS")" = 303 ] && echo 1 || echo 0)"
 check "the demo user signs in (303)" "$([ "$(rlogin "$DMJ" "$DM_NAME" "$DM_PASS")" = 303 ] && echo 1 || echo 0)"
 code_of() { curl -sk -o /dev/null -w '%{http_code}' -c "$1" -b "$1" "$URL?r=$2"; }
-for r in dashboard logs identity overrides rules geo iplists replay models settings jobs audit account; do
+for r in dashboard logs live identity overrides rules geo iplists replay models settings jobs audit account; do
 	check "operator: page $r answers 200" "$([ "$(code_of "$OPJ" "$r")" = 200 ] && echo 1 || echo 0)"
 done
+lp="$(curl -sk -D - -c "$OPJ" -b "$OPJ" "$URL?r=live&poll=1&minutes=60")"
+check "the Live poll answers JSON, never cached, for an operator (a read of the log: no Redis, no write)" "$(grep -qi '^content-type: application/json' <<<"$lp" && grep -qi '^cache-control: no-store' <<<"$lp" && grep -q '"ok":true' <<<"$lp" && echo 1 || echo 0)"
+check "the Live poll answers 403 to the demo user and is not JSON for a logged-out client" "$([ "$(code_of "$DMJ" 'live&poll=1')" = 403 ] && ! curl -sk "$URL?r=live&poll=1" | grep -q '"ok":true' && echo 1 || echo 0)"
 for r in config_file update users; do
 	check "operator: page $r answers 403" "$([ "$(code_of "$OPJ" "$r")" = 403 ] && echo 1 || echo 0)"
 done
 for r in dashboard account; do
 	check "demo: page $r answers 200" "$([ "$(code_of "$DMJ" "$r")" = 200 ] && echo 1 || echo 0)"
 done
-for r in logs identity overrides rules geo iplists replay models settings jobs audit config_file update users captcha_preview; do
+for r in logs live identity overrides rules geo iplists replay models settings jobs audit config_file update users captcha_preview; do
 	check "demo: page $r answers 403" "$([ "$(code_of "$DMJ" "$r")" = 403 ] && echo 1 || echo 0)"
 done
 dd="$(curl -sk -c "$DMJ" -b "$DMJ" "$URL?r=dashboard")"

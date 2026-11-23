@@ -2,6 +2,14 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Live requests (2026.11.34)
+
+* **New page: Live requests** (side menu, for Monitoring operators and administrators; the Demo role cannot open it). It tails the current daily log from a byte-offset cursor and polls every 2 / 5 / 10 / 30 seconds (paused while the pointer is over the table or the tab is hidden): it reads only new bytes, uses no Redis and writes nothing. The same filters as Logs, quick toggles, a fixed start / end window, a per-second chart, Top right now, a details drawer with the quick actions of *Temporary blocks & allows* (administrators), Watch and CSV export. Needs `logs/` readable by the panel, like the Logs page.
+* **Limits.** At most 500 rows and 1 MiB per poll (the page asks again at once while more is waiting); a window is at most two days; the response-status filter only sees outcomes that arrive in the same poll; a day's file that has been compressed by log rotation is not read (only uncompressed `guard-YYYYMMDD.jsonl`).
+* Nothing to do on upgrade. `app.css` is rebuilt.
+
+**Rollback.** Update page *Roll back* or `php updates/rollback.php`; nothing else reads or depends on the page.
+
 ## Overrides always act; list expiry within a minute (2026.11.33)
 
 * **Behaviour change.** An operator **deny** override used to follow `enforce.block`: on an install in monitor mode it was only logged. Now every override is an explicit operator action and acts **immediately, also in monitor mode and for a client in the holdout** (like a rule in enforce mode): deny answers 403, challenge shows the check page, CAPTCHA the image test. Only the kill switch (`guard.off`) stops them. **Check the Temporary blocks & allows page after upgrading: a deny override that was set earlier and never acted will start blocking at once.** The log reason is `OVR_DENY` (no `SH_` form); the page says "Overrides act immediately, also in monitor mode."

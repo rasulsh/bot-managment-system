@@ -26,6 +26,7 @@ require_once __DIR__ . '/filters.php';
 require_once __DIR__ . '/ui.php';
 require_once __DIR__ . '/reasons.php';
 require_once __DIR__ . '/overrides.php';
+require_once __DIR__ . '/live.php';
 require_once __DIR__ . '/health.php';
 require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/rules.php';
@@ -300,6 +301,19 @@ switch ($gp_route) {
 			'dates' => gp_log_dates(),
 			'pipeline' => $page[0] ? null : gp_pipeline_status(),
 		));
+
+	case 'live':
+		// The Live requests page. Read only: the log is tailed from a byte-offset cursor, no Redis, no writes. ?poll=1 answers JSON
+		// (a GET, never cached); anything else is the page. Operators and admins only (the ACL map): demo never gets here.
+		if (($_GET['poll'] ?? '') === '1') {
+			gp_hardening_headers();
+			header('Content-Type: application/json; charset=utf-8');
+			header('Cache-Control: no-store, no-cache, must-revalidate');
+			$ans = gp_live_answer(gp_live_request_from_get($_GET));
+			echo json_encode($ans, JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+			exit;
+		}
+		gp_render('live', array('req' => gp_live_request_from_get($_GET), 'dates' => gp_log_dates(), 'pipeline' => gp_pipeline_status()));
 
 	case 'identity':
 		$identity = (string)($_GET['id'] ?? '');
