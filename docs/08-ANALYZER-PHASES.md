@@ -201,6 +201,26 @@ otherwise monitor mode would no longer mean what you were promised. Allow wins
 over deny. Every override carries a TTL, and TTLs above 30 days are refused: an
 override that never expires is a config change in disguise.
 
+### Classifier labels: how each source is set up
+
+The supervised classifier trains only when the nightly run has at least `clf_min_positive` (default **50**) bot-labelled *sessions* and at least one human-labelled one. Until then
+nightly says `Classifier: skipped: 0 bot-labelled sessions ...`: that is **normal on a new install**, it is shown as an informational note (not "did nothing useful") as long as the
+rest of nightly did its work, and the Models page and the dashboard details show the progress: `labels: 0 / 50 positives — sources: honeypot hits, refuted crawler claims, operator ground truth`.
+A positive must be independent of the guard's own decisions (see `analyzer/labels.py` for why *challenge unsolved* is never a label). There are three sources:
+
+1. **Honeypot hits.** A link no human can see. Put an invisible link to the guard's honeypot path in your pages, for example
+   `<a href="/old-archive" style="display:none" rel="nofollow" tabindex="-1" aria-hidden="true">archive</a>` (the path is `honeypot_path`, default `/old-archive`; it must
+   answer 404 today, and `robots.txt` should `Disallow` it so honest crawlers stay away). Every session that requests it is a positive. Nothing else to enable: the guard logs the hit
+   (`hp`) whatever `enforce.*` says, and the nightly run reads it.
+2. **Refuted crawler claims.** A client that says it is Googlebot (or another entry of `known_bots`) and fails the reverse-DNS check. This needs the `verify` cron job
+   (`*/10`, `analyzer-cron.sh verify`) and `known_bots` / `bot_suffixes` in the configuration (shipped for Google, Bing and AdsBot); verdict `bad` is written to the log row (`botv`) and counted.
+3. **Operator ground truth.** A text file, `analyzer/ground-truth.txt` (the config key `ground_truth_path`, or `--ground-truth FILE` on `run_nightly.py`), one `identity,label` per line, `1` = bot and `0` = human, `#` comments
+   allowed. The identity is a device id or an address. The usual way: run a scraper you control against a staging copy, then list its device ids / addresses as `1`. Ground truth wins over every inferred label.
+
+Humans are labelled only on strong evidence (solved the handshake, browsed at least 20 s, came back more than once, never looked like a script library), so a quiet site may show humans before it shows
+positives. The counts are sessions of the labelled identities, the same unit as `clf_min_positive`. Lowering `clf_min_positive` makes the first classifier cheaper and worse; leaving the signal off
+(`signals.clf`, the default) means a classifier that is still waiting changes nothing about enforcement.
+
 ### New config keys
 
 | key | meaning |

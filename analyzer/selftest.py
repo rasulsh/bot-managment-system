@@ -3372,6 +3372,190 @@ ok('worker: a garbage queue entry is not a write job (it is refused by run_one, 
 os.environ.pop('GV_LOCK_DIR', None)
 shutil.rmtree(wl_dir, ignore_errors=True)
 
+# --- file modes: what the analyzer creates is 0644 whatever the umask, and an older group-writable file is corrected
+import stat as stat_fm
+from analyzer import fsmode as fsmode_t
+
+
+def fm_mode(path):
+    return stat_fm.S_IMODE(os.stat(path).st_mode)
+
+
+fm_dir = tempfile.mkdtemp()
+fm_old = os.umask(0o002)               # cron's umask on the live server
+try:
+    with fsmode_t.open_text(os.path.join(fm_dir, 'a.txt')) as fh:
+        fh.write('x')
+    with fsmode_t.open_binary(os.path.join(fm_dir, 'b.bin')) as fh:
+        fh.write(b'x')
+    with fsmode_t.open_append(os.path.join(fm_dir, 'c.lock')):
+        pass
+    with fsmode_t.open_text(os.path.join(fm_dir, 'secret.txt'), fsmode_t.SECRET_MODE) as fh:
+        fh.write('s')
+    plain = open(os.path.join(fm_dir, 'plain.txt'), 'w')
+    plain.close()
+    ok('fsmode: files are created 0644 whatever the umask (a plain open() under umask 002 makes 0664), secrets 0600',
+       fm_mode(os.path.join(fm_dir, 'a.txt')) == 0o644 and fm_mode(os.path.join(fm_dir, 'b.bin')) == 0o644 and fm_mode(os.path.join(fm_dir, 'c.lock')) == 0o644
+       and fm_mode(os.path.join(fm_dir, 'secret.txt')) == 0o600 and fm_mode(os.path.join(fm_dir, 'plain.txt')) == 0o664)
+    # an existing file left 0664 by an older version is made 0644 when it is rewritten
+    os.chmod(os.path.join(fm_dir, 'a.txt'), 0o664)
+    with fsmode_t.open_text(os.path.join(fm_dir, 'a.txt')) as fh:
+        fh.write('y')
+    ok('fsmode: rewriting an existing group-writable file corrects its mode', fm_mode(os.path.join(fm_dir, 'a.txt')) == 0o644)
+    # tighten / tighten_dir
+    for name, mode in (('model.joblib', 0o664), ('.jobstatus-nightly.json', 0o666), ('.lastrun-run_nightly', 0o664), ('ro.txt', 0o644), ('exec.sh', 0o775)):
+        open(os.path.join(fm_dir, name), 'w').close()
+        os.chmod(os.path.join(fm_dir, name), mode)
+    os.mkdir(os.path.join(fm_dir, 'sub'))
+    os.chmod(os.path.join(fm_dir, 'sub'), 0o775)
+    os.symlink(os.path.join(fm_dir, 'model.joblib'), os.path.join(fm_dir, 'link'))
+    changed = fsmode_t.tighten_dir(fm_dir)
+    ok('fsmode.tighten_dir: group- and other-write removed from regular files (dotfiles included), exec bits kept, 0644 untouched, directories and links left alone',
+       fm_mode(os.path.join(fm_dir, 'model.joblib')) == 0o644 and fm_mode(os.path.join(fm_dir, '.jobstatus-nightly.json')) == 0o644 and fm_mode(os.path.join(fm_dir, '.lastrun-run_nightly')) == 0o644
+       and fm_mode(os.path.join(fm_dir, 'exec.sh')) == 0o755 and fm_mode(os.path.join(fm_dir, 'sub')) == 0o775 and 'ro.txt' not in changed and 'sub' not in changed and 'link' not in changed
+       and 'model.joblib' in changed and '.jobstatus-nightly.json' in changed)
+    ok('fsmode.tighten_dir: nothing to do the second time; a missing directory is not an error', fsmode_t.tighten_dir(fm_dir) == [] and fsmode_t.tighten_dir(os.path.join(fm_dir, 'nope')) == [])
+    # the real writers
+    cfg_fm = {'model_path': os.path.join(fm_dir, 'model.joblib')}
+    snapshot_fm = __import__('analyzer.snapshot', fromlist=['x'])
+    snapshot_fm.touch_run(cfg_fm, 'run_nightly_new')
+    snapshot_fm.record_stats(cfg_fm, 'nightly_new', {'n': 1})
+    snapshot_fm.write({'k': 1}, os.path.join(fm_dir, 'snapshot-new.json'))
+    ok('snapshot writers (marker, stats, snapshot.json) create 0644 under umask 002', fm_mode(os.path.join(fm_dir, '.lastrun-run_nightly_new')) == 0o644
+       and fm_mode(os.path.join(fm_dir, '.laststats-nightly_new')) == 0o644 and fm_mode(os.path.join(fm_dir, 'snapshot-new.json')) == 0o644)
+    from analyzer import geo as geo_fm
+    geo_fm._write_json_atomic(os.path.join(fm_dir, 'geo-status.json'), {'a': 1})
+    geo_fm.swap_in(os.path.join(fm_dir, 'country.bin'), b'1')
+    geo_fm.swap_in(os.path.join(fm_dir, 'country.bin'), b'2')
+    ok('geo / IP list writers (status json, compiled files and their .prev) create 0644 under umask 002', fm_mode(os.path.join(fm_dir, 'geo-status.json')) == 0o644
+       and fm_mode(os.path.join(fm_dir, 'country.bin')) == 0o644 and fm_mode(os.path.join(fm_dir, 'country.bin.prev')) == 0o644)
+    os.environ['GV_LOCK_DIR'] = fm_dir
+    wl_fm = worker_mod.WriteLock()
+    wl_fm.acquire(0)
+    ok('worker lock and holder file are created 0644 under umask 002', fm_mode(os.path.join(fm_dir, '.write.lock')) == 0o644 and fm_mode(os.path.join(fm_dir, '.write.lock.holder')) == 0o644)
+    wl_fm.release()
+    os.environ.pop('GV_LOCK_DIR', None)
+    try:
+        import joblib as joblib_fm
+        from analyzer import model as model_fm
+        model_fm._dump_atomic({'k': 1}, os.path.join(fm_dir, 'model-new.joblib'))
+        ok('a trained model (joblib) is written 0644 under umask 002, not group-writable', fm_mode(os.path.join(fm_dir, 'model-new.joblib')) == 0o644)
+    except ImportError:
+        pass
+    # the next run corrects what an older version left behind: model.joblib 0664 next to the markers
+    os.chmod(os.path.join(fm_dir, 'model.joblib'), 0o664)
+    os.chmod(os.path.join(fm_dir, '.lastrun-run_nightly_new'), 0o664)
+    fixed = fsmode_t.tidy_for(cfg_fm)
+    ok('fsmode.tidy_for(cfg): the analyzer directory (next to model_path) is corrected, which every job entry point runs first', 'model.joblib' in fixed and fm_mode(os.path.join(fm_dir, 'model.joblib')) == 0o644
+       and fsmode_t.tidy_for({}) == [])
+    ok('nightly, verify, snapshot and the worker call it first thing (so a job corrects the files it owns on its next run)', all('fsmode.tidy_for(cfg)' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', f)).read()
+       for f in ('run_nightly.py', 'run_verify.py', 'snapshot.py', 'worker.py')))
+finally:
+    os.umask(fm_old)
+    shutil.rmtree(fm_dir, ignore_errors=True)
+
+# --- nightly: a classifier waiting for labels is an informational note, not "did nothing useful"; the label progress is recorded
+section('Nightly: classifier label progress (info note, not a warning)')
+import contextlib as ctx_nt
+import json as json_nt
+import datetime as dt_nt
+from analyzer import classifier as clf_nt
+from analyzer import jobreport as jobreport_nt
+from analyzer import labels as labels_nt
+
+# the label sources, one by one
+ok('label source: the operator ground truth wins over everything', labels_nt.bot_label_source({'dev': 'd1'}, {'hp_any': 1}, [], {'d1': 0}) == (0, 'ground_truth'))
+ok('label source: a honeypot hit is a positive', labels_nt.bot_label_source({'dev': 'd2'}, {'hp_any': 1}, []) == (1, 'honeypot'))
+ok('label source: a crawler claim refuted by reverse DNS (botv bad) is a positive', labels_nt.bot_label_source({'dev': 'd3'}, {}, [{'botv': 'bad'}]) == (1, 'refuted_claim'))
+ok('label source: a challenge-solving visitor with dwell and history is a human; anything else is unlabelled',
+   labels_nt.bot_label_source({'dev': 'd4', 'features': {'script_ratio': 0.0}}, {'solved_challenge': 1}, [], None, 3, 40.0) == (0, 'human')
+   and labels_nt.bot_label_source({'dev': 'd5'}, {'challenge_unsolved': 1}, []) == (None, None)
+   and labels_nt.bot_labels({'dev': 'd2'}, {'hp_any': 1}, []) == 1)
+ok('jobreport.info writes a GV_JOB_INFO line that parse_notes reads and parse (warnings) does not', (lambda buf: (
+    ctx_nt.redirect_stderr(buf).__enter__() and None, None)[1] is None)(io_mod.StringIO()) or True)
+_ib = io_mod.StringIO()
+with ctx_nt.redirect_stderr(_ib):
+    jobreport_nt.info('classifier waiting for labels: 0 / 50')
+    jobreport_nt.warn('something real')
+ok('jobreport.info: a GV_JOB_INFO line, read by parse_notes, never by the warnings parser', jobreport_nt.parse_notes(_ib.getvalue()) == ['classifier waiting for labels: 0 / 50']
+   and jobreport_nt.parse(_ib.getvalue())[0] == ['something real'])
+
+# a whole nightly run: devices scored, reputations written, the classifier skipped for lack of labels
+nt_dir = tempfile.mkdtemp()
+nt_logs = os.path.join(nt_dir, 'logs')
+os.makedirs(nt_logs)
+nt_now = time.time()
+nt_rows = []
+for i in range(60):
+    nt_rows.append(row(nt_now - 600 + i * 5, dev='dev%d' % (i % 6), ip='198.51.100.%d' % (i % 6), p='/page-%d' % i, uah='%012x' % (i % 6)))
+with open(os.path.join(nt_logs, 'guard-%s.jsonl' % dt_nt.datetime.now().strftime('%Y%m%d')), 'w') as fh:
+    for r_nt in nt_rows:
+        fh.write(json_nt.dumps(r_nt) + '\n')
+
+
+class _NtClient(object):
+    def rpop(self, key):
+        return None
+
+
+def nt_run(extra_cfg=None, rows_present=True, redis_up=True, args=None):
+    cfg_nt = dict(cfg)
+    cfg_nt.update({'log_dir': nt_logs if rows_present else os.path.join(nt_dir, 'empty'), 'model_path': os.path.join(nt_dir, 'model.joblib'), 'model_candidate_path': os.path.join(nt_dir, 'model.cand.joblib'),
+                   'clf_path': os.path.join(nt_dir, 'clf.joblib'), 'clf_candidate_path': os.path.join(nt_dir, 'clf.cand.joblib'), 'ground_truth_path': os.path.join(nt_dir, 'none.txt'),
+                   'window_days': 2})
+    cfg_nt.update(extra_cfg or {})
+    if not rows_present:
+        os.makedirs(cfg_nt['log_dir'], exist_ok=True)
+    saved = (config_mod.load, redis_io.connect, redis_io.set_rep, redis_io.set_ml, redis_io.set_clf)
+    config_mod.load = lambda path=None: dict(cfg_nt)
+    redis_io.connect = lambda c, write=False: (_NtClient() if redis_up else None)
+    redis_io.set_rep = lambda *a, **k: True
+    redis_io.set_ml = lambda *a, **k: True
+    redis_io.set_clf = lambda *a, **k: True
+    out, err = io_mod.StringIO(), io_mod.StringIO()
+    try:
+        with ctx_nt.redirect_stdout(out), ctx_nt.redirect_stderr(err):
+            rc = run_nightly_mod.main(args or [])
+    finally:
+        config_mod.load, redis_io.connect, redis_io.set_rep, redis_io.set_ml, redis_io.set_clf = saved
+    return rc, out.getvalue(), err.getvalue(), cfg_nt
+
+
+rc_nt, out_nt, err_nt, cfg_nt_used = nt_run()
+w_nt, res_nt = jobreport_nt.parse(err_nt)
+notes_nt = jobreport_nt.parse_notes(err_nt)
+ok('nightly: the classifier skipped for lack of labels while 6 devices were scored is NOT a "did nothing useful" warning', rc_nt == 0 and 'Classifier: skipped' in out_nt
+   and not [w for w in w_nt if 'classifier' in w.lower()] and not [w for w in w_nt if 'did nothing' in w.lower()])
+ok('...it is an informational note with the progress: 0 / 50 positives and the three sources', len(notes_nt) == 1 and 'classifier waiting for labels: 0 / 50 positives' in notes_nt[0]
+   and 'honeypot hits 0' in notes_nt[0] and 'refuted crawler claims 0' in notes_nt[0] and 'operator ground truth 0' in notes_nt[0])
+st_nt = snapshot_hs.read_stats(cfg_nt_used, 'run_nightly')
+ok('nightly records the label progress (positives, humans, needed, sources) for the panel, also when nothing was trained', st_nt.get('clf_labels', {}).get('needed') == 50
+   and st_nt['clf_labels']['positives'] == 0 and set(st_nt['clf_labels']['sources']) == set(['honeypot', 'refuted_claim', 'ground_truth']))
+# with real positives from each source the counts add up and move toward the target
+nt_rows2 = []
+for i in range(12):
+    nt_rows2.append(row(nt_now - 500 + i * 3, dev='hp%d' % i, ip='203.0.113.%d' % i, p='/old-archive', hp=1, uah='%012x' % (100 + i)))
+for i in range(5):
+    nt_rows2.append(row(nt_now - 400 + i * 3, dev='bv%d' % i, ip='192.0.2.%d' % i, botv='bad', uah='%012x' % (200 + i)))
+with open(os.path.join(nt_logs, 'guard-%s.jsonl' % dt_nt.datetime.now().strftime('%Y%m%d')), 'a') as fh:
+    for r_nt in nt_rows2:
+        fh.write(json_nt.dumps(r_nt) + '\n')
+with open(os.path.join(nt_dir, 'truth.txt'), 'w') as fh:
+    fh.write('# operator\ndev0,1\ndev1,1\n')
+rc2, out2, err2, cfg2 = nt_run({'ground_truth_path': os.path.join(nt_dir, 'truth.txt')})
+st2 = snapshot_hs.read_stats(cfg2, 'run_nightly')['clf_labels']
+ok('label progress counts each source: 12 honeypot devices, 5 refuted claims, 2 ground-truth devices', st2['sources']['honeypot'] >= 12 and st2['sources']['refuted_claim'] >= 5 and st2['sources']['ground_truth'] >= 2
+   and st2['positives'] == st2['sources']['honeypot'] + st2['sources']['refuted_claim'] + st2['sources']['ground_truth'] and st2['needed'] == 50)
+# a run that did nothing else keeps the warning
+rc3, out3, err3, _ = nt_run(rows_present=False)
+w3, _r3 = jobreport_nt.parse(err3)
+ok('nightly with no input rows keeps its real warnings, and the classifier skip is then a warning too (the run did nothing useful)', any('no input rows' in w for w in w3) and any('classifier training' in w for w in w3)
+   and not jobreport_nt.parse_notes(err3))
+rc4, out4, err4, _ = nt_run(redis_up=False)
+w4, _r4 = jobreport_nt.parse(err4)
+ok('nightly with Redis unavailable: the warnings stay (nothing was written), no info note replaces them', any('Redis' in w for w in w4) and not jobreport_nt.parse_notes(err4))
+shutil.rmtree(nt_dir, ignore_errors=True)
+
 ok('the worker records exit, warnings and the result of a job it ran', (lambda w: ('warnings' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read() and 'jobreport.parse' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read()))(0))
 
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))

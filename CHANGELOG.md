@@ -4,6 +4,12 @@ Newest first. Each entry is one version, written as `## <version>` (the same str
 The Update page of the panel shows the entries between the installed version and the one in the ZIP.
 Older history and upgrade steps: [docs/10-UPGRADE-NOTES.md](docs/10-UPGRADE-NOTES.md).
 
+## 2026.11.30
+
+- **File modes.** Cron's umask 002 made `model.joblib`, the job status / state / marker files and the lock holder group-writable. Every wrapper now sets `umask 022`, Python writers create files 0644 explicitly (`analyzer/fsmode.py`), and each job corrects the files it owns on its next run. Logs keep their own modes.
+- **File permissions scan** covers the same set every time (all files except `.venv`, `.git`, `logs/`, dotfiles and analyzer data included), reports an unreadable directory or a truncated scan as incomplete (own alert) instead of "No permission problems found", and a 0664 file under `analyzer/` is always reported.
+- **Nightly:** a classifier skipped for lack of labels is an informational note (`GV_JOB_INFO`, shown as Notes), not "did nothing useful", when the rest of nightly did its work. The Models page and the dashboard details show the label progress (`0 / 50 positives`, honeypot hits / refuted crawler claims / operator ground truth) with a link to the new docs section "Classifier labels: how each source is set up".
+
 ## 2026.11.29
 
 - **Fix: `nightly` never ran.** It started in the same second as the every-minute `worker`, both used `analyzer/.write.lock`, and `nightly` (`flock -n`) lost almost every night. `nightly`, `train` and `train-clf` now **wait** for the lock (`flock -w`, `GV_LOCK_WAIT` seconds, default 900); a run that still cannot get it is recorded as "skipped (lock busy after N s)" with the holder named.

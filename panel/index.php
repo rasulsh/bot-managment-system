@@ -264,7 +264,7 @@ switch ($gp_route) {
 		$hcfg = gv_cfg_load();
 		$hrules = gp_rules_state();
 		gp_render('dashboard', array(
-			'snapshot' => $hin['snapshot'],
+			'snapshot' => $hin['snapshot'], 'clf_labels' => gp_clf_labels(),
 			'cfg'      => $hcfg,
 			'kill'     => gp_killswitch_on(),
 			'redis_up' => $hin['redis_up'],
@@ -549,7 +549,7 @@ switch ($gp_route) {
 				$job['ok'] ? gp_t('job_enqueued') : ($job['error'] ?? gp_t('err_generic')));
 			gp_redirect('models');
 		}
-		gp_render('models', array('models' => gp_model_status()));
+		gp_render('models', array('models' => gp_model_status(), 'clf_labels' => gp_clf_labels()));
 
 	case 'settings':
 		$pending = gp_settings_from_request();

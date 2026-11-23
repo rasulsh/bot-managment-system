@@ -386,6 +386,7 @@ def _write_json_atomic(path, obj):
     tmp = path + '.tmp%d' % os.getpid()
     with open(tmp, 'w') as handle:
         json.dump(obj, handle, sort_keys=True)
+    os.chmod(tmp, 0o644)               # explicit: not whatever the cron umask makes of it (002 = group-writable)
     os.replace(tmp, path)
 
 
@@ -396,9 +397,11 @@ def swap_in(path, data):
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
+    os.chmod(tmp, 0o644)
     try:
         if os.path.exists(path):
             shutil.copyfile(path, path + '.prev.tmp%d' % os.getpid())
+            os.chmod(path + '.prev.tmp%d' % os.getpid(), 0o644)
             os.replace(path + '.prev.tmp%d' % os.getpid(), path + '.prev')
         os.replace(tmp, path)
     finally:

@@ -2575,6 +2575,39 @@ foreach ((array)glob($pm_dir . '/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) {
 @rmdir($pm_dir . '/scripts'); @rmdir($pm_dir);
 t_ok('the IP feeds table shows a real age for the last run (it had the same double subtraction)', strpos((string)file_get_contents(__DIR__ . '/../panel/views/iplists_feeds.php'), 'gp_age(max(0, time()') === false);
 
+// --- Classifier label progress (Models page, dashboard details), job notes
+t_section('Classifier labels on the Models page and the dashboard; job notes');
+$cl_none = gp_clf_labels(array());
+$cl = gp_clf_labels(array('clf_labels' => array('positives' => 0, 'humans' => 3, 'needed' => 50, 'sources' => array('honeypot' => 0, 'refuted_claim' => 0, 'ground_truth' => 0))));
+$cl2 = gp_clf_labels(array('clf_labels' => array('positives' => '17', 'needed' => 0, 'sources' => array('honeypot' => 12, 'refuted_claim' => 5, 'evil' => 99))));
+t_ok('gp_clf_labels: null before the first nightly run that records it; whole numbers; unknown sources dropped; needed is at least 1', $cl_none === null && $cl['positives'] === 0 && $cl['needed'] === 50 && $cl['humans'] === 3
+	&& $cl2['positives'] === 17 && $cl2['needed'] === 1 && $cl2['sources'] === array('honeypot' => 12, 'refuted_claim' => 5, 'ground_truth' => 0) && gp_clf_labels(array('clf_labels' => 'x')) === null);
+$clh = gp_clf_labels_html($cl);
+t_ok('the label block says "0 / 50 positives", names the three sources with their counts, and links to the docs section', strpos($clh, '0 / 50') !== false && strpos($clh, 'positives') !== false
+	&& strpos($clh, 'honeypot hits') !== false && strpos($clh, 'refuted crawler claims') !== false && strpos($clh, 'operator ground truth') !== false && strpos($clh, 'data-clf-labels="0/50"') !== false
+	&& strpos($clh, '08-ANALYZER-PHASES.md#classifier-labels-how-each-source-is-set-up') !== false && strpos($clh, 'rel="noopener noreferrer"') !== false && strpos($clh, 'How each source is set up') !== false);
+t_ok('the label block: a reached target is green, a missing record says the next nightly run records it, the link target heading exists in docs/08', strpos(gp_clf_labels_html($cl), 'gp-badge-info') !== false
+	&& strpos(gp_clf_labels_html(gp_clf_labels(array('clf_labels' => array('positives' => 60, 'needed' => 50)))), 'gp-badge-on') !== false && strpos(gp_clf_labels_html(null), 'next nightly run records it') !== false
+	&& strpos((string)file_get_contents(__DIR__ . '/../docs/08-ANALYZER-PHASES.md'), '### Classifier labels: how each source is set up') !== false);
+list($h_mdl, $e_mdl) = (function () use ($cl) {
+	$models = array('ml' => array('live' => null, 'candidate' => null), 'clf' => array('live' => null, 'candidate' => null)); $clf_labels = $cl; $user = 'tester'; $route = 'models';
+	$errs = array(); set_error_handler(function ($no, $str) use (&$errs) { $errs[] = $str; return true; });
+	ob_start(); require __DIR__ . '/../panel/views/models.php'; $html = ob_get_clean(); restore_error_handler();
+	return array($html, $errs);
+})();
+t_ok('the Models page shows the classifier labels only on the classifier card, with the counts and the docs link, and no warning', !$e_mdl && substr_count($h_mdl, 'id="clf-labels"') === 1 && strpos($h_mdl, '0 / 50') !== false && strpos($h_mdl, 'operator ground truth') !== false);
+list($h_dl, $e_dl) = $jh_render('dashboard', array(), array('clf_labels' => $cl2));
+$dl_pos = strpos($h_dl, 'id="clf-labels"');
+t_ok('the dashboard details have the classifier labels card (17 / 1 here: the counts of the record)', !$e_dl && $dl_pos !== false && strpos($h_dl, '17 / 1', $dl_pos) !== false && strpos($h_dl, 'index.php?r=models#clf-labels') !== false);
+list($h_dl0, $e_dl0) = $jh_render('dashboard', array(), array());
+t_ok('...and without a record it says so instead of showing zeros', !$e_dl0 && strpos($h_dl0, 'next nightly run records it') !== false);
+$nt_h = gp_job_health_one('nightly', gp_job_defs()['nightly'], array('status' => 'ok', 'last_success' => $jh_now - 60, 'runs' => 3, 'notes' => array('classifier waiting for labels: 0 / 50 positives', 7, '<b>x</b>')), 0, 86400, $jh_now);
+t_ok('job notes: kept (strings only), a run with only notes is "ok", and no alert is raised for them', $nt_h['state'] === 'ok' && $nt_h['notes'] === array('classifier waiting for labels: 0 / 50 positives', '<b>x</b>')
+	&& !array_filter(gp_health_alerts(array_merge($healthy, array('jobs' => array('nightly' => $nt_h)))), function ($x) { return strpos($x['id'], 'job_') === 0; }));
+list($h_nt, $e_nt) = $jh_render('jobs', array('jobs' => array_merge($healthy['jobs'], array('nightly' => $nt_h))), array('health' => array_merge($healthy['jobs'], array('nightly' => $nt_h)), 'detail' => 'nightly', 'runs' => array(), 'errors' => array(), 'perms' => null, 'php_env' => null));
+t_ok('the Jobs page job detail shows the note (escaped) and not as a "did nothing useful" warning', !$e_nt && strpos($h_nt, 'Notes: classifier waiting for labels: 0 / 50 positives') !== false && strpos($h_nt, '&lt;b&gt;x&lt;/b&gt;') !== false
+	&& strpos($h_nt, 'did nothing useful: classifier') === false);
+
 $kpi_snap = array('generated_at' => $jh_now, 'tz' => array('offset' => 0, 'name' => 'UTC'), 'traffic' => array('requests' => 10, 'devices' => 3, 'addresses' => 4, 'degraded' => 0), 'decisions' => array('allow' => 9, '403' => 1),
 	'kpi' => array('cur' => array('requests' => 120, 'allowed' => 100, 'blocked' => 10, 'limited' => 2, 'challenged' => 8, 'challenge_success' => 91.5, 'rule_hits' => 7, 'honeypot' => 1, 'degraded' => 0), 'prev' => array('requests' => 100, 'allowed' => 90, 'blocked' => 5, 'limited' => 2, 'challenged' => 8, 'challenge_success' => 95.0, 'rule_hits' => 0, 'honeypot' => 1, 'degraded' => 0)),
 	'top' => array('rules' => array(array('r1', 5)), 'reasons' => array(array('UA_SCRIPT', 9)), 'ips' => array(array('203.0.113.5', 4)), 'devices' => array(), 'uas' => array(array('curl/8.4', 4)), 'paths' => array(array('/shop?x=<b>', 3)), 'countries' => array(array('IR', 6))));
@@ -3991,6 +4024,44 @@ t_ok('permission scan: the exact commands are offered (chmod 600 per secret, chm
 foreach ($cmds as $c) { exec($c . ' 2>&1'); }
 $sc2 = gp_perm_scan_now($rp, $t0 + 20);
 t_ok('permission scan: running the offered commands really fixes everything it found', !gp_perm_has_issues($sc2), json_encode($sc2));
+// The scan covers the SAME set every time: analyzer data files and dotfiles included, only .venv / .git / logs skipped
+@mkdir($rp . '/analyzer/sub', 0755, true);
+foreach (array('analyzer/model.joblib', 'analyzer/.jobstatus-nightly.json', 'analyzer/.jobstate-nightly', 'analyzer/.lastrun-run_nightly', 'analyzer/.write.lock.holder', 'analyzer/sub/deep.dat') as $af) {
+	file_put_contents($rp . '/' . $af, 'x'); chmod($rp . '/' . $af, 0664);
+}
+$an1 = gp_perm_scan_now($rp, $t0 + 30);
+$an_files = array_map(function ($l) { return substr($l, strpos($l, ' ') + 1); }, $an1['writable_sample']);
+t_ok('permission scan: a 0664 file under analyzer/ is reported (the model, the status and state files, the markers, the lock holder, a nested file): 6 files, every one of them', $an1['writable_files'] === 6
+	&& count(array_intersect($an_files, array('analyzer/model.joblib', 'analyzer/.jobstatus-nightly.json', 'analyzer/.jobstate-nightly', 'analyzer/.lastrun-run_nightly', 'analyzer/.write.lock.holder', 'analyzer/sub/deep.dat'))) === 6);
+$an2 = gp_perm_scan_now($rp, $t0 + 31);
+$an3 = gp_perm_scan(true, $t0 + 32, $rp);
+$an4 = gp_perm_scan(false, $t0 + 33, $rp);
+$an_cmp = function ($x) { unset($x['time']); return $x; };
+t_ok('permission scan: the same install gives the same result every time (a fresh scan, "Scan again", and the cached copy agree: 6 files, nothing skipped, nothing "fixed" by running it again)',
+	$an_cmp($an1) === $an_cmp($an2) && $an_cmp($an2) === $an_cmp($an3) && $an_cmp($an3) === $an_cmp($an4) && $an4['writable_files'] === 6 && !$an4['truncated'] && $an4['unreadable'] === array());
+t_ok('permission scan: the skipped set is exactly .venv, .git and logs (a venv or node_modules directory is scanned like anything else)', gp_perm_skip() === array('.venv', '.git', 'logs'));
+@mkdir($rp . '/venv', 0755); file_put_contents($rp . '/venv/w.txt', 'x'); chmod($rp . '/venv/w.txt', 0666);
+t_ok('permission scan: a directory named "venv" is no longer skipped (only .venv)', gp_perm_scan_now($rp, $t0 + 34)['writable_files'] === 7);
+unlink($rp . '/venv/w.txt'); rmdir($rp . '/venv');
+// "No problems" is never claimed for a scan that could not look: an unreadable directory is reported
+if (function_exists('posix_geteuid') && posix_geteuid() !== 0) {
+	@mkdir($rp . '/analyzer/locked', 0755); file_put_contents($rp . '/analyzer/locked/f', 'x'); chmod($rp . '/analyzer/locked', 0000);
+	$un = gp_perm_scan_now($rp, $t0 + 35);
+	chmod($rp . '/analyzer/locked', 0755);
+	unlink($rp . '/analyzer/locked/f'); rmdir($rp . '/analyzer/locked');       // not left behind: the next tests build a ZIP from this install
+	t_ok('permission scan: a directory the PHP user cannot read is reported as unreadable (the scan says it is incomplete)', $un['unreadable'] === array('analyzer/locked'));
+} else {
+	t_skip('permission scan: an unreadable directory is reported', 'running as root: every directory is readable');
+}
+$un_fake = array_merge($sc2, array('unreadable' => array('analyzer/locked')));
+$al_un = gp_health_alerts(array('now' => time(), 'redis_up' => true, 'perms' => $un_fake));
+$lv_un = function ($a, $id) { foreach ($a as $x) { if ($x['id'] === $id) { return $x['level']; } } return ''; };
+t_ok('permission scan: an incomplete scan raises its own warning and the Jobs page does not say "No permission problems found"', $lv_un($al_un, 'perm_incomplete') === 'warning' && (function () use ($un_fake, $jh_render, $healthy) {
+	list($h, $e) = $jh_render('jobs', array(), array('health' => $healthy['jobs'], 'detail' => '', 'runs' => array(), 'errors' => array(), 'php_env' => null, 'perms' => array_merge($un_fake, array('time' => time() - 60))));
+	return !$e && strpos($h, 'INCOMPLETE') !== false && strpos($h, 'analyzer/locked') !== false && strpos($h, 'No permission problems found') === false;
+})());
+foreach (glob($rp . '/analyzer/sub/*') as $f) { unlink($f); } @rmdir($rp . '/analyzer/sub');
+foreach (array('analyzer/model.joblib', 'analyzer/.jobstatus-nightly.json', 'analyzer/.jobstate-nightly', 'analyzer/.lastrun-run_nightly', 'analyzer/.write.lock.holder') as $af) { @unlink($rp . '/' . $af); }
 // cache: one hour, recomputed after an update
 chmod($rp . '/guard/log.php', 0666);
 $ca = gp_perm_scan(true, $t0, $rp);

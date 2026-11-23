@@ -339,6 +339,12 @@ read **inside the panel request**, so they describe the PHP that serves the site
 `opcache.validate_timestamps = 0` the dashboard raises a warning: PHP keeps the old code after an update and after a change of rules, lists or settings
 until OPcache is reset or PHP restarts (the updater and the panel do call `opcache_invalidate`, which only reaches the pool that serves the panel).
 
+**Classifier labels.** The Models page (classifier card) and the dashboard details show how far the supervised classifier is from having enough labels: `0 / 50 positives`, the count per source (honeypot hits, refuted
+crawler claims, operator ground truth), the number of human-labelled sessions and a link to *Classifier labels: how each source is set up* in `docs/08-ANALYZER-PHASES.md`. Every nightly run records it.
+A classifier skipped for lack of labels is an **informational note** on the job (Jobs page, shown as *Notes*), not a "did nothing useful" warning, as long as the rest of nightly scored devices and wrote reputations;
+a run that did nothing else keeps the warning. **File permissions** scans every file of the install except `.venv`, `.git` and `logs/` (analyzer data files and dotfiles included), always the same set; a directory
+the PHP user cannot read, or a tree too large to finish, makes the scan **incomplete** (own alert) instead of claiming "No permission problems found".
+
 **Skipped by lock.** A job whose only firings so far were skipped because the write lock was busy has the state **skipped by lock** (not "never ran, check the crontab"):
 the dashboard alert says the crontab is fine, names the job that held `analyzer/.write.lock` when known, and a job that is late because its last firing was skipped says so too.
 The crontab check accepts entries prefixed with `sleep N;` / `sleep N &&` and the `PATH=`, `SHELL=` and `MAILTO=` lines. The dashboard *Cron setup* card shows only when a required job

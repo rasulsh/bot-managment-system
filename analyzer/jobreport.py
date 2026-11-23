@@ -6,7 +6,11 @@ result worth keeping (a training run: candidate written or not, sample counts,
 metrics) calls result(). Both write ONE line to stderr:
 
     GV_JOB_WARN: <reason>
+    GV_JOB_INFO: <note>
     GV_JOB_RESULT: {"key": value, ...}
+
+A warning means "this run did not do its job". An info note is for a thing worth knowing that is NOT a failure of the run (the classifier is
+waiting for labels while the rest of nightly did its work): it never turns the status into "warning".
 
 scripts/analyzer-cron.sh captures stderr, turns the warnings into the job's
 "warning" status and stores the result in .jobstatus-<mode>.json; the panel worker
@@ -18,6 +22,7 @@ import json
 import sys
 
 WARN_PREFIX = 'GV_JOB_WARN: '
+INFO_PREFIX = 'GV_JOB_INFO: '
 RESULT_PREFIX = 'GV_JOB_RESULT: '
 
 
@@ -28,6 +33,16 @@ def _oneline(text):
 def warn(reason):
     """Mark this run as 'ok, but did nothing useful' with the reason."""
     print(WARN_PREFIX + _oneline(reason), file=sys.stderr)
+
+
+def info(note):
+    """An informational note about this run (not a warning: the run did its work)."""
+    print(INFO_PREFIX + _oneline(note), file=sys.stderr)
+
+
+def parse_notes(text):
+    """The informational notes (GV_JOB_INFO) of captured output. Pure."""
+    return [line[len(INFO_PREFIX):].strip() for line in str(text).splitlines() if line.startswith(INFO_PREFIX)]
 
 
 def result(payload):

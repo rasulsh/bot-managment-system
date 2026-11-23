@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import classifier as clf_mod
 from analyzer import config as config_mod
+from analyzer import fsmode
 from analyzer import jobreport
 from analyzer import logs as logs_mod
 from analyzer import model as model_mod
@@ -146,7 +147,7 @@ def collect_rule_hits(log_dir, now, cache_path=None, days=7):
     if cache_path:
         try:
             tmp = cache_path + '.tmp'
-            with open(tmp, 'w') as handle:
+            with fsmode.open_text(tmp) as handle:
                 json.dump({'days': fresh}, handle)
             os.replace(tmp, cache_path)
         except Exception:
@@ -389,6 +390,8 @@ def build(rows, cfg, guard_cfg=None):
         'models': model_metadata(cfg),
         'last_runs': read_last_runs(cfg),
         'bot_verify': read_stats(cfg, 'run_verify'),
+        # How far the supervised classifier is from enough labels (written by every nightly run): positives of clf_min_positive, by source.
+        'clf_labels': read_stats(cfg, 'run_nightly').get('clf_labels'),
     }
     if guard_cfg:
         payload['guard'] = guard_cfg
@@ -436,7 +439,7 @@ def marker_path(cfg, name):
 def touch_run(cfg, name):
     """Record that a cron mode completed, so the panel can show freshness."""
     try:
-        with open(marker_path(cfg, name), 'w') as handle:
+        with fsmode.open_text(marker_path(cfg, name)) as handle:
             handle.write(str(round(time.time(), 3)))
     except Exception:
         pass
@@ -453,7 +456,7 @@ def record_stats(cfg, name, stats):
         payload = dict(stats)
         payload['at'] = round(time.time(), 3)
         tmp = stats_path(cfg, name) + '.tmp'
-        with open(tmp, 'w') as handle:
+        with fsmode.open_text(tmp) as handle:
             json.dump(payload, handle)
         os.replace(tmp, stats_path(cfg, name))
     except Exception:
@@ -488,7 +491,7 @@ def write(payload, path):
     """Atomic write, so the panel never reads a half-written snapshot."""
     tmp = path + '.tmp'
     try:
-        with open(tmp, 'w') as handle:
+        with fsmode.open_text(tmp) as handle:
             json.dump(payload, handle, ensure_ascii=False)
         os.replace(tmp, path)
         return True
@@ -518,6 +521,9 @@ def main(argv=None):
     except Exception as exc:
         print('ERROR: bad configuration: %s' % exc, file=sys.stderr)
         return 2
+    # Files an earlier run (cron umask 002) left group- or world-writable in the analyzer directory (the model, the markers, the status
+    # files) are corrected now; new files are created 0644 by analyzer/fsmode.py.
+    fsmode.tidy_for(cfg)
     if args.log_dir:
         cfg['log_dir'] = args.log_dir
     days = args.days or 1

@@ -13,7 +13,7 @@ if (!defined('GP_BOOT')) { http_response_code(404); exit; }
 // update. Plain functions, no shell.
 
 define('GP_PERM_TTL', 3600);
-define('GP_PERM_MAX_ENTRIES', 30000);
+define('GP_PERM_MAX_ENTRIES', 200000);       // a safety stop for a runaway tree; hitting it is reported (truncated), never silent
 define('GP_PERM_SAMPLE', 8);
 
 // Install files that hold secrets. panel/users.json is listed for the user store that arrives with panel roles;
@@ -22,8 +22,9 @@ function gp_perm_secret_files() {
 	return array('guard/config.php', 'panel/panel.config.php', 'guard/config.local.json', 'panel/users.json');
 }
 
-// Top-level names the scan never enters.
-function gp_perm_skip() { return array('.venv', 'venv', '.git', 'logs'); }
+// Top-level names the scan never enters: the virtualenv, git and logs/ (the guard and the wrappers give logs their own modes). EVERYTHING else is
+// scanned, dotfiles and the analyzer's data files included, so the result is the same set every time (it used to differ with who ran the scan).
+function gp_perm_skip() { return array('.venv', '.git', 'logs'); }
 
 function gp_perm_cache_path() { return gp_status_dir() . '/.perm-check.json'; }
 
@@ -33,15 +34,19 @@ function gp_perm_cache_clear() { @unlink(gp_perm_cache_path()); }
 function gp_perm_scan_now($root = null, $now = null) {
 	$root = rtrim($root === null ? dirname(__DIR__) : $root, '/');
 	$now = ($now === null || (int)$now <= 0) ? time() : (int)$now;       // a zero "now" must never become the scan's timestamp (it showed as 20,780 days ago)
-	$out = array('v' => 1, 'time' => $now, 'root' => $root, 'scanned' => 0, 'truncated' => false,
+	$out = array('v' => 1, 'time' => $now, 'root' => $root, 'scanned' => 0, 'truncated' => false, 'unreadable' => array(),
 		'writable_dirs' => 0, 'writable_files' => 0, 'writable_sample' => array(), 'cron_not_exec' => array(), 'secret_readable' => array());
 	$skip = gp_perm_skip();
 	$stack = array('');
 	while ($stack) {
 		$rel = array_pop($stack);
 		$dir = $rel === '' ? $root : $root . '/' . $rel;
-		$names = @scandir($dir);
-		if (!is_array($names)) { continue; }
+		$names = @scandir($dir);          // sorted: the order (and so a cap, if one is ever hit) is the same every time
+		if (!is_array($names)) {
+			// A directory this process cannot list (another owner, mode 0700) is NOT "no problems": say the scan is incomplete.
+			if (count($out['unreadable']) < GP_PERM_SAMPLE) { $out['unreadable'][] = $rel === '' ? '.' : $rel; } else { $out['unreadable_more'] = true; }
+			continue;
+		}
 		foreach ($names as $n) {
 			if ($n === '.' || $n === '..') { continue; }
 			$r = $rel === '' ? $n : $rel . '/' . $n;
@@ -57,6 +62,7 @@ function gp_perm_scan_now($root = null, $now = null) {
 			}
 			if ($isdir) { $stack[] = $r; }
 		}
+		rsort($stack, SORT_STRING);       // popped in ascending order
 	}
 	foreach ((array)glob($root . '/scripts/*.sh') as $f) {
 		if (!is_file($f) || is_link($f)) { continue; }

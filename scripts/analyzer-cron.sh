@@ -39,6 +39,9 @@
 # report writes to stdout on purpose so it can be piped or mailed. Pass
 # GV_REPORT_HTML=/path/to/file.html to also write the standalone HTML version.
 set -euo pipefail
+# Cron often runs with umask 002, which made everything a job writes group-writable (model.joblib, the status and state files, the lock
+# holder). The files are created 0644 (directories 0755); analyzer/fsmode.py also sets explicit modes where Python creates files.
+umask 022
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON=""

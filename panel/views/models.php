@@ -28,6 +28,11 @@ $promote = array('ml' => 'promote_ml', 'clf' => 'promote_clf');
 	</div>
 	<?php endif; ?>
 
+	<?php if ($kind === 'clf'): ?>
+	<div class="gp-note" id="clf-labels"><div class="gp-card-title" style="font-size:.75rem"><?= gp_e(gp_t('mdl_labels_title')) ?><?= gp_tip('mdl_labels') ?></div>
+		<?= gp_clf_labels_html(isset($clf_labels) ? $clf_labels : null) ?></div>
+	<?php endif; ?>
+
 	<div class="gp-grid-2">
 		<?php foreach (array('live' => gp_t('mdl_live'), 'candidate' => gp_t('mdl_candidate'))
 			as $slot => $slot_label):

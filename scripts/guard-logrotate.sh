@@ -36,6 +36,7 @@
 #   * One failure does not abort the rest: retention still runs, and the exit
 #     status is non-zero so cron can report it.
 set -uo pipefail
+umask 022          # cron may run with 002; what this script creates (status files, the .last-rotate marker) is not group-writable. Logs keep their own modes.
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHP_BIN="${GV_PHP:-php}"

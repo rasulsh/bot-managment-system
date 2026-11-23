@@ -9,6 +9,7 @@
 # over HTTPS only, IPv4 only; a failed fetch keeps the last good entries. The run is recorded for the job-health page
 # (analyzer/.jobstatus-feeds.json, logs/jobs.log) like every other job; it fails (exit 1) when a feed failed.
 set -uo pipefail
+umask 022          # see analyzer-cron.sh
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHP_BIN="${GV_PHP:-php}"
