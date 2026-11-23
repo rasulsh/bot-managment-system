@@ -89,6 +89,8 @@ jobs:
         run: php -d display_errors=1 -d error_reporting=-1 scripts/guard-selftest.php
       - name: panel self-test
         run: php -d display_errors=1 -d error_reporting=-1 scripts/panel-selftest.php
+      - name: reason-code docs are generated from the registry and up to date
+        run: php scripts/gen-reason-docs.php --check
       - name: access rules end-to-end (block, challenge, log, monitor, precedence)
         run: bash scripts/rules-e2e.sh
       - name: job status recording (success, failure, crash by signal, lock skip, bad Python, redaction, logrotate fields)

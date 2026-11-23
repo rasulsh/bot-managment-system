@@ -687,6 +687,7 @@ if (!function_exists('gp_t')) {
 	}
 }
 require_once __DIR__ . '/../panel/ui.php';
+require_once __DIR__ . '/../panel/reasons.php';
 if (!function_exists('gp_csrf_token_stub')) {
 	// gp_csrf_token() needs an installed panel; the view only echoes it.
 	function gp_csrf_token_stub() { return str_repeat('a', 64); }
@@ -1687,11 +1688,14 @@ t_ok('status: older than 45 days is stale, exactly 45 is not', gp_geo_status($gx
 file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin($gx_now - 90 * 86400));
 file_put_contents($gx_tmp . '/geo/asn.bin', $gx_bin($gx_now - 5 * 86400, 2));
 t_ok('status: the oldest of the two files decides', gp_geo_status($gx_now)['stale'] === true && gp_geo_status($gx_now)['asn']['age_days'] === 5);
-t_ok('warnings: stale', gp_geo_warnings(gp_geo_status($gx_now), 0, gv_cfg_defaults(array())) === array('stale'));
+$gx_nu = function (array $w) { return array_values(array_diff($w, array('uncompiled'))); };     // the uploaded geoip.dat above is not compiled, on purpose
+t_ok('warnings: stale', $gx_nu(gp_geo_warnings(gp_geo_status($gx_now), 0, gv_cfg_defaults(array()))) === array('stale'));
+t_ok('warnings: an uploaded source that was never compiled is flagged, and the status counts it',
+	in_array('uncompiled', gp_geo_warnings(gp_geo_status($gx_now), 0, gv_cfg_defaults(array())), true) && gp_geo_status($gx_now)['uncompiled'] >= 1);
 file_put_contents($gx_tmp . '/geo/country.bin', 'GARBAGE');
 t_ok('status: a damaged file is reported as corrupt, not as missing', gp_geo_status($gx_now)['country']['valid'] === false && in_array('corrupt', gp_geo_warnings(gp_geo_status($gx_now), 0, gv_cfg_defaults(array())), true));
 @unlink($gx_tmp . '/geo/country.bin'); @unlink($gx_tmp . '/geo/asn.bin');
-t_ok('warnings: a geo rule with no database at all', gp_geo_warnings(gp_geo_status($gx_now), 1, gv_cfg_defaults(array())) === array('missing'));
+t_ok('warnings: a geo rule with no database at all', $gx_nu(gp_geo_warnings(gp_geo_status($gx_now), 1, gv_cfg_defaults(array()))) === array('missing'));
 t_ok('warnings: geo.log on with no country database', in_array('log_no_db', gp_geo_warnings(gp_geo_status($gx_now), 0, array('geo' => array('log' => true))), true));
 
 file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin($gx_now - 1 * 86400));
@@ -1823,9 +1827,9 @@ $gx_index = file_get_contents(__DIR__ . '/../panel/index.php');
 
 // Dashboard, settings, strings, views.
 file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin(time() - 60 * 86400));
-t_ok('the dashboard warns when a database is older than 45 days', gp_geo_dashboard_warnings() === array('stale'));
+t_ok('the dashboard warns when a database is older than 45 days', $gx_nu(gp_geo_dashboard_warnings()) === array('stale'));
 file_put_contents($gx_tmp . '/geo/country.bin', $gx_bin(time() - 3 * 86400));
-t_ok('the dashboard is quiet about a fresh database', gp_geo_dashboard_warnings() === array());
+t_ok('the dashboard is quiet about a fresh database', $gx_nu(gp_geo_dashboard_warnings()) === array());
 @unlink($gx_tmp . '/geo/country.bin'); @unlink($gx_tmp . '/geo/asn.bin'); @unlink($gx_tmp . '/rules.json'); @unlink(gv_rules_cache_path($gx_tmp . '/rules.json'));
 $gx_def = array();
 $gx_lang = require __DIR__ . '/../panel/lang.php';
@@ -1855,6 +1859,7 @@ if ($gx_audit_backup !== null) { file_put_contents(gp_audit_path(), $gx_audit_ba
 t_section('Panel layout: include / exclude filters, tabs, tooltips');
 require_once __DIR__ . '/../panel/filters.php';
 require_once __DIR__ . '/../panel/ui.php';
+require_once __DIR__ . '/../panel/reasons.php';
 if (!function_exists('gp_t')) {
 	$GP_STRINGS = require __DIR__ . '/../panel/lang.php';
 	function gp_t($key) { global $GP_STRINGS; return isset($GP_STRINGS[$key]) ? $GP_STRINGS[$key] : $key; }
@@ -4639,6 +4644,115 @@ $d6_clean();
 unset($GLOBALS['gp_test_panel_cfg']);
 putenv('GV_AUDIT'); putenv('GV_USERS');
 $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+
+
+t_section('Reason codes: registry, scan of emitted codes, badges, pick list, short fields (PR F)');
+require_once __DIR__ . '/../panel/reasons.php';
+$rc_root = dirname(__DIR__);
+// 1. Every reason code the guard, analyzer and panel can emit is in the registry. The codes are collected from the SOURCE, not listed here.
+$rc_found = array();
+foreach (glob($rc_root . '/guard/*.php') as $f) {
+	$src = (string)file_get_contents($f);
+	if (preg_match_all('/\$st\[\'rs\'\]\[\]\s*=\s*\'([A-Za-z0-9_]+)(:?)\'/', $src, $m, PREG_SET_ORDER)) { foreach ($m as $x) { if ($x[1] . $x[2] !== 'SH_') { $rc_found[$x[1] . $x[2]] = basename($f); } } }
+	if (preg_match_all('/\$reasons\[\]\s*=\s*\'([A-Z_]+)\'/', $src, $m, PREG_SET_ORDER)) { foreach ($m as $x) { $rc_found[$x[1]] = basename($f); } }
+	if (preg_match_all('/return \(\(\$rule\[\'mode\'\] === \'enforce\'\) \? \'([A-Z_]+:)\' : \'(SH_[A-Z_]+:)\'/', $src, $m, PREG_SET_ORDER)) { foreach ($m as $x) { $rc_found[$x[1]] = basename($f); $rc_found[$x[2]] = basename($f); } }
+	if (preg_match_all('/\'IPL_\' \. \(\$type === \'block\' \? \'(BLOCK)\' : \'(ALLOW)\'\)/', $src, $m, PREG_SET_ORDER)) { foreach ($m as $x) { $rc_found['IPL_' . $x[1] . ':'] = basename($f); $rc_found['IPL_' . $x[2] . ':'] = basename($f); } }
+	// 'SH_' . $intended: the intended action of a request that a monitor-only rule did not enforce
+	if (preg_match('/\'SH_\' \. \$intended/', $src)) { foreach (array('403', '429', 'challenge') as $a) { $rc_found['SH_' . $a] = basename($f); } }
+}
+foreach (glob($rc_root . '/analyzer/*.py') as $f) {
+	if (basename($f) === 'selftest.py') { continue; }
+	$src = (string)file_get_contents($f);
+	if (preg_match_all('/_has_reason\(\w+, \'([A-Z_]+)\'\)/', $src, $m)) { foreach ($m[1] as $c) { $rc_found[$c] = basename($f); } }
+	if (preg_match_all('/\'((?:SH_)?(?:RULE|IPL_ALLOW|IPL_BLOCK):)\'/', $src, $m)) { foreach ($m[1] as $c) { $rc_found[$c] = basename($f); } }
+}
+foreach (glob($rc_root . '/panel/*.php') as $f) {
+	if (in_array(basename($f), array('reasons.php', 'lang.php'), true)) { continue; }
+	$src = (string)file_get_contents($f);
+	if (preg_match_all('/\'((?:SH_)?(?:RULE|IPL_ALLOW|IPL_BLOCK):)\'/', $src, $m)) { foreach ($m[1] as $c) { $rc_found[$c] = basename($f); } }
+}
+$rc_missing = array();
+foreach ($rc_found as $code => $where) {
+	$probe = substr($code, -1) === ':' ? $code . 'x' : $code;
+	if (!gp_reason_parse($probe)[3]) { $rc_missing[] = $code . ' (' . $where . ')'; }
+}
+t_ok('scan: the source emits at least 20 distinct reason codes (the scan itself still finds them)', count($rc_found) >= 20);
+t_ok('scan: every reason code emitted by the guard, analyzer or panel is in the registry' . ($rc_missing ? ' (missing: ' . implode(', ', $rc_missing) . ')' : ''), !$rc_missing);
+t_ok('scan: SH_CAPT_ESC, the escalation shadow code, is known', gp_reason_parse('SH_CAPT_ESC')[3] === true);
+// 2. Every registered code has a full name, an explanation and a category with a name; all of it in lang.php.
+$rc_lang = require $rc_root . '/panel/lang.php';
+$rc_nolang = array();
+foreach (gp_reason_registry() as $b => $cat) {
+	foreach (array('rsn_' . $b, 'rsn_' . $b . '_x') as $k) { if (empty($rc_lang[$k])) { $rc_nolang[] = $k; } }
+	if (!isset(gp_reason_categories()[$cat]) || empty($rc_lang['rsn_cat_' . $cat])) { $rc_nolang[] = 'cat ' . $cat; }
+}
+foreach (gp_field_registry() as $fld => $def) {
+	if (empty($rc_lang[$def[0]])) { $rc_nolang[] = $def[0]; }
+	foreach ($def[1] as $v => $k) { if (empty($rc_lang[$k])) { $rc_nolang[] = $k; } }
+}
+t_ok('registry: every code, category, short field and value has its words in lang.php' . ($rc_nolang ? ' (missing: ' . implode(', ', $rc_nolang) . ')' : ''), !$rc_nolang);
+t_ok('registry: the action names 403, 429 and challenge are reasons only with SH_', !gp_reason_parse('403')[3] && gp_reason_parse('SH_403')[3] && gp_reason_parse('SH_challenge')[3] && !gp_reason_parse('IPL_BLOCK')[3] && gp_reason_parse('IPL_BLOCK:7')[3]);
+// 3. Badges.
+gp_reason_names(array('rule' => array('r1' => 'Block <b>scrapers</b>'), 'list' => array('l1' => 'Office')));
+$rc_b = gp_reason_badge('SH_RULE:r1');
+t_ok('badge: a monitor-only rule shows the full name, the rule NAME as a link, a visible "monitor only" marker, the code in small monospace and the explanation as a tooltip',
+	strpos($rc_b, 'Rule matched') !== false && strpos($rc_b, 'href="index.php?r=rules&amp;edit=r1"') !== false && strpos($rc_b, 'gp-reason-mon') !== false
+	&& strpos($rc_b, '<code class="gp-reason-code gp-ltr">SH_RULE:r1</code>') !== false && strpos($rc_b, 'title="') !== false && strpos($rc_b, 'monitor only') !== false);
+t_ok('badge: a rule name is escaped (no markup from an operator-chosen name)', strpos($rc_b, '<b>') === false && strpos($rc_b, '&lt;b&gt;scrapers&lt;/b&gt;') !== false);
+t_ok('badge: an enforced rule has no monitor marker', strpos(gp_reason_badge('RULE:r1'), 'gp-reason-mon') === false);
+$rc_l = gp_reason_badge('IPL_BLOCK:l1');
+t_ok('badge: an IP list code gets the list colours, the list name and a link to its entries', strpos($rc_l, 'gp-badge-ipl-block') !== false && strpos($rc_l, 'Office') !== false && strpos($rc_l, 'r=iplists&amp;list=l1') !== false && strpos(gp_reason_badge('IPL_ALLOW:l1'), 'gp-badge-ipl-allow') !== false);
+t_ok('badge: a rule or list that no longer exists is struck through, not linked', strpos(gp_reason_badge('RULE:gone9'), 'gp-reason-gone') !== false && strpos(gp_reason_badge('RULE:gone9'), '<a ') === false);
+t_ok('badge: inside another link ($links = false) there is no nested anchor', strpos(gp_reason_badge('RULE:r1', false), '<a ') === false);
+t_ok('badge: an unknown code still renders (its own text, category other, a note that the panel does not know it)', strpos(gp_reason_badge('NEW_THING'), 'NEW_THING') !== false && strpos(gp_reason_badge('NEW_THING'), 'does not know') !== false);
+t_ok('badge: a hostile code is escaped', strpos(gp_reason_badge('<script>x</script>'), '<script>') === false);
+t_ok('badge: the plain-text label (pick list, CSV) names the rule and says monitor only', gp_reason_label('SH_RULE:r1') === 'Rule matched: Block <b>scrapers</b> (monitor only)' && gp_reason_label('UA_SCRIPT') === 'Script or library User-Agent');
+// 4. The Reason filter's pick list: full names, value = code.
+$rc_o = gp_reason_options();
+t_ok('pick list: the values are the codes and the labels are the full names (rules and lists of this install included)',
+	$rc_o['UA_SCRIPT'] === 'Script or library User-Agent' && isset($rc_o['SH_RULE:r1'], $rc_o['RULE:r1'], $rc_o['IPL_BLOCK:l1'], $rc_o['SH_IPL_ALLOW:l1'], $rc_o['SH_403']) && !isset($rc_o['403']) && !isset($rc_o['RULE']));
+$rc_ms = gp_multi_input('x', 'reason', '', $rc_o);
+t_ok('pick list: the box offers the label with the code beside it and SUBMITS the code', strpos($rc_ms, 'value="UA_SCRIPT"') !== false && strpos($rc_ms, 'Script or library User-Agent') !== false && strpos($rc_ms, '<code class="gp-reason-code">UA_SCRIPT</code>') !== false);
+t_ok('pick list: a plain list of values still renders as before (value = label)', strpos(gp_multi_input('y', 'm', '', array('GET', 'POST')), 'value="GET"') !== false && !gp_is_labelled(array('GET', 'POST')) && gp_is_labelled(array('a' => 'A')) && !gp_is_labelled(array()));
+$rc_logs_view = (string)file_get_contents($rc_root . '/panel/views/logs.php');
+t_ok('logs view: the Reason, Action, Token, Crawler, Monitor and Holdout filters use the registry; the list is no longer a hard-coded subset',
+	strpos($rc_logs_view, 'gp_reason_options()') !== false && strpos($rc_logs_view, "gp_field_options('act')") !== false && strpos($rc_logs_view, "'UA_EMPTY', 'UA_SCRIPT'") === false
+	&& strpos($rc_logs_view, 'gp_reason_badge($reason)') !== false && strpos($rc_logs_view, "gp_field_value('act'") !== false);
+// 5. Short fields.
+t_ok('fields: full header and value labels (tok, ovr, botv, sh, hold, act); an unknown value is shown as it is',
+	gp_field_name('tok') === 'Token state' && gp_field_value('tok', 'v') === 'valid token' && gp_field_value('ovr', 'deny') === 'deny override' && gp_field_value('botv', 'bad') === 'claim refuted'
+	&& gp_field_value('sh', '1') === 'monitor only' && gp_field_value('act', '403') === 'Blocked (403)' && gp_field_value('act', 'zzz') === 'zzz' && gp_field_name('nope') === 'nope'
+	&& gp_field_value_full('tok', 'm') === 'no token (m)');
+t_ok('fields: the pick list of a short field is value => label', gp_field_options('tok') === array('v' => 'valid token', 'm' => 'no token', 'b' => 'bad token') && isset(gp_field_options('act')['token_issued']));
+// 6. Rendering the real log view: a row with reasons and short fields shows names and codes.
+$rc_ix = file_get_contents($rc_root . '/panel/index.php');
+t_ok('csv: the export keeps the short columns and adds a last column with the reasons spelled out', strpos($rc_ix, "array('rs_names')") !== false && strpos($rc_ix, "'gp_reason_label'") !== false);
+t_ok('dashboard: the top reasons and the reasons chart draw badges, not bare codes', strpos(file_get_contents($rc_root . '/panel/views/dashboard.php'), "gp_reason_badge((string)\$r[0], false)") !== false
+	&& strpos(file_get_contents($rc_root . '/panel/views/dashboard.php'), "'reasons' => true") !== false && strpos(gp_chart_bars(array('UA_SCRIPT' => 3), array('reasons' => true)), 'Script or library User-Agent') !== false);
+t_ok('identity view: reasons are badges', strpos(file_get_contents($rc_root . '/panel/views/identity.php'), 'gp_reason_badge($reason)') !== false);
+// 7. The generated docs are in step with the registry.
+$rc_gen = shell_exec('php ' . escapeshellarg($rc_root . '/scripts/gen-reason-docs.php') . ' --check 2>&1');
+t_ok('docs: docs/14-REASON-CODES.md is exactly what scripts/gen-reason-docs.php produces from the registry', is_string($rc_gen) && strpos($rc_gen, 'up to date') !== false);
+t_ok('docs: README and the Logs page link to the reason-codes page', strpos((string)file_get_contents($rc_root . '/README.md'), 'docs/14-REASON-CODES.md') !== false && strpos($rc_logs_view, 'docs/14-REASON-CODES.md') !== false || strpos($rc_logs_view, 'logs_reason_docs') !== false);
+gp_reason_names(false);
+
+t_section('GeoIP page: upload limit, next step, banner (PR F)');
+$gu_view = (string)file_get_contents($rc_root . '/panel/views/geo.php');
+t_ok('geo.upload_max_mb: default 32, a whitelisted int 1..2048, in the GeoIP settings group',
+	gv_cfg_defaults(array())['geo']['upload_max_mb'] === 32 && gv_overlay_validate('geo.upload_max_mb', 64)[0] === true && gv_overlay_validate('geo.upload_max_mb', 0)[0] === false
+	&& gv_overlay_validate('geo.upload_max_mb', 5000)[0] === false && gv_overlay_validate('geo.upload_max_mb', 'x')[0] === false && strpos(file_get_contents($rc_root . '/panel/views/settings.php'), "'geo.upload_max_mb'") !== false);
+$gu_ini = gp_geo_upload_limit();
+t_ok('limit: the page limit is geo.upload_max_mb, never above the PHP limit', gp_geo_web_limit(array('geo' => array('upload_max_mb' => 32))) === ($gu_ini > 0 ? min(32 * 1048576, $gu_ini) : 32 * 1048576)
+	&& gp_geo_web_limit(array()) === gp_geo_web_limit(array('geo' => array('upload_max_mb' => 32))) && gp_geo_web_limit(array('geo' => array('upload_max_mb' => 99999))) <= 2048 * 1048576);
+t_ok('view: the file input carries the limit and the "copy it over SFTP" message; the page names the web server limit, LiteSpeed Max Request Body Size and that the City database is not needed',
+	strpos($gu_view, 'data-gp-max-bytes') !== false && strpos($gu_view, 'data-gp-too-big') !== false && strpos($gu_view, 'data-gp-upload-msg') !== false
+	&& strpos($rc_lang['geo_upload_proxy'], 'Max Request Body Size') !== false && strpos($rc_lang['geo_upload_city'], 'City') !== false && strpos($rc_lang['geo_up_js_big'], 'SFTP') !== false
+	&& strpos($rc_lang['geo_up_js_big'], '{size}') !== false && substr_count($rc_lang['geo_up_js_big'], '%s') === 1);
+t_ok('next step: an upload says "press Compile now", and a banner shows while a source is uncompiled (also on the dashboard alerts)',
+	strpos($rc_lang['geo_up_next'], 'Compile now') !== false && strpos($rc_ix, "gp_t('geo_up_next')") !== false && !empty($rc_lang['geo_w_uncompiled']));
+t_ok('view: the file column has a minimum width and the source table has no unlabelled control', strpos($gu_view, 'gp-col-name') !== false);
+t_ok('layout: tooltips are placed against the viewport (position:fixed in the stylesheet, a rect-based placement in the script)',
+	strpos((string)file_get_contents($rc_root . '/panel/assets/app.src.css'), '.gp-tip-box { @apply fixed') !== false && strpos((string)file_get_contents($rc_root . '/panel/views/layout.php'), 'getBoundingClientRect()') !== false);
 
 echo "\n";
 // Say so out loud. A green run on a host missing the extension must never be

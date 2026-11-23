@@ -202,7 +202,7 @@ $lists = array(
 				<p class="gp-help"><?= gp_e(gp_t($lk === 'countries' ? 'dash_top_nogeo' : 'dash_top_none')) ?></p>
 			<?php else: foreach ($rows as $r): ?>
 			<div class="gp-stat-row">
-				<a class="gp-stat-key gp-mono gp-ltr gp-truncate" href="<?= gp_e($ld[1]((string)$r[0])) ?>"><?php if ($lk === 'reasons' && gp_reason_ipl_type((string)$r[0]) !== ''): ?><span class="gp-badge <?= gp_e(gp_reason_badge_class((string)$r[0])) ?>"><?= gp_e((string)$r[0]) ?></span><?php else: ?><?= gp_e((string)$r[0]) ?><?php endif; ?></a>
+				<a class="gp-stat-key gp-mono gp-ltr gp-truncate" href="<?= gp_e($ld[1]((string)$r[0])) ?>"><?php if ($lk === 'reasons'): ?><?= gp_reason_badge((string)$r[0], false) ?><?php elseif ($lk === 'rules'): ?><?= gp_reason_badge('RULE:' . (string)$r[0], false) ?><?php else: ?><?= gp_e((string)$r[0]) ?><?php endif; ?></a>
 				<span class="gp-stat-val"><?= gp_e(gp_num((int)$r[1])) ?></span>
 			</div>
 			<?php endforeach; endif; ?>
@@ -480,7 +480,7 @@ if (!empty($bv['unknown'])): ?>
 		<div class="gp-card-title"><?= gp_e(gp_t('dash_chart_reasons')) ?></div>
 		<?php echo gp_chart_bars(
 			isset($s['reasons']) && is_array($s['reasons']) ? $s['reasons'] : array(),
-			array('color' => gp_chart_color('accent'))); ?>
+			array('color' => gp_chart_color('accent'), 'reasons' => true)); ?>
 	</div>
 </div>
 

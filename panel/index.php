@@ -24,6 +24,7 @@ require_once __DIR__ . '/update.php';
 require_once __DIR__ . '/replay.php';
 require_once __DIR__ . '/filters.php';
 require_once __DIR__ . '/ui.php';
+require_once __DIR__ . '/reasons.php';
 require_once __DIR__ . '/health.php';
 require_once __DIR__ . '/geo.php';
 require_once __DIR__ . '/rules.php';
@@ -387,7 +388,7 @@ switch ($gp_route) {
 			elseif ($do === 'compile') { $r = gp_geo_compile($gp_user); }
 			elseif ($do === 'delete') { $r = gp_geo_delete_source(is_string($_POST['name'] ?? null) ? $_POST['name'] : '', $gp_user, $gp_ip); }
 			elseif ($do === 'rollback') { $r = gp_geo_rollback(($_POST['kind'] ?? '') === 'asn' ? 'asn' : 'country', $gp_user, $gp_ip); }
-			gp_flash($r[0] ? 'ok' : 'error', gp_t($r[1]) . ($r[2] !== '' ? ': ' . $r[2] : ''));
+			gp_flash($r[0] ? 'ok' : 'error', gp_t($r[1]) . ($r[2] !== '' ? ': ' . $r[2] : '') . ($do === 'upload' && $r[0] ? '. ' . gp_t('geo_up_next') : ''));
 			gp_redirect('geo');
 		}
 		// A body larger than post_max_size arrives with no POST data at all (so no CSRF
@@ -804,7 +805,9 @@ function gp_logs_export_csv(array $rows) {
 	fwrite($out, "\xEF\xBB\xBF");     // BOM so spreadsheets read UTF-8
 	$cols = array('ts', 'rid', 'ip', 'dev', 'm', 'p', 'q', 'act', 'sh', 'hold', 'ovr',
 		'tok', 'sc', 'esc', 'rs', 'rep', 'ml', 'clf', 'botv', 'cc', 'asn', 'st', 'by', 'dur');
-	fputcsv($out, $cols);
+	// The short codes stay the columns (scripts and old exports depend on them); the last column spells the reasons out
+	// (docs/14-REASON-CODES.md lists every code).
+	fputcsv($out, array_merge($cols, array('rs_names')));
 	foreach ($rows as $row) {
 		$line = array();
 		foreach ($cols as $col) {
@@ -816,6 +819,7 @@ function gp_logs_export_csv(array $rows) {
 				$line[] = isset($row[$col]) ? (is_array($row[$col]) ? json_encode($row[$col]) : $row[$col]) : '';
 			}
 		}
+		$line[] = implode(' | ', array_map('gp_reason_label', isset($row['rs']) && is_array($row['rs']) ? array_values(array_filter($row['rs'], 'is_string')) : array()));
 		// A cell that starts with = + - @ is a formula to a spreadsheet, and the
 		// path and query columns are whatever a visitor typed. Neutralise it.
 		foreach ($line as $i => $cell) {

@@ -7,6 +7,7 @@ $st = $status;
 $now = time();
 $warn = gp_geo_warnings($st, (int)$geo_rules, $cfg);
 $limit = (int)$st['limit'];
+$web_limit = gp_geo_web_limit($cfg);
 $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) : sprintf('%.0f KiB', $b / 1024); };
 ?>
 
@@ -107,7 +108,7 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 		<tbody>
 		<?php foreach ($st['sources'] as $s): ?>
 		<tr>
-			<td class="gp-mono gp-ltr"><?= gp_e((string)($s['name'] ?? '')) ?></td>
+			<td class="gp-mono gp-ltr gp-col-name"><?= gp_e((string)($s['name'] ?? '')) ?></td>
 			<td class="gp-mono"><?= gp_e($mb((int)($s['size'] ?? 0))) ?></td>
 			<td class="gp-mono"><?= gp_e(gmdate('Y-m-d H:i', (int)($s['mtime'] ?? 0))) ?> UTC</td>
 			<td>
@@ -134,13 +135,17 @@ $mb = function ($b) { return $b >= 1048576 ? sprintf('%.1f MiB', $b / 1048576) :
 		<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
 		<label class="gp-field">
 			<span class="gp-label"><?= gp_e(gp_t('geo_upload')) ?><?= gp_tip('geo_upload') ?></span>
-			<input class="gp-input" type="file" name="source" accept=".mmdb,.dat">
+			<input class="gp-input" type="file" name="source" accept=".mmdb,.dat" data-gp-max-bytes="<?= gp_e((string)$web_limit) ?>"
+				data-gp-too-big="<?= gp_e(sprintf(gp_t('geo_up_js_big'), $st['dir'])) ?>">
 			<span class="gp-help"><?= gp_e(gp_t('geo_upload_help')) ?>
-				<?= $limit > 0 ? gp_e(gp_t('geo_upload_limit')) . ': ' . gp_e($mb($limit)) . '.' : '' ?>
+				<?= gp_e(gp_t('geo_upload_limit')) ?>: <?= gp_e($mb($web_limit)) ?> (<?= gp_e(gp_t('geo_upload_limit_by')) ?>).
+				<?= gp_e(gp_t('geo_upload_proxy')) ?>
 				<?= gp_e(gp_t('geo_upload_sftp')) ?></span>
+			<span class="gp-help"><?= gp_e(gp_t('geo_upload_city')) ?></span>
 		</label>
+		<div class="gp-upload-msg" data-gp-upload-msg hidden></div>
 		<div class="gp-row-head">
-			<button class="gp-btn gp-btn-primary" type="submit" name="do" value="upload"><?= gp_e(gp_t('geo_upload_btn')) ?></button>
+			<button class="gp-btn gp-btn-primary" type="submit" name="do" value="upload" data-gp-upload-send><?= gp_e(gp_t('geo_upload_btn')) ?></button>
 			<button class="gp-btn gp-btn-ghost" type="submit" name="do" value="compile"><?= gp_e(gp_t('geo_compile')) ?></button><?= gp_tip('geo_compile') ?>
 		</div>
 	</form>

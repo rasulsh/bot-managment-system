@@ -25,6 +25,16 @@ function gp_ini_bytes($v) {
 	return (int)$n;
 }
 
+// The largest upload the page lets the browser send, in bytes: geo.upload_max_mb (default 32), never above PHP's own limit.
+// The web server (LiteSpeed, Apache, a proxy) may refuse a smaller body than PHP does and answers with its own 413 page, which
+// PHP never sees: only a check in the browser before sending can say so in the panel's words.
+function gp_geo_web_limit(array $cfg) {
+	$mb = isset($cfg['geo']['upload_max_mb']) ? (int)$cfg['geo']['upload_max_mb'] : 32;
+	$b = max(1, min(2048, $mb)) * 1048576;
+	$php = gp_geo_upload_limit();
+	return $php > 0 ? min($b, $php) : $b;
+}
+
 // The largest file the panel can receive: the smaller of the two PHP limits.
 function gp_geo_upload_limit() {
 	$a = gp_ini_bytes(ini_get('upload_max_filesize'));
@@ -79,6 +89,8 @@ function gp_geo_status($now = null) {
 		$out['sources'][] = array('name' => $n, 'size' => (int)@filesize($dir . '/' . $n), 'mtime' => (int)@filemtime($dir . '/' . $n),
 			'provides' => array(), 'used' => array(), 'new' => true);
 	}
+	$out['uncompiled'] = 0;
+	foreach ($out['sources'] as $s) { if (!empty($s['new'])) { $out['uncompiled']++; } }
 	$ages = array();
 	foreach (array('country', 'asn') as $k) { if ($out[$k] && $out[$k]['valid']) { $ages[] = $out[$k]['age_days']; } }
 	$out['stale'] = ($ages && max($ages) > GP_GEO_STALE_DAYS);
@@ -106,6 +118,7 @@ function gp_geo_warnings(array $status, $geo_rules, array $cfg) {
 	}
 	if ($geo_rules > 0 && !$status['country'] && $status['asn']) { $w[] = 'no_country'; }
 	if (!empty($cfg['geo']['log']) && !$status['country']) { $w[] = 'log_no_db'; }
+	if (!empty($status['uncompiled'])) { $w[] = 'uncompiled'; }
 	return array_values(array_unique($w));
 }
 

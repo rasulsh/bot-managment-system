@@ -141,7 +141,9 @@ function gv_cfg_defaults(array $cfg) {
 	// GeoIP: 'log' writes the country (and ASN) of every request into the log row.
 	// Off by default: the lookup then only runs when a rule needs it.
 	if (!isset($cfg['geo']) || !is_array($cfg['geo'])) { $cfg['geo'] = array(); }
-	$cfg['geo'] = array_merge(array('log' => false), $cfg['geo']);
+	$cfg['geo'] = array_merge(array('log' => false, 'upload_max_mb' => 32), $cfg['geo']);
+	if (!is_int($cfg['geo']['upload_max_mb']) && !(is_string($cfg['geo']['upload_max_mb']) && ctype_digit($cfg['geo']['upload_max_mb']))) { $cfg['geo']['upload_max_mb'] = 32; }
+	$cfg['geo']['upload_max_mb'] = max(1, min(2048, (int)$cfg['geo']['upload_max_mb']));
 	// The image CAPTCHA and the headless signals (guard/captcha.php). 'auto' / 0 = take the value of the level.
 	// escalate_score 0 = off. The w_* values are the weights of the headless signals.
 	// (a literal: this runs on every request. gv_headless_weights_default() holds the same numbers; a test compares them.)
@@ -158,6 +160,7 @@ function gv_cfg_defaults(array $cfg) {
 	foreach (array('enforce', 'signals', 'geo') as $grp) {
 		if (!isset($cfg[$grp]) || !is_array($cfg[$grp])) { continue; }
 		foreach ($cfg[$grp] as $k => $v) {
+			if ($grp === 'geo' && $k === 'upload_max_mb') { continue; }       // a number (MiB), not a switch
 			if (!is_bool($v)) { $cfg[$grp][$k] = (bool)filter_var($v, FILTER_VALIDATE_BOOLEAN); }
 		}
 	}
@@ -234,6 +237,7 @@ function gv_overlay_whitelist() {
 		'bot_suffixes'       => array('suffixes'),
 		// GeoIP: put the country / ASN of every request into its log row.
 		'geo.log'            => array('bool'),
+		'geo.upload_max_mb'  => array('int', 1, 2048),
 		// The image CAPTCHA (guard/captcha.php). A level 1-5 preset plus every value it sets, each overridable
 		// ('auto' / 0 = from the level), the per-IP budget, escalation, and the weights of the headless signals.
 		'captcha.level'      => array('int', 1, 5),

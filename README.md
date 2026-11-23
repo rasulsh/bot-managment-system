@@ -321,6 +321,15 @@ and panel time zones differ; `secret` or `holdout_salt` still a placeholder; Red
 `noeviction`; GD missing while a CAPTCHA is configured; entries dropped from an IP list; the
 rules cache is older than the rules file; the crontab could not be read.
 
+### Reading the logs
+
+A log row keeps SHORT codes (`UA_SCRIPT`, `SH_RULE:12`, `IPL_BLOCK:3`, ...): they are written on every request, so they are never renamed. The panel shows the full
+name next to the code everywhere a reason appears (**Logs**, **Identity**, the dashboard lists): a badge such as *Rule matched: Block scrapers* with the code in small
+monospace beside it, the explanation as a tooltip, and a **monitor only** marker on every `SH_` code (the guard would have acted and did nothing). A rule or list id is
+resolved to its name and links to it. The Logs **Reason** filter offers the full names (the value stays the code), and the CSV export keeps the short columns and adds
+a last column with the reasons spelled out. Every code, the other short fields (`act`, `tok`, `ovr`, `botv`, `sh`, `hold`, `cap`) and their values:
+[docs/14-REASON-CODES.md](docs/14-REASON-CODES.md).
+
 ## 1.6 Safe rollout plan
 
 Do these in order. Each step should look quiet before the next. The project's own
@@ -1079,7 +1088,8 @@ first, with a self-test. Tests must not write into the repository tree.
 1. `panel/index.php`: add a `case '<route>':` to the route table (POST → `gp_csrf_check` is done for you; redirect after POST with `gp_redirect`), pass data to `gp_render('<view>', ...)`. No include path may derive from the request.
 2. `panel/views/<route>.php` (start with the `GP_BOOT` guard); add the route to `$gp_nav` in `panel/views/layout.php` and `nav_<route>` to `panel/lang.php`.
 3. Tabs: `gp_tabs_begin($group, $labels, $errors)`, `gp_tab_begin()`, `gp_tab_end()`, `gp_tabs_end()` (`panel/ui.php`). Tooltips: `gp_tip('<key>')` with `tip_<key>` in `lang.php`.
-4. Filters: declare a spec for `gp_filter_parse($_GET, $spec)` (`panel/filters.php`: types `choice`, `ident`, `text`, `num`) and test rows with `gp_filter_test()`; empty values on optional fields use `(none)`.
+4. Reason codes: a new code written to the `rs` list of a log row needs an entry in `gp_reason_registry()` (`panel/reasons.php`) and `rsn_<code>` / `rsn_<code>_x` in `panel/lang.php`, then `php scripts/gen-reason-docs.php`; the self-test fails otherwise. Codes are never renamed.
+5. Filters: declare a spec for `gp_filter_parse($_GET, $spec)` (`panel/filters.php`: types `choice`, `ident`, `text`, `num`) and test rows with `gp_filter_test()`; empty values on optional fields use `(none)`.
 4b. Pick lists on a choice field: `gp_multi_input($id, $name, $value, $options, $attr)` (never a `<datalist>`). Messages: every POST action needs a section id in `gp_post_section()` (`panel/ui.php`) and a `gp_msg('<section>')` next to its button in the view (the self-test fails when a POST form has none); `gp_flash()` then lands in that section and `gp_redirect()` ends in `#msg-<section>`. IP list colours: `gp_ipl_badge_class()` / `gp_reason_badge_class()`.
 5. Data readers must be bounded (`GP_MAX_ROWS`, scan caps in `panel/data.php`). Test in `scripts/panel-selftest.php` and `scripts/panel-layout-test.sh` (390 px, no horizontal scroll).
 
@@ -1106,6 +1116,7 @@ ignored files.
 | `python -W error scripts/accesslog_selftest.py` | Python (stdlib) | Access-log report |
 | `bash scripts/rules-e2e.sh` | PHP, `curl`, `redis-server` | Rules, precedence chain, kill switch, holdout, expiry over real HTTP |
 | `bash scripts/jobstatus-selftest.sh`, `bash scripts/logrotate-selftest.sh` | `bash` | Job status recording and redaction; log rotation |
+| `php scripts/gen-reason-docs.php --check` | PHP | `docs/14-REASON-CODES.md` is what the reason registry (`panel/reasons.php`) produces; run it without `--check` to regenerate. `panel-selftest` also scans the guard, analyzer and panel source for emitted reason codes and fails when one is missing from the registry |
 | `bash scripts/e2e-pipeline.sh` | PHP, `curl`, Python, `redis-server` | Traffic → log → snapshot → panel readers |
 | `bash scripts/guard-test.sh http://127.0.0.1:8080` | dev router running | HTTP matrix (`scripts/dev-router.php` + `config.dev.php`) |
 | `bash scripts/identity-check.sh <url>`, `bash scripts/monitor-check.sh` | dev router | Allowed paths are byte-identical with the guard on and off; monitor mode is inert |

@@ -2,6 +2,17 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Readable reason codes, GeoIP page fixes (2026.11.31)
+
+* **Reason codes in words.** The log rows are unchanged (short codes stay: `SH_RULE:<id>`, `IPL_BLOCK:<id>`, `UA_SCRIPT`, ...). The panel now shows the full name, the code, a tooltip
+  and a "monitor only" marker for `SH_` codes on Logs, Identity and the dashboard; the Logs Reason, Action, Token, Crawler, Monitor and Holdout pick lists show names. The CSV export gains a
+  last column `rs_names`; the existing columns are unchanged. [14-REASON-CODES.md](14-REASON-CODES.md) is generated from `panel/reasons.php`.
+* **GeoIP.** New setting `geo.upload_max_mb` (default 32): the page refuses a larger file in the browser instead of reaching the web server's own 413 page. After an upload the page says "press Compile now"
+  and warns (also on the dashboard) while a source file is not compiled. The source table no longer squeezes the File column; tooltips are never clipped by a scrolling table; the filter operator and
+  value box share one height with the pick button inside the box. `app.css` is rebuilt. Nothing to do on upgrade.
+
+**Rollback.** Update page *Roll back* or `php updates/rollback.php`; an older panel ignores `geo.upload_max_mb` in `config.local.json` (the overlay is validated per key, an unknown key is dropped on the next save).
+
 ## File modes of job output, permission scan, classifier labels (2026.11.30)
 
 * **Modes.** On a host whose cron runs with umask 002 the analyzer's files (`analyzer/model.joblib`, `.jobstatus-*.json`, `.jobstate-*`, `.lastrun-*`, `.write.lock.holder`) were group-writable. All wrappers now use

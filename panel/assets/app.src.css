@@ -308,6 +308,15 @@
 /* IP list type: allow = blue, block = red, everywhere a list type is shown (never colour alone: the word is always printed). */
 .gp-badge-ipl-allow { @apply border-info-line bg-info-bg text-info-fg; }
 .gp-badge-ipl-block { @apply border-bad-line bg-bad-bg text-bad-fg; }
+/* reason badges: the full name, the logged code small beside it, a "monitor" marker for SH_ codes */
+.gp-reason { @apply max-w-full flex-wrap; }
+.gp-reason-code { @apply font-mono text-[10px] font-normal opacity-75; overflow-wrap: anywhere; }
+.gp-reason-mon { @apply rounded border border-current px-1 text-[10px] font-bold uppercase tracking-wide; }
+.gp-reason-link { @apply underline; }
+.gp-reason-gone { @apply line-through; }
+.gp-col-name { min-width: 11rem; overflow-wrap: anywhere; }
+.gp-upload-msg { @apply rounded-lg border border-bad-line bg-bad-bg p-3 text-xs font-bold text-bad-fg; }
+.gp-upload-msg[hidden] { display: none; }
 
 /* --- buttons ------------------------------------------------------- */
 .gp-btn { @apply inline-flex min-h-[44px] cursor-pointer items-center justify-center
@@ -530,7 +539,7 @@
 .gp-tip-btn { @apply ms-1 inline-flex h-5 w-5 cursor-help items-center justify-center rounded-full border
 	border-field bg-sunken p-0 text-[11px] font-bold leading-none text-muted hover:text-ink; }
 .gp-tip-btn:focus-visible { @apply outline-none ring-2 ring-accent/60; }
-.gp-tip-box { @apply absolute start-0 top-full z-40 mt-1 hidden w-72 max-w-[80vw] rounded-lg
+.gp-tip-box { @apply fixed z-50 hidden w-72 max-w-[calc(100vw-16px)] rounded-lg
 	border border-field bg-surface p-3 text-left text-[12px] font-normal leading-relaxed text-ink shadow-lg; }
 html[dir="rtl"] .gp-tip-box { text-align: right; }
 .gp-tip:hover .gp-tip-box, .gp-tip:focus-within .gp-tip-box, .gp-tip.gp-open .gp-tip-box { @apply block; }
@@ -538,8 +547,9 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
 .gp-tip-box b { @apply block text-[11px] uppercase tracking-wide text-subtle; }
 
 /* --- include / exclude filters ----------------------------------------- */
-.gp-op { @apply min-h-[44px] w-full text-xs; }
-.gp-fgroup { @apply grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,9.5rem)_minmax(0,1fr)]; }
+.gp-op { @apply h-11 min-h-[44px] w-full text-xs; }
+.gp-fgroup { @apply grid grid-cols-1 items-start gap-2 sm:grid-cols-[minmax(0,9.5rem)_minmax(0,1fr)]; }
+.gp-fgroup .gp-input { @apply h-11 box-border; }
 .gp-chips { @apply m-0 flex flex-wrap gap-2 p-0; list-style: none; }
 .gp-chip { @apply inline-flex max-w-full items-center gap-1.5 rounded-full border border-line bg-sunken py-1 ps-3 pe-1 text-xs; }
 .gp-chip-not { @apply border-warn-line bg-warn-bg text-warn-fg; }
@@ -571,8 +581,9 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
 
 /* --- multi-select (replaces <datalist>; the text input stays and is what the form submits) --- */
 .gp-ms { @apply relative min-w-0; }
-.gp-ms-toggle { @apply mt-1 inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-field bg-surface px-3 text-xs font-bold text-ink hover:bg-sunken; }
-.gp-ms-panel { @apply absolute start-0 z-30 mt-1 max-h-64 w-full min-w-[12rem] overflow-auto rounded-lg border border-field bg-surface p-1 shadow-lg; }
+.gp-ms-toggle { @apply absolute end-1.5 top-1.5 inline-flex h-8 w-8 items-center justify-center rounded-md border border-field bg-surface p-0 text-xs font-bold text-ink hover:bg-sunken; }
+.gp-ms-on > input[type=text] { padding-inline-end: 2.75rem; }
+.gp-ms-panel { @apply absolute start-0 top-full z-30 mt-1 max-h-64 w-full min-w-[12rem] overflow-auto rounded-lg border border-field bg-surface p-1 shadow-lg; }
 .gp-ms-panel[hidden], .gp-ms-toggle[hidden] { display: none; }
 .gp-ms-opt { @apply flex min-h-[40px] cursor-pointer items-center gap-2 rounded-md px-2 text-sm text-ink hover:bg-sunken; }
 .gp-ms-opt input { @apply h-4 w-4; }

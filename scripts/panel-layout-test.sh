@@ -29,6 +29,9 @@ mkdir "$WORK/bg"
 	|| { echo "ERROR: could not create the role users"; exit 2; }
 # Sample traffic so the log, identity and dashboard pages have something to show.
 mkdir -p "$WORK/bg/logs"
+# Two uploaded GeoIP sources that were never compiled (the GeoIP page warns and shows them in the table).
+mkdir -p "$WORK/bg/geo"
+printf x > "$WORK/bg/geo/GeoLite2-ASN.mmdb"; printf x > "$WORK/bg/geo/GeoLite2-Country.mmdb"
 python3 - "$WORK/bg/logs/guard-$(date +%Y%m%d).jsonl" <<'PY'
 import json, sys, time
 now = time.time()
