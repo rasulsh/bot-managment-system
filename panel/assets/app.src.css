@@ -774,3 +774,13 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
 .gp-dready .gp-dname .gp-badge { display: block; width: max-content; margin-top: .25rem; }
 #dash-ready .gp-table-wrap { overflow-x: auto; }
 .gp-bottom-label { white-space: nowrap; }
+
+/* dashboard polish */
+.gp-dtable td > a.gp-dtrunc { display: block; max-width: 24rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-dquiet { @apply mt-2 text-sm; }
+.gp-dquiet > summary { cursor: pointer; @apply py-1 font-bold text-muted; }
+.gp-dquiet[open] .gp-dquiet-show, .gp-dquiet:not([open]) .gp-dquiet-hide { display: none; }
+.gp-dquiet-list { @apply m-0 mt-1 flex flex-col gap-1 p-0; list-style: none; }
+.gp-dquiet-list li { @apply flex flex-wrap items-center gap-2 border-b border-line py-1; }
+.gp-dlegend-sw-partial { background: rgb(var(--gp-chart-ok)); opacity: .45; }
+.gp-dchart-now { font-weight: 700; }

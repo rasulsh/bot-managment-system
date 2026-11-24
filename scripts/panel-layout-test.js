@@ -163,6 +163,20 @@ const check = (name, ok, extra) => { if (ok) { console.log('PASS  ' + name); } e
 					check(label + ': bottom navigation labels are one line each ("Blocks", not "Temporary blocks & allows")', !!nv && nv.labels.every((l) => l[1] === 1) && nv.labels.some((l) => l[0] === 'Blocks') && !nv.labels.some((l) => /Temporary/.test(l[0])), JSON.stringify(nv && nv.labels));
 					check(label + ': the page has bottom padding at least as tall as the fixed bottom bar, and the last content ends above it', !!nv && nv.pad >= nv.navH - 0.5 && nv.atEnd && nv.lowest <= nv.navTop + 1, JSON.stringify(nv && [nv.navH, nv.pad, nv.navTop, nv.lowest, nv.atEnd]));
 				}
+				// top lists: every cell of a row ends at the same line (one row border for all cells), in every tab
+				const rowsOk = await page.evaluate(() => {
+					const bad = [];
+					Array.prototype.slice.call(document.querySelectorAll('#dash-top table')).forEach((t) => {
+						const panel = t.closest('[role=tabpanel]'); const wasHidden = panel && panel.hasAttribute('hidden'); if (wasHidden) { panel.removeAttribute('hidden'); }
+						Array.prototype.slice.call(t.querySelectorAll('tbody tr')).forEach((tr) => { const b = Array.prototype.slice.call(tr.children).map((c) => Math.round(c.getBoundingClientRect().bottom * 10) / 10); if (Math.max.apply(null, b) - Math.min.apply(null, b) > 0.6) { bad.push(b.join('/')); } });
+						if (wasHidden) { panel.setAttribute('hidden', ''); }
+					});
+					return { bad: bad, rows: document.querySelectorAll('#dash-top tbody tr').length };
+				});
+				check(label + ': top lists: all cells of a row share the same bottom border line', rowsOk.rows > 0 && rowsOk.bad.length === 0, JSON.stringify(rowsOk));
+				// readiness: only rows with hits are in the table, the quiet ones are one collapsed line
+				const quiet = await page.evaluate(() => { const d = document.querySelector('#dash-ready-quiet'); return { rows: document.querySelectorAll('#dash-ready tbody tr').length, quiet: d ? d.hasAttribute('open') : null, h: Math.round(document.querySelector('#dash-ready').getBoundingClientRect().height) }; });
+				check(label + ': readiness: the quiet rules and lists are collapsed into one line (the card does not grow with them)', quiet.quiet === false && quiet.rows >= 1 && quiet.rows <= 5, JSON.stringify(quiet));
 				if (v.name === 'mobile') {
 					check(label + ': the alert list is collapsed on a phone, the first critical alert is still shown, the card stays short', r.open === false && r.firstVisible === true && r.alertsH < 420, JSON.stringify([r.open, r.firstVisible, r.alertsH, r.tileY]));
 				} else {

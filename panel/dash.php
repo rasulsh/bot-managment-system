@@ -39,12 +39,16 @@ function gp_dash_short($n) {
 
 // The main chart: requests per hour, stacked by outcome, plus a line for distinct addresses. $buckets: list of
 // array(t, n, a, c, p, b, r, m, ips). $days = true labels the X axis by day (the 7 d view). $uid keeps the SVG ids unique.
-function gp_dash_main_chart(array $buckets, $days, $uid) {
+function gp_dash_main_chart(array $buckets, $days, $uid, $now = null) {
 	if (!$buckets) { return ''; }
 	$cl = gp_dash_classes();
+	$now = $now === null ? time() : (int)$now;
 	$W = 960; $H = 292; $L = 46; $R = 12; $T = 28; $B = 30;
 	$pw = $W - $L - $R; $ph = $H - $T - $B;
 	$n = count($buckets);
+	// The last bucket is the hour in progress when it starts in the current hour: it is drawn lighter, labelled "now", and has no point on
+	// the distinct-addresses line (a partial hour is not a collapse of traffic).
+	$partial_i = ((int)$buckets[$n - 1]['t'] === intdiv($now, 3600) * 3600) ? $n - 1 : -1;
 	$max = 1;
 	foreach ($buckets as $b) { $max = max($max, (int)($b['n'] ?? 0), (int)($b['ips'] ?? 0)); }
 	$top = gp_dash_nice_max($max);
@@ -74,17 +78,19 @@ function gp_dash_main_chart(array $buckets, $days, $uid) {
 			$h = $ph * $v / $top;
 			$y -= $h;
 			$fill = $k === 'm' ? 'url(#dch-h-' . gp_e($uid) . ')' : gp_chart_color($def[0]);
-			$svg .= '<rect x="' . round($x, 2) . '" y="' . round($y, 2) . '" width="' . round($bw, 2) . '" height="' . round($h, 2) . '" style="fill:' . $fill . '"><title>'
-				. gp_e($tip . ', ' . gp_t($def[1]) . ' ' . $v . ', ' . gp_t('dash_main_ips') . ' ' . (int)($b['ips'] ?? 0)) . '</title></rect>';
+			$svg .= '<rect x="' . round($x, 2) . '" y="' . round($y, 2) . '" width="' . round($bw, 2) . '" height="' . round($h, 2) . '" style="fill:' . $fill . '"'
+				. ($i === $partial_i ? ' class="gp-dchart-partial" fill-opacity="0.45"' : '') . '><title>'
+				. gp_e($tip . ($i === $partial_i ? ' (' . gp_t('dash_chart_partial') . ')' : '') . ', ' . gp_t($def[1]) . ' ' . $v . ($i === $partial_i ? '' : ', ' . gp_t('dash_main_ips') . ' ' . (int)($b['ips'] ?? 0))) . '</title></rect>';
 		}
-		$line[] = round($x + $bw / 2, 2) . ',' . round($T + $ph - $ph * (int)($b['ips'] ?? 0) / $top, 2);
-		// X labels: every 4th hour (24 h) or the first hour of each day (7 d).
+		if ($i !== $partial_i) { $line[] = round($x + $bw / 2, 2) . ',' . round($T + $ph - $ph * (int)($b['ips'] ?? 0) / $top, 2); }
+		// X labels: every 4th hour (24 h) or the first hour of each day (7 d); the hour in progress is labelled "now" instead.
 		$lab = '';
-		if ($days) { $d = date('M j', (int)$b['t']); if ($d !== $prev_day && date('G', (int)$b['t']) === '0') { $lab = $d; } if ($d !== $prev_day) { $prev_day = $d; } }
-		elseif ($i % 4 === 0) { $lab = date('H:00', (int)$b['t']); }
-		if ($lab !== '') { $svg .= '<text x="' . round($x + $bw / 2, 1) . '" y="' . ($H - 10) . '" class="gp-dchart-tick" text-anchor="middle">' . gp_e($lab) . '</text>'; }
+		if ($days) { $d = date('M j', (int)$b['t']); if ($d !== $prev_day && date('G', (int)$b['t']) === '0' && $i < $n - 6) { $lab = $d; } if ($d !== $prev_day) { $prev_day = $d; } }
+		elseif ($i % 4 === 0 && $i < $n - 2) { $lab = date('H:00', (int)$b['t']); }
+		if ($i === $partial_i) { $lab = gp_t('dash_now'); }
+		if ($lab !== '') { $svg .= '<text x="' . round($x + $bw / 2, 1) . '" y="' . ($H - 10) . '" class="gp-dchart-tick' . ($i === $partial_i ? ' gp-dchart-now' : '') . '" text-anchor="middle">' . gp_e($lab) . '</text>'; }
 	}
-	$svg .= '<polyline points="' . implode(' ', $line) . '" class="gp-dchart-line"/></svg>';
+	$svg .= (count($line) > 1 ? '<polyline points="' . implode(' ', $line) . '" class="gp-dchart-line"/>' : '') . '</svg>';
 	return $svg;
 }
 
@@ -94,7 +100,8 @@ function gp_dash_legend() {
 	foreach (gp_dash_classes() as $k => $def) {
 		$h .= '<li><span class="gp-dlegend-sw' . ($k === 'm' ? ' gp-dlegend-sw-hatch' : '') . '" style="background:' . gp_chart_color($def[0]) . '"></span>' . gp_e(gp_t($def[1])) . '</li>';
 	}
-	return $h . '<li><span class="gp-dlegend-line"></span>' . gp_e(gp_t('dash_main_ips')) . '</li></ul>';
+	return $h . '<li><span class="gp-dlegend-line"></span>' . gp_e(gp_t('dash_main_ips')) . '</li>'
+		. '<li><span class="gp-dlegend-sw gp-dlegend-sw-partial"></span>' . gp_e(gp_t('dash_chart_partial')) . '</li></ul>';
 }
 
 // A sparkline for a KPI tile: one line, no axes. $vals: numbers, oldest first.
@@ -128,7 +135,10 @@ function gp_dash_mixbar(array $rec) {
 // "Ready to enforce?" from the readiness numbers of one rule or list: array(code, lang key).
 // none = no hit in 7 d (no evidence either way), more = too few hits to judge, review = many hits carried a valid token (people who
 // solved the check, so the false-positive risk is high), ready = enough hits and almost none carried a token.
-function gp_dash_ready_hint(array $r) {
+function gp_dash_ready_hint(array $r, $list_type = '') {
+	// An ALLOW list never blocks anything: the valid-token share is a false-positive signal for block and challenge actions only,
+	// so it gets hits and addresses and no enforce hint.
+	if ($list_type === 'allow') { return array('allow', 'dash_rd_allow'); }
 	$d7 = (int)($r['d7'] ?? 0);
 	if ($d7 <= 0) { return array('none', 'dash_rd_none'); }
 	if ($d7 < 20) { return array('more', 'dash_rd_more'); }
@@ -137,7 +147,7 @@ function gp_dash_ready_hint(array $r) {
 }
 
 function gp_dash_ready_badge($code) {
-	$cls = array('ready' => 'gp-badge-on', 'review' => 'gp-badge-bad', 'more' => 'gp-badge-warn', 'none' => 'gp-badge-off');
+	$cls = array('ready' => 'gp-badge-on', 'review' => 'gp-badge-bad', 'more' => 'gp-badge-warn', 'none' => 'gp-badge-off', 'allow' => 'gp-badge-info');
 	return $cls[$code] ?? 'gp-badge-off';
 }
 
@@ -166,4 +176,45 @@ function gp_dash_strip_counts(array $alerts, array $jobs) {
 		elseif (in_array($s, array('failing', 'late', 'warning'), true) || (in_array($s, array('never', 'skipped'), true) && !empty($h['required']))) { $o['jobs_bad']++; }
 	}
 	return $o;
+}
+
+// "not scheduled" for a job that has no crontab entry (the crontab check says missing or disabled), instead of "never ran".
+// Returns the state word to show: the job's own state, or 'unscheduled'. Pure.
+function gp_dash_job_state($job, array $h, array $cron) {
+	$state = (string)($h['state'] ?? '');
+	if ($state !== 'never' || !is_array($cron['report'] ?? null)) { return $state; }
+	foreach ((array)($cron['report']['jobs'] ?? array()) as $cj) {
+		if (($cj['job'] ?? '') === $job && in_array($cj['state'] ?? '', array('missing', 'disabled'), true)) { return 'unscheduled'; }
+	}
+	return $state;
+}
+
+// The empty state of the Countries / ASNs tabs: one sentence that names the reason and links to where to fix it. Returns HTML.
+// $geo = gp_geo_status() (or null), $cfg = the effective configuration.
+function gp_dash_geo_empty_html($geo, $cfg) {
+	$compiled = is_array($geo) && ((!empty($geo['country']['valid'])) || (!empty($geo['asn']['valid'])));
+	$logging = !empty($cfg['geo']['log']);
+	if (!$compiled) {
+		return gp_e(gp_t('dash_geo_e_nodb_a')) . ' <a href="index.php?r=geo">' . gp_e(gp_t('dash_geo_e_nodb_link')) . '</a>' . gp_e(gp_t('dash_geo_e_nodb_b'));
+	}
+	if (!$logging) {
+		return gp_e(gp_t('dash_geo_e_off_a')) . ' <a href="index.php?r=settings#set-geo">' . gp_e(gp_t('dash_geo_e_off_link')) . '</a>' . gp_e(gp_t('dash_geo_e_off_b'));
+	}
+	return gp_e(gp_t('dash_geo_e_wait'));
+}
+
+// Why the Response status card is empty, and how to fix it. Returns HTML.
+function gp_dash_status_empty_html($cfg) {
+	if (empty($cfg['capture_outcomes'])) {
+		return gp_e(gp_t('dash_st_e_off_a')) . ' <a href="index.php?r=settings#set-holdout">' . gp_e(gp_t('dash_st_e_off_link')) . '</a>' . gp_e(gp_t('dash_st_e_off_b'));
+	}
+	return gp_e(gp_t('dash_st_e_wait'));
+}
+
+// Why the Holdout gap card is empty, and how to fix it. Returns HTML.
+function gp_dash_holdout_empty_html($cfg) {
+	if ((int)($cfg['holdout_pct'] ?? 0) <= 0) {
+		return gp_e(gp_t('dash_ho_e_off_a')) . ' <a href="index.php?r=settings#set-holdout">' . gp_e(gp_t('dash_ho_e_off_link')) . '</a>' . gp_e(gp_t('dash_ho_e_off_b'));
+	}
+	return gp_e(gp_t('dash_ho_e_wait'));
 }

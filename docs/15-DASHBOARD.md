@@ -86,4 +86,9 @@ Stopping the guard needs a confirmation step on the page itself (no browser dial
 | No monitor-mode rule or list | Rollout card: "Nothing is in monitor mode" with links to **Rules** and **IP lists** |
 | No countries / ASNs in the logs | "No geo data yet: compile the GeoIP database" with a link to **GeoIP** |
 | No CAPTCHA served | Funnel shows the JS level only, with "no CAPTCHA was served in this period" |
+| Allow list in monitor mode | Rollout card shows hits and addresses and the badge "No enforce hint" (no valid-token share: it only measures false positives of block / challenge) |
+| More rules than hits | Rows with no hit in 7 d collapse into one line "N rules or lists with no hits in 7 d - show" |
+| Hour in progress | The last bucket is drawn lighter, labelled "now", with no point on the distinct-addresses line |
+| Response status / Holdout gap empty | The card says whether capture / holdout is off (and where to turn it on) or just has no data yet |
+| Job without a crontab entry | "not scheduled" in the System card (not "never ran") |
 | Demo role | aggregate tiles and the main chart only: no identities, no top lists, no readiness rows, no System card |
