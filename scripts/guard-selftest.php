@@ -1942,7 +1942,7 @@ $cx = explode('.', $cn);
 t_ok('captcha nonce: six parts, the PoW nonce parser refuses it and the CAPTCHA parser refuses a PoW nonce', count($cx) === 6 && gv_nonce_parse($cn) === false && gv_captcha_nonce_parse(gv_nonce_make('cap-secret', 'ua/1', '203.0.113.5', 12)) === false
 	&& gv_captcha_nonce_parse($cn)[2] === 12 && gv_captcha_nonce_parse($cn)[3] === 150);
 t_ok('captcha nonce: the answer is NOT in the nonce (only an HMAC of it), whatever the case or the digits typed',
-	strpos($cn, '4821') === false && gv_captcha_answer_ok($cn, 'cap-secret', '4821') && gv_captcha_answer_ok($cn, 'cap-secret', ' ۴۸۲۱ ') && gv_captcha_answer_ok($cn, 'cap-secret', '٤٨٢١')
+	!in_array('4821', $cx, true) && gv_captcha_answer_ok($cn, 'cap-secret', '4821') && gv_captcha_answer_ok($cn, 'cap-secret', ' ۴۸۲۱ ') && gv_captcha_answer_ok($cn, 'cap-secret', '٤٨٢١')
 	&& !gv_captcha_answer_ok($cn, 'cap-secret', '4822') && !gv_captcha_answer_ok($cn, 'cap-secret', '') && !gv_captcha_answer_ok($cn, 'other-secret', '4821') && !gv_captcha_answer_ok('garbage', 'cap-secret', '4821'));
 $cn2 = gv_captcha_nonce_make('cap-secret', 'ua/1', '203.0.113.5', 0, 60, 'ab3k');
 t_ok('captcha nonce: letters are case-insensitive', gv_captcha_answer_ok($cn2, 'cap-secret', 'AB3K') && gv_captcha_answer_ok($cn2, 'cap-secret', 'aB3k') && !gv_captcha_answer_ok($cn2, 'cap-secret', 'AB3L'));

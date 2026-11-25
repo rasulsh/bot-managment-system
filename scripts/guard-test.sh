@@ -277,6 +277,14 @@ else
 		handshake "$nonce" "$jar" >/dev/null 2>&1
 		dev=$(awk '$6 == "_gv" {print $7}' "$jar" | head -1 | cut -d. -f1)
 	fi
+	# A freshly minted device lands in the 5% holdout (measured only, never blocked) once in twenty runs, which turned rows 11 and 12b into a
+	# coin flip. When the dev config can name an identity OUTSIDE the holdout, rows 11-12b use that one (its token is signed with the dev secret).
+	outside_pair=$("$PHP_BIN" "$ROOT/scripts/holdout-probe.php" --outside 2>/dev/null)
+	if [ -n "$outside_pair" ]; then
+		dev="${outside_pair%% *}"
+		jar_host=$(printf '%s' "$BASE_URL" | sed -e 's|^[a-z]*://||' -e 's|[:/].*$||')
+		printf '# Netscape HTTP Cookie File\n%s\tFALSE\t/\tFALSE\t0\t_gv\t%s\n' "$jar_host" "${outside_pair#* }" > "$jar"
+	fi
 
 	if [ -z "$dev" ]; then
 		row '11 device with gv:rep seeded' 'SKIP' 'n/a' 'esc raised'
