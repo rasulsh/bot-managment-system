@@ -23,8 +23,16 @@ URL="http://127.0.0.1:$PORT/panel/index.php"
 for _ in $(seq 1 40); do curl -s -o /dev/null "$URL" && break; sleep 0.1; done
 JAR="$WORK/jar"
 tok() { curl -s -c "$1" -b "$1" "$URL?r=login" | grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//'; }
-curl -s -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$(tok "$JAR")" --data-urlencode "username=admin" --data-urlencode "password=migrate-pass-12345" "$URL?r=login"
-ok "signed in" "$(curl -s -c "$JAR" -b "$JAR" "$URL?r=dashboard" | grep -q 'data-chip="kill"' && echo 1 || echo 0)"
+# The first dashboard on a cold single-threaded php -S can be slow (the exposure probe waits on the same server); try the sign-in up to 3 times and show what came back when it never works.
+signed=0
+for try in 1 2 3; do
+  rm -f "$JAR"
+  curl -s -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$(tok "$JAR")" --data-urlencode "username=admin" --data-urlencode "password=migrate-pass-12345" "$URL?r=login"
+  page="$(curl -s -m 20 -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
+  if grep -q 'data-chip="kill"' <<<"$page"; then signed=1; break; fi
+  echo "INFO  sign-in attempt $try did not reach the dashboard: $(head -c 300 <<<"$page" | tr '\n' ' ')"
+done
+ok "signed in" "$signed"
 
 # Put the files back where the PREVIOUS release kept them, as an install that has just been updated looks.
 mv "$T/data/panel/users.json" "$T/panel/users.json"; [ -f "$T/data/panel/audit.jsonl" ] && mv "$T/data/panel/audit.jsonl" "$T/panel/audit.jsonl"
