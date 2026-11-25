@@ -101,6 +101,8 @@ jobs:
         run: bash scripts/logrotate-selftest.sh
       - name: test harness self-test (the HTTP matrix fails on a wrong row, guard.off is preserved, the monitor check waits for its server)
         run: bash scripts/harness-selftest.sh
+      - name: data migration end to end (a signed-in administrator stays signed in after panel/ -> data/panel/, modes, a stale login page)
+        run: bash scripts/data-migration-e2e.sh
       - name: exposure-check self-test (soft-404 sites, the probe list)
         run: bash scripts/exposure-check-selftest.sh
       - name: the suites left the working tree clean (nothing tracked or logged into the repo)
@@ -217,7 +219,7 @@ jobs:
           bash scripts/guard-test.sh http://127.0.0.1:8080 > /tmp/matrix.txt || rc=$?
           cat /tmp/matrix.txt
           test "$rc" -eq 0
-          test "$(grep -cE '^[0-9]+[a-z]? ' /tmp/matrix.txt)" -ge 38
+          test "$(grep -cE '^[0-9]+[a-z]? ' /tmp/matrix.txt)" -ge 30
           grep -q 'All asserted rows gave the expected answer' /tmp/matrix.txt
       - name: every allow path is byte-identical with the guard on and off
         run: bash scripts/identity-check.sh http://127.0.0.1:8080

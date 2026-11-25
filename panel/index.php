@@ -208,6 +208,8 @@ if ($gp_route === 'login') {
 	if ($gp_post && gp_panel_config() !== null && !gp_login_csrf_check($_POST['csrf'] ?? '')) {
 		// A POST without the cookie and its matching field (a cross-site form, an expired page): not an attempt, nothing is counted.
 		$gp_login_msg = gp_t('login_csrf');
+		$gp_login_user = is_string($_POST['username'] ?? null) ? substr($_POST['username'], 0, 200) : '';   // the name stays, the password never does
+		unset($_COOKIE[GP_LOGIN_CSRF_COOKIE]);                                                              // a stale cookie is replaced below with the form
 		$gp_post = false;
 	}
 	if ($gp_post) {

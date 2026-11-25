@@ -384,6 +384,9 @@ function gp_data_exposure_probe($now = null) {
 	if (is_array($c) && isset($c['at'], $c['state']) && ($now - (int)$c['at']) < 600 && empty($GLOBALS['gp_test_probe'])) {
 		return array('state' => (string)$c['state'], 'detail' => (string)($c['detail'] ?? ''));
 	}
+	// Claim the next ten minutes BEFORE asking, with the last known answer: a second dashboard load that arrives while this one waits for the
+	// server uses the cache instead of starting a second probe.
+	if (is_dir(dirname($cache)) && is_writable(dirname($cache))) { @file_put_contents($cache, json_encode(array('at' => $now, 'state' => is_array($c) && isset($c['state']) ? $c['state'] : 'unknown', 'detail' => is_array($c) ? (string)($c['detail'] ?? '') : '')), LOCK_EX); }
 	$out = gp_data_exposure_probe_run();
 	if (is_dir(dirname($cache)) && is_writable(dirname($cache))) { @file_put_contents($cache, json_encode(array('at' => $now, 'state' => $out['state'], 'detail' => $out['detail'])), LOCK_EX); }
 	return $out;
@@ -399,7 +402,9 @@ function gp_data_exposure_probe_run() {
 	if ($fetch === 'gp_data_probe_fetch' && (!preg_match('/^[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?$/', $host) || !preg_match('#^(/[A-Za-z0-9._~-]+)*$#', $prefix))) { return $unknown; }
 	$https = gp_is_https();
 	$exposed = array();
+	$exposed_started = microtime(true);
 	foreach (array('users.json' => '"password_hash"', 'audit.jsonl' => '"event"') as $name => $needle) {
+		if ($exposed_started + 3.0 < microtime(true)) { break; }        // never more than about three seconds in all
 		$r = call_user_func($fetch, $host, $prefix . '/' . $name, $https);
 		if (!is_array($r)) { continue; }
 		if ((int)$r['code'] === 200 && strpos((string)$r['body'], $needle) !== false) { $exposed[] = $prefix . '/' . $name; }
@@ -413,12 +418,13 @@ function gp_data_probe_fetch($host, $path, $https) {
 	if (preg_match('/:([0-9]{1,5})$/', $host, $m)) { $port = (int)$m[1]; }
 	if ($port === 0) { $port = $https ? 443 : 80; }
 	$ctx = stream_context_create(array('ssl' => array('verify_peer' => false, 'verify_peer_name' => false, 'peer_name' => preg_replace('/:[0-9]+$/', '', $host))));
-	$fp = @stream_socket_client(($https ? 'ssl://' : 'tcp://') . '127.0.0.1:' . $port, $en, $es, 2.0, STREAM_CLIENT_CONNECT, $ctx);
+	$fp = @stream_socket_client(($https ? 'ssl://' : 'tcp://') . '127.0.0.1:' . $port, $en, $es, 1.0, STREAM_CLIENT_CONNECT, $ctx);
 	if (!$fp) { return null; }
-	stream_set_timeout($fp, 2);
+	stream_set_timeout($fp, 1);
+	$deadline = microtime(true) + 1.5;
 	fwrite($fp, 'GET ' . $path . " HTTP/1.0\r\nHost: " . $host . "\r\nUser-Agent: bot-guard-panel-selfcheck\r\nConnection: close\r\n\r\n");
 	$resp = '';
-	while (!feof($fp) && strlen($resp) < 8192) {
+	while (!feof($fp) && strlen($resp) < 8192 && microtime(true) < $deadline) {
 		$chunk = fread($fp, 4096);
 		if ($chunk === false || $chunk === '') { break; }
 		$resp .= $chunk;

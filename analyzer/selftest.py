@@ -4224,6 +4224,47 @@ pip_src = open(os.path.join(IL_ROOT, 'panel', 'update.php')).read()
 ok('SEC-5: the update result page never enqueues pip_sync itself (gp_upd_post_verify has no gp_job_enqueue)',
    'gp_job_enqueue' not in pip_src[pip_src.index('function gp_upd_post_verify'):pip_src.index('function gp_upd_pip_queue')])
 
+# A package update that makes a saved model unusable: reported, ignored, rebuilt by the next nightly run with no manual step
+if model_mod.SKLEARN_AVAILABLE:
+    import warnings as warn_sx
+    sx_mp2 = os.path.join(sx_dir, 'ver.joblib')
+    model_mod.train([[float(i % 7) for _ in features_mod.FEATURE_ORDER] for i in range(40)], 0.05, sx_mp2, 10)
+    sx_jl = model_mod.joblib.load
+    def sx_inconsistent(path, *a, **k):
+        from sklearn.exceptions import InconsistentVersionWarning
+        warn_sx.warn(InconsistentVersionWarning(estimator_name='IsolationForest', current_sklearn_version='1.6.1', original_sklearn_version='1.3.0'))
+        return sx_jl(path, *a, **k)
+    model_mod.joblib.load = sx_inconsistent
+    try:
+        sx_info = model_mod.inspect(sx_mp2)
+        sx_none = model_mod.load(sx_mp2)
+    finally:
+        model_mod.joblib.load = sx_jl
+    ok('PIP: a model saved by another scikit-learn version (InconsistentVersionWarning) is NOT loaded: inspect says unusable with the reason, load() gives None',
+       sx_none is None and sx_info['unusable'] and not sx_info['loadable'] and 'another scikit-learn version' in sx_info['error'])
+    sx_warn = promote_sx = None
+    from analyzer import promote as promote_sx
+    ok('PIP: the stale-model warning says the guard keeps working and that the next nightly run trains a new model by itself',
+       'keeps working' in promote_sx.stale_warning('ml', sx_info) and 'by itself' in promote_sx.stale_warning('ml', sx_info) and 'once there are enough labelled sessions' in promote_sx.stale_warning('clf', dict(sx_info)))
+    open(sx_mp2, 'wb').write(b'not a pickle at all')
+    ok('PIP: a corrupt model file is "unreadable" and unusable (rebuilt), a missing one is not "unusable" (it is created)', model_mod.inspect(sx_mp2)['unusable'] and not model_mod.inspect(sx_mp2 + '.none')['unusable'])
+    # the nightly run replaces the live model by itself (no --train, no promote)
+    nt_pip_logs = os.path.join(nt_dir, 'piplogs')
+    os.makedirs(nt_pip_logs, exist_ok=True)
+    with open(os.path.join(nt_pip_logs, 'guard-%s.jsonl' % ig_dt.date.today().strftime('%Y%m%d')), 'w') as fh:
+        for sx_i in range(40):
+            fh.write(ig_json.dumps(row(ig_time.time() - 200 + sx_i, dev='dp%d' % (sx_i % 8), ip='10.5.0.%d' % (sx_i % 8 + 1), p='/y%d' % sx_i)) + '\n')
+    nt_bad = os.path.join(nt_dir, 'model.joblib')
+    open(nt_bad, 'wb').write(b'garbage from another version')
+    os.chmod(nt_bad, 0o644)
+    rc_pip, out_pip, err_pip, cfg_pip = nt_run({'ml_min_train': 3, 'log_dir': nt_pip_logs})
+    ok('PIP: nightly finds the live model unusable, says why and trains a NEW live model in the same run (no manual step); it loads afterwards',
+       rc_pip == 0 and 'cannot be used' in out_pip and 'training a new one now' in out_pip and model_mod.load(nt_bad) is not None)
+else:
+    skip('PIP: a model from another scikit-learn version is unusable and rebuilt', 'scikit-learn not installed')
+ok('PIP: the confirmation text names models, the guard staying fail-open and the automatic retraining; the button repeats the warning',
+   all(w in open(os.path.join(IL_ROOT, 'panel', 'lang.php')).read() for w in ('READ THIS BEFORE YOU CONFIRM', 'stays fail-open', 'trains the anomaly model again by itself', 'I understand the models may need retraining')))
+
 # nightly: waiting for labels is never a warning, also when no identity carries a device id
 nt_devless = os.path.join(nt_dir, 'devless')
 os.makedirs(nt_devless, exist_ok=True)

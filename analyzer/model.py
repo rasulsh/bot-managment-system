@@ -96,15 +96,35 @@ def _dump_atomic(bundle, path):
                 pass
 
 
+def load_bundle(path):
+    """(bundle, problem): joblib.load with every way a saved model can be unusable turned into a one-line reason.
+
+    The file may be refused (not ours / writable by others: fsmode.unsafe_to_load), unreadable (a newer or older numpy, scikit-learn or
+    joblib cannot unpickle it) or readable with a warning (scikit-learn's InconsistentVersionWarning: "estimator saved with 1.5.2, this is
+    1.6.1" - the results of such a model are not guaranteed, so it counts as unusable too). A problem here never raises.
+    """
+    refusal = fsmode.unsafe_to_load(path)
+    if refusal:
+        return None, 'refused to load: ' + refusal + ' (fix: chown it to the cron user and chmod 644, or just let the next nightly run write a new one)'
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        try:
+            bundle = joblib.load(path)
+        except Exception as exc:
+            return None, 'unreadable: %s' % exc
+    for w in caught:
+        if type(w.message).__name__ == 'InconsistentVersionWarning' or 'unpickle estimator' in str(w.message):
+            return None, 'saved by another scikit-learn version: %s' % str(w.message).replace('\n', ' ')[:200]
+    return bundle, ''
+
+
 def load(model_path):
     """Return the persisted bundle, or None when there is nothing usable."""
     if not SKLEARN_AVAILABLE:
         return None
-    if fsmode.unsafe_to_load(model_path):
-        return None                # never unpickle a file somebody else could have written (see fsmode.unsafe_to_load)
-    try:
-        bundle = joblib.load(model_path)
-    except Exception:
+    bundle, problem = load_bundle(model_path)      # never unpickles a file somebody else could have written (fsmode.unsafe_to_load)
+    if problem:
         return None
     if not isinstance(bundle, dict):
         return None
@@ -124,7 +144,7 @@ def inspect(model_path):
     permissive is exactly the failure nobody notices, so the caller needs to be
     able to say so out loud.
     """
-    out = {'exists': False, 'loadable': False, 'stale': False,
+    out = {'exists': False, 'loadable': False, 'stale': False, 'unusable': False,
            'feature_order': None, 'error': ''}
     if not os.path.isfile(model_path):
         out['error'] = 'no file at %s' % model_path
@@ -133,14 +153,10 @@ def inspect(model_path):
     if not SKLEARN_AVAILABLE:
         out['error'] = 'scikit-learn unavailable'
         return out
-    refusal = fsmode.unsafe_to_load(model_path)
-    if refusal:
-        out['error'] = 'refused to load: ' + refusal
-        return out
-    try:
-        bundle = joblib.load(model_path)
-    except Exception as exc:
-        out['error'] = 'unreadable: %s' % exc
+    bundle, problem = load_bundle(model_path)
+    if problem:
+        out['error'] = problem
+        out['unusable'] = True       # not a feature-set migration: the next nightly run rebuilds it by itself (run_nightly.needs_rebuild)
         return out
     if not isinstance(bundle, dict) or 'model' not in bundle or 'scaler' not in bundle:
         # Require exactly what load() requires: a bundle missing its scaler

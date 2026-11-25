@@ -120,6 +120,11 @@ def live_status(cfg):
 
 def stale_warning(kind, info):
     """The loud one-line warning naming the fix, or '' when nothing is wrong."""
+    if info and info.get('unusable'):
+        return ('WARNING: the live %s model cannot be used (%s). No gv:%s verdicts are written until it is replaced; the guard keeps working '
+                'without that signal (nothing is blocked more because of it). The next nightly run trains a new one by itself%s.'
+                % (kind, info.get('error', 'unreadable'), kind,
+                   '' if kind == 'ml' else ' once there are enough labelled sessions'))
     if not info or not info.get('stale'):
         return ''
     return ('WARNING: the live %s model is stale (%s). No gv:%s verdicts will be '

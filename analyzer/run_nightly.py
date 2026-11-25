@@ -403,10 +403,18 @@ def run_window(args, cfg, spool, row_count, phases):
     # install with no model file yet, where training a first live model is
     # acceptable. Every other training route (panel jobs, the weekly cron) passes
     # --candidate and must be promoted explicitly.
+    # A live model that cannot be used (a package update made it unreadable, another user owns it) is rebuilt like a missing one, with no
+    # manual step. A model that is only STALE (the feature set changed) keeps the documented candidate + promote path.
+    ml_unusable = bool(model_mod.SKLEARN_AVAILABLE and model_mod.inspect(cfg['model_path']).get('unusable'))
+    clf_unusable = bool(clf_mod.SKLEARN_AVAILABLE and clf_mod.inspect(cfg['clf_path']).get('unusable'))
     want_train = args.train or (not args.candidate
-                                and not os.path.isfile(cfg['model_path']))
+                                and (not os.path.isfile(cfg['model_path']) or ml_unusable))
     want_clf_train = args.train_clf or (not args.candidate
-                                        and not os.path.isfile(cfg['clf_path']))
+                                        and (not os.path.isfile(cfg['clf_path']) or clf_unusable))
+    if ml_unusable and not args.candidate:
+        print('The live anomaly model cannot be used (%s): training a new one now.' % model_mod.inspect(cfg['model_path'])['error'])
+    if clf_unusable and not args.candidate:
+        print('The live classifier cannot be used (%s): it is retrained when there are enough labels.' % clf_mod.inspect(cfg['clf_path'])['error'])
     ground_truth = labels_mod.load_ground_truth(
         args.ground_truth or cfg.get('ground_truth_path'))
 
@@ -518,7 +526,7 @@ def run_window(args, cfg, spool, row_count, phases):
     if not model_mod.SKLEARN_AVAILABLE:
         jobreport.warn('scikit-learn is not installed for this Python: no model or classifier (check GV_PYTHON)')
     elif bundle is None:
-        jobreport.warn('model missing: no usable anomaly model at %s (run train, then promote)' % os.path.basename(cfg['model_path']))
+        jobreport.warn('model missing: no usable anomaly model at %s (%s)' % (os.path.basename(cfg['model_path']), model_mod.inspect(cfg['model_path'])['error'] or 'run train, then promote'))
     if want_train and model_mod.SKLEARN_AVAILABLE and not trained:
         jobreport.warn('model training produced no candidate: %s' % train_note)
     if want_clf_train and clf_mod.SKLEARN_AVAILABLE and clf_note.startswith('failed'):
