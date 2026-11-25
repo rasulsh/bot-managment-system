@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Fast loop: forward-confirm reverse DNS for IPs that claimed to be a bot.
 
-Cron cadence around every 10 minutes. Reads the Phase 1 logs, finds addresses
-whose User-Agent claimed a known bot, and writes gv:botok / gv:botbad. Exits
+Cron cadence around every 10 minutes. Reads the crawler claims of the Phase 1 logs
+(only the bytes appended since the last run, from the store of analyzer/ingest.py;
+--full-read parses the logs), finds addresses whose User-Agent claimed a known bot,
+and writes gv:botok / gv:botbad. Exits
 non-zero only on its own hard failure (bad config, unreadable log dir) - never
 because Redis was down.
 """
@@ -18,8 +20,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import config as config_mod
 from analyzer import jobreport
+from analyzer import lowprio as lowprio_mod
 from analyzer import fsmode
 from analyzer import botverify
+from analyzer import ingest as ingest_mod
 from analyzer import logs as logs_mod
 from analyzer import redis_io
 from analyzer import snapshot as snapshot_mod
@@ -41,6 +45,39 @@ def claim_counts(rows, known_bots):
             continue
         counts[ip] = counts.get(ip, 0) + 1
     return counts
+
+
+def collect_claims(rows, known_bots):
+    """(ip -> claimed bot name, ip -> claim count) in ONE pass over `rows`.
+
+    `rows` is a generator when it comes from logs.read_lines; calling collect_bot_ips() and claim_counts() on it one after the
+    other left the second with nothing to read (counts always {}), and the volume ordering of lookup_order() was dead.
+    """
+    claims, counts = {}, {}
+    known = set(str(b).lower() for b in known_bots or [])
+    for row in rows:
+        bot = str(row.get('bot') or '').lower()
+        ip = str(row.get('ip') or '')
+        if not bot or not ip or (known and bot not in known):
+            continue
+        claims.setdefault(ip, bot)
+        counts[ip] = counts.get(ip, 0) + 1
+    return claims, counts
+
+
+def read_claims(cfg, now=None, full_read=False):
+    """(claims, counts) over the last window_days of logs: from the ingest store (only new bytes are parsed), or by reading the
+    log files when the store is unavailable."""
+    if not full_read:
+        try:
+            ingest_mod.update(cfg, now)
+            import datetime
+            with ingest_mod.reader(cfg) as store:
+                return store.claims(cfg['window_days'], datetime.date.fromtimestamp(now or time.time()), cfg['known_bots'])
+        except Exception as exc:                 # fail open: the logs themselves are always readable
+            print('WARNING: the incremental store is unavailable (%s); reading the logs directly.' % exc, file=sys.stderr)
+            jobreport.warn('incremental log store unavailable (%s): bot verification read the log files directly' % exc)
+    return collect_claims(logs_mod.read_lines(cfg['log_dir'], cfg['window_days'], fields=('bot', 'ip')), cfg['known_bots'])
 
 
 def lookup_order(claims, counts):
@@ -79,6 +116,7 @@ def parse_args(argv):
                         help='cap DNS lookups for this run')
     parser.add_argument('--dry-run', action='store_true',
                         help='resolve and report without writing verdicts')
+    parser.add_argument('--full-read', action='store_true', help='read the log files directly (no incremental store)')
     parser.add_argument('--recheck', action='store_true',
                         help='re-resolve addresses that already carry a fresh verdict')
     return parser.parse_args(argv)
@@ -86,6 +124,8 @@ def parse_args(argv):
 
 def main(argv=None, resolver=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if __name__ == '__main__':
+        lowprio_mod.apply()               # idle CPU priority for a run started by hand (the cron wrapper also sets I/O)
     try:
         cfg = config_mod.load(args.config)
     except Exception as exc:
@@ -109,9 +149,7 @@ def main(argv=None, resolver=None):
             print('WARN: known bot %r has no entry in bot_suffixes; it cannot be verified '
                   'and will be left unjudged.' % (name,), file=sys.stderr)
 
-    rows = logs_mod.read_lines(cfg['log_dir'], cfg['window_days'])
-    claims = collect_bot_ips(rows, cfg['known_bots'])
-    counts = claim_counts(rows, cfg['known_bots'])
+    claims, counts = read_claims(cfg, full_read=args.full_read)
     started = time.time()
 
     client = redis_io.connect(cfg, write=not args.dry_run)

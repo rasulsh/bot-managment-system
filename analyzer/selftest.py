@@ -3745,7 +3745,342 @@ ok('top lists: every outcome counted (not only served ones), with the outcome mi
    and all(k in dv_t for k in ('ips', 'devices', 'uas', 'paths', 'countries', 'asns')))
 ok('top lists: at most 10 entries per list', len(dv_snap.top_mix([{'ts': 1, 'act': 'allow', 'ip': '9.9.9.%d' % i} for i in range(40)])['ips']) == 10)
 ok('the whole block is JSON-serialisable and small (an empty install is well under 64 KiB)', len(json.dumps(dv_snap.build_dash([], [], dv_now))) < 65536 and json.loads(json.dumps(dv_d))['v'] == 1)
-ok('snapshot main() writes the dash block (read from 9 days of logs)', "payload['dash'] = build_dash(" in open(os.path.join(IL_ROOT, 'analyzer', 'snapshot.py')).read())
+ok('snapshot main() writes the dash block (read from 9 days of logs)', "payload['dash'] = dash_block(" in open(os.path.join(IL_ROOT, 'analyzer', 'snapshot.py')).read() and 'max(days * 2 + 1, 9)' in open(os.path.join(IL_ROOT, 'analyzer', 'snapshot.py')).read())
+
+
+# ---------------------------------------------------------------------------
+section('Incremental log ingest (PR K): parity with a full read, midnight, gzip, shrink, rebuild, crash')
+
+import datetime as ig_dt
+import gzip as ig_gzip
+import json as ig_json
+import time as ig_time
+from analyzer import ingest as ig
+from analyzer import run_verify as ig_verify
+from analyzer import lowprio as ig_lowprio
+
+ig_root = tempfile.mkdtemp(prefix='gv-ingest-')
+
+
+def ig_midnight(day):
+    return ig_time.mktime(day.timetuple())
+
+
+def ig_make_rows(rnd, day, count, end_ts=None):
+    """`count` synthetic guard rows (decisions + outcome lines) of one local day, sorted by time."""
+    start = ig_midnight(day)
+    stop = end_ts if end_ts is not None else start + 86399
+    out = []
+    for _ in range(count):
+        ts = round(rnd.uniform(start, stop), 3)
+        rid = '%012x' % rnd.getrandbits(48)
+        x = rnd.random()
+        act, rs, cap, tok, bot = 'allow', [], '', 'v', ''
+        if x < 0.06:
+            act, tok = 'challenge', ''
+        elif x < 0.10:
+            act, rs = '403', ['RULE:r%d' % rnd.randint(1, 3)]
+        elif x < 0.12:
+            act = '429'
+        elif x < 0.15:
+            act = 'token_issued'
+        elif x < 0.20:
+            bot = rnd.choice(['googlebot', 'bingbot', 'not-a-known-bot'])
+        if rnd.random() < 0.05:
+            rs = rs + ['IPL_BLOCK:L%d' % rnd.randint(1, 2)]
+        if act == 'challenge' and rnd.random() < 0.3:
+            cap = 'show'
+        r = {'v': 5, 'rid': rid, 'ts': ts, 'ip': '10.%d.%d.%d' % (rnd.randint(0, 3), rnd.randint(0, 9), rnd.randint(1, 30)),
+             'ua': 'ua%d' % rnd.randint(1, 20), 'uah': 'u%011d' % rnd.randint(1, 20), 'm': 'GET', 'p': '/p/%d' % rnd.randint(1, 40),
+             'q': '', 'nav': 1, 'tok': tok, 'dev': ('d%d' % rnd.randint(1, 40)) if rnd.random() < 0.7 else '', 'sc': rnd.randint(0, 30),
+             'esc': rnd.randint(0, 30), 'rs': rs, 'hp': 0, 'bot': bot, 'botv': '', 'rep': 0, 'ml': -1, 'clf': -1, 'hold': int(rnd.random() < 0.05),
+             'act': act, 'sh': int(rnd.random() < 0.05), 'cc': rnd.choice(['IR', 'DE', 'US']), 'asn': rnd.randint(100, 120)}
+        if cap:
+            r['cap'] = cap
+        out.append((ts, r))
+        if act == 'allow' and rnd.random() < 0.8:
+            out.append((ts + 0.2, {'o': 1, 'rid': rid, 'ts': round(ts + 0.2, 3), 'st': rnd.choice([200, 404, 500]), 'by': 100}))
+    out.sort(key=lambda pair: pair[0])
+    return [r for _, r in out]
+
+
+def ig_write(path, rows, mode='w'):
+    with open(path, mode) as fh:
+        for r in rows:
+            fh.write(ig_json.dumps(r, separators=(',', ':')) + '\n')
+
+
+def ig_cfg(name):
+    d = os.path.join(ig_root, name)
+    os.makedirs(os.path.join(d, 'logs'))
+    os.makedirs(os.path.join(d, 'an'))
+    c = config_mod.load()
+    c['log_dir'] = os.path.join(d, 'logs')
+    c['model_path'] = os.path.join(d, 'an', 'model.joblib')
+    return c, d
+
+
+def ig_view(c, now):
+    """The snapshot payload and the rule tables, from the incremental store and from a full read of the same logs at the same `now`."""
+    inc = dv_snap.incremental_inputs(c, now)
+    full = dv_snap.full_read_inputs(c, now, 1)
+    a, b = dv_snap.assemble(c, inc, now, 1), dv_snap.assemble(c, full, now, 1)
+    for d in (a, b):
+        d.pop('generated_at', None)
+    hits_full = dv_snap.collect_rule_hits(c['log_dir'], now, None)
+    return (ig_json.dumps(a, sort_keys=True) == ig_json.dumps(b, sort_keys=True),
+            ig_json.dumps(dv_snap.split_list_hits(inc['hit_totals']), sort_keys=True) == ig_json.dumps(dv_snap.split_list_hits(hits_full), sort_keys=True),
+            a, b)
+
+
+def ig_claims_equal(c, now):
+    today = ig_dt.date.fromtimestamp(now)
+    ig.update(c, now)
+    with ig.reader(c) as store:
+        got = store.claims(c['window_days'], today, c['known_bots'])
+    ref = ig_verify.collect_claims(logs_mod.read_lines(c['log_dir'], c['window_days'], today=today), c['known_bots'])
+    return got == ref and bool(ref[0])
+
+
+ig_rnd = random.Random(7)
+ig_today = ig_dt.date.fromtimestamp(ig_time.time())
+ig_now = ig_midnight(ig_today) + 14 * 3600                      # 14:00 today (local)
+if ig_now > ig_time.time():
+    ig_now = ig_time.time()
+ig_c, ig_d = ig_cfg('parity')
+for ig_off in range(7, 0, -1):                                   # seven finished days, then a part of today
+    ig_day = ig_today - ig_dt.timedelta(days=ig_off)
+    ig_write(os.path.join(ig_c['log_dir'], 'guard-%s.jsonl' % ig_day.strftime('%Y%m%d')), ig_make_rows(ig_rnd, ig_day, 700))
+ig_today_path = os.path.join(ig_c['log_dir'], 'guard-%s.jsonl' % ig_today.strftime('%Y%m%d'))
+ig_write(ig_today_path, ig_make_rows(ig_rnd, ig_today, 400, end_ts=ig_now - 3600))
+
+ig_same, ig_hits_same, ig_a, ig_b = ig_view(ig_c, ig_now)
+ok('parity: the snapshot built from the store equals the one built from a full read of 8 days (KPIs, top lists, funnel, hours, 7-day chart, readiness, status mix)', ig_same)
+ok('parity: the rule and IP-list hit counts (24 h, 7 d, last hit) are the same', ig_hits_same)
+ok('parity: the fixture is not trivial (rows, blocked, rule hits, outcomes, a 7-day chart with old hours)',
+   ig_a['traffic']['requests'] > 100 and ig_a['kpi']['cur']['blocked'] > 0 and ig_a['status'] and sum(b['n'] for b in ig_a['dash']['days7'][:100]) > 0
+   and ig_a['dash']['readiness']['rules'] and ig_a['dash']['readiness']['lists'])
+ok('parity: bot claims and their counts equal a full read of the 7-day window', ig_claims_equal(ig_c, ig_now))
+
+# A second run with nothing new reads nothing; new bytes are the only bytes read.
+ig_st = ig.update(ig_c, ig_now)
+ok('incremental: a run with nothing new parses no byte', ig_st['bytes'] == 0 and not ig_st['rows_days'])
+ig_extra = ig_make_rows(ig_rnd, ig_today, 150, end_ts=ig_now)
+ig_extra = [r for r in ig_extra if r['ts'] > ig_now - 3600]
+ig_before = os.path.getsize(ig_today_path)
+ig_write(ig_today_path, ig_extra, 'a')
+ig_st = ig.update(ig_c, ig_now)
+ok('incremental: only the appended bytes are parsed (%d of %d)' % (ig_st['bytes'], os.path.getsize(ig_today_path)),
+   ig_st['bytes'] == os.path.getsize(ig_today_path) - ig_before and ig_st['rows_days'] == [ig_today.strftime('%Y%m%d')])
+ok('incremental: parity still holds after the append', ig_view(ig_c, ig_now)[0])
+
+# A line the guard is still writing (no newline yet) is left for the next run.
+with open(ig_today_path, 'a') as ig_fh:
+    ig_fh.write('{"v":5,"rid":"half","ts":%s,"ip":"10.9.9.9","act":"allow","p"' % (ig_now - 5))
+ig.update(ig_c, ig_now)
+ok('incremental: a half-written last line is not consumed', ig_view(ig_c, ig_now)[0])
+with open(ig_today_path, 'a') as ig_fh:
+    ig_fh.write(':"/x"}\n')
+ig_st = ig.update(ig_c, ig_now)
+ok('incremental: ... and is read once its line is complete', ig_st['bytes'] > 0 and ig_view(ig_c, ig_now)[0])
+
+# Midnight: the clock moves into the next day, whose file starts at byte 0; yesterday's is complete.
+ig_next = ig_today + ig_dt.timedelta(days=1)
+ig_now2 = ig_midnight(ig_next) + 2 * 3600
+ig_write(os.path.join(ig_c['log_dir'], 'guard-%s.jsonl' % ig_next.strftime('%Y%m%d')), ig_make_rows(ig_rnd, ig_next, 200, end_ts=ig_now2 - 600))
+ig_write(ig_today_path, [r for r in ig_make_rows(ig_rnd, ig_today, 120) if r['ts'] > ig_now], 'a')
+ok('midnight: the new day is read from byte 0, the old one to its end, and the snapshot equals a full read', ig_view(ig_c, ig_now2)[0])
+
+# Compression of yesterday: the same rows in a .gz; nothing is re-read and nothing changes.
+with open(ig_today_path, 'rb') as ig_src, ig_gzip.open(ig_today_path + '.gz', 'wb') as ig_dst:
+    ig_dst.write(ig_src.read())
+os.unlink(ig_today_path)
+ig_st = ig.update(ig_c, ig_now2)
+ok('gzip: a day compressed since the last run is not parsed again', ig_st['bytes'] == 0 and not ig_st['reset'])
+ok('gzip: ... and the snapshot still equals a full read', ig_view(ig_c, ig_now2)[0])
+
+# A shrunk file (truncated or replaced by another) is detected and the day is read again.
+ig_nxt_path = os.path.join(ig_c['log_dir'], 'guard-%s.jsonl' % ig_next.strftime('%Y%m%d'))
+ig_write(ig_nxt_path, ig_make_rows(ig_rnd, ig_next, 60, end_ts=ig_now2 - 600))
+ig_st = ig.update(ig_c, ig_now2)
+ok('shrink: a file smaller than its cursor is read again from the start', ig_next.strftime('%Y%m%d') in ig_st['reset'] and ig_view(ig_c, ig_now2)[0])
+# Same size or longer, but not the same file: the fingerprint of its head catches it.
+ig_write(ig_nxt_path, ig_make_rows(ig_rnd, ig_next, 300, end_ts=ig_now2 - 600))
+ig_st = ig.update(ig_c, ig_now2)
+ok('shrink: a different file that is longer than the cursor is caught by its head fingerprint', ig_next.strftime('%Y%m%d') in ig_st['reset'] and ig_view(ig_c, ig_now2)[0])
+
+# A missing summary is rebuilt once; a deleted store is rebuilt entirely.
+os.unlink(os.path.join(ig_c['model_path'] and os.path.dirname(ig_c['model_path']), 'daily', ig_today.strftime('%Y%m%d') + '.json'))
+ig_st = ig.update(ig_c, ig_now2)
+ok('rebuild: a deleted day summary makes that day be read again, once', ig_today.strftime('%Y%m%d') in ig_st['rebuilt'] and ig_view(ig_c, ig_now2)[0]
+   and not ig.update(ig_c, ig_now2)['rebuilt'])
+shutil.rmtree(os.path.join(os.path.dirname(ig_c['model_path']), 'rowstore'))
+shutil.rmtree(os.path.join(os.path.dirname(ig_c['model_path']), 'daily'))
+os.unlink(os.path.join(os.path.dirname(ig_c['model_path']), '.ingest-state.json'))
+ok('rebuild: with the whole store deleted the next run rebuilds it and the snapshot equals a full read', ig_view(ig_c, ig_now2)[0])
+
+# A run that died while writing a day (the state says which): that day is discarded and read again.
+ig_state_path = os.path.join(os.path.dirname(ig_c['model_path']), '.ingest-state.json')
+ig_state = ig_json.load(open(ig_state_path))
+ig_state['pending'] = ig_next.strftime('%Y%m%d')
+ig_json.dump(ig_state, open(ig_state_path, 'w'))
+with open(os.path.join(os.path.dirname(ig_c['model_path']), 'rowstore', 'd-%s-%d.dat' % (ig_next.strftime('%Y%m%d'), int(ig_now2) // 3600)), 'ab') as ig_fh:
+    ig_fh.write(b'\x07\x00\x00\x00junk')                                       # a torn frame
+ig_st = ig.update(ig_c, ig_now2)
+ok('crash: a pending marker discards the half-written day and the snapshot equals a full read', ig_st['recovered'] == ig_next.strftime('%Y%m%d') and ig_view(ig_c, ig_now2)[0])
+
+# The store is derived data, bounded, and a failure to use it falls back to reading the logs.
+ok('the store is much smaller than the logs it was built from', 0 < ig.storage_bytes(ig_c) < sum(os.path.getsize(os.path.join(ig_c['log_dir'], n)) for n in os.listdir(ig_c['log_dir'])))
+ig_c2, ig_d2 = ig_cfg('failopen')
+ig_write(os.path.join(ig_c2['log_dir'], 'guard-%s.jsonl' % ig_today.strftime('%Y%m%d')), ig_make_rows(ig_rnd, ig_today, 50, end_ts=ig_now))
+open(os.path.join(ig_d2, 'an', 'rowstore'), 'w').write('a file where the store directory should be')
+ig_out = os.path.join(ig_d2, 'snap.json')
+ig_rc = dv_snap.main(['--config', os.path.join(ig_d2, 'cfg.json'), '--out', ig_out]) if False else None
+try:
+    dv_snap.incremental_inputs(ig_c2, ig_now)
+    ig_raised = False
+except Exception:
+    ig_raised = True
+ok('fail open: an unusable store raises (main() catches it and reads the logs directly)', ig_raised)
+ok("the snapshot's main() has the incremental path with the full-read fallback, and still writes the dash block",
+   'incremental_inputs(cfg, now)' in open(os.path.join(IL_ROOT, 'analyzer', 'snapshot.py')).read() and 'full_read_inputs(cfg, now, days)' in open(os.path.join(IL_ROOT, 'analyzer', 'snapshot.py')).read()
+   and "payload['dash'] = dash_block(" in open(os.path.join(IL_ROOT, 'analyzer', 'snapshot.py')).read())
+
+section('Reading a log day: .jsonl and .jsonl.gz together (LOG-15), streaming')
+ig_c3, ig_d3 = ig_cfg('daydup')
+ig_day = ig_today - ig_dt.timedelta(days=1)
+ig_p = os.path.join(ig_c3['log_dir'], 'guard-%s.jsonl' % ig_day.strftime('%Y%m%d'))
+ig_rows = ig_make_rows(ig_rnd, ig_day, 100)
+ig_write(ig_p, ig_rows)
+ig_n_one = sum(1 for _ in logs_mod.read_lines(ig_c3['log_dir'], 3, today=ig_today))
+with open(ig_p, 'rb') as ig_src, ig_gzip.open(ig_p + '.gz', 'wb') as ig_dst:
+    ig_dst.write(ig_src.read())
+os.utime(ig_p + '.gz', (ig_time.time(), ig_time.time()))                         # the archive is not older than the plain file: a copy of it
+ig_n_both = sum(1 for _ in logs_mod.read_lines(ig_c3['log_dir'], 3, today=ig_today))
+ok('a day that exists as .jsonl and as an equal .jsonl.gz is counted once (it was twice)', ig_n_one > 0 and ig_n_both == ig_n_one)
+os.unlink(ig_p)
+ok('only the archive left: it is read', sum(1 for _ in logs_mod.read_lines(ig_c3['log_dir'], 3, today=ig_today)) == ig_n_one)
+ig_write(ig_p, ig_make_rows(ig_rnd, ig_day, 10))                                  # written to after it was archived: newer than the archive
+os.utime(ig_p + '.gz', (ig_time.time() - 7200, ig_time.time() - 7200))
+ok('a day archived and then written to again is read from both files (the two are disjoint)', len(logs_mod.day_files(ig_c3['log_dir'], ig_day)) == 2
+   and sum(1 for _ in logs_mod.read_lines(ig_c3['log_dir'], 3, today=ig_today)) > ig_n_one)
+ok('read_lines is a generator (a caller that only aggregates holds one row)', hasattr(logs_mod.read_lines(ig_c3['log_dir'], 3, today=ig_today), '__next__'))
+ig_ref = [r for r in logs_mod.read_lines(ig_c3['log_dir'], 3, today=ig_today)]
+ig_slim = [r for r in logs_mod.read_lines(ig_c3['log_dir'], 3, today=ig_today, fields=logs_mod.SESSION_FIELDS)]
+ok('a field projection keeps the same rows, the projected keys and the outcome', len(ig_slim) == len(ig_ref)
+   and all(set(r) <= set(logs_mod.SESSION_FIELDS) | set(['_out']) for r in ig_slim)
+   and [(r['_out'] or {}).get('st') for r in ig_slim] == [(r['_out'] or {}).get('st') for r in ig_ref] and [(r['_out'] or {}).get('by') for r in ig_slim] == [(r['_out'] or {}).get('by') for r in ig_ref])
+
+# The nightly job reads only SESSION_FIELDS: the device view built from projected rows equals the one built from whole rows.
+from analyzer import run_nightly as ig_nightly
+ig_full_dev = ig_nightly.build_device_view(logs_mod.sessionize(logs_mod.read_lines(ig_c['log_dir'], 9, today=ig_today + ig_dt.timedelta(days=1)), 1800), ig_c)
+ig_slim_dev = ig_nightly.build_device_view(logs_mod.sessionize(
+    logs_mod.read_lines(ig_c['log_dir'], 9, today=ig_today + ig_dt.timedelta(days=1), fields=logs_mod.SESSION_FIELDS), 1800), ig_c)
+
+
+def ig_dev_digest(devs):
+    return ig_json.dumps(dict((k, {'f': v['features'], 'l': v['labels'], 'h': v['holdout'], 'n': [len(s['rows']) for s in v['sessions']]}) for k, v in devs.items()), sort_keys=True, default=str)
+
+
+ok('nightly: the features, labels and holdout flags of every device are the same from projected rows', len(ig_full_dev) > 5 and ig_dev_digest(ig_full_dev) == ig_dev_digest(ig_slim_dev))
+
+section('Bot verification claims: volume ordering (LOG-1) and the incremental claims')
+ig_c4, ig_d4 = ig_cfg('verify')
+ig_vday = ig_today
+ig_vrows = []
+for ig_i in range(5):
+    ig_vrows.append({'ts': ig_now - 100 + ig_i, 'ip': '10.0.0.9', 'bot': 'googlebot', 'act': 'allow', 'rid': 'a%d' % ig_i})
+ig_vrows.append({'ts': ig_now - 50, 'ip': '10.0.0.1', 'bot': 'googlebot', 'act': 'allow', 'rid': 'b0'})
+ig_write(os.path.join(ig_c4['log_dir'], 'guard-%s.jsonl' % ig_vday.strftime('%Y%m%d')), ig_vrows)
+ig_cfgfile = os.path.join(ig_d4, 'cfg.json')
+ig_json.dump({'log_dir': ig_c4['log_dir'], 'model_path': ig_c4['model_path'], 'model_candidate_path': ig_c4['model_path'] + '.cand',
+              'clf_path': ig_c4['model_path'] + '.clf', 'clf_candidate_path': ig_c4['model_path'] + '.clfc'}, open(ig_cfgfile, 'w'))
+ig_order = []
+ig_orig_verify = ig_verify.botverify.verify_ip
+ig_verify.botverify.verify_ip = lambda ip, bot, suffixes, resolver=None: (ig_order.append(ip), 'unknown')[1]
+ig_verify.DNS_SLEEP_S = 0
+try:
+    for ig_mode in ('--full-read', ''):
+        del ig_order[:]
+        ig_args = ['--config', ig_cfgfile, '--dry-run', '--max-lookups', '1', '--recheck'] + ([ig_mode] if ig_mode else [])
+        ig_rc = ig_verify.main(ig_args, resolver=object())
+        ok('verify %s: with room for one lookup the busiest claimant (5 claims) is resolved first, not the lowest address (rc %s)' % (ig_mode or '(store)', ig_rc),
+           ig_rc == 0 and ig_order == ['10.0.0.9'])
+finally:
+    ig_verify.botverify.verify_ip = ig_orig_verify
+ig_gen = logs_mod.read_lines(ig_c4['log_dir'], 3, today=ig_today)
+ig_cl, ig_ct = ig_verify.collect_claims(ig_gen, ig_c4['known_bots'])
+ok('claims and counts come out of ONE pass over a generator (the second pass over a spent generator used to give {})', ig_ct == {'10.0.0.9': 5, '10.0.0.1': 1} and ig_cl['10.0.0.9'] == 'googlebot')
+ok('claims: a bot that is not in known_bots is not counted, on both paths', ig_claims_equal(ig_c, ig_now2))
+
+section('Nightly job in bounded memory: the bucketed run equals the single-pass run (PR K)')
+ig_c5, ig_d5 = ig_cfg('nightly')
+for ig_off in range(3, 0, -1):
+    ig_write(os.path.join(ig_c5['log_dir'], 'guard-%s.jsonl' % (ig_today - ig_dt.timedelta(days=ig_off)).strftime('%Y%m%d')),
+             ig_make_rows(ig_rnd, ig_today - ig_dt.timedelta(days=ig_off), 600))
+ig_hp = [{'ts': ig_midnight(ig_today - ig_dt.timedelta(days=1)) + 100 * i, 'ip': '10.7.0.%d' % i, 'dev': 'hp%d' % (i % 4), 'uah': 'u00000000001', 'p': '/old-archive', 'act': '404_hp',
+          'hp': 1, 'sc': 50, 'esc': 50, 'nav': 1, 'tok': 'v', 'sh': 0, 'hold': 0, 'rid': 'h%d' % i} for i in range(1, 9)]
+ig_write(os.path.join(ig_c5['log_dir'], 'guard-%s.jsonl' % (ig_today - ig_dt.timedelta(days=1)).strftime('%Y%m%d')), ig_hp, 'a')
+ig_c5['window_days'] = 3
+ig_gt = labels_mod.load_ground_truth(None)
+ig_old_dev = ig_nightly.build_device_view(logs_mod.sessionize(logs_mod.read_lines(ig_c5['log_dir'], 3), ig_c5['session_gap_s']), ig_c5)
+ig_old_rep = {}
+for ig_k, ig_e in ig_old_dev.items():
+    if ig_e['is_device'] and not ig_e.get('holdout'):
+        ig_old_rep[ig_e['dev']] = reputation_mod.device_reputation(ig_e['features'], reputation_mod.aggregate_labels(ig_e['labels']), ig_c5['rep_clamp'])
+ig_old_progress = ig_nightly.label_progress(ig_old_dev, ig_gt, ig_c5['clf_min_positive'])
+ig_old_vectors = ig_nightly.collect_clean_vectors(ig_old_dev)
+ig_old_X, ig_old_y = ig_nightly.collect_training_set(ig_old_dev, ig_gt)
+ig_count = [0]
+ig_spool = ig_nightly.build_spool(ig_c5, ig_count)
+ig_new_rep = {}
+ig_ml, ig_clf = ig_nightly.Reservoir(10 ** 6), ig_nightly.Reservoir(10 ** 6)
+ig_first = ig_nightly.first_pass(ig_spool, ig_c5, ig_gt, ig_ml, ig_clf, lambda e, v: ig_new_rep.__setitem__(e['dev'], v))
+ok('nightly buckets: every identity lands in exactly one bucket, so reputations equal the single-pass run (%d devices)' % len(ig_old_rep), len(ig_old_rep) > 20 and ig_new_rep == ig_old_rep)
+ok('nightly buckets: label progress (positives, humans, sources) is the same', ig_first['progress'] == ig_old_progress and ig_old_progress['positives'] > 0)
+ok('nightly buckets: under the cap the training sets are every session in the original order (anomaly vectors and classifier X, y)',
+   ig_ml.result() == ig_old_vectors and [v for v, _ in ig_clf.result()] == ig_old_X and [l for _, l in ig_clf.result()] == ig_old_y and len(ig_old_vectors) > 50)
+ok('nightly buckets: the row and session counts match', ig_count[0] == sum(1 for _ in logs_mod.read_lines(ig_c5['log_dir'], 3)) and ig_first['sessions'] == sum(len(e['sessions']) for e in ig_old_dev.values()))
+ig_small = ig_nightly.Reservoir(40)
+ig_nightly.first_pass(ig_spool, ig_c5, ig_gt, ig_small, None, lambda e, v: None)
+ig_small2 = ig_nightly.Reservoir(40)
+ig_nightly.first_pass(ig_spool, ig_c5, ig_gt, ig_small2, None, lambda e, v: None)
+ok('nightly buckets: over the cap the training sample is capped, random, reproducible and a subset of the full set',
+   len(ig_small.result()) == 40 and ig_small.result() == ig_small2.result() and ig_small.n == len(ig_old_vectors) and all(v in ig_old_vectors for v in ig_small.result()))
+ok('nightly buckets: the spool is a private directory that close() removes', os.path.isdir(ig_spool.dir) and (ig_spool.close() or not os.path.exists(ig_spool.dir)))
+ig_res = ig_nightly.Reservoir(5)
+for ig_i in range(100):
+    ig_res.add((ig_i,), ig_i)
+ok('reservoir: a uniform sample of the cap size, returned in tag order', len(ig_res.result()) == 5 and ig_res.result() == sorted(ig_res.result()) and ig_res.n == 100)
+if model_mod.SKLEARN_AVAILABLE:
+    from analyzer import classifier as ig_clfmod
+    ig_model_path = os.path.join(ig_d5, 'an', 'm.joblib')
+    ok('model trains on the sampled vectors', model_mod.train(ig_old_vectors, 0.05, ig_model_path, 10))
+    ig_bundle = model_mod.load(ig_model_path)
+    ig_vecs = ig_old_vectors[:300]
+    ok('batched scoring gives the same levels as scoring one vector at a time', model_mod.score_many(ig_bundle, ig_vecs) == [model_mod.score(ig_bundle, v) for v in ig_vecs])
+    ok('batched scoring: a vector that cannot be scored is None, the rest are still scored', model_mod.score_many(ig_bundle, [ig_vecs[0], [1, 2], ig_vecs[1]]) == [model_mod.score(ig_bundle, ig_vecs[0]), None, model_mod.score(ig_bundle, ig_vecs[1])])
+    ig_scored = {}
+    ig_n = ig_nightly.score_devices(ig_old_dev, ig_bundle, model_mod.score_many, 'ml', lambda c, d, v, t: ig_scored.__setitem__(d, v) or True, 60, False, None)
+    ig_ref = {}
+    for ig_k, ig_e in ig_old_dev.items():
+        if ig_e['is_device'] and not ig_e.get('holdout'):
+            ig_lv = [model_mod.score(ig_bundle, features_mod.feature_vector(f)) for f in ig_e['features']]
+            ig_ref[ig_e['dev']] = max(ig_lv)
+    ok('scoring identities in a batch: each gets the highest level of its sessions, as before (%d devices)' % len(ig_ref), ig_scored == ig_ref and ig_n == len(ig_ref))
+    ig_cx = ig_clfmod.train(ig_old_X, ig_old_y, os.path.join(ig_d5, 'an', 'c.joblib'), min_positive=3)
+    if ig_cx:
+        ig_cb = ig_clfmod.load(os.path.join(ig_d5, 'an', 'c.joblib'))
+        ok('batched classifier scoring equals one-by-one', ig_clfmod.score_many(ig_cb, ig_old_X[:200]) == [ig_clfmod.score(ig_cb, v) for v in ig_old_X[:200]])
+else:
+    skip('batched scoring and training on the sample', 'scikit-learn not installed')
+
+section('Idle priority')
+os.environ['GV_LOWPRIO'] = '0'
+ok('GV_LOWPRIO=0 turns the Python fallback off', ig_lowprio.apply() is False)
+del os.environ['GV_LOWPRIO']
+ok('the Python fallback never raises (nice 19 where the OS allows it)', ig_lowprio.apply() in (True, False))
+shutil.rmtree(ig_root, ignore_errors=True)
 
 print('PASS %d  FAIL %d  SKIP %d' % (PASS, FAIL, SKIP))
 sys.exit(0 if FAIL == 0 else 1)

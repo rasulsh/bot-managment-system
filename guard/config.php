@@ -120,6 +120,9 @@ return array(
 		'breaker_ttl' => 5,                   // seconds to skip Redis after a failure; 0 = off
 	),
 	'log_dir'          => dirname(__DIR__) . '/logs',
+	// Days of compressed logs kept. 30 for a new install (a busy shop writes about 80 MB a day); an install whose config.php does not
+	// name it keeps the guard's built-in 60. Settings -> Log storage shows what the retention will cost.
+	'log_retention_days' => 30,
 	'strings'          => array(              // user-facing, operator-localizable
 		'lang'     => 'fa',
 		'dir'      => 'rtl',

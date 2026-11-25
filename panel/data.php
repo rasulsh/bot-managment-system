@@ -648,6 +648,35 @@ function gp_guard_health() {
 // 'never' and 'quiet' mean the guard is not seeing traffic: not loaded by PHP
 // (auto_prepend_file), a stale .user.ini, or pages served from a cache
 // without running PHP. docs/03-SETUP.md has the checks.
+// The panel's own URL prefix from the web server's SCRIPT_NAME ("/gv-admin/index.php" -> "/gv-admin/"), or '' when it has none (the
+// panel is served from the document root, where leaving it out would leave every request out) or is not a plain directory path.
+function gp_panel_prefix_of($script_name) {
+	$dir = rtrim(str_replace('\\', '/', dirname((string)$script_name)), '/');
+	$prefix = $dir . '/';
+	if ($dir === '' || $dir === '.' || !preg_match('#^/[A-Za-z0-9._~/-]+/$#', $prefix) || strpos($prefix, '..') !== false) { return ''; }
+	return $prefix;
+}
+
+// Write the panel's URL prefix to <log_dir>/.panel-path so the guard leaves the panel's page views out of the request log
+// (log_skip_panel, on by default): they are not traffic to analyse. The prefix comes from the web server's SCRIPT_NAME, never from
+// the client, and the file is rewritten only when it changes. Best effort: a panel that cannot write it just stays in the log.
+// $script_name / $allow_cli exist for the self-test; from the command line (cron, tests) nothing is written.
+function gp_note_panel_prefix($script_name = null, $allow_cli = false) {
+	if (PHP_SAPI === 'cli' && !$allow_cli) { return false; }
+	try {
+		$prefix = gp_panel_prefix_of($script_name === null ? (isset($_SERVER['SCRIPT_NAME']) ? (string)$_SERVER['SCRIPT_NAME'] : '') : $script_name);
+		if ($prefix === '') { return false; }
+		$cfg = gv_cfg_load();
+		if (empty($cfg['log_skip_panel']) || (string)$cfg['log_dir'] === '' || !is_dir((string)$cfg['log_dir'])) { return false; }
+		$file = rtrim((string)$cfg['log_dir'], '/\\') . '/.panel-path';
+		$cur = @file_get_contents($file, false, null, 0, 202);
+		if (is_string($cur) && trim($cur) === $prefix) { return true; }
+		return @file_put_contents($file, $prefix . "\n", LOCK_EX) !== false;
+	} catch (\Throwable $e) {
+		return false;
+	}
+}
+
 // Log storage for the dashboard: how big the logs are, how much disk is left,
 // and whether guard-logrotate.sh is running. Reads directory metadata and the
 // one-line logs/.last-rotate marker; never opens a log file.
@@ -659,15 +688,20 @@ function gp_log_storage($now = null) {
 	$out = array('dir' => $dir, 'total' => 0, 'today' => 0, 'live_files' => 0, 'archives' => 0,
 		'oldest' => '', 'free' => null, 'disk' => null, 'min_free_mb' => (int)$cfg['log_min_free_mb'],
 		'max_mb' => (int)$cfg['log_max_mb'], 'retention_days' => (int)$cfg['log_retention_days'],
-		'skip_paths' => (array)$cfg['log_skip_paths'], 'rotate' => null, 'warnings' => array());
+		'skip_paths' => (array)$cfg['log_skip_paths'], 'rotate' => null, 'warnings' => array(),
+		'avg_day' => 0, 'projected' => 0, 'store' => gp_analyzer_store_bytes());
 	if (!is_dir($dir)) { return $out; }
 	$today = 'guard-' . date('Ymd', $now) . '.jsonl';
 	$oldest_old = 0;
+	$per_day = array();
 	foreach ((array)glob($dir . '/guard-*') as $file) {
 		if (!is_file($file) || is_link($file)) { continue; }
 		$size = (int)@filesize($file);
 		$name = basename($file);
 		$out['total'] += $size;
+		if (preg_match('/^guard-(\d{8})\.jsonl(\.gz)?$/', $name, $mday) && $name !== $today) {
+			$per_day[$mday[1]] = (isset($per_day[$mday[1]]) ? $per_day[$mday[1]] : 0) + $size;
+		}
 		if ($name === $today) { $out['today'] = $size; }
 		if (substr($name, -6) === '.jsonl') {
 			$out['live_files']++;
@@ -680,6 +714,10 @@ function gp_log_storage($now = null) {
 			if ($out['oldest'] === '' || strcmp($day, $out['oldest']) < 0) { $out['oldest'] = $day; }
 		}
 	}
+	// What the retention will cost: the average size of the last finished days (as they are stored now) times the days kept.
+	$proj = gp_log_projection_from($per_day, (int)$out['retention_days']);
+	$out['avg_day'] = $proj['avg_day'];
+	$out['projected'] = $proj['projected'];
 	$free = @disk_free_space($dir);
 	$disk = @disk_total_space($dir);
 	$out['free'] = $free === false ? null : (float)$free;
@@ -699,6 +737,44 @@ function gp_log_storage($now = null) {
 	}
 	if ($out['max_mb'] > 0 && $out['total'] > $out['max_mb'] * 1048576) { $out['warnings'][] = 'over_cap'; }
 	return $out;
+}
+
+// What the retention will cost: the average size of the last seven finished days (day => bytes, as they are stored now: a
+// compressed day is smaller than the day in progress was) times the days kept. A forecast, not a limit.
+function gp_log_projection_from(array $per_day, $retention_days) {
+	krsort($per_day);
+	$recent = array_slice($per_day, 0, 7);
+	if (!$recent) { return array('avg_day' => 0, 'projected' => 0); }
+	$avg = (int)(array_sum($recent) / count($recent));
+	return array('avg_day' => $avg, 'projected' => $avg * max(1, (int)$retention_days));
+}
+
+// The same forecast for the Settings page, from the file names and sizes alone (no marker file, no disk figures).
+function gp_log_projection($now = null) {
+	$now = $now === null ? time() : (int)$now;
+	$cfg = gv_cfg_load();
+	$dir = rtrim((string)$cfg['log_dir'], '/\\');
+	$per_day = array();
+	foreach ((array)glob($dir . '/guard-*') as $file) {
+		if (!is_file($file) || is_link($file)) { continue; }
+		if (preg_match('/^guard-(\d{8})\.jsonl(\.gz)?$/', basename($file), $m) && $m[1] !== date('Ymd', $now)) {
+			$per_day[$m[1]] = (isset($per_day[$m[1]]) ? $per_day[$m[1]] : 0) + (int)@filesize($file);
+		}
+	}
+	$out = gp_log_projection_from($per_day, (int)$cfg['log_retention_days']);
+	$out['retention_days'] = (int)$cfg['log_retention_days'];
+	return $out;
+}
+
+// Bytes the analyzer's incremental log store holds (analyzer/rowstore and analyzer/daily): derived data, rebuilt from the logs if deleted.
+function gp_analyzer_store_bytes() {
+	$total = 0;
+	foreach (array('rowstore', 'daily') as $d) {
+		foreach ((array)glob(dirname(__DIR__) . '/analyzer/' . $d . '/*') as $f) {
+			if (is_file($f)) { $total += (int)@filesize($f); }
+		}
+	}
+	return $total;
 }
 
 // Bytes for people: "1.4 GB". Binary units, Latin digits.

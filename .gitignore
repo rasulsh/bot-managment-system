@@ -43,6 +43,8 @@ logs/.err-*
 logs/.redis-down
 logs/.last-rotate
 logs/.last-rotate.tmp
+logs/.panel-path
+logs/.logrotate.lock
 # Analyzer run statistics (next to the model).
 analyzer/.laststats-*
 analyzer/*.tmp
@@ -67,6 +69,11 @@ guard/rules.json
 guard/rules.json.tmp*
 guard/rules.json.lock
 analyzer/.rule-hits.json
+analyzer/rowstore/
+analyzer/.nightly-spool-*/
+guard/logskip.cache.php*
+analyzer/daily/
+analyzer/.ingest-state.json*
 guard/rules.cache.php
 guard/rules.cache.php.tmp*
 

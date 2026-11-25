@@ -5304,6 +5304,44 @@ echo "\n";
 // mistakable for full coverage.
 t_ok('the suite wrote no sign-in counters into the repository (panel/.ratelimit): they are private to this process',
 	getenv('GV_RATELIMIT_DIR') === $GP_RL_DIR && (is_dir(__DIR__ . '/../panel/.ratelimit') ? count(glob(__DIR__ . '/../panel/.ratelimit/*')) : 0) === $GP_RL_REPO_BEFORE);
+// Log volume and storage (PR K)
+t_ok('log storage: the projection is the average of the last seven finished days times the retention (a day in progress is not counted)',
+	gp_log_projection_from(array('20260101' => 100, '20260102' => 300), 30) === array('avg_day' => 200, 'projected' => 6000)
+	&& gp_log_projection_from(array(), 30) === array('avg_day' => 0, 'projected' => 0)
+	&& gp_log_projection_from(array_fill_keys(array('20260101','20260102','20260103','20260104','20260105','20260106','20260107','20260108'), 70), 2)['avg_day'] === 70);
+$lv_src = file_get_contents(__DIR__ . '/../panel/views/settings.php');
+t_ok('settings: the three new log settings are on the Log storage tab, each with a label, help and tooltip',
+	(function () use ($lv_src) { foreach (array('log_skip_ips', 'log_skip_panel', 'log_sample.exempt', 'log_write_timeout_ms') as $k) { $u = str_replace('.', '_', $k); if (strpos($lv_src, "'" . $k . "'") === false || gp_t('lbl_' . $u) === 'lbl_' . $u || gp_t('help_' . $u) === 'help_' . $u || gp_t('tip_set_' . $u) === 'tip_set_' . $u) { return false; } } return true; })());
+t_ok('settings: log_skip_ips is a one-per-line textarea in Settings -> Log storage whose lines the guard validates (and refuses with a readable message)',
+	strpos(file_get_contents(__DIR__ . '/../panel/index.php'), "case 'regexes': case 'ips':") !== false
+	&& strpos($lv_src, "'log_skip_ips', 'log_skip_panel'") !== false && gv_overlay_validate('log_skip_ips', array('203.0.113.0/28', '2001:db8::1'))[0] === true
+	&& gv_overlay_validate('log_skip_ips', array('203.0.113.0/28', 'nope')) === array(false, 'bad_ip') && gp_cio_t('verr_bad_ip') !== 'verr_bad_ip');
+t_ok('settings: the Log storage tab shows the projected disk use', strpos($lv_src, 'set-log-projection') !== false && strpos($lv_src, "gp_log_projection()") !== false && gp_t('ls_projected') !== 'ls_projected');
+t_ok('the dashboard card shows the projected disk use and the analyzer store', strpos(file_get_contents(__DIR__ . '/../panel/views/dashboard.php'), "gp_t('ls_projected')") !== false && strpos(file_get_contents(__DIR__ . '/../panel/views/dashboard.php'), "gp_t('ls_store')") !== false);
+// The panel notes its own URL prefix next to the logs (the guard then leaves it out of the log).
+$pp_dir = sys_get_temp_dir() . '/gp-pp-' . getmypid();
+@mkdir($pp_dir);
+$pp_cfg = tempnam(sys_get_temp_dir(), 'gpcfg');
+file_put_contents($pp_cfg, "<?php return array('secret' => 'x', 'log_dir' => " . var_export($pp_dir, true) . ");");
+$pp_prev_cfg = getenv('GV_CONFIG');
+putenv('GV_CONFIG=' . $pp_cfg);
+t_ok('the panel never writes its prefix from the command line (tests and cron leave no marker)', (function () use ($pp_dir) { gp_note_panel_prefix('/gv-admin/index.php'); return !is_file($pp_dir . '/.panel-path'); })());
+t_ok('the prefix comes from SCRIPT_NAME: a directory yes, the document root no, a path with dot segments or odd characters no',
+	gp_panel_prefix_of('/gv-admin/index.php') === '/gv-admin/' && gp_panel_prefix_of('/a/b/index.php') === '/a/b/' && gp_panel_prefix_of('/index.php') === ''
+	&& gp_panel_prefix_of('/a/../b/index.php') === '' && gp_panel_prefix_of('/a b/index.php') === '' && gp_panel_prefix_of('') === '');
+t_ok('the marker is written once and left alone while it is right', gp_note_panel_prefix('/gv-admin/index.php', true) === true && trim((string)file_get_contents($pp_dir . '/.panel-path')) === '/gv-admin/'
+	&& (function () use ($pp_dir) { $m = filemtime($pp_dir . '/.panel-path'); touch($pp_dir . '/.panel-path', $m - 100); clearstatcache(); gp_note_panel_prefix('/gv-admin/index.php', true); clearstatcache(); return filemtime($pp_dir . '/.panel-path') === $m - 100; })());
+t_ok('the guard reads what the panel wrote and would skip the panel pages (and nothing else)', gv_panel_prefix($pp_dir) === '/gv-admin/'
+	&& gv_path_has_prefix('/gv-admin/index.php', array(gv_panel_prefix($pp_dir))) && !gv_path_has_prefix('/product/1', array(gv_panel_prefix($pp_dir))));
+t_ok('log_skip_panel off: nothing is written', (function () use ($pp_dir, $pp_cfg) {
+	@unlink($pp_dir . '/.panel-path');
+	file_put_contents($pp_cfg, "<?php return array('secret' => 'x', 'log_dir' => " . var_export($pp_dir, true) . ", 'log_skip_panel' => false);");
+	$r = gp_note_panel_prefix('/gv-admin/index.php', true);
+	return $r === false && !is_file($pp_dir . '/.panel-path'); })());
+putenv($pp_prev_cfg === false ? 'GV_CONFIG' : 'GV_CONFIG=' . $pp_prev_cfg);
+@unlink($pp_cfg);
+foreach ((array)glob($pp_dir . '/{,.}*', GLOB_BRACE) as $pp_f) { if (is_file($pp_f)) { @unlink($pp_f); } }
+@rmdir($pp_dir);
 if (!$GP_HAS_DOM) {
 	echo "NOTE: ext-dom was unavailable; the DOM-level XSS assertions did not run.\n";
 }

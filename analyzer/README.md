@@ -23,7 +23,9 @@ Without scikit-learn everything except the anomaly model works when you run the 
 | file | role |
 |------|------|
 | `config.py` | defaults; override with `GV_ANALYZER_CONFIG` or `--config` (.json or .py) |
-| `logs.py` | JSONL reading (plain + gzip, corrupt lines skipped) and sessionization |
+| `logs.py` | JSONL reading (plain + gzip, a streaming generator, corrupt lines skipped; one source per day) and sessionization |
+| `ingest.py` | the incremental store: parses each log byte once (cursor per day file) so the snapshot and bot verification read only new bytes (docs/08-ANALYZER-PHASES.md) |
+| `lowprio.py` | `nice 19` for a job started by hand (the cron wrapper also sets `ionice -c3`) |
 | `features.py` | pure per-session feature math; `FEATURE_ORDER` is the train/score contract |
 | `reputation.py` | additive reputation formula; every weight is a named constant |
 | `botverify.py` | forward-confirmed reverse DNS, resolver injectable |

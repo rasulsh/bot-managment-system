@@ -958,7 +958,7 @@ Key settings (defaults from `gv_cfg_defaults()`; full table with ranges in [docs
 | `honeypot_path` | `/old-archive` | Must 404 on your site today. |
 | `cdn_ranges` | `[]` | IPv4 CIDRs of trusted proxies. |
 | `redis.*` | `127.0.0.1:6379`, no auth, db 0, no prefix, `timeout` 0.05 s, `breaker_ttl` 5 s | Shared by guard, panel and analyzer. Use an IP literal or a socket path. |
-| `log_dir`, `log_retention_days`, `log_max_mb`, `log_min_free_mb`, `log_floor_delete`, `log_skip_paths` | `<install-dir>/logs`, `60`, `0`, `200`, `false`, `[]` | Log storage. |
+| `log_dir`, `log_retention_days`, `log_max_mb`, `log_min_free_mb`, `log_floor_delete`, `log_skip_paths`, `log_skip_ips`, `log_skip_panel`, `log_sample.exempt`, `log_write_timeout_ms` | `<install-dir>/logs`, `60` (`30` in a new install's config.php), `0`, `200`, `false`, `[]`, `[]`, `true`, `1.0`, `50` | Log storage. |
 | `capture_outcomes` | `false` | Second row (status and declared length) after the application. |
 
 ## 2.10 Data formats
@@ -1043,7 +1043,7 @@ Out of band, never in the request path. Settings: `analyzer/config.py` defaults 
 | Anomaly model | `model.py` | Isolation Forest on clean sessions (needs `ml_min_train`, 200) → `ml` level 0–100. |
 | Classifier | `classifier.py` | Histogram gradient boosting tuned for precision (needs `clf_min_positive` 50 positives; target precision 0.98) → `clf` level. Labels come only from signals independent of the guard's own gating (honeypot, `botv=bad`, operator ground truth); `challenge_unsolved` is deliberately **not** a label. |
 | Outcomes | `outcomes.py` | Joins outcome rows (404 walks, bulk transfer, server errors) into features. |
-| Snapshot | `snapshot.py` | Folds recent logs into `analyzer/snapshot.json` for the dashboard (KPIs, top lists, rule and list hits, and the `dash` block: hourly buckets by outcome for 24 h and 7 d, rollout readiness per rule and list, the challenge funnel by level, top lists with the outcome mix; reads 9 days of logs). |
+| Snapshot | `snapshot.py` | Folds recent logs into `analyzer/snapshot.json` for the dashboard (KPIs, top lists, rule and list hits, and the `dash` block: hourly buckets by outcome for 24 h and 7 d, rollout readiness per rule and list, the challenge funnel by level, top lists with the outcome mix; reads only the bytes appended since its last run: see docs/08-ANALYZER-PHASES.md, Incremental reading). |
 | Compile | `geo.py`, `iplist.py` | Build the compiled range files. |
 | Replay / control | `replay.py`, `ctl.py` | Counterfactual replay; `ctl.py show|allow|deny|clear|list|promote-model`. |
 

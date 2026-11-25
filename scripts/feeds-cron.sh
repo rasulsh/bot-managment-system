@@ -17,6 +17,7 @@ JS_ROOT="$REPO"
 # shellcheck source=lib-jobstatus.sh
 . "$REPO/scripts/lib-jobstatus.sh"
 js_begin feeds
+js_lowprio_detect                    # nice -n 19 / ionice -c3 when they exist (recorded as "lowprio" in the job status)
 js_php_resolve
 PHP_BIN="${GV_PHP:-php}"
 js_php_check "$PHP_BIN"
@@ -24,10 +25,10 @@ js_php_check "$PHP_BIN"
 LOCK="${GV_LOCK_DIR:-$REPO/analyzer}/.feeds.lock"
 run_job() {
 	if ! command -v flock >/dev/null 2>&1; then
-		"$PHP_BIN" -q "$REPO/scripts/feeds-sync.php"
+		${JS_LOWPRIO[@]+"${JS_LOWPRIO[@]}"} "$PHP_BIN" -q "$REPO/scripts/feeds-sync.php"
 		return $?
 	fi
-	flock -n -E 99 "$LOCK" "$PHP_BIN" -q "$REPO/scripts/feeds-sync.php"
+	flock -n -E 99 "$LOCK" ${JS_LOWPRIO[@]+"${JS_LOWPRIO[@]}"} "$PHP_BIN" -q "$REPO/scripts/feeds-sync.php"
 }
 
 js_exec run_job

@@ -72,6 +72,47 @@ and, over the long run, by `limits.device_hour` / `device_day`). A headless brow
 throws its token away when a budget runs out pays one proof of work per budget; that
 price is `challenge.pow_bits`.
 
+### Incremental reading of the logs
+
+At 80 MB of log a day the snapshot (every 15 minutes) used to parse 9 days of JSONL and the bot verification (every 10 minutes) 7 days,
+about 700 MB parsed per run and about 6 GB of memory for the snapshot. Now `analyzer/ingest.py` reads each byte **once** and keeps a small
+derived store next to the model file:
+
+| Path | What it holds | Size |
+|---|---|---|
+| `analyzer/.ingest-state.json` | one cursor per day file: byte offset into the (uncompressed) log, a fingerprint of its head, the files' size and mtime | KB |
+| `analyzer/rowstore/d-<day>-<hour>.dat`, `o-...` | the decision rows (only the fields the dashboard reads) and the outcome lines of the last 50 hours, as zlib-compressed JSON frames | about a tenth of the log |
+| `analyzer/rowstore/h-<day>.dat` | the rows that matched an access rule or an IP list, 9 days (the Rules and readiness numbers) | small |
+| `analyzer/daily/<day>.json` | the hourly bucket of every hour that left the row store (the 7-day chart) and the crawler claims per address with counts and last-seen time | KB to a few MB |
+
+* A run parses only the **new complete lines** of each day file. A line the guard is still writing is left for the next run; the next
+  day's file starts at byte 0; a day that logrotate compressed is not read again (the cursor is into the uncompressed stream, the head
+  fingerprint proves it is the same content); a file that shrank, or is not the file the cursor belongs to, is read again from the start;
+  a missing or damaged summary rebuilds that one day; a run that died half-way is detected by a `pending` marker and that day is read again.
+* The result equals a full read of the same logs: `analyzer/selftest.py` builds the snapshot both ways at the same instant on a multi-day
+  fixture (midnight, gzip, shrink, rebuild, crash included) and compares the whole payload. Two honest differences: rows are ordered by
+  hour inside a day (they are file order in a full read; only the cap on very long top lists could notice), and a row stamped more than a
+  day in the future is not stored.
+* The store is **derived data**. Delete any part of it and the next run rebuilds it from the logs (the first run after an update does
+  that once: it reads the 9 days like the old snapshot did, then never again). An older release ignores it, so an update to a previous
+  version through the Update page and back needs no step. `snapshot.py --full-read` and `run_verify.py --full-read` read the log files
+  directly, and so does either job when the store cannot be used (it says so in the job warnings).
+* `read_lines` (nightly, replay, report) is now a generator that reads a day in two passes (outcomes first) instead of holding it, and
+  those jobs ask for only the fields they use.
+* **The nightly job runs in bounded memory.** It reads the window once into 128 compressed bucket files (`analyzer/.nightly-spool-<pid>/`,
+  removed when the run ends) partitioned by a hash of the identity, then sessionizes and featurises one bucket at a time: every identity
+  is wholly inside one bucket, so reputation, labels and the label progress are exactly what a single pass gives. Pass 1 writes the
+  reputations and collects the training sets; **the anomaly model and the classifier train on a random but reproducible sample of at most
+  200 000 sessions** (a uniform sample, so the classifier's precision estimate is not biased; under the cap it is every session in the
+  original order, and the job says "a random sample of N of them" when it was capped); pass 2 scores each identity in batches (one
+  scikit-learn call per 20 000 vectors instead of one per session: this, not the reading, was why a night's job ran for hours). The job
+  prints and records its phases and peak memory (`Nightly phases`, `analyzer/.laststats-run_nightly`).
+* A day that exists as both `guard-<day>.jsonl` and `guard-<day>.jsonl.gz` is read **once** (the plain file when the archive is not older;
+  both when the archive is older, which is a day archived and written to again). It used to be counted twice.
+
+The cron wrapper runs every analyzer job under `nice -n 19` and `ionice -c3` when those tools exist (`GV_LOWPRIO=0` turns it off) and
+the Python entry points also set `nice 19` for a run started by hand.
+
 ### Cron
 
 ```

@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from analyzer import bridge
 from analyzer import config as config_mod
 from analyzer import logs as logs_mod
+from analyzer import lowprio as lowprio_mod
 from analyzer import outcomes as outcomes_mod
 from analyzer import snapshot as snapshot_mod
 
@@ -675,6 +676,8 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if __name__ == '__main__':
+        lowprio_mod.apply()               # idle CPU priority for a run started by hand (the cron wrapper also sets I/O)
     try:
         cfg = config_mod.load(args.config)
     except Exception as exc:
@@ -698,8 +701,7 @@ def main(argv=None):
         described['clf_path'] = cfg['clf_candidate_path']
     cfg['_models'] = promote_mod.live_status(described)
 
-    rows = list(logs_mod.read_lines(cfg['log_dir'], days))
-    stats = collect(rows, cfg, guard_cfg)
+    stats = collect(logs_mod.read_lines(cfg['log_dir'], days, fields=logs_mod.REPORT_FIELDS), cfg, guard_cfg)
 
     print(render_text(stats, days))
 

@@ -439,6 +439,97 @@ t_ok('policy cleared: the line is written', count(glob($ls_dir . '/guard-*.jsonl
 foreach ((array)glob($ls_dir . '/{,.}*', GLOB_BRACE) as $ls_f) { if (is_file($ls_f)) { @unlink($ls_f); } }
 @rmdir($ls_dir);
 
+// Log volume: the panel's own prefix, sampling of exempt requests, a bounded wait for the log file lock.
+$lv_dir = sys_get_temp_dir() . '/gv-lv-' . getmypid();
+@mkdir($lv_dir);
+file_put_contents($lv_dir . '/.panel-path', "/gv-admin/\n");
+t_ok('log: the panel prefix the panel wrote is read', gv_panel_prefix($lv_dir) === '/gv-admin/');
+file_put_contents($lv_dir . '/.panel-path', "/\n");
+t_ok('log: a prefix that would leave the whole site out is refused', gv_panel_prefix($lv_dir) === '');
+foreach (array('gv-admin/', '/a/../b/', '/x y/', "/a\n/b/", '//') as $lv_bad) {
+	file_put_contents($lv_dir . '/.panel-path', $lv_bad);
+	t_ok('log: a malformed panel prefix is ignored (' . json_encode($lv_bad) . ')', gv_panel_prefix($lv_dir) === '');
+}
+@unlink($lv_dir . '/.panel-path');
+t_ok('log: no marker file means no prefix', gv_panel_prefix($lv_dir) === '');
+t_ok('log: the new settings default to the old behaviour (panel left out, every exempt request logged, 50 ms)',
+	gv_cfg_defaults(array())['log_skip_panel'] === true && gv_cfg_defaults(array())['log_sample']['exempt'] === 1.0 && gv_cfg_defaults(array())['log_write_timeout_ms'] === 50);
+t_ok('log: hand-edited nonsense falls back to those defaults',
+	gv_cfg_defaults(array('log_sample' => array('exempt' => 7), 'log_write_timeout_ms' => 'long'))['log_sample']['exempt'] === 1.0
+	&& gv_cfg_defaults(array('log_write_timeout_ms' => 99999))['log_write_timeout_ms'] === 50 && gv_cfg_defaults(array('log_sample' => 'x'))['log_sample']['exempt'] === 1.0);
+t_ok('log: the overlay takes the three new settings and refuses out-of-range values',
+	gv_overlay_validate('log_sample.exempt', 0.25)[0] === true && gv_overlay_validate('log_sample.exempt', 1.5)[0] === false
+	&& gv_overlay_validate('log_write_timeout_ms', 0)[0] === true && gv_overlay_validate('log_write_timeout_ms', 5000)[0] === false
+	&& gv_overlay_validate('log_skip_panel', false)[0] === true);
+t_ok('retention: a NEW install (the shipped config.php) keeps 30 days; an install whose config.php does not name it still gets 60, so an update changes nobody\'s retention',
+	(require __DIR__ . '/../guard/config.php')['log_retention_days'] === 30 && gv_cfg_defaults(array())['log_retention_days'] === 60
+	&& gv_cfg_defaults(array('log_retention_days' => 45))['log_retention_days'] === 45);
+// log_skip_ips: validated like IP-list entries, matched from a compiled cache, free while empty.
+$ks_cache = sys_get_temp_dir() . '/gv-logskip-' . getmypid() . '.php';
+putenv('GV_LOGSKIP_CACHE=' . $ks_cache);
+t_ok('log_skip_ips: addresses and CIDRs, v4 and v6, are accepted and normalised (host bits masked, duplicates dropped)',
+	gv_overlay_validate('log_skip_ips', array('203.0.113.7', '203.0.113.5/28', '2001:db8::1', '2001:db8:1::/48', '::ffff:198.51.100.9', '203.0.113.0/28'))
+		=== array(true, array('203.0.113.7', '203.0.113.0/28', '2001:db8::1', '2001:db8:1::/48', '198.51.100.9')));
+t_ok('log_skip_ips: nonsense, a range that is far too wide, more than 200 entries and a non-list are refused',
+	gv_overlay_validate('log_skip_ips', array('not an ip'))[0] === false && gv_overlay_validate('log_skip_ips', array('1.2.3.4/33'))[0] === false
+	&& gv_overlay_validate('log_skip_ips', array('0.0.0.0/0'))[0] === false && gv_overlay_validate('log_skip_ips', array('10.0.0.0/7'))[0] === false
+	&& gv_overlay_validate('log_skip_ips', array('::/0'))[0] === false && gv_overlay_validate('log_skip_ips', array('2001:db8::/15'))[0] === false
+	&& gv_overlay_validate('log_skip_ips', array_map(function ($i) { return '10.0.' . intdiv($i, 250) . '.' . ($i % 250 + 1); }, range(0, 200)))[0] === false
+	&& gv_overlay_validate('log_skip_ips', array_map(function ($i) { return '10.0.' . intdiv($i, 250) . '.' . ($i % 250 + 1); }, range(0, 199)))[0] === true
+	&& gv_overlay_validate('log_skip_ips', 'x')[0] === false && gv_overlay_validate('log_skip_ips', array(' ', '1.2.3.4%eth0'))[0] === false);
+$ks_list = array('203.0.113.0/28', '198.51.100.9', '2001:db8:1::/48');
+t_ok('log_skip_ips: an empty list is free (no cache file is read or written)', gv_ip_log_skipped('203.0.113.1', array()) === false && !is_file($ks_cache));
+t_ok('log_skip_ips: the operator\'s /28 matches, its neighbours do not; IPv6 and an IPv4-mapped address match their entries',
+	gv_ip_log_skipped('203.0.113.1', $ks_list) && gv_ip_log_skipped('203.0.113.15', $ks_list) && !gv_ip_log_skipped('203.0.113.16', $ks_list) && !gv_ip_log_skipped('203.0.112.255', $ks_list)
+	&& gv_ip_log_skipped('198.51.100.9', $ks_list) && !gv_ip_log_skipped('198.51.100.10', $ks_list) && gv_ip_log_skipped('2001:db8:1:ffff::5', $ks_list)
+	&& !gv_ip_log_skipped('2001:db8:2::1', $ks_list) && gv_ip_log_skipped('::ffff:198.51.100.9', $ks_list) && !gv_ip_log_skipped('not-an-ip', $ks_list) && !gv_ip_log_skipped('', $ks_list));
+t_ok('log_skip_ips: the compiled list is cached in a file together with the list it was built from', is_file($ks_cache) && (include $ks_cache)['list'] === $ks_list);
+@unlink($ks_cache);
+putenv('GV_LOGSKIP_CACHE');
+(function () {
+	// The real request flow (gv_run in a child process): a skipped client is decided but not logged, the others are.
+	$d = sys_get_temp_dir() . '/gv-ksrun-' . getmypid();
+	@mkdir($d . '/logs', 0775, true);
+	file_put_contents($d . '/cfg.php', "<?php return array('secret' => 'CHANGE_ME', 'log_dir' => " . var_export($d . '/logs', true) . ", 'log_skip_ips' => array('203.0.113.0/28'), 'redis' => array('port' => 1, 'timeout' => 0.01));");
+	file_put_contents($d . '/run.php', "<?php define('GV_BOOT', 1); define('GV_NO_AUTORUN', 1); require " . var_export(dirname(__DIR__) . '/guard/guard.php', true) . ";\n"
+		. "\$_SERVER = array('REMOTE_ADDR' => \$argv[1], 'REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/p', 'HTTP_USER_AGENT' => 'Mozilla/5.0 test', 'HTTP_ACCEPT' => 'text/html', 'HTTP_ACCEPT_LANGUAGE' => 'en');\ngv_run(microtime(true));\n");
+	foreach (array('203.0.113.9', '203.0.113.99', '198.51.100.1') as $ip) {
+		shell_exec('GV_CONFIG=' . escapeshellarg($d . '/cfg.php') . ' GV_LOGSKIP_CACHE=' . escapeshellarg($d . '/skip.php') . ' ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($d . '/run.php') . ' ' . $ip . ' 2>&1');
+	}
+	$ips = array();
+	foreach ((array)glob($d . '/logs/guard-*.jsonl') as $f) { foreach (file($f) as $l) { $r = json_decode($l, true); if (is_array($r)) { $ips[] = $r['ip']; } } }
+	t_ok('log_skip_ips: in the real request flow the skipped client is not logged and the others are (' . implode(',', $ips) . ')', $ips === array('203.0.113.99', '198.51.100.1') && is_file($d . '/skip.php'));
+	foreach ((array)glob($d . '/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+	foreach ((array)glob($d . '/logs/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+	@rmdir($d . '/logs'); @rmdir($d);
+})();
+t_ok('log_skip_ips: defaults to none and hand-edited junk becomes none', gv_cfg_defaults(array())['log_skip_ips'] === array() && gv_cfg_defaults(array('log_skip_ips' => 'x'))['log_skip_ips'] === array());
+t_ok('log: exempt sampling is all / none / a share', gv_exempt_sampled_out(1.0, 0.99) === false && gv_exempt_sampled_out(0.0, 0.0) === true
+	&& gv_exempt_sampled_out(0.1, 0.05) === false && gv_exempt_sampled_out(0.1, 0.5) === true);
+gv_log_policy(array('skip' => false, 'min_free' => 0, 'timeout_ms' => 50));
+// A second process holds the log file's lock for three seconds: the append must give up after its timeout, drop the row and count it.
+$lv_file = $lv_dir . '/guard-' . date('Ymd') . '.jsonl';
+touch($lv_file);
+$lv_child = proc_open(array(PHP_BINARY, '-r', '$h = fopen($argv[1], "ab"); flock($h, LOCK_EX); echo "locked\n"; fflush(STDOUT); sleep(3);', $lv_file),
+	array(1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $lv_pipes);
+if (is_resource($lv_child) && trim((string)fgets($lv_pipes[1])) === 'locked') {
+	gv_log_policy(array('timeout_ms' => 30));
+	$lv_t = microtime(true);
+	gv_log(array('row' => 'while-locked'), $lv_dir);
+	$lv_ms = (microtime(true) - $lv_t) * 1000;
+	t_ok('log: a busy log file holds the request for about the timeout, not until the lock is free (' . (int)$lv_ms . ' ms)', $lv_ms < 1000);
+	t_ok('log: the row that could not be written is dropped, not queued', trim((string)file_get_contents($lv_file)) === '');
+	t_ok('log: the drop is counted in guard-errors.log', is_file($lv_dir . '/guard-errors.log') && strpos((string)file_get_contents($lv_dir . '/guard-errors.log'), 'log_write_timeout') !== false);
+	proc_close($lv_child);
+	gv_log(array('row' => 'after'), $lv_dir);
+	t_ok('log: once the lock is free the next row is written again', strpos((string)file_get_contents($lv_file), '"after"') !== false);
+} else {
+	t_skip('log: a busy log file holds the request for about the timeout', 'cannot start a child PHP');
+}
+gv_log_policy(array('timeout_ms' => 50));
+foreach ((array)glob($lv_dir . '/{,.}*', GLOB_BRACE) as $lv_f) { if (is_file($lv_f)) { @unlink($lv_f); } }
+@rmdir($lv_dir);
+
 t_section('Exemptions and known bots');
 
 $ex = array('/internal-cron.php', '/rest/');
