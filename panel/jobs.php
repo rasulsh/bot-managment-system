@@ -79,6 +79,7 @@ function gp_job_enqueue($type, array $params, $actor) {
 	$status = json_encode(array_merge($envelope, array('status' => 'queued')),
 		JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 	gv_r_setex($conn, gp_key('job:' . $id), GP_JOB_TTL, $status);
+	gp_job_list_forget();
 	$pushed = gv_redis_cmd($conn, array('LPUSH', gp_key('jobs'), $json));
 	if ($pushed === false) {
 		return array('ok' => false, 'id' => null, 'error' => 'queue_failed');
@@ -102,27 +103,41 @@ function gp_t_safe($key) {
 	return function_exists('gp_t') ? gp_t($key) : $key;
 }
 
-// Recent jobs, newest first, bounded.
+// Recent jobs, newest first, bounded. The job keys are found with SCAN and each page is read with ONE MGET (it was one GET per key), and
+// the list is read ONCE per request: the Jobs page, the dashboard alerts, the IP lists and the Update page each asked for it again.
+// Anything that changes a job in this request calls gp_job_list_forget().
 function gp_job_list($limit = 50) {
+	return array_slice(gp_job_list_all(), 0, max(0, (int)$limit));
+}
+
+function gp_job_list_forget() {
+	gp_job_list_all(true);
+}
+
+function gp_job_list_all($reset = false) {
+	static $memo = null;
+	if ($reset || defined('GP_SELFTEST')) { $memo = null; if ($reset) { return array(); } }     // the self-test changes Redis between calls
+	if ($memo !== null) { return $memo; }
 	$out = array();
 	$conn = gp_redis();
-	if (!$conn) { return $out; }
+	if (!$conn) { return $memo = $out; }
 	$cursor = '0';
 	$guard = 0;
 	do {
 		// The glob job:* requires the trailing colon, so it matches the per-job
-		// status keys (job:<id>) but NOT the list key (jobs, no colon). A GET on
-		// the list key would fail and be skipped anyway, so this is doubly safe
-		// (#21d: the reviewer's collision claim is incorrect).
+		// status keys (job:<id>) but NOT the list key (jobs, no colon).
 		$reply = gp_scan($conn, $cursor, gp_key('job:*'));
 		if ($reply === null) { break; }
 		list($cursor, $keys) = $reply;
-		foreach ($keys as $key) {
-			$raw = gv_r_get($conn, $key);
-			if (!is_string($raw)) { continue; }
-			$row = json_decode($raw, true);
-			if (is_array($row)) { $out[] = $row; }
-			if (count($out) >= $limit) { break 2; }
+		$keys = array_values(array_unique($keys));
+		if ($keys) {
+			$vals = gv_redis_cmd($conn, array_merge(array('MGET'), $keys));
+			foreach ((array)$vals as $raw) {
+				if (!is_string($raw)) { continue; }
+				$row = json_decode($raw, true);
+				if (is_array($row)) { $out[] = $row; }
+				if (count($out) >= 200) { break 2; }
+			}
 		}
 		$guard++;
 	} while ($cursor !== '0' && $guard < 32);
@@ -130,7 +145,7 @@ function gp_job_list($limit = 50) {
 	usort($out, function ($a, $b) {
 		return ($b['requested_at'] ?? 0) <=> ($a['requested_at'] ?? 0);
 	});
-	return $out;
+	return $memo = $out;
 }
 
 // --------------------------------------------------------------------------

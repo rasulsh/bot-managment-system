@@ -879,6 +879,22 @@ function gp_iplists_device_ips(array $devs, $max = 20) {
 // Which of these identities (an address or a device id) a deny override can NOT touch because the address
 // (for a device: an address it was seen on) is inside an enforced allow list. Returns identity => list id.
 function gp_iplists_deny_shadow(array $identities) {
+	// The answer depends on the identities, the enforced allow list and, for a device, on the addresses it was seen on in the last logs
+	// (a scan of up to 8 MiB). It is cached for two minutes under a key made of the identities and the allow list's size and mtime, so
+	// reloading the Overrides page does not rescan the logs each time.
+	$ids = array_values(array_unique(array_filter($identities, 'is_string')));
+	sort($ids);
+	$allow = @stat(gv_iplist_file('allow'));
+	$key = sha1(json_encode($ids) . '|' . ($allow ? $allow['mtime'] . ':' . $allow['size'] : '-') . '|' . @filemtime(gv_iplist_meta_path()));
+	$file = gv_panel_data_dir() . '/.shadow-cache.json';
+	$c = json_decode((string)@file_get_contents($file), true);
+	if (is_array($c) && ($c['key'] ?? '') === $key && (time() - (int)($c['at'] ?? 0)) < 120 && is_array($c['out'] ?? null) && !defined('GP_SELFTEST')) { return $c['out']; }
+	$out = gp_iplists_deny_shadow_scan($identities);
+	if (is_dir(dirname($file)) && is_writable(dirname($file))) { @file_put_contents($file, json_encode(array('key' => $key, 'at' => time(), 'out' => $out)), LOCK_EX); }
+	return $out;
+}
+
+function gp_iplists_deny_shadow_scan(array $identities) {
 	$out = array();
 	$devs = array();
 	foreach ($identities as $id) {
@@ -982,6 +998,26 @@ function gp_iplists_verified_ips($max = 2000) {
 		if (isset($row['botv'], $row['ip']) && $row['botv'] === 'ok' && is_string($row['ip']) && $row['ip'] !== '') { $ips[$row['ip']] = true; }
 	});
 	return array_keys($ips);
+}
+
+// gp_iplists_warnings() for the IP lists page, cached per LIST VERSION: the warnings read every enabled source (up to 8 MiB), look up the ASN
+// of up to 2000 entries per allow list and need the verified crawlers of the last two log days (a log scan). The key is made of every list's
+// id, switches and the size / mtime of its source and of the ASN file, so editing any list, or the GeoIP data, recomputes it at once;
+// the crawlers part ages out after five minutes. The page used to do all of it on every GET.
+function gp_iplists_warnings_cached(array $lists) {
+	$parts = array();
+	foreach ($lists as $l) {
+		$st = @stat(gp_ipl_source_path($l['id']));
+		$parts[] = array($l['id'], !empty($l['enabled']), isset($l['type']) ? $l['type'] : '', isset($l['mode']) ? $l['mode'] : '', $st ? $st['size'] . ':' . $st['mtime'] : '-');
+	}
+	$asn = @stat(gv_geo_dir() . '/asn.bin');
+	$key = sha1(json_encode($parts) . '|' . ($asn ? $asn['size'] . ':' . $asn['mtime'] : '-'));
+	$file = gv_panel_data_dir() . '/.iplist-warnings.json';
+	$c = json_decode((string)@file_get_contents($file), true);
+	if (is_array($c) && ($c['key'] ?? '') === $key && (time() - (int)($c['at'] ?? 0)) < 300 && is_array($c['w'] ?? null) && !defined('GP_SELFTEST')) { return $c['w']; }
+	$w = gp_iplists_warnings($lists, gp_iplists_verified_ips());
+	if (is_dir(dirname($file)) && is_writable(dirname($file))) { @file_put_contents($file, json_encode(array('key' => $key, 'at' => time(), 'w' => $w)), LOCK_EX); }
+	return $w;
 }
 
 // ---------------------------------------------------------------- health (dashboard)

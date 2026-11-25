@@ -29,6 +29,7 @@ from __future__ import print_function
 
 import os
 
+from analyzer import fsmode
 from analyzer.features import FEATURE_ORDER
 
 try:
@@ -149,6 +150,8 @@ def load(model_path):
     """Return the persisted bundle, or None when there is nothing usable."""
     if not SKLEARN_AVAILABLE:
         return None
+    if fsmode.unsafe_to_load(model_path):
+        return None                # never unpickle a file somebody else could have written (see fsmode.unsafe_to_load)
     try:
         bundle = joblib.load(model_path)
     except Exception:
@@ -176,6 +179,10 @@ def inspect(model_path):
     out['exists'] = True
     if not SKLEARN_AVAILABLE:
         out['error'] = 'scikit-learn unavailable'
+        return out
+    refusal = fsmode.unsafe_to_load(model_path)
+    if refusal:
+        out['error'] = 'refused to load: ' + refusal
         return out
     try:
         bundle = joblib.load(model_path)

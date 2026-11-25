@@ -209,7 +209,7 @@ forgotten when the lists grow.
 
 ### P2-2. Honeypot write uses a fixed 7-day TTL that ignores config
 
-`gv_run()` step 6 writes `gv:hp:{ip}` with a hard-coded `604800` (7 days), and
+`gv_run()` step 6 writes `gv:hpd:{device}` / `gv:hpn:{ip or /64}` (7 days, IPv4 `honeypot_ip_ttl` since 2026.11.39; it wrote `gv:hp:{ip}` with a hard-coded `604800` before), and
 step 8 reads it back. The value is not configurable and does not track
 `token_ttl` or any limits window. More importantly, the honeypot flag is keyed by
 **IP**, and on CGNAT / mobile carriers many real users share one IP — a single
@@ -389,10 +389,14 @@ These are deliberate and correct; a future refactor should preserve them:
   and visible in logs before it can change an outcome; `secret == CHANGE_ME`
   forces monitor mode. This makes a safe rollout the default and an unsafe one
   require deliberate action.
-- **The panel never writes PHP and never builds a shell command.** Config changes
-  are validated JSON written atomically; analyzer actions are typed queue
-  envelopes run in-process by the worker. For a security tool this closes the two
-  classic self-inflicted holes.
+- **The panel never writes code from form input and never builds a shell command
+  from it.** Config changes are validated JSON written atomically; analyzer
+  actions are typed queue envelopes run in-process by the worker. Two narrow
+  exceptions, both fixed-shape: `panel/rules.php` writes `guard/rules.cache.php`
+  (a `var_export` of validated rule data, `include`d by the guard), and
+  `panel/health.php` runs `bash scripts/cron-check.sh --json` with a fixed argument
+  list. (An earlier version of this paragraph said the panel writes no PHP and runs
+  no process; the audit of 2026.11.37 showed both statements to be too strong.)
 - **Single source of validation.** `gv_overlay_validate()` is the one definition
   used both when the panel writes a key and when the guard reads it, so they
   cannot drift.

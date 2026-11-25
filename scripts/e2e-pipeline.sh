@@ -79,7 +79,7 @@ def entry(tag, nets):
 open(sys.argv[1], 'wb').write(entry('us', [((127, 0, 0, 0), 8)]) + entry('IR', [((5, 0, 0, 0), 8)]) + entry('private', [((10, 0, 0, 0), 8)]))
 PY
 GV_JOBSTATUS_DIR="$WORK" GV_JOBLOG_DIR="$WORK" GV_LOCK_DIR="$WORK" GV_GEO_DIR="$WORK/geo" GV_GEO_MIN_RANGES=1 GV_PYTHON=python3 bash "$ROOT/scripts/analyzer-cron.sh" geo >"$WORK/geo.out" 2>&1 \
-	&& echo "PASS  analyzer-cron.sh geo compiled geoip.dat into country.bin" || { echo "FAIL  analyzer-cron.sh geo"; cat "$WORK/geo.out" >&2; }
+	&& echo "PASS  analyzer-cron.sh geo compiled geoip.dat into country.bin" || { echo "FAIL  analyzer-cron.sh geo"; cat "$WORK/geo.out" >&2; GEO_FAILED=1; }
 export GV_GEO_DIR="$WORK/geo"
 
 redis-server --port "$RPORT" --save "" --appendonly no --daemonize no --dir "$WORK" >"$WORK/redis.log" 2>&1 &
@@ -184,4 +184,5 @@ else
 	echo "FAIL  geo.log: $rows_cc of $rows_total rows carry cc US"
 	status=1
 fi
+[ "${GEO_FAILED:-0}" -eq 0 ] || status=1       # the geo compile step counts too, not only the counts it leads to
 exit $status

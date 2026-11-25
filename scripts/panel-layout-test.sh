@@ -126,7 +126,8 @@ json.dump({'generated_at': now - 300, 'dash': dash, 'tz': {'name': 'UTC', 'offse
           open(os.path.join(d, 'snapshot.json'), 'w'))
 PY
 # Audit entries with long unbroken values: they must wrap, not widen the page.
-python3 - "$WORK/bg/panel/audit.jsonl" <<'PY'
+mkdir -p "$WORK/bg/data/panel"
+python3 - "$WORK/bg/data/panel/audit.jsonl" <<'PY'
 import json, sys, time
 rows = [{'ts': time.time() - i, 'event': 'config', 'actor': 'admin', 'ip': '203.0.113.1', 'key': 'exempt_paths',
          'old': ['/a' * 200], 'new': {'x': 'y' * 300, 'list': ['/long-path-%d' % n * 5 for n in range(8)]}} for i in range(5)]

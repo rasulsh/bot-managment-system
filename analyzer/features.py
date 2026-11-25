@@ -204,6 +204,48 @@ def session_features(session, path_listing=None, path_detail=None):
     return out
 
 
+HP_HIST_SCORE = 40          # what the guard adds to the static score of a request from a client that tripped the honeypot before
+
+
+def is_honeypot_row(row):
+    """The request that tripped the honeypot (the guard answers it with act 404_hp and sets hp)."""
+    try:
+        return int(row.get('hp') or 0) == 1 or str(row.get('act') or '') == '404_hp'
+    except (TypeError, ValueError):
+        return False
+
+
+def clf_features(features, session):
+    """The feature dict the SUPERVISED CLASSIFIER learns from and scores with: `features` with score_mean and notfound_ratio
+    recomputed so they no longer encode the event that labels an identity a bot.
+
+    The classifier's positive label is a honeypot hit. That same event inflated two of its inputs: every later request of the
+    device carries HP_HIST (+40 in the logged static score, averaged into score_mean), and the honeypot request itself is an
+    answered 404 (counted in notfound_ratio). A model that sees them partly re-derives the label it is trained on and looks more
+    precise than it is. Here the honeypot request is left out of both, and the HP_HIST contribution is taken out of each row's
+    score. Every other feature, the anomaly model's vector and the reputation formula are untouched. Pure.
+    """
+    out = dict(features)
+    rows = [r for r in (session.get('rows') or []) if not is_honeypot_row(r)]
+    scores = []
+    for row in rows:
+        try:
+            value = float(row.get('sc', 0))
+        except (TypeError, ValueError):
+            value = 0.0
+        if _has_reason(row, 'HP_HIST'):
+            value = max(0.0, value - HP_HIST_SCORE)
+        scores.append(value)
+    out['score_mean'] = _mean(scores)
+    out['notfound_ratio'] = outcome_features(rows)['notfound_ratio']
+    return out
+
+
+def clf_vector(features, session):
+    """feature_vector() of clf_features(): the classifier's input for one session."""
+    return feature_vector(clf_features(features, session))
+
+
 def feature_vector(features):
     """Flatten a feature dict into the fixed order the model expects."""
     return [float(features.get(name, 0.0)) for name in FEATURE_ORDER]

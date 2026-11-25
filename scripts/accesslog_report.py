@@ -620,15 +620,33 @@ def claimed_crawler(user_agent):
 def rdns_verified(ip, suffixes, resolver=socket):
     """Forward-confirmed reverse DNS. True only on a positive, confirmed answer."""
     try:
-        host = resolver.gethostbyaddr(ip)[0].lower().rstrip('.')
+        answer = resolver.gethostbyaddr(ip)
+        names = [answer[0]] + list(answer[1] or [])             # the PTR name and its aliases
     except Exception:
         return False
-    if not any(host.endswith(s) for s in suffixes):
-        return False
+    hosts = [h.lower().rstrip('.') for h in names]
+    for host in hosts:
+        # A whole-label match: "notgooglebot.com" is not under ".googlebot.com".
+        if not any(host == s.lstrip('.') or host.endswith('.' + s.lstrip('.')) for s in suffixes):
+            continue
+        try:
+            addresses = [info[4][0] for info in resolver.getaddrinfo(host, None)]
+        except Exception:
+            continue
+        if any(_same_ip(ip, a) for a in addresses):
+            return True
+    return False
+
+
+def _same_ip(a, b):
+    """Two textual addresses are the same address (2001:db8::1 equals 2001:0db8:0:0:0:0:0:1; ::ffff:1.2.3.4 equals 1.2.3.4)."""
     try:
-        return ip in set(info[4][0] for info in resolver.getaddrinfo(host, None))
-    except Exception:
-        return False
+        x, y = ipaddress.ip_address(str(a).split('%')[0]), ipaddress.ip_address(str(b).split('%')[0])
+    except ValueError:
+        return str(a) == str(b)
+    x = x.ipv4_mapped if getattr(x, 'ipv4_mapped', None) else x
+    y = y.ipv4_mapped if getattr(y, 'ipv4_mapped', None) else y
+    return x == y
 
 
 def rdns_verified_within(ip, suffixes, resolver, timeout):

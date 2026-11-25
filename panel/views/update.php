@@ -27,7 +27,16 @@ $install_dir = dirname(__DIR__, 2);
 	<?php endif; ?>
 	<?php if (!empty($m['requirements_changed'])): ?>
 	<div class="gp-note">
+		<?php if (empty($m['pip_enqueued'])): ?>
+		<?= gp_e(gp_t('upd_pip_confirm')) ?>
+		<form method="post" action="index.php?r=update" class="gp-inline">
+			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">
+			<input type="hidden" name="stamp" value="<?= gp_e((string)$ts) ?>">
+			<button class="gp-btn gp-btn-primary gp-btn-sm" type="submit" name="do" value="pip"><?= gp_e(gp_t('upd_pip_button')) ?></button>
+		</form>
+		<?php else: ?>
 		<?= gp_e(empty($m['pip_error']) ? gp_t('upd_pip_queued') : gp_t('upd_pip_failed') . ': ' . (string)$m['pip_error']) ?>
+		<?php endif; ?>
 		<p class="gp-help"><?= gp_e(gp_t('upd_pip_ssh')) ?> <code class="gp-mono">$GV_PYTHON -m pip install -r <?= gp_e($install_dir) ?>/analyzer/requirements.txt</code></p>
 	</div>
 	<?php endif; ?>

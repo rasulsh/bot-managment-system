@@ -36,6 +36,11 @@ except ImportError:        # pragma: no cover
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+if __name__ == '__main__':
+    # No bytecode, and files a manual run creates are not group-writable: a __pycache__ made under cron's umask 002 was 0775.
+    sys.dont_write_bytecode = True
+    os.umask(0o022)
+
 from analyzer import config as config_mod
 from analyzer import fsmode
 from analyzer import geo as geo_mod
@@ -203,8 +208,13 @@ class WriteLock(object):
             return True
         try:
             fh = fsmode.open_append(self.path)
-        except OSError:
-            return True            # an unwritable lock directory must not stop the queue: nothing else can hold what cannot be created
+        except OSError as exc:
+            # NOT acquired. A lock file this user cannot open (a permission-split install: the cron wrapper opens it as one user,
+            # the worker runs as another) used to count as "acquired", so write jobs ran unlocked beside nightly or a training run.
+            # The job goes back to the queue instead, and the warning names the file.
+            print('WARN: cannot open the write lock %s (%s): the job stays queued' % (self.path, exc), file=sys.stderr)
+            jobreport.warn('cannot open the write lock %s: write jobs stay queued until it can be opened by this user' % self.path)
+            return False
         deadline = time.time() + max(0.0, float(wait))
         while True:
             try:

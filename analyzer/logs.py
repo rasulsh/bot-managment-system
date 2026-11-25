@@ -46,6 +46,33 @@ def handshake_rejected(row):
     return act in HANDSHAKE_REJECTIONS and int(row.get('sh') or 0) == 0
 
 
+_TZ = None
+
+
+def configure_timezone(name):
+    """Name the PHP time zone the guard names its daily files with (guard/log.php: date('Ymd')). With none (or one this Python cannot
+    load) the host's local date is used, as before. Called by config.load() with the value scripts/config-dump.php reports."""
+    global _TZ
+    _TZ = None
+    if not name:
+        return None
+    try:
+        import zoneinfo
+        _TZ = zoneinfo.ZoneInfo(str(name))
+    except Exception:
+        _TZ = None
+    return _TZ
+
+
+def day_of(now=None):
+    """The log day (a date) of an instant: in the guard's PHP time zone when it is known, else the host's local one."""
+    if now is None:
+        now = datetime.datetime.now().timestamp()
+    if _TZ is not None:
+        return datetime.datetime.fromtimestamp(now, _TZ).date()
+    return datetime.date.fromtimestamp(now)
+
+
 def _open_text(path, gz):
     opener = gzip.open if gz else io.open
     return opener(path, 'rt', encoding='utf-8', errors='replace')
@@ -183,7 +210,7 @@ def read_lines(log_dir, window_days, today=None, join_outcomes=True, fields=None
     keeps the rows it needs. See day_files() for which files make up a day.
     """
     if today is None:
-        today = datetime.date.today()
+        today = day_of()
     for offset in range(int(window_days)):
         day = today - datetime.timedelta(days=offset)
         for row in iter_day(day_files(log_dir, day), join_outcomes, fields):

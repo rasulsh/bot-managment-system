@@ -19,7 +19,7 @@ define('GP_PERM_SAMPLE', 8);
 // Install files that hold secrets. panel/users.json is listed for the user store that arrives with panel roles;
 // it is only judged when it exists.
 function gp_perm_secret_files() {
-	return array('guard/config.php', 'panel/panel.config.php', 'guard/config.local.json', 'panel/users.json');
+	return array('guard/config.php', 'panel/panel.config.php', 'guard/config.local.json', 'panel/users.json', 'data/panel/users.json', 'data/panel/audit.jsonl');
 }
 
 // Top-level names the scan never enters: the virtualenv, git and logs/ (the guard and the wrappers give logs their own modes). EVERYTHING else is

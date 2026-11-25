@@ -99,6 +99,10 @@ jobs:
         run: php -d display_errors=1 -d error_reporting=-1 scripts/redis-selftest.php
       - name: log rotation self-test (compression, retention, size cap, settings from config)
         run: bash scripts/logrotate-selftest.sh
+      - name: test harness self-test (the HTTP matrix fails on a wrong row, guard.off is preserved, the monitor check waits for its server)
+        run: bash scripts/harness-selftest.sh
+      - name: exposure-check self-test (soft-404 sites, the probe list)
+        run: bash scripts/exposure-check-selftest.sh
       - name: the suites left the working tree clean (nothing tracked or logged into the repo)
         run: |
           git status --porcelain
@@ -207,11 +211,14 @@ jobs:
         run: |
           php -S 127.0.0.1:8080 scripts/dev-router.php >/tmp/dev-router.log 2>&1 &
           sleep 1
-          bash scripts/guard-test.sh http://127.0.0.1:8080 | tee /tmp/matrix.txt
-          # the rows that prove the hardening must show the enforced outcome
-          for row in '^4d .*\| 1 ' '^4e .*\| 403 ' '^4f .*\| 403 ' '^7b .*\| 503 ' '^7c .*\| 503 ' '^7d .*\| 503 ' '^7e .*\| 200 ' '^7f .*\| 503 ' '^7g .*\| 200 ' '^7h .*\| 503 ' '^20b .*\| 200 ' '^20c .*\| 403 '; do
-            grep -E "$row" /tmp/matrix.txt || { echo "missing/unexpected row: $row"; exit 1; }
-          done
+          # EVERY row is asserted by the script itself (exit 1 when any row differs from its "expected(enforced)" column; it used to always
+          # exit 0 and this step looked at 12 of the rows). The row count guards against a script that silently stops printing cases.
+          rc=0
+          bash scripts/guard-test.sh http://127.0.0.1:8080 > /tmp/matrix.txt || rc=$?
+          cat /tmp/matrix.txt
+          test "$rc" -eq 0
+          test "$(grep -cE '^[0-9]+[a-z]? ' /tmp/matrix.txt)" -ge 38
+          grep -q 'All asserted rows gave the expected answer' /tmp/matrix.txt
       - name: every allow path is byte-identical with the guard on and off
         run: bash scripts/identity-check.sh http://127.0.0.1:8080
       - name: monitor mode (secret = CHANGE_ME) is inert

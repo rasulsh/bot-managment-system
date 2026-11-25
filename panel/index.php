@@ -204,6 +204,12 @@ function gp_render($view, array $vars = array()) {
 
 if ($gp_route === 'login') {
 	if ($gp_user !== null) { gp_redirect('dashboard'); }
+	$gp_login_msg = '';
+	if ($gp_post && gp_panel_config() !== null && !gp_login_csrf_check($_POST['csrf'] ?? '')) {
+		// A POST without the cookie and its matching field (a cross-site form, an expired page): not an attempt, nothing is counted.
+		$gp_login_msg = gp_t('login_csrf');
+		$gp_post = false;
+	}
 	if ($gp_post) {
 		$result = gp_login_attempt($_POST['username'] ?? '', $_POST['password'] ?? '');
 		if ($result[0]) { gp_redirect('dashboard'); }
@@ -213,7 +219,7 @@ if ($gp_route === 'login') {
 			: gp_t($result[1]);
 		$gp_login_user = is_string($_POST['username'] ?? null) ? substr($_POST['username'], 0, 200) : '';
 	}
-	gp_render('login', array('login_msg' => $gp_login_msg ?? '', 'login_user' => $gp_login_user ?? ''));
+	gp_render('login', array('login_msg' => $gp_login_msg ?? '', 'login_user' => $gp_login_user ?? '', 'login_csrf' => gp_login_csrf_issue()));
 }
 
 if ($gp_route === 'logout') {
@@ -244,8 +250,11 @@ if (!gp_acl_allows($gp_role, $gp_route, $gp_method, $gp_action)) {
 
 // State-changing routes are POST only and must carry the CSRF token. A GET
 // never changes state anywhere in this panel.
+// A body larger than post_max_size arrives with NO post data at all. Decided here, before the CSRF gate empties $_POST itself: a request
+// the CSRF check rejected is not also "an upload that was too big" (the page used to report both for the same request).
+$gp_body_overflow = ($gp_post && empty($_POST) && empty($_FILES) && (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0);
 if ($gp_post && !gp_csrf_check($_POST['csrf'] ?? '')) {
-	gp_flash('error', gp_t('err_csrf'));
+	if (!$gp_body_overflow) { gp_flash('error', gp_t('err_csrf')); }       // an over-size body has its own message (no token could arrive with it)
 	$gp_post = false;
 	$_POST = array();
 }
@@ -345,7 +354,9 @@ switch ($gp_route) {
 			'identity' => $identity,
 			'verdicts' => $identity !== '' ? gp_identity_verdicts($identity) : array(),
 			'rows'     => $identity !== '' ? gp_identity_rows($identity, 60, $idfilter) : array(),
-			'shadow'   => $identity !== '' ? gp_iplists_deny_shadow(array($identity)) : array(),
+			// The allow-list overlap of a deny override reads the logs (the addresses a device was seen on): only when asked for (?shadow=1).
+			'shadow'   => ($identity !== '' && ($_GET['shadow'] ?? '') === '1') ? gp_iplists_deny_shadow(array($identity)) : array(),
+			'shadow_ran' => (($_GET['shadow'] ?? '') === '1'),
 			'redis_up' => gp_redis_up(),
 		));
 
@@ -396,8 +407,8 @@ switch ($gp_route) {
 			// "Quick block" from a log row passes the UA: a monitor-mode rule pre-filled from it.
 			$draft = isset($_GET['qua']) && is_string($_GET['qua']) ? gp_rule_from_ua(substr($_GET['qua'], 0, 300)) : gp_rule_blank();
 		}
-		// Opening the form (new, edit, quick block) shows what the rule would have matched.
-		if ($impact === null && $draft !== null && !$gp_post) {
+		// Opening the form does NOT scan the logs any more (a 4 MiB read on a plain GET): the form has a button that adds ?impact=1.
+		if ($impact === null && $draft !== null && !$gp_post && ($_GET['impact'] ?? '') === '1') {
 			$pv = gv_rule_validate(array_merge($draft, array('id' => $draft['id'] === '' ? 'r-preview' : $draft['id'], 'name' => $draft['name'] === '' ? 'preview' : $draft['name'])), false);
 			if ($pv[0]) { $impact = gp_rules_impact($pv[1]); }
 		}
@@ -431,8 +442,7 @@ switch ($gp_route) {
 		}
 		// A body larger than post_max_size arrives with no POST data at all (so no CSRF
 		// token): tell the operator why instead of showing a bare "invalid token".
-		if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && empty($_POST) && empty($_FILES)
-			&& (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+		if ($gp_body_overflow) {
 			gp_flash('error', gp_t('geo_up_toobig'));
 		}
 		$gstate = gp_rules_state();
@@ -508,7 +518,7 @@ switch ($gp_route) {
 			exit;
 		}
 		// A body larger than post_max_size arrives with no POST data at all (so no CSRF token).
-		if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && empty($_POST) && empty($_FILES) && (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+		if ($gp_body_overflow) {
 			gp_flash('error', gp_t('ipl_up_toobig'));
 		}
 		$istate = gp_iplists_state();
@@ -534,7 +544,7 @@ switch ($gp_route) {
 			'feeds_state' => gp_feeds_state(), 'feed_edit' => $feed_draft, 'feed_save' => isset($feed_save) ? $feed_save : null,
 			'state' => $istate, 'status' => $istatus, 'all' => $irows, 'visible' => gp_iplists_filter_rows($irows, $ifilter), 'filter' => $ifilter,
 			'edit' => $iedit, 'save' => isset($ipl_save) ? $ipl_save : null,
-			'warnings' => gp_iplists_warnings($istate['lists'], gp_iplists_verified_ips()),
+			'warnings' => gp_iplists_warnings_cached($istate['lists']),
 			'pending' => gp_iplists_pending($istate, $istatus), 'health' => gp_iplists_health(),
 			'eid' => $eid, 'efilter' => $efilter, 'entries' => $eid !== '' ? gp_iplists_entries($eid, $efilter) : array(array(), 0, 0, 0),
 			'test_ip' => $itest_ip, 'test' => (($_GET['test'] ?? '') === '1') ? gp_iplists_test($itest_ip) : null, 'test_ran' => (($_GET['test'] ?? '') === '1'),
@@ -742,6 +752,11 @@ switch ($gp_route) {
 				gp_flash('error', gp_t($vr[1]));
 				gp_redirect('update');
 			}
+			if ($do === 'pip') {
+				$pr = gp_upd_pip_queue(is_string($_POST['stamp'] ?? null) ? $_POST['stamp'] : '', $gp_user);
+				gp_flash($pr[0] ? 'ok' : 'error', gp_t($pr[1]));
+				gp_redirect('update', array('res' => 'ok', 'ts' => is_string($_POST['stamp'] ?? null) ? $_POST['stamp'] : ''));
+			}
 			if ($do === 'rollback') {
 				$stamp = (string)($_POST['stamp'] ?? '');
 				$rb = gp_upd_rollback($stamp);
@@ -752,7 +767,7 @@ switch ($gp_route) {
 			gp_redirect('update');
 		}
 		// A body larger than post_max_size arrives with no POST data at all: say why.
-		if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && empty($_POST) && empty($_FILES) && (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+		if ($gp_body_overflow) {
 			gp_flash('error', gp_t('upd_err_phplimit') . ': ' . gp_bytes(gp_upd_upload_limit()));
 		}
 		$upd_ts = (isset($_GET['ts']) && is_string($_GET['ts']) && preg_match('/^\d{8}-\d{6}(-\d+)?$/', $_GET['ts'])) ? $_GET['ts'] : '';
@@ -962,7 +977,7 @@ function gp_settings_from_request() {
 				if ($raw === '') { break; }
 				$out[$key] = is_numeric($raw) ? (float)$raw : $raw;
 				break;
-			case 'paths': case 'exactpaths': case 'bots': case 'cidrs4': case 'regexes': case 'ips':
+			case 'paths': case 'exactpaths': case 'bots': case 'cidrs4': case 'regexes': case 'ips': case 'names':
 				$out[$key] = gp_lines_to_list($raw);
 				break;
 			case 'params': case 'suffixes':

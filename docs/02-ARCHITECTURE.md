@@ -6,7 +6,7 @@
                           ┌──────────────────────────────────────────┐
                           │                 REDIS                    │
                           │  gv:rep:{dev}   gv:ml:{dev}  gv:clf:{dev} │
-   reads (fast, in-band)  │  gv:botok/botbad:{ip}   gv:hp:{ip}       │  writes (out of band)
+   reads (fast, in-band)  │  gv:botok/botbad:{ip}   gv:hpn:{ip}       │  writes (out of band)
         ┌─────────────────┤  gv:allow/deny:{id}     counters        ├─────────────────┐
         │                 │  gp:jobs (panel job queue)               │                 │
         │                 └──────────────────────────────────────────┘                 │

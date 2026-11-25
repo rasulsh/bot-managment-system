@@ -65,8 +65,19 @@ function gp_geo_file_info($kind, $now) {
 }
 
 // Everything the GeoIP page and the dashboard warning need.
-function gp_geo_status($now = null) {
+// The status is built once per request (the dashboard asked for it twice back to back; each build rescans the geo directory and parses
+// both compiled headers). A call with another $now, or one after gp_geo_status_forget(), builds it again.
+function gp_geo_status_forget() { gp_geo_status(null, true); }
+
+function gp_geo_status($now = null, $forget = false) {
+	static $memo = array();
+	if ($forget || defined('GP_SELFTEST')) { $memo = array(); if ($forget) { return null; } }
 	$now = $now === null ? time() : $now;
+	if (isset($memo[(int)$now])) { return $memo[(int)$now]; }
+	return $memo[(int)$now] = gp_geo_status_build($now);
+}
+
+function gp_geo_status_build($now) {
 	$dir = gv_geo_dir();
 	$out = array('dir' => $dir, 'dir_ok' => is_dir($dir), 'dir_writable' => is_dir($dir) && is_writable($dir),
 		'country' => gp_geo_file_info(GV_GEO_COUNTRY, $now), 'asn' => gp_geo_file_info(GV_GEO_ASN, $now),
@@ -161,6 +172,13 @@ function gp_geo_upload(array $file, $actor, $ip) {
 	if ($name === '') { return array(false, 'geo_up_badname', ''); }
 	$tmp = isset($file['tmp_name']) ? (string)$file['tmp_name'] : '';
 	if (!is_uploaded_file($tmp) && !(defined('GP_TEST_UPLOADS') && is_file($tmp))) { return array(false, 'geo_up_failed', 'not an upload'); }
+	// geo.upload_max_mb is enforced here, not only as a hint in the browser: a client that ignores the hint (or a script) could park a
+	// multi-gigabyte file in geo/ up to PHP's own limits.
+	$cfg = gv_cfg_load();
+	$max = max(1, (int)$cfg['geo']['upload_max_mb']) * 1048576;
+	$size = (int)(isset($file['size']) ? $file['size'] : 0);
+	$real = (int)@filesize($tmp);
+	if ($size > $max || $real > $max) { return array(false, 'geo_up_toobig', ''); }
 	if (!gp_geo_looks_ok($tmp, $name)) { return array(false, 'geo_up_badfile', ''); }
 	$dir = gv_geo_dir();
 	if (!is_dir($dir) || !is_writable($dir)) { return array(false, 'geo_up_nowrite', $dir); }
@@ -169,6 +187,7 @@ function gp_geo_upload(array $file, $actor, $ip) {
 	$ok = defined('GP_TEST_UPLOADS') ? @copy($tmp, $partial) : @move_uploaded_file($tmp, $partial);
 	if (!$ok || !@rename($partial, $dest)) { @unlink($partial); return array(false, 'geo_up_nowrite', $dir); }
 	@chmod($dest, 0640);
+	gp_geo_status_forget();
 	gp_geo_audit('geo_upload', $actor, $ip, $name, null, array('size' => (int)@filesize($dest)));
 	return array(true, 'geo_up_done', $name);
 }
@@ -180,6 +199,7 @@ function gp_geo_delete_source($name, $actor, $ip) {
 	if ($clean === '' || $clean !== (string)$name || !is_file($path)) { return array(false, 'geo_del_none', ''); }
 	$size = (int)@filesize($path);
 	if (!@unlink($path)) { return array(false, 'geo_up_nowrite', ''); }
+	gp_geo_status_forget();
 	gp_geo_audit('geo_delete', $actor, $ip, $clean, array('size' => $size), null);
 	return array(true, 'geo_del_done', $clean);
 }

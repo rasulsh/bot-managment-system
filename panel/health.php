@@ -151,7 +151,7 @@ function gp_job_health($now = null, $dir = null, ?array $intervals = null, ?arra
 
 function gp_jobs_seen_path() {
 	$env = getenv('GP_JOBS_SEEN');
-	return (is_string($env) && $env !== '') ? $env : __DIR__ . '/jobs-seen.json';
+	return (is_string($env) && $env !== '') ? $env : gv_panel_data_path('jobs-seen.json');
 }
 
 function gp_jobs_seen() {
@@ -367,6 +367,68 @@ function gp_php_env_warnings(array $e) {
 	return $out;
 }
 
+// ---------------------------------------------------------------- runtime data exposure probe
+
+// Is the panel's own runtime data downloadable? The panel asks ITS OWN web server, from the server, for <panel URL>/users.json and
+// <panel URL>/audit.jsonl (where they lived before they moved to data/panel, and where an old copy stays until the next update).
+// 403 / 404 / 410 is right. A 200 that serves the file's content (the store has "password_hash", an audit line has "event") is the
+// critical answer: the web server hands out the accounts. Any other answer (a soft-404 page, a redirect, a timeout, a CLI run) is
+// "unknown", not an alarm. The request goes to 127.0.0.1 (never to a host named by the visitor: the Host header only picks the virtual
+// host), takes at most 2 s and is repeated at most every 10 minutes (cached in the data directory). Returns
+// array('state' => 'ok'|'exposed'|'unknown', 'detail' => text).
+function gp_data_exposure_probe($now = null) {
+	$now = $now === null ? time() : (int)$now;
+	$cache = gv_panel_data_dir() . '/.exposure-probe.json';
+	$raw = @file_get_contents($cache);
+	$c = is_string($raw) ? json_decode($raw, true) : null;
+	if (is_array($c) && isset($c['at'], $c['state']) && ($now - (int)$c['at']) < 600 && empty($GLOBALS['gp_test_probe'])) {
+		return array('state' => (string)$c['state'], 'detail' => (string)($c['detail'] ?? ''));
+	}
+	$out = gp_data_exposure_probe_run();
+	if (is_dir(dirname($cache)) && is_writable(dirname($cache))) { @file_put_contents($cache, json_encode(array('at' => $now, 'state' => $out['state'], 'detail' => $out['detail'])), LOCK_EX); }
+	return $out;
+}
+
+function gp_data_exposure_probe_run() {
+	$unknown = array('state' => 'unknown', 'detail' => '');
+	$fetch = isset($GLOBALS['gp_test_probe']) && is_callable($GLOBALS['gp_test_probe']) ? $GLOBALS['gp_test_probe'] : 'gp_data_probe_fetch';
+	if (PHP_SAPI === 'cli' && $fetch === 'gp_data_probe_fetch') { return $unknown; }
+	$host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
+	$self = isset($_SERVER['SCRIPT_NAME']) ? (string)$_SERVER['SCRIPT_NAME'] : '';
+	$prefix = rtrim(str_replace('\\', '/', dirname($self)), '/');
+	if ($fetch === 'gp_data_probe_fetch' && (!preg_match('/^[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?$/', $host) || !preg_match('#^(/[A-Za-z0-9._~-]+)*$#', $prefix))) { return $unknown; }
+	$https = gp_is_https();
+	$exposed = array();
+	foreach (array('users.json' => '"password_hash"', 'audit.jsonl' => '"event"') as $name => $needle) {
+		$r = call_user_func($fetch, $host, $prefix . '/' . $name, $https);
+		if (!is_array($r)) { continue; }
+		if ((int)$r['code'] === 200 && strpos((string)$r['body'], $needle) !== false) { $exposed[] = $prefix . '/' . $name; }
+	}
+	return $exposed ? array('state' => 'exposed', 'detail' => implode(' ', $exposed)) : array('state' => 'ok', 'detail' => '');
+}
+
+// One GET to the local web server for $path with the visitor's Host header. Returns array('code' => int, 'body' => first 4 KiB) or null.
+function gp_data_probe_fetch($host, $path, $https) {
+	$port = 0;
+	if (preg_match('/:([0-9]{1,5})$/', $host, $m)) { $port = (int)$m[1]; }
+	if ($port === 0) { $port = $https ? 443 : 80; }
+	$ctx = stream_context_create(array('ssl' => array('verify_peer' => false, 'verify_peer_name' => false, 'peer_name' => preg_replace('/:[0-9]+$/', '', $host))));
+	$fp = @stream_socket_client(($https ? 'ssl://' : 'tcp://') . '127.0.0.1:' . $port, $en, $es, 2.0, STREAM_CLIENT_CONNECT, $ctx);
+	if (!$fp) { return null; }
+	stream_set_timeout($fp, 2);
+	fwrite($fp, 'GET ' . $path . " HTTP/1.0\r\nHost: " . $host . "\r\nUser-Agent: bot-guard-panel-selfcheck\r\nConnection: close\r\n\r\n");
+	$resp = '';
+	while (!feof($fp) && strlen($resp) < 8192) {
+		$chunk = fread($fp, 4096);
+		if ($chunk === false || $chunk === '') { break; }
+		$resp .= $chunk;
+	}
+	fclose($fp);
+	if (!preg_match('#^HTTP/\d\.\d (\d{3})#', $resp, $m)) { return null; }
+	$pos = strpos($resp, "\r\n\r\n");
+	return array('code' => (int)$m[1], 'body' => $pos === false ? '' : substr($resp, $pos + 4, 4096));
+}
+
 // Gather every input the alerts need. Live reads only; each is small.
 function gp_health_inputs($now = null) {
 	$now = $now === null ? time() : (int)$now;
@@ -375,13 +437,13 @@ function gp_health_inputs($now = null) {
 	$snap = gp_snapshot();
 	$def = gp_degraded_recent(900, $now);
 	return array(
-		'now' => $now, 'exposed' => gp_exposure_warning(), 'redis_up' => gp_redis_up(), 'degraded' => $def,
+		'now' => $now, 'exposed' => gp_exposure_warning(), 'data_exposure' => gp_data_exposure_probe($now), 'redis_up' => gp_redis_up(), 'degraded' => $def,
 		'guard_errors' => gp_recent_guard_errors(3600, $now), 'jobs' => gp_job_health($now), 'queue' => gp_queue_health($now),
 		'storage' => gp_log_storage($now), 'snapshot' => $snap, 'geo_warn' => gp_geo_dashboard_warnings(), 'geo_rules' => gp_geo_rules_need($rs['rules']),
 		'rules_state' => $rs['state'], 'rules_enabled' => count(array_filter($rs['rules'], function ($r) { return !empty($r['enabled']); })), 'rules_cache_stale' => gp_rules_cache_stale(),
 		'secret_default' => (!isset($cfg['secret']) || $cfg['secret'] === 'CHANGE_ME'), 'salt_default' => (!isset($cfg['holdout_salt']) || $cfg['holdout_salt'] === 'CHANGE_ME_TOO'),
 		'noeviction' => gp_redis_noeviction(), 'cron' => gp_cron_check($now), 'tz_offset' => (int)date('Z', $now),
-		'geo_used' => gp_geo_status($now)['country'] !== null || gp_geo_status($now)['asn'] !== null,
+		'geo_used' => ($geo_st = gp_geo_status($now)) && ($geo_st['country'] !== null || $geo_st['asn'] !== null),
 		'iplist_warn' => gp_iplists_health($now),
 		'update_warn' => function_exists('gp_upd_health') ? gp_upd_health($now) : array(),
 		'perms' => gp_perm_scan(false, $now),
@@ -409,6 +471,7 @@ function gp_health_alerts(array $in) {
 	$a = array();
 	$add = function ($id, $level, $key, $detail = '', $link = '') use (&$a) { $a[] = array('id' => $id, 'level' => $level, 'key' => $key, 'detail' => $detail, 'link' => $link); };
 	if (!empty($in['exposed'])) { $add('exposed', 'critical', 'al_exposed', implode(' ', array_slice((array)$in['exposed'], 0, 3)), 'dashboard'); }
+	if (!empty($in['data_exposure']) && ($in['data_exposure']['state'] ?? '') === 'exposed') { $add('data_exposed', 'critical', 'al_data_exposed', (string)$in['data_exposure']['detail'], 'dashboard'); }
 	if (empty($in['redis_up'])) { $add('redis_down', 'critical', 'al_redis_down', '', ''); }
 	$d = isset($in['degraded']) ? $in['degraded'] : array(0, 0);
 	if ($d[1] > 0) { $add('degraded', ($d[0] > 0 && $d[1] * 2 >= $d[0]) ? 'critical' : 'warning', 'al_degraded', $d[1] . '/' . $d[0], 'logs'); }

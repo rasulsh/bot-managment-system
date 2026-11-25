@@ -18,6 +18,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+if __name__ == '__main__':
+    # No bytecode, and files a manual run creates are not group-writable: a __pycache__ made under cron's umask 002 was 0775.
+    sys.dont_write_bytecode = True
+    os.umask(0o022)
+
 from analyzer import config as config_mod
 from analyzer import jobreport
 from analyzer import lowprio as lowprio_mod
@@ -73,7 +78,7 @@ def read_claims(cfg, now=None, full_read=False):
             ingest_mod.update(cfg, now)
             import datetime
             with ingest_mod.reader(cfg) as store:
-                return store.claims(cfg['window_days'], datetime.date.fromtimestamp(now or time.time()), cfg['known_bots'])
+                return store.claims(cfg['window_days'], logs_mod.day_of(now), cfg['known_bots'])
         except Exception as exc:                 # fail open: the logs themselves are always readable
             print('WARNING: the incremental store is unavailable (%s); reading the logs directly.' % exc, file=sys.stderr)
             jobreport.warn('incremental log store unavailable (%s): bot verification read the log files directly' % exc)

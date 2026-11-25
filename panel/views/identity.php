@@ -87,6 +87,11 @@ $v = is_array($verdicts) ? $verdicts : array();
 		<div class="gp-note gp-note-strong" role="alert" data-shadow="1"><?= gp_e(str_replace('%s', $slist, gp_t('ovr_deny_shadowed'))) ?>
 			<a href="index.php?r=iplists&amp;list=<?= gp_u($slist) ?>#ipl-entries"><?= gp_e(gp_t('ovr_shadow_link')) ?></a></div>
 		<?php endforeach; ?>
+		<?php if (!empty($v['deny_ttl']) && empty($shadow_ran)): ?>
+		<p class="gp-help"><a href="index.php?r=identity&amp;id=<?= gp_u($identity) ?>&amp;shadow=1"><?= gp_e(gp_t('ovr_shadow_check')) ?></a></p>
+		<?php elseif (!empty($shadow_ran) && !$shadow): ?>
+		<p class="gp-help"><?= gp_e(gp_t('ovr_shadow_none')) ?></p>
+		<?php endif; ?>
 		<form method="post" action="index.php?r=identity&amp;id=<?= gp_u($identity) ?>"
 			class="gp-form" style="margin-top:.75rem">
 			<input type="hidden" name="csrf" value="<?= gp_e(gp_csrf_token()) ?>">

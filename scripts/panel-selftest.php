@@ -8,6 +8,16 @@ define('GV_BOOT', 1);
 define('GP_BOOT', 1);
 define('GP_SELFTEST', 1);
 
+// The panel's runtime data (users, audit trail, sign-in counters) of this suite lives in a temp directory, never in data/panel of the checkout.
+$GP_TMP_DATA = sys_get_temp_dir() . '/gp-selftest-data-' . getmypid();
+@mkdir($GP_TMP_DATA, 0700, true);
+putenv('GV_PANEL_DATA=' . $GP_TMP_DATA);
+register_shutdown_function(function () use ($GP_TMP_DATA) {
+	foreach ((array)glob($GP_TMP_DATA . '/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } }
+	foreach ((array)glob($GP_TMP_DATA . '/*', GLOB_ONLYDIR) as $d) { foreach ((array)glob($d . '/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } } @rmdir($d); }
+	@rmdir($GP_TMP_DATA);
+});
+
 require __DIR__ . '/../guard/guard.php';
 require __DIR__ . '/../panel/config_io.php';
 require __DIR__ . '/../panel/acl.php';          // the views ask it which links the role may follow
@@ -588,8 +598,13 @@ t_ok('an empty flash list encodes to nothing to store',
 	gp_flash_encode(array(), $flash_secret) === '');
 $flash_big = array();
 for ($i = 0; $i < 200; $i++) { $flash_big[] = array('kind' => 'ok', 'message' => str_repeat('x', 40)); }
-t_ok('an oversize flash set is refused rather than bloating headers',
-	gp_flash_encode($flash_big, $flash_secret) === '');
+$flash_enc = gp_flash_encode($flash_big, $flash_secret);
+t_ok('an oversize flash set is shortened to fit the cookie (the newest messages kept), not dropped', $flash_enc !== '' && strlen($flash_enc) < 1536
+	&& ($flash_dec = gp_flash_decode($flash_enc, $flash_secret)) && count($flash_dec) >= 1 && strpos($flash_dec[count($flash_dec) - 1]['message'], 'xxxxxxxx') === 0);
+$flash_long = gp_flash_encode(array(array('kind' => 'warn', 'message' => 'Saved. ' . str_repeat('detail é ', 400))), $flash_secret);
+$flash_long_dec = gp_flash_decode($flash_long, $flash_secret);
+t_ok('one long message is cut with an ellipsis instead of vanishing (it used to report nothing after the action)', $flash_long !== '' && count($flash_long_dec) === 1
+	&& strpos($flash_long_dec[0]['message'], 'Saved. detail') === 0 && substr($flash_long_dec[0]['message'], -3) === "\u{2026}" && strlen($flash_long) <= 1536);
 $flash_poison = gp_flash_encode(array(array('kind' => 'ok')), $flash_secret);
 t_ok('an entry of the wrong shape is dropped on load',
 	$flash_poison !== '' && gp_flash_decode($flash_poison, $flash_secret) === array());
@@ -4062,7 +4077,17 @@ $ag = gp_upd_apply($sg['plan']['id'], 'a', array('confirm' => array('git_present
 t_ok('...and goes through once the .git warning is confirmed', $ag['ok'] === true);
 $ut_run($root_w . '/updates/verify.php', array($ag['stamp']));
 $ph = gp_upd_post_verify($ag['stamp'], 'admin');
-t_ok('after a good check a changed requirements.txt asks for the pip_sync job exactly once', $ph !== null && $ph['status'] === 'ok' && !empty($ph['pip_enqueued']) && !empty(gp_upd_json_read(gp_upd_dir() . '/' . $ag['stamp'] . '/manifest.json')['audited']));
+t_ok('after a good check a changed requirements.txt installs NOTHING by itself: no pip_sync is queued, the result page only offers it',
+	$ph !== null && $ph['status'] === 'ok' && empty($ph['pip_enqueued']) && !empty($ph['requirements_changed']) && !empty(gp_upd_json_read(gp_upd_dir() . '/' . $ag['stamp'] . '/manifest.json')['audited']));
+$pq = gp_upd_pip_queue($ag['stamp'], 'admin');
+$pq2 = gp_upd_pip_queue($ag['stamp'], 'admin');
+t_ok('...the administrator\'s confirmation queues pip_sync exactly once (a second press is refused) and audits it',
+	$pq[1] === 'upd_pip_queued' && $pq2 === array(false, 'upd_pip_already') && !empty(gp_upd_json_read(gp_upd_dir() . '/' . $ag['stamp'] . '/manifest.json')['pip_enqueued'])
+	&& strpos((string)@file_get_contents(gp_audit_path()), 'update_pip_queue') !== false);
+t_ok('...and only for an update that really changed requirements.txt', gp_upd_pip_queue('20200101-000000', 'admin') === array(false, 'upd_err_unknown_update'));
+$upd_src = file_get_contents(__DIR__ . '/../panel/views/update.php') . file_get_contents(__DIR__ . '/../panel/index.php');
+t_ok('...the result page has the confirmation button (a POST of the Update route, admin only by the ACL map) and never enqueues from a GET',
+	strpos($upd_src, 'value="pip"') !== false && strpos($upd_src, "\$do === 'pip'") !== false && gp_acl_allows('operator', 'update', 'POST', 'pip') === false && gp_acl_allows('admin', 'update', 'POST', 'pip') === true);
 if (!empty($ph['pip_job'])) {                                   // a Redis that was reachable took the job: remove it again
 	$ut_c = gv_redis_connect(gv_cfg_load()['redis'], $GP_TMP_LOGS, false);
 	if ($ut_c) { gv_redis_cmd($ut_c, array('DEL', gp_key('job:' . $ph['pip_job'])));
@@ -4655,15 +4680,15 @@ $cli = function ($input) use ($ur, $UT_PHP) {
 	fclose($pipes[1]); fclose($pipes[2]);
 	return array(proc_close($p), $out);
 };
-$ucli = function () use ($ur) { $d = json_decode((string)@file_get_contents($ur . '/panel/users.json'), true); $o = array(); foreach ((array)($d['users'] ?? array()) as $u) { $o[$u['username']] = $u; } return $o; };
+$ucli = function () use ($ur) { $d = json_decode((string)@file_get_contents($ur . '/data/panel/users.json'), true); $o = array(); foreach ((array)($d['users'] ?? array()) as $u) { $o[$u['username']] = $u; } return $o; };
 $c1 = $cli("Root.Admin\nfirst-admin-password-1\nfirst-admin-password-1\n");
 $u1 = $ucli();
 t_ok('CLI: the first run creates panel.config.php and the first administrator (lowercased) in users.json, mode 0600', $c1[0] === 0 && isset($u1['root.admin']) && $u1['root.admin']['role'] === 'admin' && $u1['root.admin']['enabled'] === true
-	&& (fileperms($ur . '/panel/users.json') & 0777) === 0600 && is_file($ur . '/panel/panel.config.php') && password_verify('first-admin-password-1', $u1['root.admin']['password_hash']));
-$d = json_decode(file_get_contents($ur . '/panel/users.json'), true);
+	&& (fileperms($ur . '/data/panel/users.json') & 0777) === 0600 && is_file($ur . '/panel/panel.config.php') && password_verify('first-admin-password-1', $u1['root.admin']['password_hash']));
+$d = json_decode(file_get_contents($ur . '/data/panel/users.json'), true);
 $d['users'][0]['enabled'] = false; $d['users'][0]['role'] = 'demo';
 $d['users'][] = array('username' => 'keep.me', 'role' => 'operator', 'enabled' => true, 'password_hash' => password_hash('keep-me-password-1', PASSWORD_DEFAULT), 'created_at' => 1, 'created_by' => 'x', 'updated_at' => 1, 'last_login_at' => 0, 'last_login_ip' => '', 'session_version' => 3);
-file_put_contents($ur . '/panel/users.json', json_encode($d));
+file_put_contents($ur . '/data/panel/users.json', json_encode($d));
 $c2 = $cli("y\nroot.admin\nrecovered-password-1\nrecovered-password-1\nn\n");
 $u2 = $ucli();
 t_ok('CLI recovery: resetting a disabled, demoted admin re-enables it, makes it an administrator again, sets the password and ends its sessions; other accounts are untouched',
@@ -4676,11 +4701,11 @@ $c4 = $cli("y\nx\n");
 t_ok('CLI: a bad username is refused with an error and exit code 2, nothing written', $c4[0] === 2 && file_get_contents($ur . '/panel/panel.config.php') === $cfg_before && count($ucli()) === 3);
 $cli("y\nroot.admin\nrecovered-password-2\nrecovered-password-2\ny\n");
 t_ok('CLI: answering yes to "log out every session" rotates the session secret', file_get_contents($ur . '/panel/panel.config.php') !== $cfg_before);
-file_put_contents($ur . '/panel/users.json', 'garbage');
+file_put_contents($ur . '/data/panel/users.json', 'garbage');
 $c5 = $cli("y\nn\n");
-t_ok('CLI recovery: a corrupt users.json is not touched unless you agree', $c5[0] === 2 && file_get_contents($ur . '/panel/users.json') === 'garbage');
+t_ok('CLI recovery: a corrupt users.json is not touched unless you agree', $c5[0] === 2 && file_get_contents($ur . '/data/panel/users.json') === 'garbage');
 $c6 = $cli("y\ny\nrescue.admin\nrescue-password-123\nrescue-password-123\nn\n");
-t_ok('CLI recovery: ...and with your agreement it is moved aside and a new store starts with the new administrator', $c6[0] === 0 && isset($ucli()['rescue.admin']) && count($ucli()) === 1 && count(glob($ur . '/panel/users.json.bad-*')) === 1);
+t_ok('CLI recovery: ...and with your agreement it is moved aside and a new store starts with the new administrator', $c6[0] === 0 && isset($ucli()['rescue.admin']) && count($ucli()) === 1 && count(glob($ur . '/data/panel/users.json.bad-*')) === 1);
 $c7 = $cli("y\nroot\nroot\nroot\nn\n");
 t_ok('CLI: a password equal to the username or shorter than 12 characters is refused', $c7[0] === 2);
 
@@ -5304,6 +5329,125 @@ echo "\n";
 // mistakable for full coverage.
 t_ok('the suite wrote no sign-in counters into the repository (panel/.ratelimit): they are private to this process',
 	getenv('GV_RATELIMIT_DIR') === $GP_RL_DIR && (is_dir(__DIR__ . '/../panel/.ratelimit') ? count(glob(__DIR__ . '/../panel/.ratelimit/*')) : 0) === $GP_RL_REPO_BEFORE);
+// ---------------------------------------------------------------- Audit fixes (PR J): panel
+t_section('Audit fixes (PR J): panel');
+$GLOBALS['gp_test_panel_cfg'] = array('session_secret' => str_repeat('k', 32), 'username' => 'admin', 'password_hash' => 'x', 'trusted_proxies' => array('198.51.100.0/24'));
+
+// SEC-1: login CSRF
+$_COOKIE = array();
+$lt = gp_login_csrf_issue();
+$lc = $_COOKIE[GP_LOGIN_CSRF_COOKIE];
+t_ok('SEC-1: the login page issues a random cookie and a keyed token for it', preg_match('/^[a-f0-9]{32}$/', $lc) === 1 && preg_match('/^[a-f0-9]{64}$/', $lt) === 1 && gp_login_csrf_issue() === $lt);
+t_ok('SEC-1: a login POST with the token that matches the cookie passes', gp_login_csrf_check($lt) === true);
+t_ok('SEC-1: ...without the field, with a wrong one, with the field but NO cookie (a cross-site form) or with a forged cookie it does not',
+	gp_login_csrf_check('') === false && gp_login_csrf_check($lt . '0') === false && gp_login_csrf_check(null) === false
+	&& (function () use ($lt) { $keep = $_COOKIE; $_COOKIE = array(); $r = gp_login_csrf_check($lt); $_COOKIE = $keep; return $r === false; })()
+	&& (function () use ($lt) { $keep = $_COOKIE; $_COOKIE[GP_LOGIN_CSRF_COOKIE] = str_repeat('a', 32); $r = gp_login_csrf_check($lt); $_COOKIE = $keep; return $r === false; })());
+$idx = file_get_contents(__DIR__ . '/../panel/index.php');
+t_ok('SEC-1: index.php runs the check BEFORE gp_login_attempt (a refused POST counts no attempt) and the form carries the field; the language key is used',
+	strpos($idx, 'gp_login_csrf_check') !== false && strpos($idx, 'gp_login_csrf_check') < strpos($idx, 'gp_login_attempt($_POST')
+	&& strpos(file_get_contents(__DIR__ . '/../panel/views/login.php'), 'name="csrf"') !== false && strpos($idx, "gp_t('login_csrf')") !== false);
+
+// SEC-7: X-Forwarded-Proto only from trusted_proxies
+$sv = $_SERVER;
+$_SERVER = array('REMOTE_ADDR' => '203.0.113.9', 'HTTP_X_FORWARDED_PROTO' => 'https');
+$a1 = gp_is_https();
+$_SERVER['REMOTE_ADDR'] = '198.51.100.20';
+$a2 = gp_is_https();
+$_SERVER = array('REMOTE_ADDR' => '203.0.113.9', 'HTTPS' => 'on');
+$a3 = gp_is_https();
+$_SERVER = $sv;
+t_ok('SEC-7: the panel believes X-Forwarded-Proto only from a trusted proxy (a stranger gets a plain-HTTP cookie, a listed proxy a Secure one, a real HTTPS request is HTTPS)', $a1 === false && $a2 === true && $a3 === true);
+unset($GLOBALS['gp_test_panel_cfg']);
+
+// SEC-8: the server enforces geo.upload_max_mb
+$gu_tmp = tempnam(sys_get_temp_dir(), 'gpgeo');
+file_put_contents($gu_tmp, str_repeat("\0", 3 * 1048576) . "\xAB\xCD\xEFMaxMind.com");
+$gu_cfg = tempnam(sys_get_temp_dir(), 'gpcfg');
+file_put_contents($gu_cfg, "<?php return array('secret' => 'x', 'geo' => array('upload_max_mb' => 1));");
+$gu_prev = getenv('GV_CONFIG');
+putenv('GV_CONFIG=' . $gu_cfg);
+if (!defined('GP_TEST_UPLOADS')) { define('GP_TEST_UPLOADS', 1); }
+$gu = gp_geo_upload(array('error' => UPLOAD_ERR_OK, 'name' => 'big.mmdb', 'tmp_name' => $gu_tmp, 'size' => 3 * 1048576 + 20), 'admin', '127.0.0.1');
+t_ok('SEC-8: a 3 MiB upload is refused with geo.upload_max_mb = 1 even though the browser-side hint was ignored (nothing is written to geo/)', $gu[0] === false && $gu[1] === 'geo_up_toobig' && !is_file(gv_geo_dir() . '/big.mmdb'));
+putenv($gu_prev === false ? 'GV_CONFIG' : 'GV_CONFIG=' . $gu_prev);
+@unlink($gu_tmp); @unlink($gu_cfg);
+
+// LOG-12: a CSRF-rejected POST is not an over-size upload
+t_ok('LOG-12: the over-size detection is decided before the CSRF gate empties $_POST, and the CSRF message is not shown for an over-size body',
+	strpos($idx, '$gp_body_overflow = (') !== false && strpos($idx, '$gp_body_overflow = (') < strpos($idx, "!gp_csrf_check(\$_POST['csrf'] ?? '')")
+	&& substr_count($idx, 'if ($gp_body_overflow)') >= 3 && strpos($idx, "empty(\$_POST) && empty(\$_FILES)\n\t\t\t&& (int)") === false);
+
+// LOG-19: one username rule set
+t_ok('LOG-19: one definition of a user name (creation 3-32, a name already stored 1-64), used by the form and by the store check',
+	gp_users_name_ok('ab', false) === false && gp_users_name_ok('abc', false) === true && gp_users_name_ok(str_repeat('a', 33), false) === false
+	&& gp_users_name_ok('a', true) === true && gp_users_name_ok(str_repeat('a', 64), true) === true && gp_users_name_ok(str_repeat('a', 65), true) === false && gp_users_name_ok('A', true) === false
+	&& gp_users_valid_name(' Root.Admin ') === true && substr_count(file_get_contents(__DIR__ . '/../panel/users.php'), '{1,64}') === 1 && substr_count(file_get_contents(__DIR__ . '/../panel/users.php'), '{3,32}') >= 1);
+
+// VIS-1
+t_ok('VIS-1: the class gp-dchart-partial that the chart emits has a CSS rule in the source and in the compiled file',
+	strpos(file_get_contents(__DIR__ . '/../panel/assets/app.src.css'), '.gp-dchart-partial') !== false && strpos(file_get_contents(__DIR__ . '/../panel/assets/app.css'), '.gp-dchart-partial{fill-opacity:.45}') !== false);
+
+// SEC-2: where the panel keeps its files, and the exposure probe
+$env_keep = array();
+foreach (array('GV_USERS', 'GV_AUDIT', 'GP_JOBS_SEEN', 'GV_RATELIMIT_DIR') as $ek) { $env_keep[$ek] = getenv($ek); putenv($ek); }
+$dd_res = array(gp_users_path(), gp_audit_path(), gp_jobs_seen_path(), gp_ratelimit_file_dir());
+foreach ($env_keep as $ek => $ev) { if ($ev !== false) { putenv($ek . '=' . $ev); } }
+t_ok('SEC-2: users, audit trail, jobs-seen and the sign-in counters resolve into the data directory (GV_PANEL_DATA of this suite)',
+	count(array_filter($dd_res, function ($p) { return strpos($p, getenv('GV_PANEL_DATA') . '/') === 0; })) === 4);
+$probe_calls = array();
+$GLOBALS['gp_test_probe'] = function ($host, $path, $https) use (&$probe_calls) { $probe_calls[] = $path; return $path === '/gv-admin/users.json' ? array('code' => 200, 'body' => '{"users":[{"password_hash":"$2y$"}]}') : array('code' => 404, 'body' => ''); };
+$_SERVER['SCRIPT_NAME'] = '/gv-admin/index.php';
+$ex1 = gp_data_exposure_probe(time());
+$GLOBALS['gp_test_probe'] = function ($host, $path, $https) { return array('code' => 403, 'body' => 'Forbidden'); };
+$ex2 = gp_data_exposure_probe(time());
+$GLOBALS['gp_test_probe'] = function ($host, $path, $https) { return array('code' => 200, 'body' => '<html>soft 404</html>'); };
+$ex3 = gp_data_exposure_probe(time());
+$GLOBALS['gp_test_probe'] = function ($host, $path, $https) { return null; };
+$ex4 = gp_data_exposure_probe(time());
+unset($GLOBALS['gp_test_probe'], $_SERVER['SCRIPT_NAME']);
+t_ok('SEC-2: the probe asks for <panel URL>/users.json and /audit.jsonl; a 200 that serves the store is "exposed", 403 / 404 is "ok", a soft-404 page or no answer is "unknown" (no false alarm)',
+	$ex1['state'] === 'exposed' && strpos($ex1['detail'], '/gv-admin/users.json') !== false && $probe_calls === array('/gv-admin/users.json', '/gv-admin/audit.jsonl')
+	&& $ex2['state'] === 'ok' && $ex3['state'] === 'ok' && $ex4['state'] === 'ok');
+$al = gp_health_alerts(array('now' => time(), 'redis_up' => true, 'data_exposure' => array('state' => 'exposed', 'detail' => '/gv-admin/users.json')));
+$al_ids = array(); $al_lv = array();
+foreach ($al as $a_) { $al_ids[] = $a_['id']; $al_lv[$a_['id']] = $a_['level']; }
+t_ok('SEC-2: an exposed data file is a CRITICAL dashboard alert with its own language key; "ok" and "unknown" raise nothing',
+	in_array('data_exposed', $al_ids, true) && $al_lv['data_exposed'] === 'critical' && gp_t('al_data_exposed') !== 'al_data_exposed'
+	&& !in_array('data_exposed', array_column(gp_health_alerts(array('now' => time(), 'redis_up' => true, 'data_exposure' => array('state' => 'ok', 'detail' => ''))), 'id'), true)
+	&& !in_array('data_exposed', array_column(gp_health_alerts(array('now' => time(), 'redis_up' => true, 'data_exposure' => array('state' => 'unknown', 'detail' => ''))), 'id'), true));
+t_ok('SEC-2: the exposure probe is the only socket the panel opens besides Redis and the feed fetch, to 127.0.0.1 only', substr_count(file_get_contents(__DIR__ . '/../panel/health.php'), 'stream_socket_client(') === 1);
+t_ok('SEC-2: the updater knows the data/ folder and never overwrites or deletes data/panel/ (update-protected.txt)',
+	in_array('data', gp_upd_tree(), true) && strpos(file_get_contents(__DIR__ . '/../panel/update-protected.txt'), "\ndata/panel/\n") !== false);
+
+// PERF-2..6
+t_ok('PERF-3: opening the rule editor and the identity page does not scan the logs on its own (?impact=1 / ?shadow=1 only)',
+	strpos($idx, "(\$_GET['impact'] ?? '') === '1'") !== false && strpos($idx, "(\$_GET['shadow'] ?? '') === '1'") !== false
+	&& strpos(file_get_contents(__DIR__ . '/../panel/views/rules.php'), 'rules_impact_button') !== false && strpos(file_get_contents(__DIR__ . '/../panel/views/identity.php'), 'ovr_shadow_check') !== false);
+t_ok('PERF-4: the IP lists page uses the cached warnings (keyed by list version); PERF-6: the dashboard builds the geo status once',
+	strpos($idx, 'gp_iplists_warnings_cached($istate') !== false && substr_count(file_get_contents(__DIR__ . '/../panel/health.php'), 'gp_geo_status($now)') === 1);
+if (gp_redis()) {
+	$pc = gp_redis();
+	foreach (array('chal:1.1.1.1' => 'c', 'chal:2.2.2.2' => '1', 'deny:3.3.3.3' => '1', 'allow:4.4.4.4' => '1') as $k => $v) { gv_r_setex($pc, gv_key($k), 600, $v); }
+	$ol = gp_overrides_list();
+	$ol_map = array(); foreach ($ol as $o) { $ol_map[$o['kind'] . ':' . $o['identity']] = $o['ttl']; }
+	t_ok('PERF-2: the overrides list (one pipelined round trip per SCAN page) has every override with its kind and a TTL',
+		isset($ol_map['captcha:1.1.1.1'], $ol_map['challenge:2.2.2.2'], $ol_map['deny:3.3.3.3'], $ol_map['allow:4.4.4.4']) && $ol_map['deny:3.3.3.3'] > 0 && $ol_map['deny:3.3.3.3'] <= 600);
+	foreach (array('chal:1.1.1.1', 'chal:2.2.2.2', 'deny:3.3.3.3', 'allow:4.4.4.4') as $k) { gv_redis_cmd($pc, array('DEL', gv_key($k))); }
+	gp_job_list_forget();
+	$j1 = gp_job_enqueue('snapshot', array(), 'admin');
+	$jl = gp_job_list(30);
+	t_ok('PERF-5/6: the job list is read with MGET and contains the job just queued; a second call in the same request uses the memo, an enqueue forgets it', $j1['ok'] && count($jl) >= 1
+		&& $jl[0]['type'] === 'snapshot' && strpos(file_get_contents(__DIR__ . '/../panel/jobs.php'), "'MGET'") !== false && strpos(file_get_contents(__DIR__ . '/../panel/jobs.php'), 'gp_job_list_forget();') !== false);
+	gp_limiter_conn(true);
+	$c1 = gp_limiter_conn();
+	t_ok('PERF-5: the sign-in limiter opens ONE Redis connection and reuses it for every counter (bump, get, ttl)', $c1 !== null && gp_attempts_bump('perf-bucket', 60) >= 1 && gp_attempts_get('perf-bucket', 60) >= 1
+		&& gp_limiter_conn() === $c1 && substr_count(file_get_contents(__DIR__ . '/../panel/auth.php'), 'gv_redis_connect(') <= 3);
+	gp_attempts_clear('perf-bucket');
+} else {
+	t_skip('PERF-2/5: overrides list, job list, limiter connection', 'no Redis');
+}
+
 // Log volume and storage (PR K)
 t_ok('log storage: the projection is the average of the last seven finished days times the retention (a day in progress is not counted)',
 	gp_log_projection_from(array('20260101' => 100, '20260102' => 300), 30) === array('avg_day' => 200, 'projected' => 6000)
@@ -5314,7 +5458,7 @@ t_ok('settings: the three new log settings are on the Log storage tab, each with
 	(function () use ($lv_src) { foreach (array('log_skip_ips', 'log_skip_panel', 'log_sample.exempt', 'log_write_timeout_ms') as $k) { $u = str_replace('.', '_', $k); if (strpos($lv_src, "'" . $k . "'") === false || gp_t('lbl_' . $u) === 'lbl_' . $u || gp_t('help_' . $u) === 'help_' . $u || gp_t('tip_set_' . $u) === 'tip_set_' . $u) { return false; } } return true; })());
 t_ok('settings: log_skip_ips is a one-per-line textarea in Settings -> Log storage whose lines the guard validates (and refuses with a readable message)',
 	strpos(file_get_contents(__DIR__ . '/../panel/index.php'), "case 'regexes': case 'ips':") !== false
-	&& strpos($lv_src, "'log_skip_ips', 'log_skip_panel'") !== false && gv_overlay_validate('log_skip_ips', array('203.0.113.0/28', '2001:db8::1'))[0] === true
+	&& strpos($lv_src, "'log_skip_ips', 'log_redact_params', 'log_skip_panel'") !== false && gv_overlay_validate('log_skip_ips', array('203.0.113.0/28', '2001:db8::1'))[0] === true
 	&& gv_overlay_validate('log_skip_ips', array('203.0.113.0/28', 'nope')) === array(false, 'bad_ip') && gp_cio_t('verr_bad_ip') !== 'verr_bad_ip');
 t_ok('settings: the Log storage tab shows the projected disk use', strpos($lv_src, 'set-log-projection') !== false && strpos($lv_src, "gp_log_projection()") !== false && gp_t('ls_projected') !== 'ls_projected');
 t_ok('the dashboard card shows the projected disk use and the analyzer store', strpos(file_get_contents(__DIR__ . '/../panel/views/dashboard.php'), "gp_t('ls_projected')") !== false && strpos(file_get_contents(__DIR__ . '/../panel/views/dashboard.php'), "gp_t('ls_store')") !== false);

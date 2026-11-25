@@ -15,7 +15,9 @@ import os
 import re
 import sys
 
+from analyzer import botverify
 from analyzer import bridge
+from analyzer import logs
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -259,6 +261,10 @@ def load(path=None):
     cfg = _derive_candidate_paths(cfg, explicit)
     cfg['redis'] = resolve_redis(cfg, explicit_redis)
     cfg = apply_panel(cfg)
+    # The guard names its daily files by PHP's date; every day this analyzer picks (read_lines, the store, the rule hits) follows it.
+    cfg['php_timezone'] = bridge.php_timezone(php=bridge.php_binary(cfg), config_path=cfg.get('guard_config_path') or None)
+    logs.configure_timezone(cfg['php_timezone'])
+    cfg['bot_suffixes'] = botverify.clean_suffixes(cfg.get('bot_suffixes'), warn=lambda text: print('WARN: ' + text, file=sys.stderr))
     return validate(cfg)
 
 

@@ -19,6 +19,11 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+if __name__ == '__main__':
+    # No bytecode, and files a manual run creates are not group-writable: a __pycache__ made under cron's umask 002 was 0775.
+    sys.dont_write_bytecode = True
+    os.umask(0o022)
+
 from analyzer import classifier as clf_mod
 from analyzer import config as config_mod
 from analyzer import fsmode
@@ -140,14 +145,17 @@ def build_spool(cfg, count):
     return spool
 
 
-def score_devices(devices, bundle, scorer, field, write, ttl, dry_run, client):
+def score_devices(devices, bundle, scorer, field, write, ttl, dry_run, client, clf=False):
     """Set entry[field] (the highest level over the identity's sessions) with one batched scorer call; returns verdicts written."""
     entries, vectors = [], []
     for entry in devices.values():
         if not entry['is_device'] or entry.get('holdout'):
             continue
         start = len(vectors)
-        vectors.extend(features_mod.feature_vector(f) for f in entry['features'])
+        if clf:      # the classifier's own inputs (features.clf_features), the anomaly model's are the plain ones
+            vectors.extend(features_mod.clf_vector(f, sess) for f, sess in zip(entry['features'], entry['sessions']))
+        else:
+            vectors.extend(features_mod.feature_vector(f) for f in entry['features'])
         entries.append((entry, start, len(vectors)))
     levels = scorer(bundle, vectors) if vectors else []
     written = 0
@@ -191,14 +199,7 @@ def build_device_view(sessions, cfg):
     return devices
 
 
-def _median(values):
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    middle = len(ordered) // 2
-    if len(ordered) % 2 == 1:
-        return float(ordered[middle])
-    return (float(ordered[middle - 1]) + float(ordered[middle])) / 2.0
+_median = labels_mod.median
 
 
 def _labelled(devices, ground_truth):
@@ -212,7 +213,7 @@ def _labelled(devices, ground_truth):
         agg = reputation_mod.aggregate_labels(entry['labels'])
         median_dwell = _median([f.get('dur_s', 0.0) for f in entry['features']])
         merged = dict(entry['sessions'][0])
-        merged['features'] = entry['features'][0] if entry['features'] else {}
+        merged['features'] = labels_mod.identity_features(entry['features'])
         label, source = labels_mod.bot_label_source(merged, agg, rows, ground_truth,
                                                     session_count=len(entry['sessions']),
                                                     median_dwell=median_dwell)
@@ -238,8 +239,8 @@ def collect_training_set(devices, ground_truth):
     X = []
     y = []
     for entry, label, _source in _labelled(devices, ground_truth):
-        for feats in entry['features']:
-            X.append(features_mod.feature_vector(feats))
+        for feats, sess in zip(entry['features'], entry['sessions']):
+            X.append(features_mod.clf_vector(feats, sess))
             y.append(label)
     return X, y
 
@@ -380,7 +381,7 @@ def first_pass(spool, cfg, ground_truth, ml_sample, clf_sample, on_rep):
                 progress['humans'] += n
             if clf_sample is not None:
                 for i, feats in enumerate(entry['features']):
-                    clf_sample.add((entry['sessions'][0]['key'], i), (features_mod.feature_vector(feats), label))
+                    clf_sample.add((entry['sessions'][0]['key'], i), (features_mod.clf_vector(feats, entry['sessions'][i]), label))
         del devices
     return {'progress': progress, 'holdout_skipped': holdout_skipped, 'device_keys': device_keys, 'sessions': session_count}
 
@@ -492,7 +493,7 @@ def run_window(args, cfg, spool, row_count, phases):
                 # The device's most anomalous recent session represents it.
                 ml_written += score_devices(devices, bundle, model_mod.score_many, 'ml', redis_io.set_ml, cfg['ml_ttl'], args.dry_run, client)
             if clf_bundle is not None:
-                clf_written += score_devices(devices, clf_bundle, clf_mod.score_many, 'clf', redis_io.set_clf, cfg['ml_ttl'], args.dry_run, client)
+                clf_written += score_devices(devices, clf_bundle, clf_mod.score_many, 'clf', redis_io.set_clf, cfg['ml_ttl'], args.dry_run, client, clf=True)
             del devices
     phases['scoring'] = round(time.time() - t_phase, 1)
     phases['peak_rss_mb'] = peak_rss_mb()
@@ -523,12 +524,11 @@ def run_window(args, cfg, spool, row_count, phases):
     if want_clf_train and clf_mod.SKLEARN_AVAILABLE and clf_note.startswith('failed'):
         jobreport.warn('classifier training produced no candidate: %s' % clf_note)
     elif want_clf_train and clf_mod.SKLEARN_AVAILABLE and clf_note.startswith('skipped'):
-        # Waiting for labels is not a failure of the run. When the rest of nightly did its work (devices scored, reputations written),
-        # it is an informational note with the progress; only a run that did nothing else keeps the "did nothing useful" warning.
-        if client is not None and row_count[0] and device_keys > 0:
-            jobreport.info(label_note(progress))
-        else:
-            jobreport.warn('classifier training produced no candidate: %s' % clf_note)
+        # Waiting for labels is never a warning by itself: an install with no positive labels yet (no honeypot hit, no refuted crawler,
+        # no operator ground truth) has nothing to train on, whatever else the run did. It is the informational note with the progress.
+        # (It used to warn whenever no identity carried a device id, i.e. on every install that has not enforced the challenge yet.)
+        # Real problems keep their own warnings above: no rows, Redis unreachable, scikit-learn missing, a model that failed to train.
+        jobreport.info(label_note(progress))
     if args.train or args.train_clf or want_train or want_clf_train:
         metrics = clf_bundle.get('metrics') if clf_bundle is not None and isinstance(clf_bundle.get('metrics'), dict) else None
         jobreport.result({

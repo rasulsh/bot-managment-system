@@ -214,6 +214,9 @@ $err_text = function ($field) use ($errors, $details) {
 	</div>
 	<?php gp_tab_end(); gp_tabs_end(); ?>
 
+	<?php if (!is_array($impact ?? null) && $draft !== null): ?>
+	<p class="gp-help"><a class="gp-btn gp-btn-ghost gp-btn-sm" href="index.php?<?= gp_e(preg_replace('/&?impact=1/', '', (string)($_SERVER['QUERY_STRING'] ?? 'r=rules'))) ?>&amp;impact=1"><?= gp_e(gp_t('rules_impact_button')) ?></a> <?= gp_e(gp_t('rules_impact_button_help')) ?></p>
+	<?php endif; ?>
 	<?php if (is_array($impact ?? null)): $im = $impact; $mt = $im['meta']; ?>
 	<div class="gp-note<?= $im['danger'] ? ' gp-note-strong' : '' ?>" role="status"<?= $im['danger'] ? ' style="border-color:#c0392b"' : '' ?>>
 		<strong><?= gp_e(gp_t('rules_impact')) ?></strong>

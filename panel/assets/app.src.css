@@ -784,3 +784,4 @@ html[dir="rtl"] .gp-tip-box { text-align: right; }
 .gp-dquiet-list li { @apply flex flex-wrap items-center gap-2 border-b border-line py-1; }
 .gp-dlegend-sw-partial { background: rgb(var(--gp-chart-ok)); opacity: .45; }
 .gp-dchart-now { font-weight: 700; }
+.gp-dchart-partial { fill-opacity: .45; }          /* the hour in progress: lighter bar (the legend chip gp-dlegend-sw-partial carries the same signal) */

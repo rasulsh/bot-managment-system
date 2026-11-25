@@ -280,8 +280,13 @@ function gp_is_https() {
 	if (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off') {
 		return true;
 	}
-	return isset($_SERVER['HTTP_X_FORWARDED_PROTO'])
-		&& strtolower((string)$_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https';
+	// X-Forwarded-Proto counts only from a proxy named in trusted_proxies, like X-Forwarded-For: any client can send the header, and
+	// a Secure cookie that a plain-HTTP browser refuses to store is a silent login loop.
+	if (!isset($_SERVER['HTTP_X_FORWARDED_PROTO']) || strtolower((string)$_SERVER['HTTP_X_FORWARDED_PROTO']) !== 'https') { return false; }
+	$cfg = gp_panel_config();
+	$trusted = ($cfg !== null && !empty($cfg['trusted_proxies'])) ? $cfg['trusted_proxies'] : array();
+	$remote = isset($_SERVER['REMOTE_ADDR']) ? (string)$_SERVER['REMOTE_ADDR'] : '';
+	return $trusted && gp_ip_parse($remote) !== null && strpos($remote, '/') === false && gp_ip_in_any(gv_ip_canon($remote), $trusted);
 }
 
 function gp_session_set_cookie($token, $ttl) {
@@ -438,6 +443,39 @@ function gp_csrf_token() {
 	return hash_hmac('sha256', 'csrf.' . $token, $cfg['session_secret']);
 }
 
+// --- CSRF for the login form (there is no session yet) ------------------------------------------------------------------------------
+// A cross-site page that auto-submits the attacker's credentials to this form would plant the attacker's session in the operator's
+// browser (login CSRF). The login page therefore sets a random SameSite=Strict cookie and puts a keyed hash of it in the form; the POST
+// is only looked at when the cookie came back AND the field matches. A cross-site request carries no Strict cookie. The attempt
+// limiter is not touched by a request that fails this check.
+define('GP_LOGIN_CSRF_COOKIE', 'gp_login_csrf');
+
+function gp_login_csrf_expected($cookie_value) {
+	$cfg = gp_panel_config();
+	if ($cfg === null || !is_string($cookie_value) || !preg_match('/^[a-f0-9]{32}$/', $cookie_value)) { return ''; }
+	return hash_hmac('sha256', 'logincsrf.' . $cookie_value, $cfg['session_secret']);
+}
+
+// The form field value for this browser; sets the cookie when the browser has none (or a malformed one). Call before any output.
+function gp_login_csrf_issue() {
+	$cur = isset($_COOKIE[GP_LOGIN_CSRF_COOKIE]) && is_string($_COOKIE[GP_LOGIN_CSRF_COOKIE]) ? $_COOKIE[GP_LOGIN_CSRF_COOKIE] : '';
+	if (!preg_match('/^[a-f0-9]{32}$/', $cur)) {
+		$cur = bin2hex(random_bytes(16));
+		$_COOKIE[GP_LOGIN_CSRF_COOKIE] = $cur;
+		if (!headers_sent()) {
+			setcookie(GP_LOGIN_CSRF_COOKIE, $cur, array('expires' => time() + 3600, 'path' => gp_cookie_path(), 'secure' => gp_is_https(),
+				'httponly' => true, 'samesite' => 'Strict'));
+		}
+	}
+	return gp_login_csrf_expected($cur);
+}
+
+function gp_login_csrf_check($submitted) {
+	$cur = isset($_COOKIE[GP_LOGIN_CSRF_COOKIE]) && is_string($_COOKIE[GP_LOGIN_CSRF_COOKIE]) ? $_COOKIE[GP_LOGIN_CSRF_COOKIE] : '';
+	$expected = gp_login_csrf_expected($cur);
+	return $expected !== '' && is_string($submitted) && $submitted !== '' && hash_equals($expected, $submitted);
+}
+
 function gp_csrf_check($submitted) {
 	$expected = gp_csrf_token();
 	if ($expected === '' || !is_string($submitted) || $submitted === '') { return false; }
@@ -458,10 +496,35 @@ function gp_csrf_check($submitted) {
 
 // Encode flashes to the signed cookie value, or '' when there is nothing to
 // store, no secret, or the payload would exceed the size cap.
+// $text cut to $max characters with a trailing ellipsis (multi-byte safe).
+function gp_flash_cut($text, $max) {
+	$text = (string)$text;
+	if (function_exists('mb_strlen')) {
+		return mb_strlen($text, 'UTF-8') <= $max ? $text : mb_substr($text, 0, max(1, $max - 1), 'UTF-8') . "\u{2026}";
+	}
+	return strlen($text) <= $max ? $text : substr($text, 0, max(1, $max - 1)) . '...';
+}
+
 function gp_flash_encode(array $flashes, $secret) {
 	$secret = (string)$secret;
 	if (!$flashes || $secret === '') { return ''; }
-	$json = json_encode(array_values($flashes));
+	$flashes = array_values($flashes);
+	$json = json_encode($flashes);
+	// A longer message used to be dropped whole, so the action happened and nothing was reported. It is shortened instead: every
+	// message is cut (with "...") until the whole payload fits, the details at the end go first; only when even a short stub of each
+	// does not fit, the oldest messages are left out.
+	for ($limit = 400; (!is_string($json) || strlen($json) > GP_FLASH_MAX) && $limit >= 24; $limit = (int)($limit * 0.7)) {
+		$cut = array();
+		foreach ($flashes as $fl) {
+			if (isset($fl['message']) && is_string($fl['message'])) { $fl['message'] = gp_flash_cut($fl['message'], $limit); }
+			$cut[] = $fl;
+		}
+		$json = json_encode($cut);
+	}
+	while ((!is_string($json) || strlen($json) > GP_FLASH_MAX) && count($cut ?? $flashes) > 1) {
+		$cut = array_slice($cut ?? $flashes, 1);
+		$json = json_encode($cut);
+	}
 	if (!is_string($json) || strlen($json) > GP_FLASH_MAX) { return ''; }
 	$payload = rtrim(strtr(base64_encode($json), '+/', '-_'), '=');
 	return $payload . '.' . hash_hmac('sha256', $json, $secret);
@@ -473,7 +536,7 @@ function gp_flash_encode(array $flashes, $secret) {
 function gp_flash_decode($raw, $secret) {
 	$raw = (string)$raw;
 	$secret = (string)$secret;
-	if ($raw === '' || $secret === '' || strlen($raw) > GP_FLASH_MAX + 128) {
+	if ($raw === '' || $secret === '' || strlen($raw) > (int)(GP_FLASH_MAX * 4 / 3) + 200) {
 		return array();
 	}
 	$dot = strrpos($raw, '.');
@@ -504,14 +567,29 @@ function gp_ratelimit_file_dir() {
 	// GV_RATELIMIT_DIR lets the test harness keep the counters out of the working tree (and apart from other processes), like GV_AUDIT.
 	$env = getenv('GV_RATELIMIT_DIR');
 	if (is_string($env) && $env !== '') { return rtrim($env, '/\\'); }
-	return __DIR__ . '/.ratelimit';
+	return gv_panel_data_dir() . '/ratelimit';
+}
+
+// ONE Redis connection for all the sign-in counters of a request. A failed sign-in used to open and close a TCP connection per counter
+// operation (about six to nine per attempt): exactly the extra load a brute-force run does not need. A failure to connect is remembered for
+// the request too (the callers then use the file counters, so the limiter still never fails open). Returns the connection or null.
+function gp_limiter_conn($forget = false) {
+	static $conn = null, $tried = false;
+	if ($forget) { $conn = null; $tried = false; return null; }          // the self-test changes the Redis settings between requests
+	if ($tried && $conn && !gv_redis_alive($conn)) { $tried = false; }
+	if (!$tried) {
+		$tried = true;
+		$cfg = gv_cfg_load();
+		$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
+		if (!$conn) { $conn = null; }
+	}
+	return $conn;
 }
 
 // Count and record one attempt against a bucket. Returns the new count.
 // Uses Redis when reachable and a file counter when it is not.
 function gp_attempts_bump($bucket, $window) {
-	$cfg = gv_cfg_load();
-	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
+	$conn = gp_limiter_conn();
 	if ($conn) {
 		$key = gp_key('login:' . $bucket);        // after connect: the prefix is set there
 		// One pipelined SET NX EX + INCR + TTL: the counter is created with its
@@ -520,18 +598,15 @@ function gp_attempts_bump($bucket, $window) {
 		// which sends this down the file fallback below - the limiter never
 		// fails open just because Redis is unreachable.
 		$n = gv_bump($conn, $key, $window);
-		gv_redis_close($conn);
 		if ($n > 0) { return $n; }
 	}
 	return gp_attempts_bump_file($bucket, $window);
 }
 
 function gp_attempts_get($bucket, $window) {
-	$cfg = gv_cfg_load();
-	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
+	$conn = gp_limiter_conn();
 	if ($conn) {
 		$v = gv_r_get($conn, gp_key('login:' . $bucket));
-		gv_redis_close($conn);
 		if (is_string($v) && ctype_digit($v)) { return (int)$v; }
 		if ($v === null) { return 0; }
 	}
@@ -623,8 +698,7 @@ function gp_login_global_state() {
 
 function gp_login_lock_state() {
 	$out = array('global' => gp_login_global_state(), 'users' => 0, 'ips' => 0, 'scanned' => false);
-	$cfg = gv_cfg_load();
-	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
+	$conn = gp_limiter_conn();
 	if (!$conn) { return $out; }
 	$out['scanned'] = true;
 	$prefix = gp_key('login:');
@@ -633,27 +707,25 @@ function gp_login_lock_state() {
 		$reply = gv_redis_cmd($conn, array('SCAN', $cursor, 'MATCH', $prefix . '*', 'COUNT', '200'));
 		if (!is_array($reply) || count($reply) < 2) { break; }
 		$cursor = (string)$reply[0];
-		foreach ((array)$reply[1] as $k) {
+		$ks = array_values(array_filter((array)$reply[1], function ($k) use ($prefix) { return substr((string)$k, strlen($prefix)) !== 'user'; }));
+		$vals = $ks ? (array)gv_redis_cmd($conn, array_merge(array('MGET'), $ks)) : array();      // one round trip per page, not one GET per key
+		foreach ($ks as $i => $k) {
 			$bucket = substr((string)$k, strlen($prefix));
-			if ($bucket === 'user') { continue; }
-			$v = gv_r_get($conn, $k);
+			$v = isset($vals[$i]) ? $vals[$i] : null;
 			if (!is_string($v) || !ctype_digit($v)) { continue; }
 			if (strncmp($bucket, 'u:', 2) === 0) { if ((int)$v >= GP_LOGIN_MAX_ATTEMPTS * 2) { $out['users']++; } }
 			elseif ((int)$v >= GP_LOGIN_MAX_ATTEMPTS) { $out['ips']++; }
 		}
 		$guard++;
 	} while ($cursor !== '0' && $guard < 50);
-	gv_redis_close($conn);
 	return $out;
 }
 
 // Seconds until the counter of one bucket expires (0 when it is not running).
 function gp_attempts_ttl($bucket, $window) {
-	$cfg = gv_cfg_load();
-	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
+	$conn = gp_limiter_conn();
 	if ($conn) {
 		$ttl = gv_redis_cmd($conn, array('TTL', gp_key('login:' . $bucket)));
-		gv_redis_close($conn);
 		if (is_int($ttl) && $ttl > 0) { return $ttl; }
 		if ($ttl === -2) { return 0; }
 	}
@@ -738,11 +810,9 @@ function gp_login_attempt($username, $password) {
 // --------------------------------------------------------------------------
 
 function gp_attempts_clear($bucket) {
-	$cfg = gv_cfg_load();
-	$conn = gv_redis_connect($cfg['redis'], (string)$cfg['log_dir'], false);
+	$conn = gp_limiter_conn();
 	if ($conn) {
 		gv_redis_cmd($conn, array('DEL', gp_key('login:' . $bucket)));
-		gv_redis_close($conn);
 	}
 	@unlink(gp_attempts_file($bucket));
 }

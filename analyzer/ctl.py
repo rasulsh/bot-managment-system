@@ -33,6 +33,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+if __name__ == '__main__':
+    # No bytecode, and files a manual run creates are not group-writable: a __pycache__ made under cron's umask 002 was 0775.
+    sys.dont_write_bytecode = True
+    os.umask(0o022)
+
 from analyzer import config as config_mod
 from analyzer import promote as promote_mod
 from analyzer import redis_io
@@ -133,6 +138,21 @@ def cmd_list(client, args):
 def cmd_promote_model(client, args):
     """Move a trained candidate over the live model. Needs no Redis."""
     cfg = args.cfg
+    # The same write lock the worker and the nightly / training jobs hold: a training run that renames a new candidate into place
+    # between the check below and the move would otherwise ship a model that was never inspected.
+    from analyzer import worker as worker_mod
+    lock = worker_mod.WriteLock(mode='promote-model')
+    if not lock.acquire(60):
+        print('ERROR: the write lock is busy (nightly, a training run or another promotion holds it) or cannot be opened; try again.',
+              file=sys.stderr)
+        return 1
+    try:
+        return _promote_locked(args, cfg)
+    finally:
+        lock.release()
+
+
+def _promote_locked(args, cfg):
     live, candidate = promote_mod.paths_for(args.kind, cfg)
     verdict = promote_mod.check(args.kind, cfg)
     if not verdict['ok']:

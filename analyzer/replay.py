@@ -29,6 +29,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+if __name__ == '__main__':
+    # No bytecode, and files a manual run creates are not group-writable: a __pycache__ made under cron's umask 002 was 0775.
+    sys.dont_write_bytecode = True
+    os.umask(0o022)
+
 from analyzer import bridge
 from analyzer import config as config_mod
 from analyzer import decision
@@ -189,10 +194,9 @@ def identity_label_map(sessions, ground_truth=None):
         for session in group:
             history.extend(session.get('rows') or [])
         feats = [features_mod.session_features(s) for s in group]
-        dwells = sorted(f['dur_s'] for f in feats)
-        median_dwell = dwells[len(dwells) // 2] if dwells else 0.0
+        median_dwell = labels_mod.median([f['dur_s'] for f in feats])
         merged = dict(group[0])
-        merged['features'] = feats[0] if feats else {}
+        merged['features'] = labels_mod.identity_features(feats)
         label_set = features_mod.session_labels(group[0], history)
         for session in group[1:]:
             more = features_mod.session_labels(session, history)
@@ -211,8 +215,9 @@ def recompute_rows_full(rows, sessions, cfg, guard_cfg):
     """Re-derive rep and ml per identity with candidate analyzer settings.
 
     Returns a new row list with rep/ml replaced. Used by --mode full when the
-    reputation weights themselves are being tuned. Holdout rows are left alone:
-    their identities never carry a stable device id.
+    reputation weights themselves are being tuned. Holdout rows (hold = 1) keep the rep and ml they were logged with: the holdout is
+    the one slice the candidate has not shaped, so replacing its values would bias holdout_newly_restricted, the estimate that is
+    supposed to be unbiased.
     """
     from analyzer import model as model_mod
     from analyzer import reputation as reputation_mod
@@ -250,7 +255,7 @@ def recompute_rows_full(rows, sessions, cfg, guard_cfg):
     out = []
     for row in rows:
         key, _ = logs_mod.session_key(row)
-        if key in derived:
+        if key in derived and int(row.get('hold') or 0) != 1:
             new_row = dict(row)
             new_row['rep'], new_row['ml'] = derived[key]
             out.append(new_row)

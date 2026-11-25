@@ -30,7 +30,7 @@ try {
 try {
 	// The panel's user store: every account's password hash is a secret too.
 	$up = getenv('GV_USERS');
-	$up = (is_string($up) && $up !== '') ? $up : __DIR__ . '/../panel/users.json';
+	$up = (is_string($up) && $up !== '') ? $up : gv_panel_data_path('users.json');
 	if (is_file($up)) {
 		$ud = json_decode((string)file_get_contents($up), true);
 		foreach ((is_array($ud) && isset($ud['users']) && is_array($ud['users'])) ? $ud['users'] : array() as $uu) {

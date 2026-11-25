@@ -384,7 +384,7 @@ def _sha256(path):
 
 def _write_json_atomic(path, obj):
     tmp = path + '.tmp%d' % os.getpid()
-    with open(tmp, 'w') as handle:
+    with open(tmp, 'w', encoding='utf-8') as handle:
         json.dump(obj, handle, sort_keys=True)
     os.chmod(tmp, 0o644)               # explicit: not whatever the cron umask makes of it (002 = group-writable)
     os.replace(tmp, path)
@@ -461,7 +461,14 @@ def compile_geo(geo_dir, known=None, min_ranges=MIN_RANGES, now=None):
     except OSError as exc:
         status['errors'].append('cannot read %s: %s' % (geo_dir, exc))
         return status
-    names.sort(key=lambda n: os.path.getmtime(os.path.join(geo_dir, n)), reverse=True)
+    stats = {}
+    for n in names:
+        try:                                       # a source deleted while we list them is skipped, not fatal
+            st = os.stat(os.path.join(geo_dir, n))
+            stats[n] = (st.st_size, st.st_mtime)
+        except OSError:
+            continue
+    names = sorted(stats, key=lambda n: stats[n][1], reverse=True)
     if not names:
         status['errors'].append('no .mmdb or geoip.dat source file in %s' % geo_dir)
         return status
@@ -469,7 +476,7 @@ def compile_geo(geo_dir, known=None, min_ranges=MIN_RANGES, now=None):
     candidates = {'country': None, 'asn': None}      # kind -> (name, v4, v6)
     for name in names:
         path = os.path.join(geo_dir, name)
-        entry = {'name': name, 'size': os.path.getsize(path), 'mtime': int(os.path.getmtime(path)), 'provides': [], 'used': []}
+        entry = {'name': name, 'size': stats[name][0], 'mtime': int(stats[name][1]), 'provides': [], 'used': []}
         try:
             if name.lower().endswith('.dat'):
                 dat = read_dat(path)

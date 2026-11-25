@@ -1,4 +1,8 @@
-redis>=4.0
-scikit-learn>=1.0
-numpy>=1.20
-maxminddb>=2.0
+# Exact versions: the ones CI installs and tests (Python 3.9 and 3.13). An unpinned "scikit-learn>=1.0" upgraded by pip_sync can make the
+# saved joblib models unloadable in production (a model is a pickle of scikit-learn objects). Change a pin together with a retrain and a
+# test run; the in-panel updater never installs these by itself, an administrator confirms it on the Update result page.
+redis==5.2.1
+scikit-learn==1.6.1
+numpy==2.0.2; python_version < "3.10"
+numpy==2.2.6; python_version >= "3.10"
+maxminddb==2.6.3

@@ -90,6 +90,11 @@ SENSITIVE=(
 	"/docs/03-SETUP.md"
 	"/guard.off"
 	"/scripts/config.dev.php"
+	"/scripts/config-dump.php"
+	"/scripts/secret-values.php"
+	"/scripts/gen-reason-docs.php"
+	"/lists/feeds.json"
+	"/panel/jobs-seen.json"
 	"/scripts/guard-selftest.php"
 	"/prepend.php"
 	"/.htaccess"
@@ -156,9 +161,16 @@ fi
 # Inside the panel directory only index.php and static assets may be served.
 for path in "$PANEL_PATH/panel.config.php" "$PANEL_PATH/audit.jsonl" "$PANEL_PATH/auth.php" "$PANEL_PATH/views/login.php" "$PANEL_PATH/users.json" "$PANEL_PATH/users.json.lock" "$PANEL_PATH/users.php" "$PANEL_PATH/acl.php" "$PANEL_PATH/update.php" "$PANEL_PATH/update-rollback.tpl"; do
 	code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$BASE_URL$path" 2>/dev/null)"
-	if [ "$code" = "200" ] && [ "$soft404" = "0" ]; then
-		printf '%-34s | %s\n' "$path" "200  EXPOSED"
-		failures=$((failures + 1))
+	if [ "$code" = "200" ]; then
+		# Like the first loop: on a site that answers 200 for every unknown path a 200 proves nothing when the body is the soft-404 page
+		# (it used to be reported "ok" for ANY 200 there, which is exactly the site this tool is for); a different body is the file.
+		if [ "$soft404" = "1" ] && [ "$("${CURL[@]}" "$BASE_URL$path" 2>/dev/null)" = "$probe_body" ]; then
+			printf '%-34s | %s\n' "$path" "200 (same as a nonexistent path: soft-404 site, inconclusive)"
+			warnings=$((warnings + 1))
+		else
+			printf '%-34s | %s\n' "$path" "200  EXPOSED"
+			failures=$((failures + 1))
+		fi
 	elif [ "$code" = "000" ]; then
 		printf '%-34s | %s\n' "$path" "no response"
 		failures=$((failures + 1))

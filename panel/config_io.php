@@ -24,7 +24,7 @@ function gp_audit_path() {
 	// GV_AUDIT lets the test harness keep the trail out of the working tree, like GV_CONFIG.
 	$env = getenv('GV_AUDIT');
 	if (is_string($env) && $env !== '') { return $env; }
-	return __DIR__ . '/audit.jsonl';
+	return gv_panel_data_path('audit.jsonl');
 }
 
 // Append one line to the audit trail. Append-only by design: the panel offers

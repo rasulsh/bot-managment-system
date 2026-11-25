@@ -20,12 +20,16 @@ REDIS_ARGS="${REDIS_ARGS:--h 127.0.0.1 -p 6379}"
 CLIENT_IP="${GV_CLIENT_IP:-127.0.0.1}"
 CHROME_UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 GOOGLEBOT_UA='Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"; rm -f "$ROOT/guard.off"' EXIT
+# An operator's own kill switch is put aside while the checks run and put back afterwards (it used to be deleted).
+SAVED_OFF=""
+if [ -e "$ROOT/guard.off" ]; then SAVED_OFF="$ROOT/guard.off.saved-$$"; mv "$ROOT/guard.off" "$SAVED_OFF"; fi
+restore_off() { rm -f "$ROOT/guard.off"; [ -z "$SAVED_OFF" ] || mv "$SAVED_OFF" "$ROOT/guard.off"; }
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"; restore_off' EXIT
 failed=0
 
 rcli() { $REDIS_CLI $REDIS_ARGS "$@" 2>/dev/null; }
 clear_counters() {
-	for pattern in 'gv:ri:*' 'gv:riu:*' 'gv:rd:*' 'gv:rb:*' 'gv:hp:*'; do
+	for pattern in 'gv:ri:*' 'gv:riu:*' 'gv:rd:*' 'gv:rb:*' 'gv:hp:*' 'gv:hpn:*' 'gv:hpd:*'; do
 		keys=$(rcli --scan --pattern "$pattern")
 		[ -n "$keys" ] && echo "$keys" | xargs -r $REDIS_CLI $REDIS_ARGS del >/dev/null 2>&1
 	done

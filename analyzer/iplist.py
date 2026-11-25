@@ -54,6 +54,11 @@ except ImportError:                     # not on Windows; the lock is best effor
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+if __name__ == '__main__':
+    # No bytecode, and files a manual run creates are not group-writable: a __pycache__ made under cron's umask 002 was 0775.
+    sys.dont_write_bytecode = True
+    os.umask(0o022)
+
 from analyzer import geo  # noqa: E402
 
 STATUS_FILE = 'lists-status.json'
