@@ -197,6 +197,30 @@ def inspect(model_path):
     return out
 
 
+SCORE_BATCH = 20000
+
+
+def score_many(bundle, vectors):
+    """score() for many vectors at once (see model.score_many): the same levels, a vector that cannot be scored is None."""
+    _require_sklearn()
+    if bundle is None:
+        raise ClassifierUnavailable('no classifier bundle loaded')
+    out = []
+    for i in range(0, len(vectors), SCORE_BATCH):
+        chunk = vectors[i:i + SCORE_BATCH]
+        try:
+            matrix = numpy.asarray([list(v) for v in chunk], dtype=float)
+            for p in bundle['model'].predict_proba(matrix)[:, 1]:
+                out.append(int(max(0, min(100, round(float(p) * 100)))))
+        except Exception:
+            for v in chunk:
+                try:
+                    out.append(score(bundle, v))
+                except Exception:
+                    out.append(None)
+    return out
+
+
 def score(bundle, vector):
     """Map one feature vector to a bot-likelihood level in 0..100.
 

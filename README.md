@@ -958,7 +958,7 @@ Key settings (defaults from `gv_cfg_defaults()`; full table with ranges in [docs
 | `honeypot_path` | `/old-archive` | Must 404 on your site today. |
 | `cdn_ranges` | `[]` | IPv4 CIDRs of trusted proxies. |
 | `redis.*` | `127.0.0.1:6379`, no auth, db 0, no prefix, `timeout` 0.05 s, `breaker_ttl` 5 s | Shared by guard, panel and analyzer. Use an IP literal or a socket path. |
-| `log_dir`, `log_retention_days`, `log_max_mb`, `log_min_free_mb`, `log_floor_delete`, `log_skip_paths`, `log_skip_panel`, `log_sample.exempt`, `log_write_timeout_ms` | `<install-dir>/logs`, `60` (`30` in a new install's config.php), `0`, `200`, `false`, `[]`, `true`, `1.0`, `50` | Log storage. |
+| `log_dir`, `log_retention_days`, `log_max_mb`, `log_min_free_mb`, `log_floor_delete`, `log_skip_paths`, `log_skip_ips`, `log_skip_panel`, `log_sample.exempt`, `log_write_timeout_ms` | `<install-dir>/logs`, `60` (`30` in a new install's config.php), `0`, `200`, `false`, `[]`, `[]`, `true`, `1.0`, `50` | Log storage. |
 | `capture_outcomes` | `false` | Second row (status and declared length) after the application. |
 
 ## 2.10 Data formats

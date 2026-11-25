@@ -154,6 +154,36 @@ def inspect(model_path):
     return out
 
 
+SCORE_BATCH = 20000
+
+
+def score_many(bundle, vectors):
+    """score() for many vectors at once: the same levels, one scikit-learn call per SCORE_BATCH instead of one per vector.
+
+    A single decision_function call costs milliseconds whatever its size, so scoring a night's sessions one by one dominated the
+    nightly job. A batch that raises is scored vector by vector; a vector that cannot be scored is None.
+    """
+    _require_sklearn()
+    if bundle is None:
+        raise ModelUnavailable('no model bundle loaded')
+    out = []
+    for i in range(0, len(vectors), SCORE_BATCH):
+        chunk = vectors[i:i + SCORE_BATCH]
+        try:
+            matrix = numpy.asarray([list(v) for v in chunk], dtype=float)
+            decisions = bundle['model'].decision_function(bundle['scaler'].transform(matrix))
+            for d in decisions:
+                level = 50.0 - (float(d) / DECISION_SPAN) * 50.0
+                out.append(int(max(0, min(100, round(level)))))
+        except Exception:
+            for v in chunk:
+                try:
+                    out.append(score(bundle, v))
+                except Exception:
+                    out.append(None)
+    return out
+
+
 def score(bundle, vector):
     """Map one feature vector to an anomaly level in 0..100 (higher = stranger).
 

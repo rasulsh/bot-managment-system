@@ -4013,6 +4013,68 @@ ig_cl, ig_ct = ig_verify.collect_claims(ig_gen, ig_c4['known_bots'])
 ok('claims and counts come out of ONE pass over a generator (the second pass over a spent generator used to give {})', ig_ct == {'10.0.0.9': 5, '10.0.0.1': 1} and ig_cl['10.0.0.9'] == 'googlebot')
 ok('claims: a bot that is not in known_bots is not counted, on both paths', ig_claims_equal(ig_c, ig_now2))
 
+section('Nightly job in bounded memory: the bucketed run equals the single-pass run (PR K)')
+ig_c5, ig_d5 = ig_cfg('nightly')
+for ig_off in range(3, 0, -1):
+    ig_write(os.path.join(ig_c5['log_dir'], 'guard-%s.jsonl' % (ig_today - ig_dt.timedelta(days=ig_off)).strftime('%Y%m%d')),
+             ig_make_rows(ig_rnd, ig_today - ig_dt.timedelta(days=ig_off), 600))
+ig_hp = [{'ts': ig_midnight(ig_today - ig_dt.timedelta(days=1)) + 100 * i, 'ip': '10.7.0.%d' % i, 'dev': 'hp%d' % (i % 4), 'uah': 'u00000000001', 'p': '/old-archive', 'act': '404_hp',
+          'hp': 1, 'sc': 50, 'esc': 50, 'nav': 1, 'tok': 'v', 'sh': 0, 'hold': 0, 'rid': 'h%d' % i} for i in range(1, 9)]
+ig_write(os.path.join(ig_c5['log_dir'], 'guard-%s.jsonl' % (ig_today - ig_dt.timedelta(days=1)).strftime('%Y%m%d')), ig_hp, 'a')
+ig_c5['window_days'] = 3
+ig_gt = labels_mod.load_ground_truth(None)
+ig_old_dev = ig_nightly.build_device_view(logs_mod.sessionize(logs_mod.read_lines(ig_c5['log_dir'], 3), ig_c5['session_gap_s']), ig_c5)
+ig_old_rep = {}
+for ig_k, ig_e in ig_old_dev.items():
+    if ig_e['is_device'] and not ig_e.get('holdout'):
+        ig_old_rep[ig_e['dev']] = reputation_mod.device_reputation(ig_e['features'], reputation_mod.aggregate_labels(ig_e['labels']), ig_c5['rep_clamp'])
+ig_old_progress = ig_nightly.label_progress(ig_old_dev, ig_gt, ig_c5['clf_min_positive'])
+ig_old_vectors = ig_nightly.collect_clean_vectors(ig_old_dev)
+ig_old_X, ig_old_y = ig_nightly.collect_training_set(ig_old_dev, ig_gt)
+ig_count = [0]
+ig_spool = ig_nightly.build_spool(ig_c5, ig_count)
+ig_new_rep = {}
+ig_ml, ig_clf = ig_nightly.Reservoir(10 ** 6), ig_nightly.Reservoir(10 ** 6)
+ig_first = ig_nightly.first_pass(ig_spool, ig_c5, ig_gt, ig_ml, ig_clf, lambda e, v: ig_new_rep.__setitem__(e['dev'], v))
+ok('nightly buckets: every identity lands in exactly one bucket, so reputations equal the single-pass run (%d devices)' % len(ig_old_rep), len(ig_old_rep) > 20 and ig_new_rep == ig_old_rep)
+ok('nightly buckets: label progress (positives, humans, sources) is the same', ig_first['progress'] == ig_old_progress and ig_old_progress['positives'] > 0)
+ok('nightly buckets: under the cap the training sets are every session in the original order (anomaly vectors and classifier X, y)',
+   ig_ml.result() == ig_old_vectors and [v for v, _ in ig_clf.result()] == ig_old_X and [l for _, l in ig_clf.result()] == ig_old_y and len(ig_old_vectors) > 50)
+ok('nightly buckets: the row and session counts match', ig_count[0] == sum(1 for _ in logs_mod.read_lines(ig_c5['log_dir'], 3)) and ig_first['sessions'] == sum(len(e['sessions']) for e in ig_old_dev.values()))
+ig_small = ig_nightly.Reservoir(40)
+ig_nightly.first_pass(ig_spool, ig_c5, ig_gt, ig_small, None, lambda e, v: None)
+ig_small2 = ig_nightly.Reservoir(40)
+ig_nightly.first_pass(ig_spool, ig_c5, ig_gt, ig_small2, None, lambda e, v: None)
+ok('nightly buckets: over the cap the training sample is capped, random, reproducible and a subset of the full set',
+   len(ig_small.result()) == 40 and ig_small.result() == ig_small2.result() and ig_small.n == len(ig_old_vectors) and all(v in ig_old_vectors for v in ig_small.result()))
+ok('nightly buckets: the spool is a private directory that close() removes', os.path.isdir(ig_spool.dir) and (ig_spool.close() or not os.path.exists(ig_spool.dir)))
+ig_res = ig_nightly.Reservoir(5)
+for ig_i in range(100):
+    ig_res.add((ig_i,), ig_i)
+ok('reservoir: a uniform sample of the cap size, returned in tag order', len(ig_res.result()) == 5 and ig_res.result() == sorted(ig_res.result()) and ig_res.n == 100)
+if model_mod.SKLEARN_AVAILABLE:
+    from analyzer import classifier as ig_clfmod
+    ig_model_path = os.path.join(ig_d5, 'an', 'm.joblib')
+    ok('model trains on the sampled vectors', model_mod.train(ig_old_vectors, 0.05, ig_model_path, 10))
+    ig_bundle = model_mod.load(ig_model_path)
+    ig_vecs = ig_old_vectors[:300]
+    ok('batched scoring gives the same levels as scoring one vector at a time', model_mod.score_many(ig_bundle, ig_vecs) == [model_mod.score(ig_bundle, v) for v in ig_vecs])
+    ok('batched scoring: a vector that cannot be scored is None, the rest are still scored', model_mod.score_many(ig_bundle, [ig_vecs[0], [1, 2], ig_vecs[1]]) == [model_mod.score(ig_bundle, ig_vecs[0]), None, model_mod.score(ig_bundle, ig_vecs[1])])
+    ig_scored = {}
+    ig_n = ig_nightly.score_devices(ig_old_dev, ig_bundle, model_mod.score_many, 'ml', lambda c, d, v, t: ig_scored.__setitem__(d, v) or True, 60, False, None)
+    ig_ref = {}
+    for ig_k, ig_e in ig_old_dev.items():
+        if ig_e['is_device'] and not ig_e.get('holdout'):
+            ig_lv = [model_mod.score(ig_bundle, features_mod.feature_vector(f)) for f in ig_e['features']]
+            ig_ref[ig_e['dev']] = max(ig_lv)
+    ok('scoring identities in a batch: each gets the highest level of its sessions, as before (%d devices)' % len(ig_ref), ig_scored == ig_ref and ig_n == len(ig_ref))
+    ig_cx = ig_clfmod.train(ig_old_X, ig_old_y, os.path.join(ig_d5, 'an', 'c.joblib'), min_positive=3)
+    if ig_cx:
+        ig_cb = ig_clfmod.load(os.path.join(ig_d5, 'an', 'c.joblib'))
+        ok('batched classifier scoring equals one-by-one', ig_clfmod.score_many(ig_cb, ig_old_X[:200]) == [ig_clfmod.score(ig_cb, v) for v in ig_old_X[:200]])
+else:
+    skip('batched scoring and training on the sample', 'scikit-learn not installed')
+
 section('Idle priority')
 os.environ['GV_LOWPRIO'] = '0'
 ok('GV_LOWPRIO=0 turns the Python fallback off', ig_lowprio.apply() is False)

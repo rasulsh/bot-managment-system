@@ -98,8 +98,15 @@ derived store next to the model file:
   version through the Update page and back needs no step. `snapshot.py --full-read` and `run_verify.py --full-read` read the log files
   directly, and so does either job when the store cannot be used (it says so in the job warnings).
 * `read_lines` (nightly, replay, report) is now a generator that reads a day in two passes (outcomes first) instead of holding it, and
-  those jobs ask for only the fields they use. The nightly job still keeps the sessions of its whole window in memory: that is what
-  sessionizing needs.
+  those jobs ask for only the fields they use.
+* **The nightly job runs in bounded memory.** It reads the window once into 128 compressed bucket files (`analyzer/.nightly-spool-<pid>/`,
+  removed when the run ends) partitioned by a hash of the identity, then sessionizes and featurises one bucket at a time: every identity
+  is wholly inside one bucket, so reputation, labels and the label progress are exactly what a single pass gives. Pass 1 writes the
+  reputations and collects the training sets; **the anomaly model and the classifier train on a random but reproducible sample of at most
+  200 000 sessions** (a uniform sample, so the classifier's precision estimate is not biased; under the cap it is every session in the
+  original order, and the job says "a random sample of N of them" when it was capped); pass 2 scores each identity in batches (one
+  scikit-learn call per 20 000 vectors instead of one per session: this, not the reading, was why a night's job ran for hours). The job
+  prints and records its phases and peak memory (`Nightly phases`, `analyzer/.laststats-run_nightly`).
 * A day that exists as both `guard-<day>.jsonl` and `guard-<day>.jsonl.gz` is read **once** (the plain file when the archive is not older;
   both when the archive is older, which is a day archived and written to again). It used to be counted twice.
 

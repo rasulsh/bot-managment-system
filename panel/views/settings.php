@@ -22,7 +22,7 @@ $groups = array(
 	'paths'    => array('set_group_paths', '', array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'honeypot_path')),
 	'network'  => array('set_group_network', '', array('cdn_ranges', 'cdn_ranges_feed')),
 	'bots'     => array('set_group_bots', '', array('known_bots', 'preview_bots', 'bot_suffixes')),
-	'logs'     => array('set_group_logs', 'set_group_logs_sub', array('log_skip_paths', 'log_skip_panel', 'log_sample.exempt', 'log_write_timeout_ms', 'log_retention_days', 'log_max_mb', 'log_min_free_mb', 'log_floor_delete', 'log_floor_keep_days')),
+	'logs'     => array('set_group_logs', 'set_group_logs_sub', array('log_skip_paths', 'log_skip_ips', 'log_skip_panel', 'log_sample.exempt', 'log_write_timeout_ms', 'log_retention_days', 'log_max_mb', 'log_min_free_mb', 'log_floor_delete', 'log_floor_keep_days')),
 	'geo'      => array('set_group_geo', 'set_group_geo_sub', array('geo.log', 'geo.upload_max_mb')),
 	'captcha'  => array('set_group_captcha', 'set_group_captcha_sub', array('captcha.level', 'captcha.length', 'captcha.charset', 'captcha.warp', 'captcha.noise', 'captcha.overlap',
 		'captcha.time_limit', 'captcha.max_attempts', 'captcha.ip_budget', 'captcha.ip_window', 'captcha.require_pow', 'captcha.escalate_score', 'captcha.device_budget',
@@ -57,7 +57,7 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 	$id = 'f-' . str_replace('.', '-', $key);
 	$name = 'f[' . $key . ']';
 	$err = isset($errors[$key]) ? gp_overlay_msg($errors[$key], $key) : '';
-	$wide = in_array($type, array('paths', 'exactpaths', 'bots', 'cidrs4', 'regexes', 'params', 'suffixes', 'text'), true);
+	$wide = in_array($type, array('paths', 'exactpaths', 'bots', 'cidrs4', 'regexes', 'ips', 'params', 'suffixes', 'text'), true);
 	?>
 	<div class="gp-set<?= $wide ? ' gp-set-wide' : '' ?><?= $err !== '' ? ' gp-set-invalid' : '' ?>">
 	<?php if ($type === 'bool'): ?>
@@ -81,7 +81,7 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 				<option value="<?= gp_e($opt) ?>" <?= $value === $opt ? 'selected' : '' ?>><?= gp_e($opt) ?></option>
 				<?php endforeach; ?>
 			</select>
-		<?php elseif (in_array($type, array('paths', 'exactpaths', 'bots', 'cidrs4', 'regexes'), true)): ?>
+		<?php elseif (in_array($type, array('paths', 'exactpaths', 'bots', 'cidrs4', 'regexes', 'ips'), true)): ?>
 			<textarea class="gp-textarea" id="<?= gp_e($id) ?>" name="<?= gp_e($name) ?>" rows="4"
 				spellcheck="false"><?= gp_e(is_array($value) ? implode("\n", $value) : (string)$value) ?></textarea>
 		<?php elseif ($type === 'params' || $type === 'suffixes'):
@@ -105,7 +105,7 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 			<?php endif; ?>
 			<?php if ($type === 'int' || $type === 'float'): ?>
 			<span><?= gp_e(gp_t('set_range')) ?>: <?= gp_e((string)$spec[1]) ?>–<?= gp_e((string)$spec[2]) ?></span>
-			<?php elseif (in_array($type, array('paths', 'exactpaths', 'bots', 'cidrs4', 'regexes'), true)): ?>
+			<?php elseif (in_array($type, array('paths', 'exactpaths', 'bots', 'cidrs4', 'regexes', 'ips'), true)): ?>
 			<span><?= gp_e(gp_t('set_one_per_line')) ?></span>
 			<?php elseif ($type === 'params' || $type === 'suffixes'): ?>
 			<span><?= gp_e(gp_t('set_name_values')) ?></span>

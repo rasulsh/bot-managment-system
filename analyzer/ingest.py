@@ -701,3 +701,9 @@ def storage_bytes(cfg):
         except OSError:
             pass
     return total
+
+
+# The frame files are also what the nightly job spools its rows into (analyzer/run_nightly.py).
+frame = _frame
+append_frames = _append_frames
+iter_frames = _iter_frames

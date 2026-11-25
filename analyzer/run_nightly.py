@@ -10,13 +10,19 @@ from __future__ import print_function
 
 import argparse
 import os
+import random
+import resource
+import shutil
 import sys
+import time
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import classifier as clf_mod
 from analyzer import config as config_mod
 from analyzer import fsmode
+from analyzer import ingest as ingest_mod
 from analyzer import features as features_mod
 from analyzer import iplist as iplist_mod
 from analyzer import jobreport
@@ -28,6 +34,131 @@ from analyzer import promote as promote_mod
 from analyzer import redis_io
 from analyzer import snapshot as snapshot_mod
 from analyzer import reputation as reputation_mod
+
+
+# ---------------------------------------------------------------------------------------------------- bounded memory
+# The window's rows are spooled into SPOOL_BUCKETS files by a hash of the identity (a device id, else address|UA hash), then each
+# bucket is sessionized, featurised and reduced on its own: the identities of one bucket never appear in another, so every
+# per-identity result is the one a single pass over all rows would give, while memory is one bucket (a hundredth of the window)
+# plus what the training needs. Training reads a random but reproducible sample of at most TRAIN_CAP sessions (the same sample for the
+# same logs); under the cap it is every session, in the original order.
+SPOOL_BUCKETS = 128
+SPOOL_FLUSH_ROWS = 1000
+TRAIN_CAP = 200000
+
+
+class Reservoir(object):
+    """A uniform random sample of at most `cap` items from a stream (Algorithm R, seeded: same stream, same sample)."""
+
+    def __init__(self, cap, seed=0):
+        self.cap, self.rng, self.n, self.items = int(cap), random.Random(seed), 0, []
+
+    def add(self, tag, payload):
+        self.n += 1
+        if len(self.items) < self.cap:
+            self.items.append((tag, payload))
+            return
+        j = self.rng.randrange(self.n)
+        if j < self.cap:
+            self.items[j] = (tag, payload)
+
+    def result(self):
+        """The sampled payloads in tag order: the order a full pass visits them in (identity key, then session)."""
+        self.items.sort(key=lambda pair: pair[0])
+        return [payload for _, payload in self.items]
+
+
+class Spool(object):
+    """Rows partitioned by identity into compressed bucket files in a private directory (removed by close())."""
+
+    def __init__(self, base_dir, buckets=SPOOL_BUCKETS):
+        self.nb = int(buckets)
+        self.dir = os.path.join(base_dir, '.nightly-spool-%d' % os.getpid())
+        os.makedirs(self.dir, 0o755)
+        self.buffers = [[] for _ in range(self.nb)]
+
+    def _path(self, b):
+        return os.path.join(self.dir, '%03d.dat' % b)
+
+    def add(self, row):
+        key, _is_device = logs_mod.session_key(row)
+        if key in ('', '|'):
+            return                                  # sessionize drops these rows too
+        b = zlib.crc32(key.encode('utf-8', 'replace')) % self.nb
+        self.buffers[b].append(row)
+        if len(self.buffers[b]) >= SPOOL_FLUSH_ROWS:
+            self._flush(b)
+
+    def _flush(self, b):
+        if self.buffers[b]:
+            ingest_mod.append_frames(self._path(b), [ingest_mod.frame(self.buffers[b])])
+            self.buffers[b] = []
+
+    def seal(self):
+        for b in range(self.nb):
+            self._flush(b)
+
+    def buckets(self):
+        """The rows of each non-empty bucket, one bucket in memory at a time."""
+        for b in range(self.nb):
+            rows = []
+            for frame in ingest_mod.iter_frames(self._path(b)):
+                rows.extend(frame)
+            if rows:
+                yield rows
+
+    def close(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def remove_stale_spools(base_dir, max_age_s=86400):
+    """A spool left by a run that was killed: removed once it is a day old."""
+    try:
+        for name in os.listdir(base_dir):
+            path = os.path.join(base_dir, name)
+            if name.startswith('.nightly-spool-') and os.path.isdir(path) and time.time() - os.path.getmtime(path) > max_age_s:
+                shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def peak_rss_mb():
+    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024)
+
+
+def build_spool(cfg, count):
+    """Read the window once, in a stream, into a Spool. `count` is a one-element list that receives the number of rows."""
+    spool = Spool(ingest_mod.base_dir(cfg))
+    try:
+        for row in logs_mod.read_lines(cfg['log_dir'], cfg['window_days'], fields=logs_mod.SESSION_FIELDS):
+            count[0] += 1
+            spool.add(row)
+        spool.seal()
+    except BaseException:
+        spool.close()
+        raise
+    return spool
+
+
+def score_devices(devices, bundle, scorer, field, write, ttl, dry_run, client):
+    """Set entry[field] (the highest level over the identity's sessions) with one batched scorer call; returns verdicts written."""
+    entries, vectors = [], []
+    for entry in devices.values():
+        if not entry['is_device'] or entry.get('holdout'):
+            continue
+        start = len(vectors)
+        vectors.extend(features_mod.feature_vector(f) for f in entry['features'])
+        entries.append((entry, start, len(vectors)))
+    levels = scorer(bundle, vectors) if vectors else []
+    written = 0
+    for entry, a, b in entries:
+        got = [v for v in levels[a:b] if v is not None]
+        if not got:
+            continue
+        entry[field] = max(got)
+        if not dry_run and write(client, entry['dev'], entry[field], ttl):
+            written += 1
+    return written
 
 
 def build_device_view(sessions, cfg):
@@ -196,44 +327,71 @@ def main(argv=None):
         print('ERROR: log directory not readable: %s' % cfg['log_dir'], file=sys.stderr)
         return 2
 
-    # Streamed through sessionize (no second copy of the window) and reduced to the keys the job reads: the nightly job holds
-    # every row of the window in its sessions, so what a row costs is what the job costs.
+    phases = {}
+    t_phase = time.time()
+    remove_stale_spools(ingest_mod.base_dir(cfg))
     row_count = [0]
+    try:
+        spool = build_spool(cfg, row_count)
+    except OSError as exc:
+        print('ERROR: cannot spool the window under %s: %s' % (ingest_mod.base_dir(cfg), exc), file=sys.stderr)
+        return 2
+    phases['read'] = round(time.time() - t_phase, 1)
+    try:
+        return run_window(args, cfg, spool, row_count, phases)
+    finally:
+        spool.close()
 
-    def _counted(source):
-        for item in source:
-            row_count[0] += 1
-            yield item
-    sessions = logs_mod.sessionize(
-        _counted(logs_mod.read_lines(cfg['log_dir'], cfg['window_days'], fields=logs_mod.SESSION_FIELDS)), cfg['session_gap_s'])
-    devices = build_device_view(sessions, cfg)
 
+def first_pass(spool, cfg, ground_truth, ml_sample, clf_sample, on_rep):
+    """Pass 1 over the spooled buckets. For every identity with a browsing device and no holdout, on_rep(entry, reputation) is called;
+    the clean sessions go to ml_sample and the labelled ones to clf_sample (each a Reservoir, or None when that model is not trained
+    this run). Returns the label progress (additive over buckets), the counts and the number of sessions."""
+    progress = {'positives': 0, 'humans': 0, 'needed': int(cfg['clf_min_positive']), 'positive_identities': 0,
+                'sources': {labels_mod.SOURCE_HONEYPOT: 0, labels_mod.SOURCE_REFUTED: 0, labels_mod.SOURCE_GROUND_TRUTH: 0}}
+    holdout_skipped = device_keys = session_count = 0
+    for rows in spool.buckets():
+        sessions = logs_mod.sessionize(rows, cfg['session_gap_s'])
+        session_count += len(sessions)
+        devices = build_device_view(sessions, cfg)
+        del rows, sessions
+        for entry in devices.values():
+            if not entry['is_device']:
+                continue          # rep/ml are per browsing identity, not per IP
+            if entry.get('holdout'):
+                holdout_skipped += 1
+                continue          # holdout data is aggregate-only, never per device
+            device_keys += 1
+            labels = reputation_mod.aggregate_labels(entry['labels'])
+            on_rep(entry, reputation_mod.device_reputation(entry['features'], labels, cfg['rep_clamp']))
+        if ml_sample is not None:
+            for key, entry in devices.items():
+                for i, (feats, labels) in enumerate(zip(entry['features'], entry['labels'])):
+                    if model_mod.is_clean_session(labels, feats):
+                        ml_sample.add((key, i), features_mod.feature_vector(feats))
+        for entry, label, source in _labelled(devices, ground_truth):
+            n = len(entry['features'])
+            if label == 1:
+                progress['positives'] += n
+                progress['positive_identities'] += 1
+                if source in progress['sources']:
+                    progress['sources'][source] += n
+            else:
+                progress['humans'] += n
+            if clf_sample is not None:
+                for i, feats in enumerate(entry['features']):
+                    clf_sample.add((entry['sessions'][0]['key'], i), (features_mod.feature_vector(feats), label))
+        del devices
+    return {'progress': progress, 'holdout_skipped': holdout_skipped, 'device_keys': device_keys, 'sessions': session_count}
+
+
+def run_window(args, cfg, spool, row_count, phases):
     client = redis_io.connect(cfg, write=not args.dry_run)
 
     # --- IP list entries past their `# expires=` time: recompile, so the compiled files stop matching them and the lines go.
     lists_expired = recompile_expired_lists(args.dry_run)
 
-    # --- reputation -------------------------------------------------------
-    rep_written = 0
-    holdout_skipped = 0
-    for key, entry in devices.items():
-        if not entry['is_device']:
-            continue          # rep/ml are per browsing identity, not per IP
-        if entry.get('holdout'):
-            holdout_skipped += 1
-            continue          # holdout data is aggregate-only, never per device
-        labels = reputation_mod.aggregate_labels(entry['labels'])
-        value = reputation_mod.device_reputation(entry['features'], labels, cfg['rep_clamp'])
-        entry['reputation'] = value
-        if not args.dry_run and redis_io.set_rep(client, entry['dev'], value, cfg['rep_ttl']):
-            rep_written += 1
-
-    # --- model ------------------------------------------------------------
-    trained = False
-    train_n = 0
-    train_note = 'not requested'
-    bundle = None
-
+    # --- what this run trains (decided before the pass: the pass collects the samples) ------------------------------
     ml_train_path = cfg['model_candidate_path'] if args.candidate else cfg['model_path']
     clf_train_path = cfg['clf_candidate_path'] if args.candidate else cfg['clf_path']
 
@@ -246,64 +404,71 @@ def main(argv=None):
     # --candidate and must be promoted explicitly.
     want_train = args.train or (not args.candidate
                                 and not os.path.isfile(cfg['model_path']))
+    want_clf_train = args.train_clf or (not args.candidate
+                                        and not os.path.isfile(cfg['clf_path']))
+    ground_truth = labels_mod.load_ground_truth(
+        args.ground_truth or cfg.get('ground_truth_path'))
+
+    # --- pass 1: per bucket: sessions, features, labels -> reputation, label progress, training samples ------------
+    t_phase = time.time()
+    ml_sample = Reservoir(TRAIN_CAP)
+    clf_sample = Reservoir(TRAIN_CAP)
+    rep_written = [0]
+
+    def on_rep(entry, value):
+        if not args.dry_run and redis_io.set_rep(client, entry['dev'], value, cfg['rep_ttl']):
+            rep_written[0] += 1
+    first = first_pass(spool, cfg, ground_truth, ml_sample if (want_train and model_mod.SKLEARN_AVAILABLE) else None,
+                       clf_sample if (want_clf_train and clf_mod.SKLEARN_AVAILABLE) else None, on_rep)
+    progress, holdout_skipped, device_keys, session_count = first['progress'], first['holdout_skipped'], first['device_keys'], first['sessions']
+    rep_written = rep_written[0]
+    phases['sessions+features'] = round(time.time() - t_phase, 1)
+
+    # --- model ------------------------------------------------------------
+    t_phase = time.time()
+    trained = False
+    train_n = 0
+    train_note = 'not requested'
+    bundle = None
     if not model_mod.SKLEARN_AVAILABLE:
         train_note = 'scikit-learn unavailable, no ML this run'
     elif want_train:
-        vectors = collect_clean_vectors(devices)
-        train_n = len(vectors)
+        vectors = ml_sample.result()
+        train_n = ml_sample.n
         try:
             trained = model_mod.train(vectors, cfg['contamination'],
                                       ml_train_path, cfg['ml_min_train'])
-            train_note = ('trained on %d clean sessions -> %s'
-                          % (train_n, os.path.basename(ml_train_path)) if trained
+            sampled = '' if ml_sample.n == len(vectors) else ' (a random sample of %d of them)' % len(vectors)
+            train_note = ('trained on %d clean sessions%s -> %s'
+                          % (train_n, sampled, os.path.basename(ml_train_path)) if trained
                           else 'skipped: %d clean sessions is below ml_min_train=%d'
                                % (train_n, cfg['ml_min_train']))
         except Exception as exc:
             train_note = 'failed: %s' % exc
-
-    ml_written = 0
+        del vectors
     if model_mod.SKLEARN_AVAILABLE:
         bundle = model_mod.load(cfg['model_path'])
-    if bundle is not None:
-        for key, entry in devices.items():
-            if not entry['is_device'] or entry.get('holdout'):
-                continue
-            levels = []
-            for feats in entry['features']:
-                try:
-                    levels.append(model_mod.score(bundle, features_mod.feature_vector(feats)))
-                except Exception:
-                    continue
-            if not levels:
-                continue
-            # The device's most anomalous recent session represents it.
-            entry['ml'] = max(levels)
-            if not args.dry_run and redis_io.set_ml(client, entry['dev'], entry['ml'], cfg['ml_ttl']):
-                ml_written += 1
 
     # --- supervised classifier --------------------------------------------
-    ground_truth = labels_mod.load_ground_truth(
-        args.ground_truth or cfg.get('ground_truth_path'))
     clf_note = 'not requested'
     clf_bundle = None
-    clf_written = 0
-    progress = label_progress(devices, ground_truth, cfg['clf_min_positive'])
-
-    want_clf_train = args.train_clf or (not args.candidate
-                                        and not os.path.isfile(cfg['clf_path']))
     if not clf_mod.SKLEARN_AVAILABLE:
         clf_note = 'scikit-learn unavailable, no classifier this run'
     elif want_clf_train:
-        X, y = collect_training_set(devices, ground_truth)
+        pairs = clf_sample.result()
+        X = [v for v, _ in pairs]
+        y = [lab for _, lab in pairs]
+        del pairs
         positives = sum(1 for v in y if v == 1)
         try:
             written = clf_mod.train(X, y, clf_train_path,
                                     min_positive=cfg['clf_min_positive'],
                                     test_size=cfg['clf_test_size'],
                                     target_precision=cfg['clf_target_precision'])
+            sampled = '' if clf_sample.n == len(y) else ' (a random sample of %d of %d)' % (len(y), clf_sample.n)
             if written:
-                clf_note = 'trained on %d labelled sessions (%d bot, %d human) -> %s' % (
-                    len(y), positives, len(y) - positives,
+                clf_note = 'trained on %d labelled sessions%s (%d bot, %d human) -> %s' % (
+                    len(y), sampled, positives, len(y) - positives,
                     os.path.basename(clf_train_path))
             else:
                 clf_note = ('skipped: %d bot-labelled sessions is below '
@@ -311,30 +476,29 @@ def main(argv=None):
                             % (positives, cfg['clf_min_positive']))
         except Exception as exc:
             clf_note = 'failed: %s' % exc
-
+        del X, y
     if clf_mod.SKLEARN_AVAILABLE:
         clf_bundle = clf_mod.load(cfg['clf_path'])
-    if clf_bundle is not None:
-        for key, entry in devices.items():
-            if not entry['is_device'] or entry.get('holdout'):
-                continue
-            levels = []
-            for feats in entry['features']:
-                try:
-                    levels.append(clf_mod.score(clf_bundle, features_mod.feature_vector(feats)))
-                except Exception:
-                    continue
-            if not levels:
-                continue
-            entry['clf'] = max(levels)
-            if not args.dry_run and redis_io.set_clf(client, entry['dev'], entry['clf'],
-                                                     cfg['ml_ttl']):
-                clf_written += 1
+    phases['training'] = round(time.time() - t_phase, 1)
+
+    # --- pass 2: score every identity with the models as they are now -----------------------------------------------
+    t_phase = time.time()
+    ml_written = clf_written = 0
+    if bundle is not None or clf_bundle is not None:
+        for rows in spool.buckets():
+            devices = build_device_view(logs_mod.sessionize(rows, cfg['session_gap_s']), cfg)
+            del rows
+            if bundle is not None:
+                # The device's most anomalous recent session represents it.
+                ml_written += score_devices(devices, bundle, model_mod.score_many, 'ml', redis_io.set_ml, cfg['ml_ttl'], args.dry_run, client)
+            if clf_bundle is not None:
+                clf_written += score_devices(devices, clf_bundle, clf_mod.score_many, 'clf', redis_io.set_clf, cfg['ml_ttl'], args.dry_run, client)
+            del devices
+    phases['scoring'] = round(time.time() - t_phase, 1)
+    phases['peak_rss_mb'] = peak_rss_mb()
+    sessions = range(session_count)
 
     # --- summary ----------------------------------------------------------
-    device_keys = sum(1 for e in devices.values()
-                      if e['is_device'] and not e.get('holdout'))
-
     # A stale live model is the one failure mode that makes the system quietly
     # more permissive, so it is said out loud with the fix attached.
     for kind, info in sorted(promote_mod.live_status(cfg).items()):
@@ -372,17 +536,18 @@ def main(argv=None):
             'ml_trained': bool(trained), 'ml_samples': train_n, 'ml_note': train_note,
             'clf_note': clf_note,
             'clf_metrics': {k: v for k, v in (metrics or {}).items() if isinstance(v, (int, float, str))},
-            'rows': row_count[0], 'devices_scored': sum(1 for e in devices.values() if e['is_device'] and not e.get('holdout')),
+            'rows': row_count[0], 'devices_scored': device_keys,
             'clf_labels': progress,
             'iplists_expired': lists_expired,
         })
     if not args.dry_run:
         # The label progress for the Models page and the dashboard (snapshot.py copies it); every nightly run, trained or not.
-        snapshot_mod.record_stats(cfg, 'run_nightly', {'clf_labels': progress, 'devices_scored': device_keys, 'rows': row_count[0]})
+        snapshot_mod.record_stats(cfg, 'run_nightly', {'clf_labels': progress, 'devices_scored': device_keys, 'rows': row_count[0], 'phases': phases})
     if bundle is None and model_mod.SKLEARN_AVAILABLE:
         print('No usable model on disk: skipping ML verdicts. Run with --train.')
     if clf_bundle is None and clf_mod.SKLEARN_AVAILABLE:
         print('No usable classifier on disk: skipping clf verdicts. Run with --train-clf.')
+    print('Nightly phases (s): %s' % ', '.join('%s %s' % kv for kv in sorted(phases.items())))
     print('Nightly analysis: %d rows, %d sessions, %d devices scored.'
           % (row_count[0], len(sessions), device_keys))
     if holdout_skipped:

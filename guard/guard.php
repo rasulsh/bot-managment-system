@@ -51,6 +51,9 @@ function gv_cfg_defaults(array $cfg) {
 		// 1 = all, 0 = none. log_write_timeout_ms: how long one log append may wait for the file lock before the row is dropped
 		// (counted in guard-errors.log); the request is never held longer.
 		'log_skip_panel'   => true,
+		// log_skip_ips: client addresses (IPv4 / IPv6, single or CIDR, at most 200) whose requests are decided as always but never written to the
+		// log, e.g. the operator's own network. Compiled once into guard/logskip.cache.php; free while the list is empty.
+		'log_skip_ips'     => array(),
 		'log_sample'       => array('exempt' => 1.0),
 		'log_write_timeout_ms' => 50,
 		'log_retention_days' => 60,
@@ -177,7 +180,7 @@ function gv_cfg_defaults(array $cfg) {
 			if (!is_bool($v)) { $cfg[$grp][$k] = (bool)filter_var($v, FILTER_VALIDATE_BOOLEAN); }
 		}
 	}
-	foreach (array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'known_bots', 'preview_bots', 'cdn_ranges', 'cdn_ranges_feed', 'bot_suffixes', 'log_skip_paths') as $k) {
+	foreach (array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'known_bots', 'preview_bots', 'cdn_ranges', 'cdn_ranges_feed', 'bot_suffixes', 'log_skip_paths', 'log_skip_ips') as $k) {
 		if (!is_array($cfg[$k])) { $cfg[$k] = array(); }
 	}
 	return $cfg;
@@ -241,6 +244,7 @@ function gv_overlay_whitelist() {
 		// Log storage.
 		'log_skip_paths'     => array('paths'),
 		'log_skip_panel'     => array('bool'),
+		'log_skip_ips'       => array('ips'),
 		'log_sample.exempt'  => array('float', 0.0, 1.0),
 		'log_write_timeout_ms' => array('int', 0, 2000),
 		'log_retention_days' => array('int', 1, 3650),
@@ -438,6 +442,18 @@ function gv_overlay_validate($key, $value) {
 			if (preg_match('/[\s\x00-\x1F]/', $entry)) { return array(false, 'control_chars'); }
 		}
 		return array(true, array_values($value));
+	}
+	if ($type === 'ips') {
+		if (!is_array($value) || gv_is_assoc($value)) { return array(false, 'not_list'); }
+		if (count($value) > 200) { return array(false, 'too_many'); }
+		$out = array();
+		foreach ($value as $entry) {
+			$en = is_string($entry) ? gv_ip_entry_parse(trim($entry)) : null;
+			if ($en === null) { return array(false, 'bad_ip'); }
+			if ($en['p'] < ($en['v'] === 4 ? 8 : 16)) { return array(false, 'too_broad'); }
+			$out[] = gv_ip_entry_text($en);
+		}
+		return array(true, array_values(array_unique($out)));
 	}
 	if ($type === 'cidrs4') {
 		if (!is_array($value) || gv_is_assoc($value)) { return array(false, 'not_list'); }
@@ -886,6 +902,77 @@ function gv_exempt_sampled_out($share, $draw = null) {
 	return $draw >= $share;
 }
 
+// One IPv4 / IPv6 address or CIDR, like an IP-list entry (panel gp_ipl_parse_entry): array('v' => 4|6, 's' => first, 'e' => last, 'p' => prefix)
+// as packed binary strings, or null. Host bits are masked; an IPv4-mapped IPv6 address is the IPv4 address it carries.
+function gv_ip_entry_parse($token) {
+	if (!is_string($token) || $token === '' || strpbrk($token, "% \t") !== false) { return null; }
+	$slash = strpos($token, '/');
+	$addr = $slash === false ? $token : substr($token, 0, $slash);
+	$tail = $slash === false ? null : substr($token, $slash + 1);
+	if ($tail !== null && !preg_match('/^[0-9]{1,3}$/', $tail)) { return null; }
+	if (filter_var($addr, FILTER_VALIDATE_IP) === false) { return null; }
+	$bin = @inet_pton($addr);
+	if ($bin === false) { return null; }
+	$bits = strlen($bin) * 8;
+	$prefix = $tail === null ? $bits : (int)$tail;
+	if ($prefix > $bits) { return null; }
+	if ($bits === 128 && strncmp($bin, "\0\0\0\0\0\0\0\0\0\0\xff\xff", 12) === 0) {
+		if ($prefix < 96) { return null; }
+		$bin = substr($bin, 12);
+		$bits = 32;
+		$prefix -= 96;
+	}
+	$s = '';
+	$e = '';
+	for ($i = 0; $i < strlen($bin); $i++) {
+		$keep = max(0, min(8, $prefix - $i * 8));
+		$mask = $keep === 0 ? 0 : ((0xFF << (8 - $keep)) & 0xFF);
+		$b = ord($bin[$i]);
+		$s .= chr($b & $mask);
+		$e .= chr(($b & $mask) | (~$mask & 0xFF));
+	}
+	return array('v' => $bits === 32 ? 4 : 6, 's' => $s, 'e' => $e, 'p' => $prefix);
+}
+
+function gv_ip_entry_text(array $en) {
+	$full = $en['v'] === 4 ? 32 : 128;
+	return inet_ntop($en['s']) . ($en['p'] === $full ? '' : '/' . $en['p']);
+}
+
+// log_skip_ips compiled to sorted-free [first, last] pairs per family and cached in guard/logskip.cache.php (the list it was built from is stored
+// with it, so a changed list recompiles once). GV_LOGSKIP_CACHE moves the file (tests).
+function gv_ip_skip_compiled(array $list) {
+	static $mem = null;
+	if ($mem !== null && $mem['list'] === $list) { return $mem; }
+	$file = getenv('GV_LOGSKIP_CACHE');
+	if (!is_string($file) || $file === '') { $file = __DIR__ . '/logskip.cache.php'; }
+	$c = is_file($file) ? @include $file : false;
+	if (is_array($c) && isset($c['list']) && $c['list'] === $list) { return $mem = $c; }
+	$c = array('list' => $list, 'v4' => array(), 'v6' => array());
+	foreach ($list as $token) {
+		$en = gv_ip_entry_parse(trim((string)$token));
+		if ($en !== null) { $c[$en['v'] === 4 ? 'v4' : 'v6'][] = array($en['s'], $en['e']); }
+	}
+	$tmp = $file . '.tmp' . getmypid();
+	if (@file_put_contents($tmp, "<?php\nif (!defined('GV_BOOT')) { exit; }\nreturn " . var_export($c, true) . ";\n", LOCK_EX) !== false) {
+		if (!@rename($tmp, $file)) { @unlink($tmp); }
+	}
+	return $mem = $c;
+}
+
+// True when this client address is in log_skip_ips. Free while the list is empty.
+function gv_ip_log_skipped($ip, array $list) {
+	if (!$list) { return false; }
+	$bin = @inet_pton((string)$ip);
+	if ($bin === false) { return false; }
+	if (strlen($bin) === 16 && strncmp($bin, "\0\0\0\0\0\0\0\0\0\0\xff\xff", 12) === 0) { $bin = substr($bin, 12); }
+	$c = gv_ip_skip_compiled($list);
+	foreach ($c[strlen($bin) === 4 ? 'v4' : 'v6'] as $r) {
+		if ($bin >= $r[0] && $bin <= $r[1]) { return true; }
+	}
+	return false;
+}
+
 // The URL prefix the admin panel wrote into <log_dir>/.panel-path (panel/index.php), e.g. "/gv-admin/", or '' when there is none or it
 // is not a plain directory prefix. One small file read per request, only while log_skip_panel is on.
 function gv_panel_prefix($log_dir) {
@@ -1332,7 +1419,7 @@ function gv_run($t0) {
 	}
 	gv_log_policy(array(
 		// GV_DRY_RUN: the updater's health check (updates/verify.php) runs one synthetic request and must leave no log row.
-		'skip'     => defined('GV_DRY_RUN') || gv_path_has_prefix($f['path'], $skip_paths),
+		'skip'     => defined('GV_DRY_RUN') || gv_path_has_prefix($f['path'], $skip_paths) || gv_ip_log_skipped($f['ip'], (array)$cfg['log_skip_ips']),
 		'min_free' => max(0, (int)$cfg['log_min_free_mb']),
 		'timeout_ms' => max(0, (int)$cfg['log_write_timeout_ms']),
 	));

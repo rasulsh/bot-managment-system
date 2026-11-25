@@ -962,7 +962,7 @@ function gp_settings_from_request() {
 				if ($raw === '') { break; }
 				$out[$key] = is_numeric($raw) ? (float)$raw : $raw;
 				break;
-			case 'paths': case 'exactpaths': case 'bots': case 'cidrs4': case 'regexes':
+			case 'paths': case 'exactpaths': case 'bots': case 'cidrs4': case 'regexes': case 'ips':
 				$out[$key] = gp_lines_to_list($raw);
 				break;
 			case 'params': case 'suffixes':

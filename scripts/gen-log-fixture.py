@@ -33,6 +33,7 @@ def main():
     devs = ['%012x' % rnd.getrandbits(48) for _ in range(20000)]
     uas = ['Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/%d.0 Safari/537.36' % (90 + i % 40) for i in range(300)]
     paths = ['/index.php', '/'] + ['/product/%d' % i for i in range(3000)] + ['/category/%d' % i for i in range(200)]
+    uahs = ['%012x' % rnd.getrandbits(48) for _ in uas]
     ccs = ['IR', 'DE', 'US', 'NL', 'TR', 'AE', 'GB', 'FR']
     bots = ['googlebot', 'bingbot', 'adsbot-google']
     rules = ['R%d' % i for i in range(1, 12)]
@@ -51,6 +52,7 @@ def main():
             for i, ts in enumerate(stamps):
                 x = rnd.random()
                 ip = rnd.choice(ips)
+                uai = rnd.randrange(len(uas))
                 dev = rnd.choice(devs) if rnd.random() < 0.7 else ''
                 rid = '%012x' % rnd.getrandbits(48)
                 act, sh, cap, rs, tok, bot, botv = 'allow', 0, '', [], 'v' if dev else '', '', ''
@@ -68,7 +70,7 @@ def main():
                     rs = rs + ['IPL_BLOCK:L%d' % rnd.randint(1, 3)]
                 if act == 'challenge' and rnd.random() < 0.1:
                     cap = 'show'
-                row = {'v': 5, 'rid': rid, 'ts': round(ts, 3), 'ip': ip, 'ua': rnd.choice(uas), 'uah': '%012x' % rnd.getrandbits(48),
+                row = {'v': 5, 'rid': rid, 'ts': round(ts, 3), 'ip': ip, 'ua': uas[uai], 'uah': uahs[uai],
                        'm': 'GET', 'p': rnd.choice(paths), 'q': '', 'aj': 0, 'nav': 1, 'gate': 0, 'tok': tok, 'dev': dev, 'sf': '',
                        'al': 1, 'hc': 4, 'sc': rnd.randint(0, 30), 'esc': rnd.randint(0, 30), 'rs': rs, 'cd': 0, 'cdh': 0, 'cdd': 0,
                        'ciu': 0, 'ci': 0, 'rd': 0, 'hp': 0, 'bot': bot, 'ref': '', 'botv': botv, 'rep': 0, 'ml': -1, 'clf': -1,

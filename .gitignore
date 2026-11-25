@@ -70,6 +70,8 @@ guard/rules.json.tmp*
 guard/rules.json.lock
 analyzer/.rule-hits.json
 analyzer/rowstore/
+analyzer/.nightly-spool-*/
+guard/logskip.cache.php*
 analyzer/daily/
 analyzer/.ingest-state.json*
 guard/rules.cache.php

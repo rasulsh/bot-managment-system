@@ -5311,7 +5311,11 @@ t_ok('log storage: the projection is the average of the last seven finished days
 	&& gp_log_projection_from(array_fill_keys(array('20260101','20260102','20260103','20260104','20260105','20260106','20260107','20260108'), 70), 2)['avg_day'] === 70);
 $lv_src = file_get_contents(__DIR__ . '/../panel/views/settings.php');
 t_ok('settings: the three new log settings are on the Log storage tab, each with a label, help and tooltip',
-	(function () use ($lv_src) { foreach (array('log_skip_panel', 'log_sample.exempt', 'log_write_timeout_ms') as $k) { $u = str_replace('.', '_', $k); if (strpos($lv_src, "'" . $k . "'") === false || gp_t('lbl_' . $u) === 'lbl_' . $u || gp_t('help_' . $u) === 'help_' . $u || gp_t('tip_set_' . $u) === 'tip_set_' . $u) { return false; } } return true; })());
+	(function () use ($lv_src) { foreach (array('log_skip_ips', 'log_skip_panel', 'log_sample.exempt', 'log_write_timeout_ms') as $k) { $u = str_replace('.', '_', $k); if (strpos($lv_src, "'" . $k . "'") === false || gp_t('lbl_' . $u) === 'lbl_' . $u || gp_t('help_' . $u) === 'help_' . $u || gp_t('tip_set_' . $u) === 'tip_set_' . $u) { return false; } } return true; })());
+t_ok('settings: log_skip_ips is a one-per-line textarea in Settings -> Log storage whose lines the guard validates (and refuses with a readable message)',
+	strpos(file_get_contents(__DIR__ . '/../panel/index.php'), "case 'regexes': case 'ips':") !== false
+	&& strpos($lv_src, "'log_skip_ips', 'log_skip_panel'") !== false && gv_overlay_validate('log_skip_ips', array('203.0.113.0/28', '2001:db8::1'))[0] === true
+	&& gv_overlay_validate('log_skip_ips', array('203.0.113.0/28', 'nope')) === array(false, 'bad_ip') && gp_cio_t('verr_bad_ip') !== 'verr_bad_ip');
 t_ok('settings: the Log storage tab shows the projected disk use', strpos($lv_src, 'set-log-projection') !== false && strpos($lv_src, "gp_log_projection()") !== false && gp_t('ls_projected') !== 'ls_projected');
 t_ok('the dashboard card shows the projected disk use and the analyzer store', strpos(file_get_contents(__DIR__ . '/../panel/views/dashboard.php'), "gp_t('ls_projected')") !== false && strpos(file_get_contents(__DIR__ . '/../panel/views/dashboard.php'), "gp_t('ls_store')") !== false);
 // The panel notes its own URL prefix next to the logs (the guard then leaves it out of the log).
