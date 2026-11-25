@@ -20,6 +20,7 @@ from analyzer import fsmode
 from analyzer import features as features_mod
 from analyzer import iplist as iplist_mod
 from analyzer import jobreport
+from analyzer import lowprio as lowprio_mod
 from analyzer import labels as labels_mod
 from analyzer import logs as logs_mod
 from analyzer import model as model_mod
@@ -179,6 +180,8 @@ def recompile_expired_lists(dry_run=False):
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if __name__ == '__main__':
+        lowprio_mod.apply()               # idle CPU priority for a run started by hand (the cron wrapper also sets I/O)
     try:
         cfg = config_mod.load(args.config)
     except Exception as exc:
@@ -193,8 +196,16 @@ def main(argv=None):
         print('ERROR: log directory not readable: %s' % cfg['log_dir'], file=sys.stderr)
         return 2
 
-    rows = list(logs_mod.read_lines(cfg['log_dir'], cfg['window_days']))
-    sessions = logs_mod.sessionize(rows, cfg['session_gap_s'])
+    # Streamed through sessionize (no second copy of the window) and reduced to the keys the job reads: the nightly job holds
+    # every row of the window in its sessions, so what a row costs is what the job costs.
+    row_count = [0]
+
+    def _counted(source):
+        for item in source:
+            row_count[0] += 1
+            yield item
+    sessions = logs_mod.sessionize(
+        _counted(logs_mod.read_lines(cfg['log_dir'], cfg['window_days'], fields=logs_mod.SESSION_FIELDS)), cfg['session_gap_s'])
     devices = build_device_view(sessions, cfg)
 
     client = redis_io.connect(cfg, write=not args.dry_run)
@@ -337,7 +348,7 @@ def main(argv=None):
         reason = redis_io.unavailable_reason(cfg)
         print(reason + '.')
         jobreport.warn(reason)
-    if not rows:
+    if not row_count[0]:
         jobreport.warn('no input rows: the log directory has no decision rows in the last %s day(s)' % cfg['window_days'])
     if not model_mod.SKLEARN_AVAILABLE:
         jobreport.warn('scikit-learn is not installed for this Python: no model or classifier (check GV_PYTHON)')
@@ -350,7 +361,7 @@ def main(argv=None):
     elif want_clf_train and clf_mod.SKLEARN_AVAILABLE and clf_note.startswith('skipped'):
         # Waiting for labels is not a failure of the run. When the rest of nightly did its work (devices scored, reputations written),
         # it is an informational note with the progress; only a run that did nothing else keeps the "did nothing useful" warning.
-        if client is not None and rows and device_keys > 0:
+        if client is not None and row_count[0] and device_keys > 0:
             jobreport.info(label_note(progress))
         else:
             jobreport.warn('classifier training produced no candidate: %s' % clf_note)
@@ -361,19 +372,19 @@ def main(argv=None):
             'ml_trained': bool(trained), 'ml_samples': train_n, 'ml_note': train_note,
             'clf_note': clf_note,
             'clf_metrics': {k: v for k, v in (metrics or {}).items() if isinstance(v, (int, float, str))},
-            'rows': len(rows), 'devices_scored': sum(1 for e in devices.values() if e['is_device'] and not e.get('holdout')),
+            'rows': row_count[0], 'devices_scored': sum(1 for e in devices.values() if e['is_device'] and not e.get('holdout')),
             'clf_labels': progress,
             'iplists_expired': lists_expired,
         })
     if not args.dry_run:
         # The label progress for the Models page and the dashboard (snapshot.py copies it); every nightly run, trained or not.
-        snapshot_mod.record_stats(cfg, 'run_nightly', {'clf_labels': progress, 'devices_scored': device_keys, 'rows': len(rows)})
+        snapshot_mod.record_stats(cfg, 'run_nightly', {'clf_labels': progress, 'devices_scored': device_keys, 'rows': row_count[0]})
     if bundle is None and model_mod.SKLEARN_AVAILABLE:
         print('No usable model on disk: skipping ML verdicts. Run with --train.')
     if clf_bundle is None and clf_mod.SKLEARN_AVAILABLE:
         print('No usable classifier on disk: skipping clf verdicts. Run with --train-clf.')
     print('Nightly analysis: %d rows, %d sessions, %d devices scored.'
-          % (len(rows), len(sessions), device_keys))
+          % (row_count[0], len(sessions), device_keys))
     if holdout_skipped:
         print('Holdout identities skipped for per-device verdicts: %d '
               '(their data is sound in aggregate only).' % holdout_skipped)

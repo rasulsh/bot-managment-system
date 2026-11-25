@@ -357,6 +357,10 @@ $perms = isset($perms) && is_array($perms) ? $perms : null;
 	<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('ls_total')) ?></span><span class="gp-stat-val"><?= gp_e(gp_bytes($storage['total'])) ?><?php if ($storage['max_mb'] > 0): ?> / <?= gp_e(gp_bytes($storage['max_mb'] * 1048576)) ?><?php endif; ?></span></div>
 	<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('ls_today')) ?></span><span class="gp-stat-val"><?= gp_e(gp_bytes($storage['today'])) ?></span></div>
 	<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('ls_archives')) ?></span><span class="gp-stat-val"><?= gp_e(gp_num($storage['archives'])) ?> · <?= gp_e(sprintf(gp_t('ls_kept'), gp_num($storage['retention_days']))) ?></span></div>
+	<?php if (!empty($storage['avg_day'])): ?>
+	<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('ls_projected')) ?><?= gp_tip('ls_projected') ?></span><span class="gp-stat-val"><?= gp_e(gp_bytes($storage['projected'])) ?> · <?= gp_e(sprintf(gp_t('ls_projected_avg'), gp_bytes($storage['avg_day']), gp_num($storage['retention_days']))) ?></span></div><?php endif; ?>
+	<?php if (!empty($storage['store'])): ?>
+	<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('ls_store')) ?><?= gp_tip('ls_store') ?></span><span class="gp-stat-val"><?= gp_e(gp_bytes($storage['store'])) ?></span></div><?php endif; ?>
 	<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('ls_free')) ?></span><span class="gp-stat-val"><?= $storage['free'] === null ? gp_e(gp_t('unknown')) : gp_e(gp_bytes($storage['free'])) ?><?php if ($storage['disk']): ?> / <?= gp_e(gp_bytes($storage['disk'])) ?><?php endif; ?></span></div>
 	<?php $lq = isset($jobs['logrotate']['result']['quota']) ? (string)$jobs['logrotate']['result']['quota'] : ''; if ($lq !== ''): ?>
 	<div class="gp-stat-row"><span class="gp-stat-key"><?= gp_e(gp_t('ls_quota')) ?></span><span class="gp-stat-val gp-mono gp-ltr"><?= gp_e($lq) ?></span></div><?php endif; ?>

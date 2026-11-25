@@ -104,6 +104,8 @@ in the `http` job. Pass a directory to keep screenshots. Nothing is written into
 php scripts/guard-selftest.php        # engine: every condition, op, <empty>, regex errors, precedence helpers
 bash scripts/rules-e2e.sh             # HTTP: block/challenge/log/monitor + the whole precedence chain
 bash scripts/bench-gv-run.sh          # gv_run p50/p99 with 0 / 20 / 200 rules (run on both branches)
+php scripts/bench-log-append.php      # one log append, previous writer vs now (add a `dd ... oflag=dsync` load on the same disk to see a busy disk)
+python3 scripts/gen-log-fixture.py --out /tmp/logs --days 9 --rows-per-day 150000   # about 80 MB a day; then time analyzer/snapshot.py, run_verify.py, run_nightly.py with --config pointing log_dir and model_path at scratch paths
 ```
 
 GeoIP has its own sections in the same suites: `guard-selftest.php` (lookup edge cases on generated range files:

@@ -98,6 +98,8 @@ JS_ROOT="$ROOT"
 # shellcheck source=lib-jobstatus.sh
 . "$ROOT/scripts/lib-jobstatus.sh"
 js_begin "$MODE"
+# Idle CPU and I/O priority for the job (nice -n 19, ionice -c3 when they exist); recorded as "lowprio" in the job status.
+js_lowprio_detect
 # Which Python: GV_PYTHON from the environment, else from the crontab, else <install-dir>/.venv/bin/python, else python3 (js_python_resolve).
 # A job run by hand from an SSH shell has no GV_PYTHON, and python3 alone has none of the packages.
 js_python_resolve
@@ -117,7 +119,7 @@ fi
 run_job() {
 	if ! command -v flock >/dev/null 2>&1; then
 		echo "flock not available: running $MODE without a lock"
-		"$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
+		${JS_LOWPRIO[@]+"${JS_LOWPRIO[@]}"} "$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
 		return $?
 	fi
 	# -E 99 makes "could not take the lock" distinguishable from the job's own
@@ -126,10 +128,10 @@ run_job() {
 		# Wait for the write lock; once held, record who holds it ("<mode> <pid> <start>": the pid is this shell, which then
 		# becomes the job with exec, so it stays valid) for the run that has to give up, then run the job.
 		flock -w "$LOCK_WAIT" -E 99 "$LOCK" bash -c 'printf "%s %s %s\n" "$1" "$$" "$(date +%s)" > "$2" 2>/dev/null; shift 2; exec "$@"' _ \
-			"$MODE" "$WRITE_LOCK.holder" "$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
+			"$MODE" "$WRITE_LOCK.holder" ${JS_LOWPRIO[@]+"${JS_LOWPRIO[@]}"} "$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
 		return $?
 	fi
-	flock -n -E 99 "$LOCK" "$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
+	flock -n -E 99 "$LOCK" ${JS_LOWPRIO[@]+"${JS_LOWPRIO[@]}"} "$PYTHON" "$ROOT/$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}
 }
 
 js_exec run_job

@@ -222,6 +222,21 @@ ok "guard-logrotate.sh under umask 002: its status file is not group-writable ei
 grep -q '^umask 022' "$ROOT/scripts/analyzer-cron.sh" && grep -q '^umask 022' "$ROOT/scripts/guard-logrotate.sh" && grep -q '^umask 022' "$ROOT/scripts/feeds-cron.sh" && grep -q '^umask 022' "$ROOT/scripts/lib-jobstatus.sh"
 ok "every wrapper and the status library set umask 022 at the top" "$(yes_if [ $? -eq 0 ])"
 
+echo "== idle priority: nice -n 19 / ionice -c3 for every background job, recorded as lowprio"
+LP="$WORK/lowprio"; mkdir -p "$LP/status" "$LP/logs" "$LP/locks"
+GV_JOBSTATUS_DIR="$LP/status" GV_JOBLOG_DIR="$LP/logs" GV_LOCK_DIR="$LP/locks" FAKE_MODE=ok bash "$CRON" verify > /dev/null 2>&1
+lp="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lowprio"])' "$LP/status/.jobstatus-verify.json" 2>/dev/null)"
+ok "the job status records which idle-priority tools the run used (lowprio: '$lp')" "$(yes_if [ -n "$lp" ])"
+if command -v nice >/dev/null 2>&1 && nice -n 19 true >/dev/null 2>&1; then
+	ok "nice is among them where it exists" "$(yes_if test "${lp#*nice}" != "$lp")"
+	# The fake python prints its own niceness: the job really runs at 19.
+	printf '#!/usr/bin/env bash\nif [ "$1" = "-c" ]; then exit 0; fi\nps -o ni= -p $$ > "$NI_OUT"\nexit 0\n' > "$LP/ni-python"; chmod +x "$LP/ni-python"
+	NI_OUT="$LP/ni.txt" GV_PYTHON="$LP/ni-python" GV_JOBSTATUS_DIR="$LP/status" GV_JOBLOG_DIR="$LP/logs" GV_LOCK_DIR="$LP/locks" bash "$CRON" snapshot > /dev/null 2>&1
+	ok "the job process runs at nice 19" "$(yes_if [ "$(tr -d ' ' < "$LP/ni.txt" 2>/dev/null)" = 19 ])"
+	NI_OUT="$LP/ni0.txt" GV_LOWPRIO=0 GV_PYTHON="$LP/ni-python" GV_JOBSTATUS_DIR="$LP/status" GV_JOBLOG_DIR="$LP/logs" GV_LOCK_DIR="$LP/locks" bash "$CRON" snapshot > /dev/null 2>&1
+	ok "GV_LOWPRIO=0 turns it off (nice 0, lowprio none)" "$(yes_if [ "$(tr -d ' ' < "$LP/ni0.txt" 2>/dev/null)" = 0 ] && grep -q '"lowprio":"none"' "$LP/status/.jobstatus-snapshot.json")"
+fi
+
 echo "== which Python runs the job (environment, crontab, .venv, python3) and which php (CLI fallback)"
 INST="$WORK/inst"; mkdir -p "$INST/scripts" "$INST/analyzer" "$WORK/bin" "$WORK/cli"
 cp "$ROOT/scripts/analyzer-cron.sh" "$ROOT/scripts/lib-jobstatus.sh" "$ROOT/scripts/cron_check.py" "$ROOT/scripts/cron-check.sh" "$INST/scripts/"

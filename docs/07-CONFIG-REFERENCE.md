@@ -208,8 +208,8 @@ Real users never see it; a client that follows it is labelled for 7 days.
 
 ## Log rotation
 
-`scripts/guard-logrotate.sh` compresses finished days (gzip, roughly a tenth of the size),
-deletes archives older than `log_retention_days` (default 60) and, when `log_max_mb` is
+`scripts/guard-logrotate.sh` compresses finished days (`gzip -6`, roughly a tenth of the size),
+deletes archives older than `log_retention_days` (60 unless set; the `config.php` of a **new** install sets 30, an existing one keeps what it has) and, when `log_max_mb` is
 set, deletes the oldest archives until all log files fit under it. It reads these from the
 effective config (`guard/config.php` plus the panel), so changes in **Settings → Log
 storage** apply on its next run. Install it once (as the account user):
@@ -226,10 +226,23 @@ without PHP the script uses the defaults (60 days, no cap). Each run writes
 `logs/.last-rotate`; the dashboard card **Log storage** warns when rotation never ran or
 is more than two days old.
 
+**What counts as a finished day.** The guard names its file by *PHP's* date and cron runs in the *shell's* time zone, and the two can
+differ (and the command-line PHP may read another `php.ini` than the web server). The script therefore does not use the clock to decide
+what is "today": the file with the **newest date in its name is the live one**, every older day is finished, and a finished day is
+compressed once it has been idle for `GV_MIN_IDLE_MINUTES` (default 10; a request in flight at midnight). A day is compressed at the
+first run after it is finished. The archive is written as `guard-<day>.jsonl.gz.tmp`, verified with `gzip -t`, renamed, and only then
+is the plain file removed, so an interruption never leaves a day in two copies the analyzer would count twice; a day that was archived
+and then written to again is merged into one archive. The work runs under `nice -n 19` and `ionice -c3` when they exist (recorded as
+`lowprio` in the job status). Every skipped or failed day is reported with its reason in the run's output, the job status and
+`logs/.last-rotate`.
+
 | Setting | Default | Effect |
 |---|---|---|
 | `log_skip_paths` | none | Path prefixes never written to the log (e.g. `/gv-admin/`). The guard still checks them; `exempt_paths` is what skips the checks, and those requests are still logged as `exempt`. |
-| `log_retention_days` | 60 | Archives older than this are deleted (1-3650). |
+| `log_skip_panel` | true | Leave the admin panel's own page views out of the log. The panel writes its URL prefix (from the web server's `SCRIPT_NAME`, for example `/gv-admin/`) to `logs/.panel-path` when it is opened, and the guard skips that prefix, in addition to `log_skip_paths`. A panel served from the document root is not noted (that would skip everything). Settings -> Log storage. |
+| `log_sample.exempt` | 1.0 | The share (0 to 1) of **exempt** requests (payment callbacks, APIs; `exempt_paths` / `exempt_params`) that is logged. 1 = all, 0 = none, 0.1 = about one in ten. Their outcome lines follow the decision line. Exempt traffic is never checked, so full logging of it is rarely needed. |
+| `log_write_timeout_ms` | 50 | The longest one log append waits for the file lock (0 to 2000; 0 = one try). After that the line is dropped and counted in `logs/guard-errors.log` (`log_write_timeout`, at most once a minute), so a contended disk never holds a visitor longer than this. It cannot bound a `write()` the operating system itself stalls. |
+| `log_retention_days` | 60 (30 in a new install's `config.php`) | Archives older than this are deleted (1-3650). Settings -> Log storage and the dashboard's Log storage card show the **projected disk use**: the average of the last seven finished days times the retention. |
 | `log_max_mb` | 0 (off) | Total size cap for all `guard-*` files. Oldest archives go first; today's file is never deleted, and a run where it alone is over the cap says so. |
 | `log_floor_delete` | Default false. Lets `scripts/guard-logrotate.sh` delete the oldest archives when free disk space is below `log_min_free_mb`. Off: the condition is only reported. Settings -> Log storage. |
 | `log_floor_keep_days` | Default 7, minimum 1. Archives newer than this are never deleted for the disk floor; at most 10 files are deleted per run. Only matters when `log_floor_delete` is on. |

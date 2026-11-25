@@ -37,6 +37,8 @@ JS_EXTRA_RESULT=""    # a result JSON object the wrapper itself produced (logrot
 JS_WARN_EXTRA=""      # wrapper-level warning text
 JS_LOCK_HOLDER=""     # who held the lock a skipped run found (e.g. "worker"), when known
 JS_PYTHON_DESC=""     # "<python> (source: environment|crontab|venv|default)", recorded as "python" in the status file
+JS_LOWPRIO=()         # the command prefix that runs a job at idle priority (js_lowprio_detect)
+JS_LOWPRIO_DESC="none"   # which of nice / ionice it holds, recorded as "lowprio" in the status file
 
 # js_php_check [php]: a php that is not the command-line build (cPanel cron's default PATH finds php-cgi first: it prints HTTP
 # headers and used to make every config read fail) gets ONE job warning naming the binary and the fix.
@@ -124,6 +126,20 @@ js_begin() {
 	trap 'exit 130' INT
 	trap 'exit 129' HUP
 	js_tidy_modes
+}
+
+# js_lowprio_detect: background work must never compete with the site for the disk and the CPU of a shared server. Sets JS_LOWPRIO to
+# a command prefix, `nice -n 19` and/or `ionice -c3` (the idle I/O class), for the tools that exist AND work here (a container or an
+# LVE may refuse ionice); JS_LOWPRIO_DESC says which ("nice,ionice", "nice", "ionice" or "none"). Missing tools are skipped silently.
+# GV_LOWPRIO=0 turns it off. Use it as: ${JS_LOWPRIO[@]+"${JS_LOWPRIO[@]}"} command args
+js_lowprio_detect() {
+	local d=""
+	JS_LOWPRIO=()
+	if [ "${GV_LOWPRIO:-1}" != 0 ]; then
+		if command -v nice >/dev/null 2>&1 && nice -n 19 true >/dev/null 2>&1; then JS_LOWPRIO+=(nice -n 19); d="nice"; fi
+		if command -v ionice >/dev/null 2>&1 && ionice -c3 true >/dev/null 2>&1; then JS_LOWPRIO+=(ionice -c3); d="${d:+$d,}ionice"; fi
+	fi
+	JS_LOWPRIO_DESC="${d:-none}"
 }
 
 # Run a command with stderr (and stdout, unless $JS_PASS_STDOUT=1) captured, then replay both
@@ -301,10 +317,10 @@ EOF
 	done <<EOF
 $notes
 EOF
-	printf '{"v":1,"mode":"%s","status":"%s","last_start":%s,"last_end":%s,"last_success":%s,"last_failure":%s,"last_exit":%s,"duration":%s,"skipped":%s,"runs":%s,"failures":%s,"last_error":"%s","warnings":[%s],"result_json":"%s","python":"%s","lock_holder":"%s","notes":[%s]}\n' \
+	printf '{"v":1,"mode":"%s","status":"%s","last_start":%s,"last_end":%s,"last_success":%s,"last_failure":%s,"last_exit":%s,"duration":%s,"skipped":%s,"runs":%s,"failures":%s,"last_error":"%s","warnings":[%s],"result_json":"%s","python":"%s","lock_holder":"%s","notes":[%s],"lowprio":"%s"}\n' \
 		"$JS_MODE" "$status" "$JS_START" "$end" "$ls" "$lf" "$rc" "$dur" "$skipped" "$runs" "$failures" \
 		"$(printf '%s' "$err_text" | js_esc)" "$wj" "$(printf '%s' "$result" | js_redact | head -c 2000 | js_esc)" "$(printf '%s' "${JS_PYTHON_DESC:-${PYTHON:-}}" | js_esc)" \
-		"$(printf '%s' "$JS_LOCK_HOLDER" | js_esc)" "$nj" \
+		"$(printf '%s' "$JS_LOCK_HOLDER" | js_esc)" "$nj" "$JS_LOWPRIO_DESC" \
 		> "$f.tmp$$" 2>/dev/null && mv -f "$f.tmp$$" "$f" 2>/dev/null
 
 	# jobs.log: one line per run; jobs-errors.log: the full stderr of a failure.

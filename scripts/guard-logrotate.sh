@@ -9,9 +9,9 @@
 # Settings come from the guard's effective config (guard/config.php plus the
 # panel overlay), read through scripts/config-dump.php:
 #   log_dir             where the logs are
-#   log_retention_days  archives older than this are deleted (default 60)
+#   log_retention_days  archives older than this are deleted (default 60 here and in the guard; the config.php of a NEW install sets 30)
 #   log_max_mb          total size cap for logs/ in MiB, 0 = no cap (default 0)
-# Environment overrides: GV_LOG_DIR, GV_RETENTION_DAYS, GV_MAX_MB. GV_PHP names
+# Environment overrides: GV_LOG_DIR, GV_RETENTION_DAYS, GV_MAX_MB, GV_MIN_IDLE_MINUTES. GV_PHP names
 # the PHP binary (cron has a minimal PATH). Without PHP the defaults apply.
 #
 # Every run writes logs/.last-rotate (one JSON line) for the panel dashboard, and records its
@@ -25,16 +25,25 @@
 # newer than log_floor_keep_days (default 7), and removes at most 10 files per run.
 #
 # What this script is careful about:
-#   * It never compresses a file that was written to in the last hour. The
-#     guard names its file by PHP's date and this script by the system's; when
-#     the two time zones differ, "not today's file" can still be the live one.
-#   * It never overwrites an archive. If a .gz for that day already exists the
-#     new rows are appended to it as a second gzip member (still one valid .gz).
+#   * It never compresses the live file. The guard names its file by PHP's date and this script runs in the shell's time zone, and
+#     the two can differ (and cron's php may use another php.ini than the web server's), so "today" is NOT taken from the clock: the
+#     file with the NEWEST date in its name is the one the guard is writing, and every older day is finished. A finished day is also
+#     left alone while it was written to in the last GV_MIN_IDLE_MINUTES (default 10), for requests still in flight at midnight.
+#     (Before 2026.11.38 the day was taken from the shell's date and an idle time of 60 minutes: when the two time zones differed,
+#     yesterday's file could be skipped as "live" for hours, and on a site that logs all day nothing was compressed.)
+#   * It never overwrites an archive and never leaves two copies of a day. The archive is written as <day>.jsonl.gz.tmp (a copy of
+#     the existing archive followed by the new rows, when the day was already archived and written to again), verified with
+#     gzip -t, renamed over <day>.jsonl.gz, and only then is the plain file removed. An interruption leaves the plain file (the
+#     next run starts again) or, after the rename, both files with the archive not older: the next run verifies the archive and
+#     removes the plain file. The analyzer reads only one of the two (analyzer/logs.py day_files).
+#   * The work runs at idle priority (nice -n 19, ionice -c3 when they exist) and gzip -6; a run takes a lock, so two runs never
+#     compress the same day together.
 #   * It only touches regular files. A directory, FIFO or symlink that happens
 #     to be named like a log is skipped, so a planted symlink cannot make a root
 #     cron job compress some other file, and one odd entry cannot stop the run.
 #   * One failure does not abort the rest: retention still runs, and the exit
 #     status is non-zero so cron can report it.
+#   * Every skipped or failed day is reported with its reason (the output, the job status "result" and logs/.last-rotate).
 set -uo pipefail
 umask 022          # cron may run with 002; what this script creates (status files, the .last-rotate marker) is not group-writable. Logs keep their own modes.
 
@@ -47,6 +56,7 @@ js_begin logrotate
 js_php_resolve                       # a non-CLI php on PATH: try /usr/local/bin/php before the warning
 PHP_BIN="${GV_PHP:-php}"
 js_php_check "$PHP_BIN"
+js_lowprio_detect                    # nice -n 19 / ionice -c3 when they exist (recorded as "lowprio" in the job status)
 
 # One effective setting, or nothing when PHP or the key is unavailable.
 cfg_get() {
@@ -65,7 +75,7 @@ MIN_FREE_MB="$(int_or "${GV_MIN_FREE_MB:-$(cfg_get log_min_free_mb)}" 0 200)"
 FLOOR_DELETE="${GV_FLOOR_DELETE:-$(cfg_get log_floor_delete)}"
 FLOOR_KEEP_DAYS="$(int_or "${GV_FLOOR_KEEP_DAYS:-$(cfg_get log_floor_keep_days)}" 1 7)"
 FLOOR_MAX_FILES=10
-MIN_IDLE_MINUTES=60
+MIN_IDLE_MINUTES="$(int_or "${GV_MIN_IDLE_MINUTES:-}" 0 10)"
 
 # The job logs live in the same directory: tell the status writer where.
 export GV_JOBLOG_DIR="$LOG_DIR"
@@ -81,29 +91,61 @@ total_bytes() {
 }
 bytes_before="$(total_bytes)"
 reasons=""
-TODAY="guard-$(date +%Y%m%d).jsonl"
 gzipped=0
 skipped=0
 failed=0
+skipped_live=0
+skipped_idle=0
+fail_notes=""
+
+# One lock: a second run (cron fires hourly, or somebody runs it by hand) never compresses the same day at the same time.
+if command -v flock >/dev/null 2>&1 && { exec 9>"$LOG_DIR/.logrotate.lock"; } 2>/dev/null; then
+	if ! flock -n 9; then
+		echo "Another log rotation is already running; skipping this one."
+		js_skipped
+		JS_EXIT=0
+		exit 0
+	fi
+fi
+
+# Leftovers of an interrupted run: a half-written archive is never used.
+find "$LOG_DIR" -maxdepth 1 -type f -name 'guard-*.jsonl.gz.tmp' -mmin +30 -delete 2>/dev/null
+
+# The live file is the one with the newest date in its name (see the header): finished days are the older ones.
+NEWEST="$(find "$LOG_DIR" -maxdepth 1 -type f -name 'guard-????????.jsonl' -printf '%f\n' 2>/dev/null | sort | tail -1)"
+
+# compress_day <plain file>: archive one finished day atomically. Returns 0 on success.
+compress_day() {
+	local f="$1" gz="$1.gz" tmp="$1.gz.tmp" rc=0
+	if [ -e "$gz" ] || [ -L "$gz" ]; then
+		[ -f "$gz" ] && [ ! -L "$gz" ] || { fail_notes="${fail_notes}${fail_notes:+; }$(basename "$gz") is not a regular file"; return 1; }
+		if [ ! "$f" -nt "$gz" ]; then
+			# The archive is not older than the plain file: an interrupted earlier run (or a copy). Verify it, then drop the plain file.
+			if gzip -t -- "$gz" 2>/dev/null; then rm -f -- "$f" && return 0; fi
+			fail_notes="${fail_notes}${fail_notes:+; }$(basename "$gz") failed gzip -t, the plain file was kept"
+			return 1
+		fi
+		# Compressed once and written to again since: archive + the new rows, as one verified archive.
+		{ cat -- "$gz" && ${JS_LOWPRIO[@]+"${JS_LOWPRIO[@]}"} gzip -6 -c -- "$f"; } > "$tmp" 2>/dev/null || rc=$?
+	else
+		${JS_LOWPRIO[@]+"${JS_LOWPRIO[@]}"} gzip -6 -c -- "$f" > "$tmp" 2>/dev/null || rc=$?
+	fi
+	if [ "$rc" -ne 0 ] || ! gzip -t -- "$tmp" 2>/dev/null; then
+		rm -f -- "$tmp"
+		fail_notes="${fail_notes}${fail_notes:+; }$(basename "$f"): compressing failed (disk full or no permission?)"
+		return 1
+	fi
+	mv -f -- "$tmp" "$gz" || { rm -f -- "$tmp"; fail_notes="${fail_notes}${fail_notes:+; }$(basename "$f"): could not rename the archive"; return 1; }
+	rm -f -- "$f" || { fail_notes="${fail_notes}${fail_notes:+; }$(basename "$f"): archived but the plain file could not be removed"; return 1; }
+	return 0
+}
 
 while IFS= read -r -d '' f; do
 	name="$(basename "$f")"
-	[ "$name" = "$TODAY" ] && continue
-	if [ -e "$f.gz" ]; then
-		# Never overwrite: append as another gzip member, then drop the source.
-		if [ -f "$f.gz" ] && [ ! -L "$f.gz" ] && gzip -c -- "$f" >> "$f.gz" && rm -f -- "$f"; then
-			gzipped=$((gzipped + 1))
-		else
-			failed=$((failed + 1))
-		fi
-		continue
-	fi
-	if gzip -- "$f"; then
-		gzipped=$((gzipped + 1))
-	else
-		failed=$((failed + 1))
-	fi
-done < <(find "$LOG_DIR" -maxdepth 1 -type f -name 'guard-*.jsonl' -mmin "+$MIN_IDLE_MINUTES" -print0)
+	if [ "$name" = "$NEWEST" ]; then skipped_live=$((skipped_live + 1)); continue; fi
+	if [ -z "$(find "$f" -maxdepth 0 -mmin "+$MIN_IDLE_MINUTES" 2>/dev/null)" ]; then skipped_idle=$((skipped_idle + 1)); continue; fi
+	if compress_day "$f"; then gzipped=$((gzipped + 1)); else failed=$((failed + 1)); fi
+done < <(find "$LOG_DIR" -maxdepth 1 -type f -name 'guard-????????.jsonl' -print0 | sort -z)
 
 # Anything named like a log that is not a regular file is reported, not touched.
 skipped=$(find "$LOG_DIR" -maxdepth 1 -name 'guard-*.jsonl' ! -type f -print | wc -l | tr -d ' ')
@@ -113,7 +155,7 @@ skipped=$(find "$LOG_DIR" -maxdepth 1 -name 'guard-*.jsonl' ! -type f -print | w
 ERR="$LOG_DIR/guard-errors.log"
 if [ -f "$ERR" ] && [ ! -L "$ERR" ] && [ "$(wc -c < "$ERR")" -gt 1048576 ]; then
 	ARCH="$LOG_DIR/guard-errors-$(date +%Y%m%d%H%M%S).log"
-	if mv -- "$ERR" "$ARCH" && gzip -- "$ARCH"; then :; else failed=$((failed + 1)); fi
+	if mv -- "$ERR" "$ARCH" && ${JS_LOWPRIO[@]+"${JS_LOWPRIO[@]}"} gzip -6 -- "$ARCH"; then :; else failed=$((failed + 1)); fi
 fi
 find "$LOG_DIR" -maxdepth 1 -name 'guard-errors-*.log.gz' -type f -mtime "+$RETENTION_DAYS" -delete || failed=$((failed + 1))
 
@@ -123,7 +165,7 @@ for jl in jobs jobs-errors; do
 	JF="$LOG_DIR/$jl.log"
 	if [ -f "$JF" ] && [ ! -L "$JF" ] && [ "$(wc -c < "$JF")" -gt 1048576 ]; then
 		JA="$LOG_DIR/$jl-$(date +%Y%m%d%H%M%S).log"
-		if mv -- "$JF" "$JA" && gzip -- "$JA"; then :; else failed=$((failed + 1)); fi
+		if mv -- "$JF" "$JA" && ${JS_LOWPRIO[@]+"${JS_LOWPRIO[@]}"} gzip -6 -- "$JA"; then :; else failed=$((failed + 1)); fi
 	fi
 done
 find "$LOG_DIR" -maxdepth 1 \( -name 'jobs-*.log.gz' -o -name 'jobs-errors-*.log.gz' \) -type f -mtime "+$RETENTION_DAYS" -delete || failed=$((failed + 1))
@@ -178,9 +220,9 @@ done
 
 bytes="$(total_bytes)"
 freed=$((bytes_before > bytes ? bytes_before - bytes : 0))
-JS_EXTRA_RESULT="$(printf '{"compressed":%s,"deleted_retention":%s,"deleted_size_cap":%s,"deleted_disk_floor":%s,"bytes_freed":%s,"bytes_now":%s,"reasons":"%s","over_cap":%s,"disk_low":%s,"free_mb":%s,"floor_delete":%s,"floor_keep_days":%s,"floor_limit_hit":%s,"quota":"%s"}' \
+JS_EXTRA_RESULT="$(printf '{"compressed":%s,"deleted_retention":%s,"deleted_size_cap":%s,"deleted_disk_floor":%s,"bytes_freed":%s,"bytes_now":%s,"reasons":"%s","over_cap":%s,"disk_low":%s,"free_mb":%s,"floor_delete":%s,"floor_keep_days":%s,"floor_limit_hit":%s,"quota":"%s","skipped_live":%s,"skipped_idle":%s,"newest":"%s","failed_notes":"%s"}' \
 	"$gzipped" "$deleted" "$capped" "$floor_deleted" "$freed" "$bytes" "$reasons" "$over" "$disk_low" "$(free_mb | grep -E '^[0-9]+$' || echo 0)" \
-	"$([ "$FLOOR_DELETE" = true ] && echo true || echo false)" "$FLOOR_KEEP_DAYS" "$floor_limit_hit" "$quota_text")"
+	"$([ "$FLOOR_DELETE" = true ] && echo true || echo false)" "$FLOOR_KEEP_DAYS" "$floor_limit_hit" "$quota_text" "$skipped_live" "$skipped_idle" "${NEWEST#guard-}" "$(printf '%s' "$fail_notes" | js_esc | cut -c1-300)")"
 [ "$over" -eq 0 ] || JS_WARN_EXTRA="the uncompressed log files alone exceed log_max_mb (${MAX_MB} MiB)"
 if [ "$disk_low" -eq 1 ]; then
 	JS_WARN_EXTRA="${JS_WARN_EXTRA:+$JS_WARN_EXTRA
@@ -190,9 +232,11 @@ printf '{"ts":%s,"compressed":%s,"deleted":%s,"capped":%s,"over_cap":%s,"failure
 	"$(date +%s)" "$gzipped" "$deleted" "$capped" "$over" "$failed" "$RETENTION_DAYS" "$MAX_MB" "$bytes" \
 	> "$LOG_DIR/.last-rotate.tmp" && mv -f -- "$LOG_DIR/.last-rotate.tmp" "$LOG_DIR/.last-rotate" || failed=$((failed + 1))
 
+[ "$skipped_idle" -eq 0 ] || echo "NOTE: $skipped_idle finished day(s) were written to in the last $MIN_IDLE_MINUTES minute(s) and are left for the next run."
+[ -z "$fail_notes" ] || echo "FAILED: $fail_notes"
 echo "Bot Guard log rotation: compressed $gzipped file(s), deleted $deleted archive(s) older than $RETENTION_DAYS days, $capped more for the ${MAX_MB} MiB cap, skipped $skipped non-regular entr(ies), $failed failure(s) in $LOG_DIR ($bytes bytes now)"
 [ "$over" -eq 0 ] || echo "WARNING: the uncompressed log files alone exceed log_max_mb (${MAX_MB} MiB); lower traffic logging (log_skip_paths) or raise the cap."
 [ "$disk_low" -eq 0 ] || echo "WARNING: free disk space is below log_min_free_mb (${MIN_FREE_MB} MiB); deleted $floor_deleted archive(s) for it (log_floor_delete=${FLOOR_DELETE:-false}, keeping the last $FLOOR_KEEP_DAYS days)."
 [ "$floor_limit_hit" -eq 0 ] || echo "NOTICE: stopped at the limit of $FLOOR_MAX_FILES files per run; the next run continues."
-if [ "$failed" -ne 0 ]; then JS_NOTE="$failed failure(s) while rotating logs in $LOG_DIR"; exit 1; fi
+if [ "$failed" -ne 0 ]; then JS_NOTE="$failed failure(s) while rotating logs in $LOG_DIR${fail_notes:+: $fail_notes}"; exit 1; fi
 exit 0

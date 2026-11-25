@@ -75,6 +75,9 @@ connection, and then skips Redis for `breaker_ttl` (5 s).
 - Case-insensitivity is ASCII only; a UA is matched as bytes. Regex: no back-references.
 - The request path reads the generated `guard/rules.cache.php` (OPcache). Without OPcache, or when the cache is stale and `rules.json` is read instead, 200 rules cost about 1 ms per request; keep the list short and save rules from the panel.
 - Hit counts (Rules page) lag by up to one snapshot interval and need the `snapshot` cron job.
+- The log append is bounded by `log_write_timeout_ms` only while it waits for the **file lock**. A `write()` that the operating system itself stalls (a hung disk, a frozen network filesystem) cannot be interrupted from PHP; a line is one small append to the page cache, so this needs a storage failure, not just a busy disk.
+- `log_sample.exempt` below 1 drops exempt requests at random: a single payment callback may be missing from the log. Leave it at 1 when you need to reconstruct callbacks.
+- Why a finished day was not compressed on a given production host cannot be proven from the code; the rotation now reports a reason for every skipped or failed day (output, job status, `logs/.last-rotate`), see docs/07-CONFIG-REFERENCE.md, Log rotation.
 - A "Quick block" of a UA longer than 120 chars becomes a prefix rule because the log keeps 120.
 
 ## GeoIP

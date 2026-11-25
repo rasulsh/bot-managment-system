@@ -9,8 +9,9 @@ minutes.
 generated_at is included on purpose: the panel shows the snapshot's age, and a
 stale snapshot is itself a useful alert that the analyzer has stopped.
 
-READ-ONLY with respect to the guard: this reads logs and Redis and writes one
-file of its own. It never touches a verdict.
+READ-ONLY with respect to the guard: this reads logs and Redis and writes its own
+files (snapshot.json and the derived log store of analyzer/ingest.py, which lets it
+read only the bytes appended since its last run). It never touches a verdict.
 """
 
 from __future__ import print_function
@@ -27,7 +28,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from analyzer import classifier as clf_mod
 from analyzer import config as config_mod
 from analyzer import fsmode
+from analyzer import ingest as ingest_mod
 from analyzer import jobreport
+from analyzer import lowprio as lowprio_mod
 from analyzer import logs as logs_mod
 from analyzer import model as model_mod
 from analyzer import outcomes as outcomes_mod
@@ -105,13 +108,38 @@ def count_rule_hits(rows, since=0.0):
     return out
 
 
+def fold_rule_hits(totals, counts, recent):
+    """Add one day's per-id counts (and the part of them inside the last 24 h) to the running totals. Pure."""
+    for rid, pair in counts.items():
+        slot = totals.setdefault(rid, {'h24': 0, 'd7': 0, 'last': 0.0})
+        slot['d7'] += int(pair[0])
+        slot['last'] = max(slot['last'], float(pair[1]))
+    for rid, pair in recent.items():
+        totals.setdefault(rid, {'h24': 0, 'd7': 0, 'last': 0.0})['h24'] += int(pair[0])
+
+
+def collect_rule_hits_store(store, now, days=7):
+    """collect_rule_hits over the ingest store (analyzer/ingest.py): the same numbers, without reading a log file."""
+    today = datetime.date.fromtimestamp(now)
+    totals = {}
+    for offset in range(int(days)):
+        key = (today - datetime.timedelta(days=offset)).strftime('%Y%m%d')
+        rows = list(store.hit_rows(key))
+        fold_rule_hits(totals, count_rule_hits(rows), count_rule_hits(rows, since=now - 86400) if offset < 2 else {})
+    for slot in totals.values():
+        slot['last'] = round(slot['last'], 3)
+    return totals
+
+
 def collect_rule_hits(log_dir, now, cache_path=None, days=7):
     """Per-rule hit counts for the panel's Rules page: {id: {h24, d7, last}}.
 
     Hits come from the logs, never from Redis counters in the request path. The
     last two days are always re-read (the 24 h window reaches back into
     yesterday); older finished days are counted once and kept in a small cache
-    file, so the 15-minute snapshot does not re-read a week of logs every time.
+    file. This is the direct-read path (--full-read, or when the incremental store
+    is unusable); the normal run takes the same numbers from the store
+    (collect_rule_hits_store), which needs no cache file.
     """
     today = datetime.date.fromtimestamp(now)
     cache = {}
@@ -138,12 +166,7 @@ def collect_rule_hits(log_dir, now, cache_path=None, days=7):
                 recent = count_rule_hits(rows, since=now - 86400)
         if offset >= 2:
             fresh[key] = counts
-        for rid, pair in counts.items():
-            slot = totals.setdefault(rid, {'h24': 0, 'd7': 0, 'last': 0.0})
-            slot['d7'] += int(pair[0])
-            slot['last'] = max(slot['last'], float(pair[1]))
-        for rid, pair in recent.items():
-            totals.setdefault(rid, {'h24': 0, 'd7': 0, 'last': 0.0})['h24'] += int(pair[0])
+        fold_rule_hits(totals, counts, recent)
     if cache_path:
         try:
             tmp = cache_path + '.tmp'
@@ -457,10 +480,15 @@ def top_mix(rows, n=10):
                 for name, tab in tables.items())
 
 
+def dash_block(hours, days7, ready, funnel, top):
+    """The dashboard v2 report block from its five parts. Pure."""
+    return {'v': 1, 'hours': hours, 'days7': days7, 'readiness': ready, 'funnel': funnel, 'top': top}
+
+
 def build_dash(rows24, rows7, now):
     """The dashboard v2 report block (snapshot key 'dash'). Pure."""
-    return {'v': 1, 'hours': hour_buckets(rows24, now, 24), 'days7': hour_buckets(rows7, now, 168),
-            'readiness': readiness(rows7, now), 'funnel': funnel_by_level(rows24), 'top': top_mix(rows24)}
+    return dash_block(hour_buckets(rows24, now, 24), hour_buckets(rows7, now, 168), readiness(rows7, now),
+                      funnel_by_level(rows24), top_mix(rows24))
 
 
 def local_tz():
@@ -725,11 +753,69 @@ def parse_args(argv):
     parser.add_argument('--log-dir', default=None)
     parser.add_argument('--days', type=int, default=None)
     parser.add_argument('--out', default=None)
+    parser.add_argument('--full-read', action='store_true', help='read every log file directly (no incremental store)')
     return parser.parse_args(argv)
+
+
+def _ts_of(row):
+    try:
+        return float(row.get('ts') or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def full_read_inputs(cfg, now, days):
+    """Everything main() needs, from a direct read of the last max(2 days + 1, 9) log days (the original path).
+
+    Used for --full-read, for --days other than 1, and when the incremental store cannot be used.
+    """
+    window = days * 86400
+    all_rows = list(logs_mod.read_lines(cfg['log_dir'], max(days * 2 + 1, 9), today=datetime.date.fromtimestamp(now)))   # 9 days: 24 h + 24 h before it, and 7 d for the dashboard
+    rows = [r for r in all_rows if _ts_of(r) >= now - window]
+    prev_rows = [r for r in all_rows if now - 2 * window <= _ts_of(r) < now - window]
+    rows24 = [r for r in all_rows if _ts_of(r) >= now - 86400]
+    rows7 = [r for r in all_rows if _ts_of(r) >= now - 7 * 86400]
+    return {'rows': rows, 'rows24': rows24, 'prev_kpi': kpi_counts(prev_rows), 'any_rows': bool(all_rows), 'hit_totals': None,
+            'days7': hour_buckets(rows7, now, 168), 'readiness': readiness(rows7, now)}
+
+
+def incremental_inputs(cfg, now):
+    """The same inputs from the ingest store: only the bytes appended since the last run are parsed (analyzer/ingest.py)."""
+    ingest_mod.update(cfg, now)
+    window = 86400
+    with ingest_mod.reader(cfg) as store:
+        rows = list(store.rows(now - window))
+        prev_kpi = kpi_counts(store.rows(now - 2 * window, until=now - window))
+        edge_ts = store.edge * 3600
+        days7 = hour_buckets(store.rows(max(edge_ts, now - 7 * 86400)), now, 168)
+        cells = store.cells()
+        for bucket in days7:
+            if bucket['t'] < edge_ts and bucket['t'] in cells:
+                bucket.update(cells[bucket['t']])
+        hits7 = []
+        for key, _path in store.hit_days():
+            hits7.extend(r for r in store.hit_rows(key) if _ts_of(r) >= now - 7 * 86400)
+        hit_totals = collect_rule_hits_store(store, now)
+    any_rows = bool(rows) or prev_kpi['requests'] > 0 or any(b['n'] for b in days7)
+    return {'rows': rows, 'rows24': rows, 'prev_kpi': prev_kpi, 'any_rows': any_rows, 'hit_totals': hit_totals,
+            'days7': days7, 'readiness': readiness(hits7, now)}
+
+
+def assemble(cfg, inputs, now, days):
+    """The snapshot payload (without tz / redis / rule tables) from one set of inputs. Pure."""
+    rows, rows24 = inputs['rows'], inputs['rows24']
+    payload = build(rows, cfg)
+    payload['kpi'] = {'cur': kpi_counts(rows), 'prev': inputs['prev_kpi'], 'window_h': days * 24}
+    payload['top'] = top_lists(rows)
+    payload['dash'] = dash_block(hour_buckets(rows24, now, 24), inputs['days7'], inputs['readiness'],
+                                 funnel_by_level(rows24), top_mix(rows24))
+    return payload
 
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if __name__ == '__main__':
+        lowprio_mod.apply()               # idle CPU priority for a run started by hand (the cron wrapper also sets I/O)
     try:
         cfg = config_mod.load(args.config)
     except Exception as exc:
@@ -749,31 +835,29 @@ def main(argv=None):
     # change meaning at local midnight and differ from the panel's time zone): read
     # enough daily files for the window and the one before it, then cut by ts.
     now = time.time()
-    window = days * 86400
-    all_rows = list(logs_mod.read_lines(cfg['log_dir'], max(days * 2 + 1, 9)))   # 9 days: 24 h + 24 h before it, and 7 d for the dashboard
-
-    def ts_of(row):
+    inputs = None
+    if days == 1 and not args.full_read:
         try:
-            return float(row.get('ts') or 0)
-        except (TypeError, ValueError):
-            return 0.0
-    rows = [r for r in all_rows if ts_of(r) >= now - window]
-    prev_rows = [r for r in all_rows if now - 2 * window <= ts_of(r) < now - window]
-    payload = build(rows, cfg)
-    payload['kpi'] = {'cur': kpi_counts(rows), 'prev': kpi_counts(prev_rows), 'window_h': days * 24}
-    payload['top'] = top_lists(rows)
-    payload['dash'] = build_dash([r for r in all_rows if ts_of(r) >= now - 86400],
-                                 [r for r in all_rows if ts_of(r) >= now - 7 * 86400], now)
+            inputs = incremental_inputs(cfg, now)
+        except Exception as exc:             # fail open: the logs themselves are always readable
+            print('WARNING: the incremental store is unavailable (%s); reading the logs directly.' % exc, file=sys.stderr)
+            jobreport.warn('incremental log store unavailable (%s): the snapshot read every log file directly' % exc)
+    if inputs is None:
+        inputs = full_read_inputs(cfg, now, days)
+    rows = inputs['rows']
+    payload = assemble(cfg, inputs, now, days)
     payload['tz'] = local_tz()
     payload['redis'] = redis_io.connect(cfg) is not None
     if not payload['redis']:
         jobreport.warn('Redis unreachable: the snapshot has no live Redis status')
-    if not all_rows:
+    if not inputs['any_rows']:
         jobreport.warn('no log rows in the last %d day(s): the dashboard shows nothing (is the guard logging?)' % (days * 2 + 1))
     try:
-        hit_totals = collect_rule_hits(
-            cfg['log_dir'], time.time(),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), '.rule-hits.json'))
+        hit_totals = inputs['hit_totals']
+        if hit_totals is None:
+            hit_totals = collect_rule_hits(
+                cfg['log_dir'], time.time(),
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), '.rule-hits.json'))
         payload['rules'], payload['iplists'] = split_list_hits(hit_totals)
     except Exception as exc:                  # hit counts are a convenience, never fatal
         print('WARNING: rule hit counts skipped: %s' % exc, file=sys.stderr)

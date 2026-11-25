@@ -2,10 +2,17 @@
 
 What changed in each release and what to do about it. Newest first.
 
+## Disk I/O and log volume (2026.11.38)
+
+* **What changed:** (1) The snapshot and the bot verification read only the log bytes appended since their last run (a derived store in `analyzer/rowstore/`, `analyzer/daily/`, `analyzer/.ingest-state.json`); on an 80 MB-a-day site the snapshot went from about 6 GB of memory and a minute of CPU every 15 minutes to a few hundred MB and seconds (docs/08-ANALYZER-PHASES.md, Incremental reading). (2) Every background job runs under `nice -n 19` / `ionice -c3` when they exist. (3) The panel's own page views are left out of the request log (`log_skip_panel`, the prefix is noted in `logs/.panel-path` when the panel is opened); `log_sample.exempt` and `log_write_timeout_ms` are new. (4) Log rotation decides what a finished day is without the clock (the newest file name is the live one), writes archives atomically, compresses at idle priority and reports a reason for every day it skipped. (5) A day that exists as both `.jsonl` and `.jsonl.gz` is no longer counted twice. (6) Retention: a **new** install's `config.php` says 30 days; an existing install keeps its value (and the built-in 60 when it names none). Settings -> Log storage and the dashboard card show the projected disk use.
+* **Upgrade:** just update. The **first** snapshot / verify run after the update reads the 9 days of logs once to build the store (about the cost of one old run, at idle priority); every run after that reads only new bytes. Nothing to configure. Nothing the guard reads changed, no log field was renamed or shortened.
+* **Rollback:** Update page *Roll back* to 2026.11.37: the old code ignores the new files (`rowstore/`, `daily/`, `.ingest-state.json`, `logs/.panel-path`, the new overlay keys, which the old guard discards on read) and reads the logs itself as before. Update forward again and the cursors are checked against the files, never trusted. The store can be deleted at any time.
+* **Reading `logs/.last-rotate`:** it now also has `skipped_live`, `skipped_idle`, `newest` and `failed_notes`, which say why a day was not compressed.
+
 ## Dashboard v2 (2026.11.36)
 
 * **What changed:** the dashboard layout, charts and reports (README 1.5, docs/15). Nothing in the guard, the configuration or the log format changed.
-* **Upgrade:** just update. The new reports fill in after the next snapshot run (at most 15 minutes; **Jobs -> snapshot**): until then the cards say "the next snapshot run adds this report". The snapshot job reads 9 days of logs (it read 3), so on a very busy site its run takes a little longer; it stays read-only.
+* **Upgrade:** just update. The new reports fill in after the next snapshot run (at most 15 minutes; **Jobs -> snapshot**): until then the cards say "the next snapshot run adds this report". The snapshot job reads 9 days of logs (it read 3), so on a very busy site its run takes a little longer; it stays read-only. (Since 2026.11.38 it reads only the bytes appended since its last run.)
 * **Rollback:** Update page *Roll back*. The old dashboard ignores the extra `dash` block in `snapshot.json`.
 
 ## Asset cache busting (2026.11.35)

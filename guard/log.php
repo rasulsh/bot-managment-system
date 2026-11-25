@@ -16,9 +16,10 @@ function gv_cut($s, $max) {
 // Per-request write policy, set once by gv_run():
 //   skip      the request path is in log_skip_paths: write nothing for it
 //   min_free  MiB that must stay free on the log disk (0 = no check)
+//   timeout_ms how long one append may wait for the file lock (log_write_timeout_ms)
 // Outside a request (tests, panel, CLI) the default writes everything.
 function gv_log_policy($set = null) {
-	static $policy = array('skip' => false, 'min_free' => 0);
+	static $policy = array('skip' => false, 'min_free' => 0, 'timeout_ms' => 50);
 	if (is_array($set)) { $policy = array_merge($policy, $set); }
 	return $policy;
 }
@@ -43,6 +44,42 @@ function gv_log_allowed($log_dir) {
 	return true;
 }
 
+// Append one line to a log file, waiting at most the policy's timeout_ms for the file lock. The lock is taken without blocking and
+// retried every millisecond: a slow or contended disk can therefore hold a request for at most that long, after which the row is
+// dropped and counted (guard-errors.log, once a minute). Returns true when the line was written. What this does NOT bound is a
+// write() that the kernel itself stalls on (a hung disk): PHP has no timeout for that, which is why a line is one small append.
+function gv_log_append($file, $line, $log_dir) {
+	$p = gv_log_policy();
+	$h = @fopen($file, 'ab');
+	if ($h === false) {
+		if (function_exists('gv_errlog')) { gv_errlog('log_write_failed', 'cannot append to ' . basename($file), $log_dir); }
+		return false;
+	}
+	$locked = @flock($h, LOCK_EX | LOCK_NB);       // the common case: free at once, no clock read
+	if (!$locked) {
+		$deadline = microtime(true) + max(0, (int)$p['timeout_ms']) / 1000;
+		while (microtime(true) < $deadline) {
+			usleep(1000);
+			if (@flock($h, LOCK_EX | LOCK_NB)) { $locked = true; break; }
+		}
+	}
+	if (!$locked) {
+		@fclose($h);
+		if (function_exists('gv_errlog')) {
+			gv_errlog('log_write_timeout', 'could not lock ' . basename($file) . ' within ' . (int)$p['timeout_ms'] . ' ms; rows are being dropped', $log_dir);
+		}
+		return false;
+	}
+	$n = @fwrite($h, $line);
+	@flock($h, LOCK_UN);
+	@fclose($h);
+	if ($n === false || $n < strlen($line)) {
+		if (function_exists('gv_errlog')) { gv_errlog('log_write_failed', 'cannot append to ' . basename($file), $log_dir); }
+		return false;
+	}
+	return true;
+}
+
 // Append one row to {log_dir}/guard-YYYYMMDD.jsonl.
 // The directory is passed explicitly so the logger stays free of global state
 // and can be unit-tested against a temporary directory.
@@ -61,12 +98,7 @@ function gv_log(array $row, $log_dir) {
 		$line = json_encode($row, $flags);
 		if ($line === false) { return; }
 		$file = rtrim($log_dir, '/\\') . '/guard-' . date('Ymd') . '.jsonl';
-		$n = @file_put_contents($file, $line . "\n", FILE_APPEND | LOCK_EX);
-		// A log that cannot be written is otherwise invisible: the guard keeps
-		// deciding and nothing records it. gv_errlog throttles itself.
-		if ($n === false && function_exists('gv_errlog')) {
-			gv_errlog('log_write_failed', 'cannot append to ' . basename($file), $log_dir);
-		}
+		gv_log_append($file, $line . "\n", $log_dir);     // a log that cannot be written is recorded in guard-errors.log (throttled)
 	} catch (\Throwable $e) {
 		// silent: the guard may fail, the site may not
 	}
@@ -91,12 +123,7 @@ function gv_log_outcome(array $row, $log_dir) {
 		$line = json_encode($row, $flags);
 		if ($line === false) { return; }
 		$file = rtrim($log_dir, '/\\') . '/guard-' . date('Ymd') . '.jsonl';
-		$n = @file_put_contents($file, $line . "\n", FILE_APPEND | LOCK_EX);
-		// A log that cannot be written is otherwise invisible: the guard keeps
-		// deciding and nothing records it. gv_errlog throttles itself.
-		if ($n === false && function_exists('gv_errlog')) {
-			gv_errlog('log_write_failed', 'cannot append to ' . basename($file), $log_dir);
-		}
+		gv_log_append($file, $line . "\n", $log_dir);     // a log that cannot be written is recorded in guard-errors.log (throttled)
 	} catch (\Throwable $e) {
 		// silent: the response is already on its way to the client
 	}

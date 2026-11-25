@@ -35,6 +35,7 @@ from analyzer import decision
 from analyzer import features as features_mod
 from analyzer import labels as labels_mod
 from analyzer import logs as logs_mod
+from analyzer import lowprio as lowprio_mod
 
 ACTIONS = ('allow', 'challenge', '403', '429')
 
@@ -337,6 +338,8 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if __name__ == '__main__':
+        lowprio_mod.apply()               # idle CPU priority for a run started by hand (the cron wrapper also sets I/O)
     try:
         cfg = config_mod.load(args.config)
     except Exception as exc:
@@ -360,7 +363,7 @@ def main(argv=None):
     base_cfg = bridge.decision_config(guard_cfg)
     cand_cfg = bridge.decision_config(guard_cfg, overrides)
 
-    rows = list(logs_mod.read_lines(cfg['log_dir'], cfg['window_days']))
+    rows = list(logs_mod.read_lines(cfg['log_dir'], cfg['window_days'], fields=logs_mod.REPLAY_FIELDS))
     sessions = logs_mod.sessionize(rows, cfg['session_gap_s'])
 
     ground_truth = labels_mod.load_ground_truth(

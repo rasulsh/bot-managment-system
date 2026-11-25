@@ -46,6 +46,13 @@ function gv_cfg_defaults(array $cfg) {
 		// scripts/guard-logrotate.sh (retention, total size cap) and by the
 		// logger (min free space, 0 = off).
 		'log_skip_paths'   => array(),
+		// The admin panel's own page views are not traffic: its URL prefix (written by the panel into <log_dir>/.panel-path) is
+		// left out of the log. log_sample.exempt: the share (0..1) of EXEMPT requests (payment callbacks, APIs) that is logged;
+		// 1 = all, 0 = none. log_write_timeout_ms: how long one log append may wait for the file lock before the row is dropped
+		// (counted in guard-errors.log); the request is never held longer.
+		'log_skip_panel'   => true,
+		'log_sample'       => array('exempt' => 1.0),
+		'log_write_timeout_ms' => 50,
 		'log_retention_days' => 60,
 		'log_max_mb'       => 0,
 		'log_min_free_mb'  => 200,
@@ -138,6 +145,12 @@ function gv_cfg_defaults(array $cfg) {
 		$cur = isset($cfg[$k]) ? $cfg[$k] : $d[0];
 		$cfg[$k] = ((is_int($cur) || (is_string($cur) && ctype_digit($cur))) && (int)$cur >= $d[1]) ? (int)$cur : $d[0];
 	}
+	$cfg['log_skip_panel'] = (bool)filter_var($cfg['log_skip_panel'], FILTER_VALIDATE_BOOLEAN);
+	$wt = $cfg['log_write_timeout_ms'];
+	$cfg['log_write_timeout_ms'] = ((is_int($wt) || (is_string($wt) && ctype_digit($wt))) && (int)$wt <= 2000) ? (int)$wt : 50;
+	$ls = (isset($cfg['log_sample']) && is_array($cfg['log_sample'])) ? $cfg['log_sample'] : array();
+	$ex = isset($ls['exempt']) ? $ls['exempt'] : 1.0;
+	$cfg['log_sample'] = array('exempt' => (is_numeric($ex) && (float)$ex >= 0.0 && (float)$ex <= 1.0) ? (float)$ex : 1.0);
 	// GeoIP: 'log' writes the country (and ASN) of every request into the log row.
 	// Off by default: the lookup then only runs when a rule needs it.
 	if (!isset($cfg['geo']) || !is_array($cfg['geo'])) { $cfg['geo'] = array(); }
@@ -227,6 +240,9 @@ function gv_overlay_whitelist() {
 		'exempt_params_paths' => array('exactpaths'),
 		// Log storage.
 		'log_skip_paths'     => array('paths'),
+		'log_skip_panel'     => array('bool'),
+		'log_sample.exempt'  => array('float', 0.0, 1.0),
+		'log_write_timeout_ms' => array('int', 0, 2000),
 		'log_retention_days' => array('int', 1, 3650),
 		'log_max_mb'         => array('int', 0, 10000000),
 		'log_min_free_mb'    => array('int', 0, 1000000),
@@ -861,6 +877,25 @@ function gv_is_exempt(array $f, array $exempt_paths, array $exempt_params, $para
 	return false;
 }
 
+// log_sample.exempt: true when this exempt request is NOT to be logged. 1 logs every one, 0 none, in between a random share.
+// $draw (0..1) is injectable for tests.
+function gv_exempt_sampled_out($share, $draw = null) {
+	if ($share >= 1.0) { return false; }
+	if ($share <= 0.0) { return true; }
+	$draw = $draw === null ? mt_rand() / mt_getrandmax() : (float)$draw;
+	return $draw >= $share;
+}
+
+// The URL prefix the admin panel wrote into <log_dir>/.panel-path (panel/index.php), e.g. "/gv-admin/", or '' when there is none or it
+// is not a plain directory prefix. One small file read per request, only while log_skip_panel is on.
+function gv_panel_prefix($log_dir) {
+	$v = @file_get_contents(rtrim((string)$log_dir, '/\\') . '/.panel-path', false, null, 0, 202);
+	if (!is_string($v)) { return ''; }
+	$v = trim($v);
+	if (strlen($v) < 3 || strlen($v) > 200 || $v[0] !== '/' || substr($v, -1) !== '/' || !preg_match('#^/[A-Za-z0-9._~/-]+/$#', $v) || strpos($v, '..') !== false) { return ''; }
+	return $v;
+}
+
 // Prefix match for exempt_paths and log_skip_paths. A path with a dot
 // segment, an empty segment or an encoded slash, dot or backslash never
 // matches (see gv_is_exempt): "/gv-admin/../product/x" is not under /gv-admin/.
@@ -1290,10 +1325,16 @@ function gv_run($t0) {
 	$cfg = gv_cfg_load();
 	$f   = gv_facts($_SERVER, $_GET, $_COOKIE, $cfg);
 	$log = (string)$cfg['log_dir'];
+	$skip_paths = (array)$cfg['log_skip_paths'];
+	if (!empty($cfg['log_skip_panel'])) {
+		$panel = gv_panel_prefix($log);
+		if ($panel !== '') { $skip_paths[] = $panel; }
+	}
 	gv_log_policy(array(
 		// GV_DRY_RUN: the updater's health check (updates/verify.php) runs one synthetic request and must leave no log row.
-		'skip'     => defined('GV_DRY_RUN') || gv_path_has_prefix($f['path'], (array)$cfg['log_skip_paths']),
+		'skip'     => defined('GV_DRY_RUN') || gv_path_has_prefix($f['path'], $skip_paths),
 		'min_free' => max(0, (int)$cfg['log_min_free_mb']),
+		'timeout_ms' => max(0, (int)$cfg['log_write_timeout_ms']),
 	));
 	$st  = gv_state_new();
 	gv_redis_ctx(array('log_dir' => $log));       // where swallowed errors are reported
@@ -1500,6 +1541,8 @@ function gv_run($t0) {
 
 	// 3. Exemptions. CLI was already excluded by prepend.php.
 	if (gv_is_exempt($f, $cfg['exempt_paths'], $cfg['exempt_params'], $cfg['exempt_params_paths'])) {
+		// log_sample.exempt < 1: only that share of exempt requests is logged (the outcome line follows the decision line).
+		if (gv_exempt_sampled_out((float)$cfg['log_sample']['exempt'])) { gv_log_policy(array('skip' => true)); }
 		gv_emit($f, $st, 'exempt', 0, $t0, $log);
 		gv_arm_outcome($cfg, $f, $log);
 		return;

@@ -22,7 +22,7 @@ $groups = array(
 	'paths'    => array('set_group_paths', '', array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'honeypot_path')),
 	'network'  => array('set_group_network', '', array('cdn_ranges', 'cdn_ranges_feed')),
 	'bots'     => array('set_group_bots', '', array('known_bots', 'preview_bots', 'bot_suffixes')),
-	'logs'     => array('set_group_logs', 'set_group_logs_sub', array('log_skip_paths', 'log_retention_days', 'log_max_mb', 'log_min_free_mb', 'log_floor_delete', 'log_floor_keep_days')),
+	'logs'     => array('set_group_logs', 'set_group_logs_sub', array('log_skip_paths', 'log_skip_panel', 'log_sample.exempt', 'log_write_timeout_ms', 'log_retention_days', 'log_max_mb', 'log_min_free_mb', 'log_floor_delete', 'log_floor_keep_days')),
 	'geo'      => array('set_group_geo', 'set_group_geo_sub', array('geo.log', 'geo.upload_max_mb')),
 	'captcha'  => array('set_group_captcha', 'set_group_captcha_sub', array('captcha.level', 'captcha.length', 'captcha.charset', 'captcha.warp', 'captcha.noise', 'captcha.overlap',
 		'captcha.time_limit', 'captcha.max_attempts', 'captcha.ip_budget', 'captcha.ip_window', 'captcha.require_pow', 'captcha.escalate_score', 'captcha.device_budget',
@@ -170,6 +170,9 @@ $field = function ($key) use ($rules, $overlay, $errors, $value_of, $lbl) {
 		gp_tab_begin('set', $gid, $tab_labels[$gid]); ?>
 		<div class="gp-card">
 		<?php if ($g[1] !== ''): ?><p class="gp-help" style="margin-bottom:.75rem"><?= gp_e(gp_t($g[1])) ?></p><?php endif; ?>
+		<?php if ($gid === 'logs'): $ls_now = gp_log_projection(); if (!empty($ls_now['avg_day'])): ?>
+		<p class="gp-note" id="set-log-projection"><?= gp_e(gp_t('ls_projected')) ?>: <strong><?= gp_e(gp_bytes($ls_now['projected'])) ?></strong> · <?= gp_e(sprintf(gp_t('ls_projected_avg'), gp_bytes($ls_now['avg_day']), gp_num($ls_now['retention_days']))) ?></p>
+		<?php endif; endif; ?>
 		<?php if ($gid === 'captcha'): $gd_ok = gv_captcha_available(); ?>
 		<div class="gp-note<?= $gd_ok ? '' : ' gp-note-strong' ?>" role="status" id="cap-gd"><?= gp_e(gp_t($gd_ok ? 'cap_gd_ok' : 'cap_gd_missing')) ?></div>
 		<p class="gp-help"><?= gp_e(gp_t('cap_tab_note')) ?></p>
