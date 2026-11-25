@@ -44,7 +44,8 @@ bursts=0; for n in 1 2 3 4 5 6 7 8; do grep -q 'data-chip="kill"' "$WORK/bp$n" &
 logins=0; for n in 1 2 3; do [ "$(cat "$WORK/bc$n" 2>/dev/null)" = 303 ] && logins=$((logins + 1)); done
 ok "eight overlapping first page loads and three overlapping first sign-ins all succeed during the migration ($bursts/8 pages, $logins/3 sign-ins)" "$([ "$bursts" = 8 ] && [ "$logins" = 3 ] && echo 1 || echo 0)"
 ok "...and the migrated store is one valid, complete copy (no half-written or older copy replaced a newer one)" "$(php -r '$j=json_decode(file_get_contents($argv[1]),true); $o=json_decode(file_get_contents($argv[2]),true); echo (is_array($j) && count($j["users"])===count($o["users"]) && $j["users"][0]["username"]==="admin" && $j["users"][0]["password_hash"]===$o["users"][0]["password_hash"] && $j["users"][0]["session_version"]===$o["users"][0]["session_version"]) ? 1 : 0;' "$T/data/panel/users.json" "$T/panel/users.json" 2>/dev/null)"
-ls "$T/data/panel" | grep -q '\.mig' && ok "...no temporary copy is left behind" 0 || ok "...no temporary copy is left behind" 1
+leftover=0; for f in "$T"/data/panel/*.mig*; do [ -e "$f" ] && leftover=1; done
+ok "...no temporary copy is left behind" "$([ "$leftover" = 0 ] && echo 1 || echo 0)"
 page="$(curl -s -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
 ok "the FIRST request after the move: the signed-in administrator is still signed in (the dashboard, not the login page)" "$(grep -q 'data-chip="kill"' <<<"$page" && echo 1 || echo 0)"
 ok "...the store was migrated to data/panel/users.json (same user, password hash, role and session version)" "$(php -r '$a=json_decode(file_get_contents($argv[1]),true)["users"][0]; $b=json_decode(file_get_contents($argv[2]),true)["users"][0]; echo ($a["username"]===$b["username"] && $a["password_hash"]===$b["password_hash"] && $a["session_version"]===$b["session_version"] && $a["role"]===$b["role"]) ? 1 : 0;' "$T/panel/users.json" "$T/data/panel/users.json" 2>/dev/null)"
