@@ -48,7 +48,7 @@ function gp_audit_append(array $row) {
 		$line = json_encode($row, $flags);
 		if ($line === false) { return false; }
 		$ok = @file_put_contents(gp_audit_path(), $line . "\n", FILE_APPEND | LOCK_EX);
-		if ($ok !== false) { @chmod(gp_audit_path(), 0640); }
+		if ($ok !== false) { @chmod(gp_audit_path(), 0600); }
 		return $ok !== false;
 	} catch (\Throwable $e) {
 		return false;

@@ -1,8 +1,19 @@
-# Exact versions: the ones CI installs and tests (Python 3.9 and 3.13). An unpinned "scikit-learn>=1.0" upgraded by pip_sync can make the
+# Exact versions: the ones CI installs and tests (Python 3.9 and 3.13), including the packages scikit-learn pulls in (scipy, joblib,
+# threadpoolctl, cloudpickle): a model is a pickle, so every one of them can change what loads. Python 3.10 and 3.11 are not in CI: the middle
+# lines are the newest releases that support them. An unpinned "scikit-learn>=1.0" upgraded by pip_sync can make the
 # saved joblib models unloadable in production (a model is a pickle of scikit-learn objects). Change a pin together with a retrain and a
 # test run; the in-panel updater never installs these by itself, an administrator confirms it on the Update result page.
 redis==5.2.1
 scikit-learn==1.6.1
+maxminddb==2.6.3
 numpy==2.0.2; python_version < "3.10"
 numpy==2.2.6; python_version >= "3.10"
-maxminddb==2.6.3
+scipy==1.13.1; python_version < "3.10"
+scipy==1.15.3; python_version >= "3.10" and python_version < "3.12"
+scipy==1.18.1; python_version >= "3.12"
+joblib==1.5.3; python_version < "3.12"
+joblib==1.6.0; python_version >= "3.12"
+threadpoolctl==3.7.0; python_version < "3.10"
+threadpoolctl==3.6.0; python_version >= "3.10" and python_version < "3.12"
+threadpoolctl==3.8.0; python_version >= "3.12"
+cloudpickle==3.1.3; python_version >= "3.12"

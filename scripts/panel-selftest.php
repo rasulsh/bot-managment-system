@@ -5405,10 +5405,12 @@ $GLOBALS['gp_test_probe'] = function ($host, $path, $https) { return array('code
 $ex3 = gp_data_exposure_probe(time());
 $GLOBALS['gp_test_probe'] = function ($host, $path, $https) { return null; };
 $ex4 = gp_data_exposure_probe(time());
+$GLOBALS['gp_test_probe'] = function ($host, $path, $https) { return array('code' => 301, 'body' => ''); };      // a site that sends http:// to https://
+$ex5 = gp_data_exposure_probe(time());
 unset($GLOBALS['gp_test_probe'], $_SERVER['SCRIPT_NAME']);
 t_ok('SEC-2: the probe asks for <panel URL>/users.json and /audit.jsonl; a 200 that serves the store is "exposed", 403 / 404 is "ok", a soft-404 page or no answer is "unknown" (no false alarm)',
 	$ex1['state'] === 'exposed' && strpos($ex1['detail'], '/gv-admin/users.json') !== false && $probe_calls === array('/gv-admin/users.json', '/gv-admin/audit.jsonl')
-	&& $ex2['state'] === 'ok' && $ex3['state'] === 'ok' && $ex4['state'] === 'ok');
+	&& $ex2['state'] === 'ok' && $ex3['state'] === 'unknown' && $ex4['state'] === 'unknown' && $ex5['state'] === 'unknown');
 $al = gp_health_alerts(array('now' => time(), 'redis_up' => true, 'data_exposure' => array('state' => 'exposed', 'detail' => '/gv-admin/users.json')));
 $al_ids = array(); $al_lv = array();
 foreach ($al as $a_) { $al_ids[] = $a_['id']; $al_lv[$a_['id']] = $a_['level']; }

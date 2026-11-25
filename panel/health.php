@@ -402,14 +402,19 @@ function gp_data_exposure_probe_run() {
 	if ($fetch === 'gp_data_probe_fetch' && (!preg_match('/^[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?$/', $host) || !preg_match('#^(/[A-Za-z0-9._~-]+)*$#', $prefix))) { return $unknown; }
 	$https = gp_is_https();
 	$exposed = array();
+	$denied = true;
 	$exposed_started = microtime(true);
 	foreach (array('users.json' => '"password_hash"', 'audit.jsonl' => '"event"') as $name => $needle) {
 		if ($exposed_started + 3.0 < microtime(true)) { break; }        // never more than about three seconds in all
 		$r = call_user_func($fetch, $host, $prefix . '/' . $name, $https);
-		if (!is_array($r)) { continue; }
-		if ((int)$r['code'] === 200 && strpos((string)$r['body'], $needle) !== false) { $exposed[] = $prefix . '/' . $name; }
+		if (!is_array($r)) { $denied = false; continue; }                 // no answer: cannot tell
+		$code = (int)$r['code'];
+		if ($code === 200 && strpos((string)$r['body'], $needle) !== false) { $exposed[] = $prefix . '/' . $name; }
+		elseif (!in_array($code, array(401, 403, 404, 410), true)) { $denied = false; }   // a redirect (http -> https), a 5xx or a soft-404 page proves nothing
 	}
-	return $exposed ? array('state' => 'exposed', 'detail' => implode(' ', $exposed)) : array('state' => 'ok', 'detail' => '');
+	if ($exposed) { return array('state' => 'exposed', 'detail' => implode(' ', $exposed)); }
+	// "ok" only when every file was refused outright. Anything else is "unknown": neutral, nothing is shown and no alert is raised.
+	return array('state' => $denied ? 'ok' : 'unknown', 'detail' => '');
 }
 
 // One GET to the local web server for $path with the visitor's Host header. Returns array('code' => int, 'body' => first 4 KiB) or null.

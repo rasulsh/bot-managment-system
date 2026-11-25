@@ -258,7 +258,11 @@ function gv_panel_data_migrate($dir) {
 		$tmp = $dir . '/' . $name . '.mig' . getmypid();
 		if (@copy($old . '/' . $name, $tmp)) {
 			@chmod($tmp, 0600);
-			if (!@rename($tmp, $dir . '/' . $name)) { @unlink($tmp); }
+			// Never replace a file another request has already migrated AND written to since: link() fails when the target exists,
+			// so a slow copy of the OLD data cannot overwrite a newer one. Where hard links are not available, rename after a last look.
+			if (@link($tmp, $dir . '/' . $name)) { @unlink($tmp); }
+			elseif (!is_file($dir . '/' . $name) && @rename($tmp, $dir . '/' . $name)) { /* moved */ }
+			else { @unlink($tmp); }
 		}
 	}
 	$ver = trim((string)@file_get_contents(dirname(__DIR__) . '/VERSION'));
