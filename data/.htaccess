@@ -1,0 +1,16 @@
+# Deny all direct web access to the runtime data of the panel (data/panel/: users.json with the password hashes, the audit trail, the sign-in
+# counters). The directory is created by the panel on first load; it is outside panel/, the only directory that is published.
+<IfModule mod_authz_core.c>
+	Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+	Order allow,deny
+	Deny from all
+</IfModule>
+# Second, independent mechanism: servers differ in which directive family they
+# honour inside .htaccess (Apache 2.4 reads both; LiteSpeed's support for the
+# authorization family varies by edition), so a rewrite rule answers 403 as well.
+<IfModule mod_rewrite.c>
+	RewriteEngine On
+	RewriteRule ^ - [F,L]
+</IfModule>

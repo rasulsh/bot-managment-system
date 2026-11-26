@@ -25,13 +25,14 @@ function t_section($name) { echo "\n-- $name\n"; }
 $T_DIR = sys_get_temp_dir() . '/gv-redis-selftest-' . getmypid();
 @mkdir($T_DIR, 0775, true);
 $T_PIDS = array();
-$T_AUDIT_BACKUP = is_file(__DIR__ . '/../panel/audit.jsonl') ? file_get_contents(__DIR__ . '/../panel/audit.jsonl') : null;
+$T_AUDIT_PATH = gv_panel_data_path('audit.jsonl');
+$T_AUDIT_BACKUP = is_file($T_AUDIT_PATH) ? file_get_contents($T_AUDIT_PATH) : null;
 
 function t_cleanup() {
-	global $T_DIR, $T_PIDS, $T_AUDIT_BACKUP;
-	// The panel tests enqueue jobs, which append to the real panel/audit.jsonl:
+	global $T_DIR, $T_PIDS, $T_AUDIT_BACKUP, $T_AUDIT_PATH;
+	// The panel tests enqueue jobs, which append to the real audit trail (data/panel/audit.jsonl):
 	// put it back exactly as it was.
-	$audit = __DIR__ . '/../panel/audit.jsonl';
+	$audit = $T_AUDIT_PATH;
 	if ($T_AUDIT_BACKUP === null) { @unlink($audit); } else { @file_put_contents($audit, $T_AUDIT_BACKUP); }
 	foreach ((array)@glob($T_DIR . '/redis-*.pid') as $pf) { $T_PIDS[] = (int)trim((string)@file_get_contents($pf)); }
 	foreach ($T_PIDS as $pid) { if ($pid > 1) { @posix_kill($pid, 15); } }
@@ -141,6 +142,26 @@ $R = array('host' => '127.0.0.1', 'port' => 63800);
 $cx = gv_redis_connect($R + array('timeout' => 0.2));
 gv_redis_cmd($cx, array('FLUSHALL'));
 
+// LOG-9: the honeypot mark is per DEVICE when the client has one, per IPv6 /64, and per IPv4 address with a short TTL
+gv_redis_cmd($cx, array('FLUSHALL'));
+$c6 = t_cfg(array(), array('honeypot_ip_ttl' => 900));
+$hp6 = t_nav(); $hp6['REQUEST_URI'] = '/old-archive'; $hp6['REMOTE_ADDR'] = '2001:db8:aa:bb:1:2:3:4';
+t_probe($c6, $hp6);
+t_ok('LOG-9: an IPv6 client without a device is marked by its /64 for 7 days (a rotating address inside it keeps the mark)',
+	gv_redis_cmd($cx, array('GET', 'gv:hpn:2001:db8:aa:bb::/64')) === '1' && gv_redis_cmd($cx, array('TTL', 'gv:hpn:2001:db8:aa:bb::/64')) > 600000);
+$hp4 = t_nav(); $hp4['REQUEST_URI'] = '/old-archive'; $hp4['REMOTE_ADDR'] = '198.51.100.40';
+t_probe($c6, $hp4);
+t_ok('LOG-9: an IPv4 client without a device is marked for honeypot_ip_ttl (900 s here), not 7 days (everyone behind one carrier address used to get +40 for a week)',
+	gv_redis_cmd($cx, array('GET', 'gv:hpn:198.51.100.40')) === '1' && ($ttl4 = gv_redis_cmd($cx, array('TTL', 'gv:hpn:198.51.100.40'))) > 0 && $ttl4 <= 900);
+$other = t_nav(); $other['REMOTE_ADDR'] = '198.51.100.40';
+$o1 = t_probe($c6, $other);
+$ro = t_lastrow($c6);
+t_ok('LOG-9: ...and the address is scored with HP_HIST while the mark lives', in_array('HP_HIST', (array)$ro['rs'], true));
+gv_redis_cmd($cx, array('DEL', 'gv:hpn:198.51.100.40'));
+$o2 = t_probe($c6, $other);
+t_ok('LOG-9: ...and without it once the mark has expired', !in_array('HP_HIST', (array)t_lastrow($c6)['rs'], true));
+gv_redis_cmd($cx, array('FLUSHALL'));
+
 // --------------------------------------------------------------------------
 t_section('Pipeline primitive');
 
@@ -218,14 +239,15 @@ $hp = t_nav(); $hp['REQUEST_URI'] = '/old-archive';
 $p = t_probe($cfg, $hp);
 $row = t_lastrow($cfg);
 t_ok('the honeypot costs at most 2 round trips (' . $p['rt'] . ') and fires', $p['rt'] <= 2 && $row['act'] === '404_hp'
-	&& gv_redis_cmd($cx, array('GET', 'gv:hp:198.51.100.9')) === '1');
+	&& gv_redis_cmd($cx, array('GET', 'gv:hpn:198.51.100.9')) === '1' && gv_redis_cmd($cx, array('TTL', 'gv:hpn:198.51.100.9')) <= 3600
+	&& gv_redis_cmd($cx, array('GET', 'gv:hp:198.51.100.9')) === null);
 t_ok('the honeypot fires even with every enforce toggle off', (function () use ($cx) {
 	global $T_DIR;
-	gv_redis_cmd($cx, array('DEL', 'gv:hp:198.51.100.9'));
+	gv_redis_cmd($cx, array('DEL', 'gv:hpn:198.51.100.9'));
 	$c = t_cfg(array(), array('enforce' => array('block' => false, 'challenge' => false, 'ratelimit' => false)));
 	$hp = t_nav(); $hp['REQUEST_URI'] = '/old-archive';
 	t_probe($c, $hp);
-	return gv_redis_cmd($cx, array('GET', 'gv:hp:198.51.100.9')) === '1';
+	return gv_redis_cmd($cx, array('GET', 'gv:hpn:198.51.100.9')) === '1';
 })());
 gv_redis_cmd($cx, array('FLUSHALL'));
 
@@ -572,6 +594,8 @@ function t_panel_as($prefix, $name) {
 		array('log_dir' => $T_DIR . '/pnl-' . $name)), true) . ';');
 	putenv('GV_CONFIG=' . $path);
 	gp_redis(true);
+	gp_limiter_conn(true);       // one limiter connection per request: a new install context needs a new one
+	gp_job_list_forget();
 }
 gv_redis_cmd($cx, array('FLUSHALL'));
 t_panel_as('shop1:', 'a');
@@ -639,9 +663,14 @@ foreach (array('guard', 'panel') as $dir) {
 		if (basename($path) === 'redis.php') { continue; }
 		// panel/feeds.php fetches provider IP ranges over HTTPS: its one socket is checked on its own below (ssl:// only, never Redis).
 		if ($dir === 'panel' && basename($path) === 'feeds.php') { continue; }
+		// panel/health.php's exposure probe asks the panel's OWN web server (127.0.0.1, HTTP over tcp:// or ssl://): checked on its own below.
+		if ($dir === 'panel' && basename($path) === 'health.php') { continue; }
 		if (preg_match('/stream_socket_client|pfsockopen|fsockopen|new Redis\b/', file_get_contents($path))) { $conns[] = basename($path); }
 	}
 }
+$hh = file_get_contents(__DIR__ . '/../panel/health.php');
+t_ok('the exposure probe in health.php connects to 127.0.0.1 only (one socket call, tcp:// or ssl://, a loopback address, never a Redis port)',
+	substr_count($hh, 'stream_socket_client(') === 1 && strpos($hh, "127.0.0.1:' . \$port") !== false && preg_match('/\bnew Redis\b|fsockopen|pfsockopen/', $hh) === 0);
 t_ok('nothing opens Redis except the shared connect function' . ($conns ? ' (' . implode(', ', $conns) . ')' : ''), !$conns);
 $fsrc = (string)file_get_contents(__DIR__ . '/../panel/feeds.php');
 t_ok('the IP feed fetcher opens exactly one socket, TLS only (ssl://), and never speaks to Redis', preg_match_all('/stream_socket_client|pfsockopen|fsockopen|new Redis\b/', $fsrc) === 1 && strpos($fsrc, "stream_socket_client('ssl://'") !== false && stripos($fsrc, 'gv_redis') === false);

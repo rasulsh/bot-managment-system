@@ -29,6 +29,9 @@ function gv_cfg_defaults(array $cfg) {
 		'nonce_ttl'        => 120,
 		'hard_block_score' => 60,
 		'honeypot_path'    => '/old-archive',
+		// How long an honeypot hit marks a client that has no device id by its IPv4 address (seconds). An IPv4 address can be one of thousands behind
+		// a carrier's NAT, so the mark is short; a client WITH a device id is marked by the device for 7 days, an IPv6 client by its /64.
+		'honeypot_ip_ttl'  => 3600,
 		'exempt_paths'     => array(),
 		'exempt_params'    => array(),
 		'known_bots'       => array(),
@@ -41,6 +44,9 @@ function gv_cfg_defaults(array $cfg) {
 		// feed never touches what the operator typed; the request path trusts the union of both.
 		'cdn_ranges_feed'  => array(),
 		'log_dir'          => dirname(__DIR__) . '/logs',
+		// Where the panel keeps its runtime data (users.json, audit.jsonl, jobs-seen.json, the sign-in counters). '' = <install>/data/panel, a
+		// directory that is not exposed by the symlink that publishes panel/. Set an absolute path to move it elsewhere (file only, never the panel).
+		'panel_data_dir'   => '',
 		// Log storage. log_skip_paths: path prefixes never written to the log
 		// (the guard still decides for them). The rest is read by
 		// scripts/guard-logrotate.sh (retention, total size cap) and by the
@@ -54,6 +60,9 @@ function gv_cfg_defaults(array $cfg) {
 		// log_skip_ips: client addresses (IPv4 / IPv6, single or CIDR, at most 200) whose requests are decided as always but never written to the
 		// log, e.g. the operator's own network. Compiled once into guard/logskip.cache.php; free while the list is empty.
 		'log_skip_ips'     => array(),
+		// log_redact_params: query-string parameters whose VALUE is replaced by *** before the request is logged (reset tokens, gateway
+		// references, e-mail addresses ...). Matched case-insensitively on the decoded name; name[...] counts as name.
+		'log_redact_params' => array('token', 'key', 'password', 'pass', 'pwd', 'secret', 'code', 'authority', 'refid', 'resnum', 'trackingcode', 'email', 'mobile', 'phone'),
 		'log_sample'       => array('exempt' => 1.0),
 		'log_write_timeout_ms' => 50,
 		'log_retention_days' => 60,
@@ -138,7 +147,7 @@ function gv_cfg_defaults(array $cfg) {
 		$cur = isset($cfg['limits'][$k]) ? $cfg['limits'][$k] : $v;
 		$cfg['limits'][$k] = ((is_int($cur) || (is_string($cur) && ctype_digit($cur))) && (int)$cur >= 1) ? (int)$cur : $v;
 	}
-	foreach (array('token_ttl' => 604800, 'nonce_ttl' => 120) as $k => $v) {
+	foreach (array('token_ttl' => 604800, 'nonce_ttl' => 120, 'honeypot_ip_ttl' => 3600) as $k => $v) {
 		$cur = isset($cfg[$k]) ? $cfg[$k] : $v;
 		$cfg[$k] = ((is_int($cur) || (is_string($cur) && ctype_digit($cur))) && (int)$cur >= 1) ? (int)$cur : $v;
 	}
@@ -180,10 +189,100 @@ function gv_cfg_defaults(array $cfg) {
 			if (!is_bool($v)) { $cfg[$grp][$k] = (bool)filter_var($v, FILTER_VALIDATE_BOOLEAN); }
 		}
 	}
-	foreach (array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'known_bots', 'preview_bots', 'cdn_ranges', 'cdn_ranges_feed', 'bot_suffixes', 'log_skip_paths', 'log_skip_ips') as $k) {
+	foreach (array('exempt_paths', 'exempt_params', 'exempt_params_paths', 'known_bots', 'preview_bots', 'cdn_ranges', 'cdn_ranges_feed', 'bot_suffixes', 'log_skip_paths', 'log_skip_ips', 'log_redact_params') as $k) {
 		if (!is_array($cfg[$k])) { $cfg[$k] = array(); }
 	}
 	return $cfg;
+}
+
+// --------------------------------------------------------------------------
+// The panel's runtime data directory
+// --------------------------------------------------------------------------
+//
+// users.json (password hashes), audit.jsonl and the other runtime files of the panel used to live inside panel/, which is the directory
+// that is exposed to the web by a symlink or a copy under the docroot: one missing rule away from being downloadable. They now live in
+// <install>/data/panel/ (config key panel_data_dir), which is outside whatever the web server is pointed at. See gv_panel_data_path().
+
+// The directory, without a trailing slash. GV_PANEL_DATA (tests) wins over the config key, which wins over the default.
+function gv_panel_data_dir() {
+	$env = getenv('GV_PANEL_DATA');
+	if (is_string($env) && $env !== '') { return rtrim($env, '/\\'); }
+	$dir = '';
+	try {
+		$cfg = gv_cfg_load();
+		$dir = isset($cfg['panel_data_dir']) && is_string($cfg['panel_data_dir']) ? trim($cfg['panel_data_dir']) : '';
+	} catch (\Throwable $e) {
+		$dir = '';
+	}
+	if ($dir !== '' && $dir[0] === '/' && strpos($dir, "\0") === false) { return rtrim($dir, '/\\'); }
+	return dirname(__DIR__) . '/data/panel';
+}
+
+// Where the files lived before 2026.11.39: panel/ (GV_PANEL_OLD, for the self-test).
+function gv_panel_old_dir() {
+	$env = getenv('GV_PANEL_OLD');
+	return (is_string($env) && $env !== '') ? rtrim($env, '/\\') : dirname(__DIR__) . '/panel';
+}
+
+// The files that moved (names inside panel/ and inside the data directory).
+function gv_panel_data_files() {
+	return array('users.json', 'users.json.lock', 'audit.jsonl', 'jobs-seen.json');
+}
+
+// Path of one runtime file. The first call of a request migrates (gv_panel_data_migrate): idempotent, never destructive. When the data
+// directory cannot be created or written the OLD location is used (read AND write), so a panel on a read-only data path keeps working.
+function gv_panel_data_path($name) {
+	static $ready = null;
+	$dir = gv_panel_data_dir();
+	if ($ready === null || $ready['dir'] !== $dir) { $ready = array('dir' => $dir, 'ok' => gv_panel_data_migrate($dir)); }
+	if ($ready['ok'] || is_file($dir . '/' . $name)) { return $dir . '/' . $name; }
+	return gv_panel_old_dir() . '/' . $name;
+}
+
+// Create the data directory (0700, with an .htaccess that denies everything for the day somebody points a web server at it) and copy
+// the old files in, once. A file that already exists in the new place is NEVER overwritten. The old copies stay in panel/ so that a
+// rollback to the release that read them there still finds them (they are as old as the migration: changes made afterwards are in
+// the new files only); they are removed by the first run of a LATER release (gv_panel_data_cleanup). Returns true when the directory is
+// usable.
+function gv_panel_data_migrate($dir) {
+	if (!is_dir($dir)) { @mkdir($dir, 0700, true); }
+	if (!is_dir($dir) || !is_writable($dir)) { return false; }
+	@chmod($dir, 0700);
+	if (!is_file($dir . '/.htaccess')) {
+		@file_put_contents($dir . '/.htaccess', "# Runtime data of the panel: never served.\n<IfModule mod_authz_core.c>\n\tRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n\tOrder allow,deny\n\tDeny from all\n</IfModule>\n");
+	}
+	$old = gv_panel_old_dir();
+	$marker = $dir . '/.migrated';
+	foreach (gv_panel_data_files() as $name) {
+		if (is_file($dir . '/' . $name) || !is_file($old . '/' . $name) || is_link($old . '/' . $name)) { continue; }
+		$tmp = $dir . '/' . $name . '.mig' . getmypid();
+		if (@copy($old . '/' . $name, $tmp)) {
+			@chmod($tmp, 0600);
+			// Never replace a file another request has already migrated AND written to since: link() fails when the target exists,
+			// so a slow copy of the OLD data cannot overwrite a newer one. Where hard links are not available, rename after a last look.
+			if (@link($tmp, $dir . '/' . $name)) { @unlink($tmp); }
+			elseif (!is_file($dir . '/' . $name) && @rename($tmp, $dir . '/' . $name)) { /* moved */ }
+			else { @unlink($tmp); }
+		}
+	}
+	$ver = trim((string)@file_get_contents(dirname(__DIR__) . '/VERSION'));
+	if (!is_file($marker)) {
+		// Which release made the copies; a later release deletes the old ones.
+		@file_put_contents($marker, $ver . "\n");
+	} else {
+		gv_panel_data_cleanup($dir, $old, $ver, trim((string)@file_get_contents($marker)));
+	}
+	return true;
+}
+
+// The old copies left in panel/ are removed once the running version differs from the one that migrated: the rollback window is the
+// release that made them, and by the next update they are stale, password hashes included.
+function gv_panel_data_cleanup($dir, $old, $ver, $migrated_by) {
+	if ($ver === '' || $migrated_by === '' || $ver === $migrated_by) { return; }
+	foreach (gv_panel_data_files() as $name) {
+		if (is_file($dir . '/' . $name) && is_file($old . '/' . $name) && !is_link($old . '/' . $name)) { @unlink($old . '/' . $name); }
+	}
+	@file_put_contents($dir . '/.migrated', $ver . "\n");
 }
 
 // --------------------------------------------------------------------------
@@ -231,6 +330,7 @@ function gv_overlay_whitelist() {
 		'known_bots'         => array('bots'),
 		'preview_bots'       => array('bots'),
 		'honeypot_path'      => array('hppath'),
+		'honeypot_ip_ttl'    => array('int', 60, 604800),
 		// Tokens and the challenge.
 		'token_ttl'          => array('int', 3600, 2592000),
 		'nonce_ttl'          => array('int', 30, 900),
@@ -245,6 +345,7 @@ function gv_overlay_whitelist() {
 		'log_skip_paths'     => array('paths'),
 		'log_skip_panel'     => array('bool'),
 		'log_skip_ips'       => array('ips'),
+		'log_redact_params'  => array('names'),
 		'log_sample.exempt'  => array('float', 0.0, 1.0),
 		'log_write_timeout_ms' => array('int', 0, 2000),
 		'log_retention_days' => array('int', 1, 3650),
@@ -442,6 +543,17 @@ function gv_overlay_validate($key, $value) {
 			if (preg_match('/[\s\x00-\x1F]/', $entry)) { return array(false, 'control_chars'); }
 		}
 		return array(true, array_values($value));
+	}
+	if ($type === 'names') {
+		if (!is_array($value) || gv_is_assoc($value)) { return array(false, 'not_list'); }
+		if (count($value) > 60) { return array(false, 'too_many'); }
+		$out = array();
+		foreach ($value as $entry) {
+			$entry = is_string($entry) ? strtolower(trim($entry)) : '';
+			if (!preg_match('/^[a-z0-9_.-]{1,40}$/', $entry)) { return array(false, 'bad_charset'); }
+			$out[] = $entry;
+		}
+		return array(true, array_values(array_unique($out)));
 	}
 	if ($type === 'ips') {
 		if (!is_array($value) || gv_is_assoc($value)) { return array(false, 'not_list'); }
@@ -644,14 +756,20 @@ function gv_cidr_match($ip, $cidr) {
 // Resolve the client IP. X-Forwarded-For is trusted only when REMOTE_ADDR is
 // inside a configured CDN range, and then only its LAST entry (the hop the CDN
 // itself observed); earlier entries are client-controlled and forgeable.
+// True when the TCP peer is inside one of the CDN / proxy ranges: the only peers whose forwarding headers (X-Forwarded-For,
+// X-Forwarded-Proto) are believed.
+function gv_peer_trusted(array $server, array $cdn_ranges) {
+	$remote = isset($server['REMOTE_ADDR']) ? (string)$server['REMOTE_ADDR'] : '';
+	if ($remote === '' || empty($cdn_ranges)) { return false; }
+	foreach ($cdn_ranges as $cidr) {
+		if (gv_cidr_match($remote, $cidr)) { return true; }
+	}
+	return false;
+}
+
 function gv_client_ip(array $server, array $cdn_ranges) {
 	$remote = isset($server['REMOTE_ADDR']) ? (string)$server['REMOTE_ADDR'] : '';
-	if ($remote === '' || empty($cdn_ranges)) { return $remote; }
-	$trusted = false;
-	foreach ($cdn_ranges as $cidr) {
-		if (gv_cidr_match($remote, $cidr)) { $trusted = true; break; }
-	}
-	if (!$trusted) { return $remote; }
+	if (!gv_peer_trusted($server, $cdn_ranges)) { return $remote; }
 	$xff = isset($server['HTTP_X_FORWARDED_FOR']) ? (string)$server['HTTP_X_FORWARDED_FOR'] : '';
 	if ($xff === '') { return $remote; }
 	$parts = explode(',', $xff);
@@ -711,9 +829,12 @@ function gv_facts(array $server, array $get, array $cookie, array $cfg) {
 	if (!is_string($path) || $path === '') { $path = '/'; }
 	$https = false;
 	if (!empty($server['HTTPS']) && strtolower((string)$server['HTTPS']) !== 'off') { $https = true; }
-	if (isset($server['HTTP_X_FORWARDED_PROTO']) && strtolower((string)$server['HTTP_X_FORWARDED_PROTO']) === 'https') { $https = true; }
+	// X-Forwarded-Proto is believed only from a proxy / CDN the operator listed (cdn_ranges): any client can send it, and a Secure cookie
+	// that a plain-HTTP browser then refuses to store is a challenge loop.
+	$ranges = array_merge($cfg['cdn_ranges'], $cfg['cdn_ranges_feed']);
+	if (isset($server['HTTP_X_FORWARDED_PROTO']) && strtolower((string)$server['HTTP_X_FORWARDED_PROTO']) === 'https' && gv_peer_trusted($server, $ranges)) { $https = true; }
 	$name = (string)$cfg['cookie_name'];
-	$ip   = gv_ip_canon(gv_client_ip($server, array_merge($cfg['cdn_ranges'], $cfg['cdn_ranges_feed'])));
+	$ip   = gv_ip_canon(gv_client_ip($server, $ranges));
 	$cookies = gv_cookie_values($name, $cookie, isset($server['HTTP_COOKIE']) ? $server['HTTP_COOKIE'] : '');
 	return array(
 		'rid'     => gv_rid(),
@@ -1054,6 +1175,25 @@ function gv_bump($conn, $key, $window) {
 // Logging
 // --------------------------------------------------------------------------
 
+// The query string with the VALUE of every sensitive parameter replaced by ***: "token=abc&page=2" -> "token=***&page=2". A name is sensitive
+// when it (decoded, lower-case, without a trailing [..]) is in $names. Order, spelling and everything else are kept, so the log stays
+// readable and the caller's length cap still applies. Pure.
+function gv_redact_query($query, array $names) {
+	$query = (string)$query;
+	if ($query === '' || !$names) { return $query; }
+	$set = array_flip(array_map('strtolower', $names));
+	$parts = explode('&', $query);
+	foreach ($parts as $i => $part) {
+		$eq = strpos($part, '=');
+		$raw = $eq === false ? $part : substr($part, 0, $eq);
+		$name = strtolower(rawurldecode(str_replace('+', ' ', $raw)));
+		$br = strpos($name, '[');
+		if ($br !== false) { $name = substr($name, 0, $br); }
+		if (isset($set[$name]) && ($eq !== false)) { $parts[$i] = $raw . '=***'; }
+	}
+	return implode('&', $parts);
+}
+
 // Build the log row in the documented key order. Pure.
 function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 	$ua  = (string)$f['ua'];
@@ -1071,7 +1211,7 @@ function gv_log_row(array $f, array $st, $act, $sh, $t0) {
 		'uah' => substr(md5($ua), 0, 12),
 		'm'   => gv_cut((string)$f['method'], 16),
 		'p'   => gv_cut((string)$f['path'], 200),
-		'q'   => gv_cut((string)$f['query'], 100),
+		'q'   => gv_cut(gv_redact_query($f['query'], isset($f['redact']) ? (array)$f['redact'] : gv_cfg_defaults(array())['log_redact_params']), 100),
 		'aj'  => gv_is_ajax($f) ? 1 : 0,
 		'nav' => gv_is_nav($f) ? 1 : 0,
 		'gate' => (int)($st['gate'] ?? 0),
@@ -1353,18 +1493,6 @@ function gv_served($esc, $over, $gate, $tok, $hard_block_score, $ovr, array $enf
 	return $a;
 }
 
-// Whether the holdout slice should suppress enforcement of the intended action.
-// The holdout measures the guard's own classifier decisions without bias, so a
-// held-out 403/challenge is recorded but not enforced. Two things are never
-// suppressed: a 429 (resource protection, not a classification) and an explicit
-// operator deny (an action, not a classification, and the documented manual
-// block). Pure, so the gate stays testable in isolation.
-function gv_holdout_suppresses($hold, $ovr, $intended) {
-	if ((int)$hold !== 1) { return false; }
-	if ($ovr === 'deny') { return false; }
-	return $intended === '403' || $intended === 'challenge';
-}
-
 // --------------------------------------------------------------------------
 // Responses
 // --------------------------------------------------------------------------
@@ -1423,6 +1551,7 @@ function gv_run($t0) {
 		'min_free' => max(0, (int)$cfg['log_min_free_mb']),
 		'timeout_ms' => max(0, (int)$cfg['log_write_timeout_ms']),
 	));
+	$f['redact'] = (array)$cfg['log_redact_params'];
 	$st  = gv_state_new();
 	gv_redis_ctx(array('log_dir' => $log));       // where swallowed errors are reported
 
@@ -1734,7 +1863,9 @@ function gv_run($t0) {
 		if ($f['ip'] !== '') { $reads['allow_ip'] = array('GET', gv_key('allow:' . $f['ip'])); }
 		$reads['deny_ip'] = array('GET', gv_key('deny:' . $f['ip']));
 		if ($f['ip'] !== '') { $reads['chal_ip'] = array('GET', gv_key('chal:' . $f['ip'])); }       // temporary challenge: the same pipeline
-		$reads['hp']      = array('GET', gv_key('hp:' . $f['ip']));
+		// Honeypot history: by device when the client has one (7 days), else by address: IPv6 its /64 (7 days), IPv4 the address (short TTL).
+		if ($dev !== '') { $reads['hp_dev'] = array('GET', gv_key('hpd:' . $dev)); }
+		$reads['hp']      = array('GET', gv_key('hpn:' . $f['ipn']));
 		// A CAPTCHA may be needed (a captcha rule matched, an escalation flag is set, or CAPTCHA instead of a device 429 is on):
 		// the per-IP CAPTCHA budget is READ in this same pipeline, never in a round trip of its own. Every other request
 		// pays one array test and nothing more.
@@ -1846,7 +1977,13 @@ function gv_run($t0) {
 
 	// 6. Honeypot. Fires regardless of the enforce toggles: it is labelling data.
 	if ($is_hp) {
-		if (gv_redis_alive($conn)) { gv_r_setex($conn, gv_key('hp:' . $f['ip']), 604800, '1'); }
+		if (gv_redis_alive($conn)) {
+			if ($dev !== '') {
+				gv_r_setex($conn, gv_key('hpd:' . $dev), 604800, '1');            // a device is one browser, not everybody behind its address
+			} else {
+				gv_r_setex($conn, gv_key('hpn:' . $f['ipn']), strpos($f['ip'], ':') !== false ? 604800 : (int)$cfg['honeypot_ip_ttl'], '1');
+			}
+		}
 		$st['hp'] = 1;
 		gv_finish($conn, $st);
 		gv_emit($f, $st, '404_hp', 0, $t0, $log);
@@ -1889,7 +2026,7 @@ function gv_run($t0) {
 
 	// 8. Static score. gv_score stays pure and Phase 1 shaped; the Phase 2
 	// contributions are folded in below.
-	$hp_hist   = ($rv('hp') === '1');
+	$hp_hist   = ($rv('hp') === '1' || $rv('hp_dev') === '1');
 	$scored    = gv_score($f, $hp_hist);
 	$st['sc']  = $scored[0];
 	$st['rs']  = array_merge($scored[1], $st['rs']);

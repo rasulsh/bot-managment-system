@@ -21,6 +21,7 @@
 #
 # Status values: ok | warning (exit 0 but the job said it did nothing useful) | failed | skipped.
 
+export PYTHONDONTWRITEBYTECODE=1   # no __pycache__ from a job (cron's umask 002 made one 0775; analyzer/fsmode.py removes an existing loose one)
 umask 022   # whoever sources this library: its files are never group-writable, whatever cron's umask is (logs keep the modes of their own writers)
 
 JS_ROOT="${JS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -69,7 +70,8 @@ js_esc() {
 	tr -cd '\11\12\40-\176' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' | awk 'BEGIN{ORS=""} {if (NR>1) print "\\n"; print}'
 }
 
-# Redact secrets from stdin. Exact values (secret, salt, Redis and panel credentials) come from
+# Redact secrets from stdin. Exact values (secret, salt, Redis and panel credentials; values with . * ^ $ & [ ] \ / in them are escaped
+# correctly, jobstatus-selftest.sh proves it) come from
 # scripts/secret-values.php; generic patterns catch "password=...", "AUTH ..." and "secret: ..." even
 # when PHP is unavailable.
 js_redact() {

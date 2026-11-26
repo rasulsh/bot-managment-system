@@ -427,3 +427,10 @@ without `--dry-run`, `worker`) refuses with `ERROR: the Redis settings are not c
 instead of writing into the wrong namespace. Read-only commands still run. To work without PHP,
 state the namespace yourself: an explicit `redis` block with a `prefix` key (even `""`) in the
 analyzer config counts as confirmed.
+
+
+## Security notes (the audit of 2026.11.37)
+
+* A `.py` file named by `GV_ANALYZER_CONFIG` / `--config` is **executed** (`config.py` runs it). That is by design (an operator's own file) and stays; keep that file, and the directory it is in, writable by the analyzer's user only. Use a `.json` file when you do not need code.
+* `analyzer/requirements.txt` has exact `==` pins. The in-panel updater never installs packages by itself; an administrator confirms on the Update result page (or you run pip yourself).
+* A model file (`model.joblib`, `clf.joblib`, candidates) is a pickle. It is loaded only when it is a regular file, owned by the user running the analyzer, and not writable by group or others; otherwise `inspect` reports `refused to load: ...` and the job continues without that model.

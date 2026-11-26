@@ -39,6 +39,7 @@ $c = require '${repo}/scripts/config.dev.php';
 $c['limits'] = array('window' => 60, 'device' => 100000, 'ip_ua' => 100000, 'ip' => 100000, 'bot' => 100000, 'mint' => 100000);
 $c['holdout_pct'] = 0;
 $c['capture_outcomes'] = false;
+$c['cdn_ranges'] = array('127.0.0.1/32');   // the https proxy in front is the only trusted forwarder (X-Forwarded-Proto is believed only from it)
 $c['log_dir'] = '${tmp}/logs';
 return $c;`);
   // A second server for the CAPTCHA scenarios only: escalation at headless score 80 would also escalate the default

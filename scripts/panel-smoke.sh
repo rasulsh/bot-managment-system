@@ -16,6 +16,7 @@ fi
 BASE="${BASE%/}"; PANEL="/${PANEL#/}"; PANEL="${PANEL%/}"
 URL="$BASE$PANEL/index.php"
 JAR="$(mktemp)"; OPJ="$(mktemp)"; DMJ="$(mktemp)"; NJ="$(mktemp)"; trap 'rm -f "$JAR" "$OPJ" "$DMJ" "$NJ"' EXIT
+login_token() { curl -sk -c "$1" -b "$1" "$URL?r=login" | grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//'; }   # the login form's CSRF field (it comes with a cookie)
 newjar() { : > "$NJ"; echo "$NJ"; }
 failed=0
 check() { if [ "$2" = "1" ]; then echo "PASS  $1"; else echo "FAIL  $1"; failed=$((failed + 1)); fi; }
@@ -57,8 +58,19 @@ if [ -n "$css_href" ]; then
 	fi
 fi
 
-code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "username=$USER_NAME" --data-urlencode "password=$PASS" "$URL?r=login")"
+code="$(curl -sk -o /dev/null -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode "csrf=$(login_token "$JAR")" --data-urlencode "username=$USER_NAME" --data-urlencode "password=$PASS" "$URL?r=login")"
 check "login answers 303" "$([ "$code" = 303 ] && echo 1 || echo 0)"
+# Login CSRF: a login POST that does not carry the form's token and cookie is not an attempt (no session, the message says why, and the
+# right password does not help).
+CJ="$(newjar)"
+nocsrf="$(curl -sk -D - -c "$CJ" -b "$CJ" --data-urlencode "username=$USER_NAME" --data-urlencode "password=$PASS" "$URL?r=login")"
+check "a login POST without the CSRF field is refused: no session cookie, the page says it was open too long" "$(grep -qi '^set-cookie: gp_sess' <<<"$nocsrf" && echo 0 || (grep -q 'open too long' <<<"$nocsrf" && echo 1 || echo 0))"
+CJ="$(newjar)"; tok_ok="$(login_token "$CJ")"
+wrongcsrf="$(curl -sk -D - -c "$CJ" -b "$CJ" --data-urlencode "csrf=${tok_ok}0" --data-urlencode "username=$USER_NAME" --data-urlencode "password=$PASS" "$URL?r=login")"
+check "...and so is a wrong token" "$(grep -qi '^set-cookie: gp_sess' <<<"$wrongcsrf" && echo 0 || (grep -q 'open too long' <<<"$wrongcsrf" && echo 1 || echo 0))"
+CJ="$(newjar)"
+crosssite="$(curl -sk -D - -c "$CJ" --data-urlencode "csrf=$(login_token "$CJ")" --data-urlencode "username=$USER_NAME" --data-urlencode "password=$PASS" "$URL?r=login")"
+check "...and a right token WITHOUT the cookie (what a cross-site form can send) is refused too" "$(grep -qi '^set-cookie: gp_sess' <<<"$crosssite" && echo 0 || (grep -q 'open too long' <<<"$crosssite" && echo 1 || echo 0))"
 dash="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
 check "dashboard is shown after login (session cookie works on this path)" "$(grep -q 'data-chip="kill"' <<<"$dash" && echo 1 || echo 0)"
 cpath="$(awk '$6 ~ /^gp_/ {print $3; exit}' "$JAR")"
@@ -110,7 +122,10 @@ tp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'test=1' --data-urlencode
 check "the test box names the rule" "$(grep -q "$rid" <<<"$tp" && grep -q 'Winning rule' <<<"$tp" && echo 1 || echo 0)"
 qp="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'new=1' --data-urlencode 'qua=curl/8.4.0' "$URL?r=rules")"
 check "quick block pre-fills the form" "$(grep -q 'curl/8.4.0' <<<"$qp" && grep -q 'name="ua_values"' <<<"$qp" && echo 1 || echo 0)"
-check "quick block shows the impact preview before saving" "$(grep -q 'Impact preview' <<<"$qp" && grep -q 'Matching requests' <<<"$qp" && echo 1 || echo 0)"
+# Opening the form does not scan the logs any more (PR J, PERF-3): it offers a button, and the preview comes with ?impact=1.
+check "quick block opens WITHOUT reading the logs and offers the impact preview as a button" "$(grep -q 'Show what this rule would have matched' <<<"$qp" && ! grep -q 'Matching requests' <<<"$qp" && echo 1 || echo 0)"
+qpi="$(curl -sk -c "$JAR" -b "$JAR" -G --data-urlencode 'new=1' --data-urlencode 'qua=curl/8.4.0' --data-urlencode 'impact=1' "$URL?r=rules")"
+check "...and the button's link shows the impact preview before saving" "$(grep -q 'Impact preview' <<<"$qpi" && grep -q 'Matching requests' <<<"$qpi" && echo 1 || echo 0)"
 tok="$(printf '%s' "$qp" | csrf)"
 pp="$(curl -sk -c "$JAR" -b "$JAR" --data-urlencode "csrf=$tok" -d 'do=preview' -d 'name=Smoke preview' -d 'mode=monitor' -d 'action=block' -d 'priority=900' \
 	-d 'ua_op=include' -d 'ua_type=exact' --data-urlencode 'ua_values=curl/8.4.0' "$URL?r=rules")"
@@ -271,7 +286,7 @@ check "a short password is refused (no such user is created)" "$(! grep -q 'smok
 check "the Users page lists both, with the role labels" "$(grep -q 'Monitoring operator' <<<"$ul" && grep -q "$DM_NAME" <<<"$ul" && echo 1 || echo 0)"
 filtered="$(curl -sk -c "$JAR" -b "$JAR" "$URL?r=users&role=demo&role_op=not")"
 check "the Users filters include / exclude (role is not demo hides the demo user)" "$(grep -q "$OP_NAME" <<<"$filtered" && ! grep -q "$DM_NAME" <<<"$filtered" && echo 1 || echo 0)"
-rlogin() { curl -sk -o /dev/null -w '%{http_code}' -c "$1" -b "$1" --data-urlencode "username=$2" --data-urlencode "password=$3" "$URL?r=login"; }
+rlogin() { curl -sk -o /dev/null -w '%{http_code}' -c "$1" -b "$1" --data-urlencode "csrf=$(login_token "$1")" --data-urlencode "username=$2" --data-urlencode "password=$3" "$URL?r=login"; }
 check "the operator signs in (303)" "$([ "$(rlogin "$OPJ" "$OP_NAME" "$OP_PASS")" = 303 ] && echo 1 || echo 0)"
 check "the demo user signs in (303)" "$([ "$(rlogin "$DMJ" "$DM_NAME" "$DM_PASS")" = 303 ] && echo 1 || echo 0)"
 code_of() { curl -sk -o /dev/null -w '%{http_code}' -c "$1" -b "$1" "$URL?r=$2"; }
@@ -325,7 +340,7 @@ OP_PASS="operator-new-pass-2"
 check "...the new password signs in" "$([ "$(rlogin "$(newjar)" "$OP_NAME" "$OP_PASS")" = 303 ] && echo 1 || echo 0)"
 check "the admin disables the operator (303)" "$([ "$(upost -d do=disable --data-urlencode "username=$OP_NAME")" = 303 ] && echo 1 || echo 0)"
 check "...and the operator's open session ends on its next request (redirect to login)" "$([ "$(code_of "$OPJ" dashboard)" = 303 ] && echo 1 || echo 0)"
-dl="$(curl -sk -c "$(newjar)" --data-urlencode "username=$OP_NAME" --data-urlencode "password=$OP_PASS" "$URL?r=login")"
+DLJ="$(newjar)"; dl="$(curl -sk -c "$DLJ" -b "$DLJ" --data-urlencode "csrf=$(login_token "$DLJ")" --data-urlencode "username=$OP_NAME" --data-urlencode "password=$OP_PASS" "$URL?r=login")"
 check "...a disabled user cannot sign in and the message is the generic one" "$(grep -q 'Wrong username or password' <<<"$dl" && echo 1 || echo 0)"
 upost -d do=delete --data-urlencode "username=$USER_NAME" >/dev/null; upost -d do=disable --data-urlencode "username=$USER_NAME" >/dev/null
 ul="$(uform)"

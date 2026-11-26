@@ -35,9 +35,10 @@ CUR="$(tr -d '[:space:]' < "$INST/VERSION")"
 GOOD=2099.01.01; BROKEN=2099.02.02
 python3 "$HERE/update-fixture.py" "$INST" "$WORK" "$GOOD" "$BROKEN" || { echo "FAIL  could not build the fixture ZIPs"; exit 1; }
 
+login_token() { curl -s -c "$1" -b "$1" "$URL?r=login" | grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//'; }   # the login form's CSRF field (it comes with a cookie)
 page() { curl -s -c "$JAR" -b "$JAR" "$URL?r=$1"; }
 login() {
-	curl -s -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "username=admin" --data-urlencode "password=$PASS" "$URL?r=login"
+	curl -s -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$(login_token "$JAR")" --data-urlencode "username=admin" --data-urlencode "password=$PASS" "$URL?r=login"
 	check "signed in; the Update page opens (version $CUR)" "$(has "$CUR" "$(page update)")"
 	CSS_BEFORE="$(css_of "$(page update)")"
 }

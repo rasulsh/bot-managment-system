@@ -1,9 +1,10 @@
 # Deny all direct web access to the operator scripts.
 #
-# Defence in depth, not a live fix: every script here already refuses a web
-# request on its own - config-dump.php, decision-parity.php, holdout-probe.php
-# and the self-tests are PHP_SAPI !== 'cli' guarded, and config.dev.php is
-# behind GV_BOOT. This makes scripts/ consistent with guard/ and logs/, so a
+# Defence in depth, not a live fix: every script here refuses a web request on
+# its own - the PHP files are PHP_SAPI guarded (dev-router.php: cli-server only)
+# and config.dev.php is behind GV_BOOT. scripts/guard-selftest.php checks that
+# for EVERY file in this directory and requests each one through PHP's web
+# server (gen-reason-docs.php had no guard and rewrote docs/14-REASON-CODES.md). This makes scripts/ consistent with guard/ and logs/, so a
 # future script that forgets its own guard is still covered.
 #
 # No exceptions: nothing in this directory is meant to be reachable from the web.

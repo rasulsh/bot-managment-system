@@ -22,8 +22,16 @@ CONF
 GV_DEV_CONFIG="$TMP/config.php" php -S "127.0.0.1:$PORT" "$ROOT/scripts/dev-router.php" >/dev/null 2>&1 &
 server=$!
 trap 'kill $server 2>/dev/null; rm -rf "$TMP"' EXIT
-sleep 1
-GV_LOG_DIR="$TMP/logs" bash "$ROOT/scripts/guard-test.sh" "http://127.0.0.1:$PORT" > "$TMP/matrix.txt" 2>&1
+# Wait until THIS server answers (it used to sleep one second and go on: a leftover process on the port, or a server that failed to start,
+# made the check "pass" without the code under test ever running).
+up=0
+for _ in $(seq 1 50); do
+	kill -0 "$server" 2>/dev/null || break
+	if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/"; then up=1; break; fi
+	sleep 0.2
+done
+if [ "$up" -ne 1 ]; then echo "ERROR: the test server did not start on port $PORT (is something else using it?)"; exit 2; fi
+GV_MATRIX_ASSERT=0 GV_LOG_DIR="$TMP/logs" bash "$ROOT/scripts/guard-test.sh" "http://127.0.0.1:$PORT" > "$TMP/matrix.txt" 2>&1
 bad=$(awk -F'|' '/^[0-9]+[a-z]? / && $2 ~ /^ *(403|429|503|204) *$/' "$TMP/matrix.txt")
 if [ -n "$bad" ]; then
 	echo "FAIL: monitor mode blocked, challenged or limited a request:"

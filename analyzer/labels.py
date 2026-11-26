@@ -14,7 +14,7 @@ is labelled a bot and teaches the model to block people like them.
 It stays a reputation input, where its circularity is visible, bounded by a
 fixed weight, and easy to reason about. It never becomes a label.
 
-The positives below are all independent of the guard's gating decisions: a
+The positives below are independent of the guard's gating decisions (a request that was served or blocked does not decide them), but not of every FEATURE: the honeypot request and the HP_HIST score it causes used to leak into score_mean and notfound_ratio, which features.clf_features() now removes for the classifier. A
 honeypot hit is a link no human can see, a botv=='bad' verdict comes from
 reverse DNS the guard never consults in band, and ground truth comes from the
 operator. The negatives require evidence of a person, not merely the absence of
@@ -123,6 +123,36 @@ def bot_label_source(session, labels, rows, ground_truth=None, session_count=1,
 
     # Everything else, including challenge_unsolved on its own.
     return None, None
+
+
+def median(values):
+    """The median of a list of numbers (the mean of the two middle values for an even count); 0.0 for none. Shared by the nightly
+    job, the replay and the reputation formula so they cannot drift."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return float(ordered[middle])
+    return (float(ordered[middle - 1]) + float(ordered[middle])) / 2.0
+
+
+def identity_features(session_features_list):
+    """The features bot_label_source reads for a whole identity: the first session's, with script_ratio the HIGHEST over all of
+    its sessions. Every other gate (solved, dwell, session count) is identity-wide and the label is given to every session of the
+    identity, so one scripted session among several browsing ones must keep it from being labelled human."""
+    feats = list(session_features_list or [])
+    if not feats:
+        return {}
+    merged = dict(feats[0])
+    ratios = []
+    for f in feats:
+        try:
+            ratios.append(float((f or {}).get('script_ratio', 0.0)))
+        except (TypeError, ValueError):
+            ratios.append(0.0)
+    merged['script_ratio'] = max(ratios)
+    return merged
 
 
 def bot_labels(session, labels, rows, ground_truth=None, session_count=1,

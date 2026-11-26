@@ -530,6 +530,106 @@ gv_log_policy(array('timeout_ms' => 50));
 foreach ((array)glob($lv_dir . '/{,.}*', GLOB_BRACE) as $lv_f) { if (is_file($lv_f)) { @unlink($lv_f); } }
 @rmdir($lv_dir);
 
+t_section('Every PHP file under scripts/ refuses a web request');
+// scripts/.htaccess says every script refuses a web request on its own; gen-reason-docs.php did not (it overwrote docs/14-REASON-CODES.md as
+// the web user). Static: each file names the SAPI before it does anything. Dynamic: each guarded file is requested through PHP's built-in
+// web server and answers nothing; docs/14-REASON-CODES.md is untouched. (dev-router.php and config.dev.php exist for the built-in server.)
+$sc_files = glob(__DIR__ . '/*.php');
+$sc_unguarded = array();
+foreach ($sc_files as $sc_f) {
+	$head = implode("\n", array_slice(file($sc_f), 0, 40));
+	if (strpos($head, 'PHP_SAPI') === false && strpos($head, "defined('GV_BOOT')") === false) { $sc_unguarded[] = basename($sc_f); }
+}
+t_ok('every script names the SAPI (or GV_BOOT) in its first lines: ' . count($sc_files) . ' files' . ($sc_unguarded ? ', unguarded: ' . implode(' ', $sc_unguarded) : ''), !$sc_unguarded);
+$sc_docs = dirname(__DIR__) . '/docs/14-REASON-CODES.md';
+$sc_before = array(filemtime($sc_docs), md5_file($sc_docs));
+$sc_port = 18700 + (getmypid() % 200);
+$sc_srv = proc_open(array(PHP_BINARY, '-S', '127.0.0.1:' . $sc_port, '-t', __DIR__), array(1 => array('file', '/dev/null', 'w'), 2 => array('file', '/dev/null', 'w')), $sc_pipes);
+$sc_up = false;
+for ($i = 0; $i < 30 && is_resource($sc_srv); $i++) {
+	$sock = @fsockopen('127.0.0.1', $sc_port, $en, $es, 0.2);
+	if ($sock) { fclose($sock); $sc_up = true; break; }
+	usleep(100000);
+}
+if ($sc_up) {
+	$sc_bad = array();
+	foreach ($sc_files as $sc_f) {
+		$n = basename($sc_f);
+		if (in_array($n, array('dev-router.php', 'config.dev.php'), true)) { continue; }
+		$ctx = stream_context_create(array('http' => array('timeout' => 20, 'ignore_errors' => true)));
+		$body = @file_get_contents('http://127.0.0.1:' . $sc_port . '/' . $n, false, $ctx);
+		if ($body === false || trim($body) !== '') { $sc_bad[] = $n; }
+	}
+	clearstatcache();
+	t_ok('a web request to any script prints nothing' . ($sc_bad ? ' (not refused: ' . implode(' ', $sc_bad) . ')' : ''), !$sc_bad);
+	t_ok('...and gen-reason-docs.php did not rewrite docs/14-REASON-CODES.md', $sc_before === array(filemtime($sc_docs), md5_file($sc_docs)));
+} else {
+	t_skip('a web request to any script prints nothing', 'the built-in server did not start');
+}
+if (is_resource($sc_srv)) { proc_terminate($sc_srv); proc_close($sc_srv); }
+
+t_section('Audit fixes (PR J): guard');
+
+// SEC-10: query-string redaction
+$rq = gv_cfg_defaults(array())['log_redact_params'];
+t_ok('SEC-10: the value of a sensitive parameter is replaced by ***, the rest of the query is kept as it was',
+	gv_redact_query('page=2&token=abc123&sort=asc', $rq) === 'page=2&token=***&sort=asc'
+	&& gv_redact_query('email=a%40b.ir&mobile=0912&q=shoes', $rq) === 'email=***&mobile=***&q=shoes');
+t_ok('SEC-10: names match case-insensitively, URL-encoded and as name[..]; a parameter without a value and a different name are left alone',
+	gv_redact_query('TOKEN=x&to%6Ben=y&pass[]=z&user[password]=w&password&passwordx=ok', $rq) === 'TOKEN=***&to%6Ben=***&pass[]=***&user[password]=w&password&passwordx=ok');
+t_ok('SEC-10: the shipped list has the audit\'s names; log_redact_params is configurable (overlay type names) and an empty list redacts nothing',
+	count(array_diff(array('token', 'key', 'password', 'pass', 'pwd', 'secret', 'code', 'authority', 'refid', 'resnum', 'trackingcode', 'email', 'mobile', 'phone'), $rq)) === 0
+	&& gv_overlay_validate('log_redact_params', array('Coupon', 'sid'))[1] === array('coupon', 'sid') && gv_overlay_validate('log_redact_params', array('bad name'))[0] === false
+	&& gv_redact_query('token=abc', array()) === 'token=abc');
+$rf = t_facts(array('query' => 'authority=A00000123&page=3'));
+$rrow = gv_log_row($rf, gv_state_new(), 'allow', 0, microtime(true));
+t_ok('SEC-10: the logged q field is redacted by default and still capped at 100 characters', $rrow['q'] === 'authority=***&page=3'
+	&& strlen(gv_log_row(t_facts(array('query' => str_repeat('a=1&', 60))), gv_state_new(), 'allow', 0, microtime(true))['q']) === 100);
+
+// SEC-7: X-Forwarded-Proto only from a listed proxy / CDN
+$xs = array('REQUEST_URI' => '/', 'REMOTE_ADDR' => '203.0.113.9', 'HTTP_X_FORWARDED_PROTO' => 'https');
+$xc = gv_cfg_defaults(array('cdn_ranges' => array('198.51.100.0/24')));
+t_ok('SEC-7: any client can send X-Forwarded-Proto; from an address outside cdn_ranges it is ignored (no Secure cookie, no challenge loop)', gv_facts($xs, array(), array(), $xc)['https'] === false);
+$xs['REMOTE_ADDR'] = '198.51.100.7';
+t_ok('SEC-7: ...from a listed proxy it counts, and a real HTTPS request is HTTPS whoever sent it',
+	gv_facts($xs, array(), array(), $xc)['https'] === true && gv_facts(array('REQUEST_URI' => '/', 'REMOTE_ADDR' => '203.0.113.9', 'HTTPS' => 'on'), array(), array(), $xc)['https'] === true
+	&& gv_facts(array('REQUEST_URI' => '/', 'REMOTE_ADDR' => '203.0.113.9', 'HTTP_X_FORWARDED_PROTO' => 'https'), array(), array(), gv_cfg_defaults(array()))['https'] === false);
+
+// LOG-9: honeypot defaults and validation (the keys themselves are tested end to end in redis-selftest.php)
+t_ok('LOG-9: honeypot_ip_ttl defaults to one hour, a nonsense value falls back, the overlay takes 60..604800',
+	gv_cfg_defaults(array())['honeypot_ip_ttl'] === 3600 && gv_cfg_defaults(array('honeypot_ip_ttl' => 0))['honeypot_ip_ttl'] === 3600 && gv_cfg_defaults(array('honeypot_ip_ttl' => '7200'))['honeypot_ip_ttl'] === 7200
+	&& gv_overlay_validate('honeypot_ip_ttl', 30)[0] === false && gv_overlay_validate('honeypot_ip_ttl', 900)[0] === true);
+
+// SEC-2: the panel's runtime data directory
+$dd = sys_get_temp_dir() . '/gv-data-' . getmypid();
+$od = $dd . '-old';
+@mkdir($od, 0775, true);
+file_put_contents($od . '/users.json', '{"users":[{"username":"old"}]}');
+file_put_contents($od . '/audit.jsonl', "{\"event\":\"old\"}\n");
+putenv('GV_PANEL_OLD=' . $od);
+putenv('GV_PANEL_DATA=' . $dd);
+$dp = gv_panel_data_path('users.json');
+t_ok('SEC-2: the first use creates the data directory (0700, with a deny .htaccess), copies the old files in and leaves the old copies where they were',
+	$dp === $dd . '/users.json' && is_file($dd . '/users.json') && file_get_contents($dd . '/users.json') === '{"users":[{"username":"old"}]}' && is_file($dd . '/audit.jsonl') && is_file($dd . '/.htaccess')
+	&& (fileperms($dd) & 0777) === 0700 && is_file($od . '/users.json') && is_file($dd . '/.migrated'));
+file_put_contents($dd . '/users.json', '{"users":[{"username":"changed"}]}');
+gv_panel_data_migrate($dd);
+t_ok('SEC-2: the migration is idempotent and never overwrites a newer file in the new place', file_get_contents($dd . '/users.json') === '{"users":[{"username":"changed"}]}' && is_file($od . '/users.json'));
+$mv = trim((string)file_get_contents(dirname(__DIR__) . '/VERSION'));
+file_put_contents($dd . '/.migrated', "2026.01.01\n");
+gv_panel_data_migrate($dd);
+t_ok('SEC-2: a LATER release removes the old copies (password hashes must not stay in panel/); the new files stay', !is_file($od . '/users.json') && !is_file($od . '/audit.jsonl') && is_file($dd . '/users.json')
+	&& trim(file_get_contents($dd . '/.migrated')) === $mv);
+putenv('GV_PANEL_DATA=/proc/nonexistent/panel-data');
+file_put_contents($od . '/users.json', '{"users":[]}');
+t_ok('SEC-2: when the data directory cannot be created the OLD location is used (read and write), so the panel keeps working', gv_panel_data_path('users.json') === $od . '/users.json');
+putenv('GV_PANEL_DATA');
+putenv('GV_PANEL_OLD');
+t_ok('SEC-2: by default the directory is <install>/data/panel (outside panel/, the published one) and panel_data_dir moves it', strpos(gv_panel_data_dir(), '/data/panel') !== false
+	&& strpos(gv_panel_data_dir(), '/panel/') === false && gv_cfg_defaults(array())['panel_data_dir'] === '');
+foreach (array($dd, $od) as $x) { foreach ((array)glob($x . '/{,.}*', GLOB_BRACE) as $f) { if (is_file($f)) { @unlink($f); } } @rmdir($x); }
+putenv('GV_PANEL_DATA');
+
 t_section('Exemptions and known bots');
 
 $ex = array('/internal-cron.php', '/rest/');
@@ -987,20 +1087,15 @@ t_section('Holdout enforcement gate (FIX #12 pt1)');
 // The holdout suppresses the guard's own classifier decisions only; an operator
 // deny is an action, not a classification, and a 429 is resource protection -
 // neither is ever held out.
-t_ok('a held-out classifier 403 is suppressed',
-	gv_holdout_suppresses(1, '', '403') === true);
-t_ok('a held-out challenge is suppressed',
-	gv_holdout_suppresses(1, '', 'challenge') === true);
-t_ok('a held-out operator deny is NOT suppressed, so it still enforces',
-	gv_holdout_suppresses(1, 'deny', '403') === false);
-t_ok('a held-out 429 is never suppressed',
-	gv_holdout_suppresses(1, '', '429') === false);
-t_ok('outside the holdout nothing is suppressed',
-	gv_holdout_suppresses(0, '', '403') === false
-	&& gv_holdout_suppresses(0, 'deny', '403') === false);
-t_ok('an identity in the holdout slice with ovr=deny produces an enforced 403',
-	gv_decide(0, false, true, 'v', 60, 'deny') === '403'
-	&& gv_holdout_suppresses(1, 'deny', gv_decide(0, false, true, 'v', 60, 'deny')) === false);
+// gv_served() is the gate the request path really uses (an unused helper, gv_holdout_suppresses(), was removed: it had tests and no caller).
+$hs_enf = array('block' => true, 'challenge' => true, 'ratelimit' => true);
+t_ok('a held-out classifier 403 is suppressed', gv_served(70, false, true, 'v', 60, '', $hs_enf, 1, true) === 'allow');
+t_ok('a held-out challenge is suppressed', gv_served(0, false, true, '', 60, '', $hs_enf, 1, true) === 'allow');
+t_ok('a held-out operator deny is NOT suppressed, so it still enforces', gv_served(0, false, true, 'v', 60, 'deny', $hs_enf, 1, true) === '403');
+t_ok('a held-out 429 is never suppressed', gv_served(0, true, true, 'v', 60, '', $hs_enf, 1, true) === '429');
+t_ok('outside the holdout the same requests are enforced', gv_served(70, false, true, 'v', 60, '', $hs_enf, 0, true) === '403'
+	&& gv_served(0, false, true, '', 60, '', $hs_enf, 0, true) === 'challenge' && gv_served(0, false, true, 'v', 60, 'deny', $hs_enf, 0, true) === '403');
+t_ok('an identity in the holdout slice with ovr=deny produces an enforced 403', gv_decide(0, false, true, 'v', 60, 'deny') === '403');
 
 // --------------------------------------------------------------------------
 t_section('Phase 2 decision engine');
@@ -1847,7 +1942,7 @@ $cx = explode('.', $cn);
 t_ok('captcha nonce: six parts, the PoW nonce parser refuses it and the CAPTCHA parser refuses a PoW nonce', count($cx) === 6 && gv_nonce_parse($cn) === false && gv_captcha_nonce_parse(gv_nonce_make('cap-secret', 'ua/1', '203.0.113.5', 12)) === false
 	&& gv_captcha_nonce_parse($cn)[2] === 12 && gv_captcha_nonce_parse($cn)[3] === 150);
 t_ok('captcha nonce: the answer is NOT in the nonce (only an HMAC of it), whatever the case or the digits typed',
-	strpos($cn, '4821') === false && gv_captcha_answer_ok($cn, 'cap-secret', '4821') && gv_captcha_answer_ok($cn, 'cap-secret', ' ۴۸۲۱ ') && gv_captcha_answer_ok($cn, 'cap-secret', '٤٨٢١')
+	!in_array('4821', $cx, true) && gv_captcha_answer_ok($cn, 'cap-secret', '4821') && gv_captcha_answer_ok($cn, 'cap-secret', ' ۴۸۲۱ ') && gv_captcha_answer_ok($cn, 'cap-secret', '٤٨٢١')
 	&& !gv_captcha_answer_ok($cn, 'cap-secret', '4822') && !gv_captcha_answer_ok($cn, 'cap-secret', '') && !gv_captcha_answer_ok($cn, 'other-secret', '4821') && !gv_captcha_answer_ok('garbage', 'cap-secret', '4821'));
 $cn2 = gv_captcha_nonce_make('cap-secret', 'ua/1', '203.0.113.5', 0, 60, 'ab3k');
 t_ok('captcha nonce: letters are case-insensitive', gv_captcha_answer_ok($cn2, 'cap-secret', 'AB3K') && gv_captcha_answer_ok($cn2, 'cap-secret', 'aB3k') && !gv_captcha_answer_ok($cn2, 'cap-secret', 'AB3L'));

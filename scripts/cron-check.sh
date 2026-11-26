@@ -15,4 +15,5 @@ if [ -z "$PY" ]; then
 	echo "ERROR: python3 was not found, so the crontab cannot be checked. Compare it by hand with docs/03-SETUP.md (Step 4)."
 	exit 2
 fi
+export PYTHONDONTWRITEBYTECODE=1        # no scripts/__pycache__ (a loose one is reported by the permission check)
 exec "$PY" "$HERE/cron_check.py" "$@"

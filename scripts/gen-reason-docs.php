@@ -6,6 +6,8 @@
 //   php scripts/gen-reason-docs.php --stdout   print it
 //
 // Nothing here reads a log or a config: the page is a pure function of the registry, so it cannot drift from the panel.
+// Command line only. Over HTTP this used to run and overwrite docs/14-REASON-CODES.md as the web user.
+if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 define('GP_BOOT', 1);
 $root = dirname(__DIR__);
 $GP_LANG = require $root . '/panel/lang.php';

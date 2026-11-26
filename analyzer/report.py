@@ -23,6 +23,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+if __name__ == '__main__':
+    # No bytecode, and files a manual run creates are not group-writable: a __pycache__ made under cron's umask 002 was 0775.
+    sys.dont_write_bytecode = True
+    os.umask(0o022)
+
 from analyzer import bridge
 from analyzer import config as config_mod
 from analyzer import logs as logs_mod
@@ -707,7 +712,7 @@ def main(argv=None):
 
     if args.html:
         try:
-            with open(args.html, 'w') as handle:
+            with open(args.html, 'w', encoding='utf-8') as handle:
                 handle.write(render_html(stats, days))
             print('')
             print('HTML report written to %s' % args.html)

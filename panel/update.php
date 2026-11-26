@@ -31,7 +31,7 @@ define('GP_UPD_TOKEN_TTL', 86400);              // recovery token validity
 define('GP_UPD_WAIT_ALERT', 120);               // seconds an update may wait for its health check before the alert
 
 // Top-level directories an update may write into. Anything else in the ZIP is refused (".github" is ignored).
-function gp_upd_tree() { return array('guard', 'panel', 'analyzer', 'scripts', 'docs', 'geo', 'lists', 'logs', 'updates'); }
+function gp_upd_tree() { return array('guard', 'panel', 'analyzer', 'scripts', 'docs', 'geo', 'lists', 'logs', 'updates', 'data'); }
 // Allowed file extensions, and the few allowed dot / extension-less names.
 function gp_upd_exts() { return array('php', 'py', 'sh', 'md', 'txt', 'json', 'css', 'js', 'woff2', 'ttf', 'png', 'tpl'); }
 function gp_upd_names() { return array('.htaccess', '.gitkeep', '.gitignore', 'VERSION', 'LICENSE'); }
@@ -724,8 +724,9 @@ function gp_upd_manifest_save($stamp, array $m) {
 	return gp_upd_json_write(gp_upd_dir() . '/' . $stamp . '/manifest.json', $m);
 }
 
-// After a successful health check (called when the admin lands on the result page): enqueue pip_sync once when
-// analyzer/requirements.txt changed. Returns the manifest summary, or null.
+// After a successful health check (called when the admin lands on the result page): record the verification. Nothing is installed
+// here: when analyzer/requirements.txt changed the result page offers a button and gp_upd_pip_queue() runs only when an administrator
+// presses it. Returns the manifest summary, or null.
 function gp_upd_post_verify($stamp, $actor) {
 	if (!is_string($stamp) || !preg_match('/^\d{8}-\d{6}(-\d+)?$/', $stamp)) { return null; }
 	$m = gp_upd_json_read(gp_upd_dir() . '/' . $stamp . '/manifest.json');
@@ -735,14 +736,24 @@ function gp_upd_post_verify($stamp, $actor) {
 		gp_upd_manifest_save($stamp, $m);
 		gp_upd_audit('update_verified', $actor, $stamp, array('version' => $m['from'] ?? ''), array('version' => $m['to'] ?? ''));
 	}
-	if (!empty($m['requirements_changed']) && empty($m['pip_enqueued'])) {
-		$j = gp_job_enqueue('pip_sync', array(), $actor);
-		$m['pip_enqueued'] = true;
-		$m['pip_job'] = $j['ok'] ? (string)$j['id'] : '';
-		$m['pip_error'] = $j['ok'] ? '' : (string)$j['error'];
-		gp_upd_manifest_save($stamp, $m);
-	}
 	return $m;
+}
+
+// The administrator confirmed "install the Python packages" on the result page: queue the worker's pip_sync job once for this update.
+// pip installs from the network into the analyzer's environment, so it is never started by an update on its own.
+// Returns array(ok, lang key).
+function gp_upd_pip_queue($stamp, $actor) {
+	if (!is_string($stamp) || !preg_match('/^\d{8}-\d{6}(-\d+)?$/', $stamp)) { return array(false, 'upd_err_unknown_update'); }
+	$m = gp_upd_json_read(gp_upd_dir() . '/' . $stamp . '/manifest.json');
+	if ($m === null || ($m['status'] ?? '') !== 'ok' || empty($m['requirements_changed'])) { return array(false, 'upd_err_unknown_update'); }
+	if (!empty($m['pip_enqueued'])) { return array(false, 'upd_pip_already'); }
+	$j = gp_job_enqueue('pip_sync', array(), $actor);
+	$m['pip_enqueued'] = true;
+	$m['pip_job'] = $j['ok'] ? (string)$j['id'] : '';
+	$m['pip_error'] = $j['ok'] ? '' : (string)$j['error'];
+	gp_upd_manifest_save($stamp, $m);
+	gp_upd_audit('update_pip_queue', $actor, $stamp, null, array('job' => $m['pip_job'], 'ok' => (bool)$j['ok']));
+	return array((bool)$j['ok'], $j['ok'] ? 'upd_pip_queued' : 'upd_pip_failed');
 }
 
 // Dashboard alerts about updates: array of array(code, detail, level). Cheap: one manifest read, and the job list

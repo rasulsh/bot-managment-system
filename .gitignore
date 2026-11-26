@@ -15,7 +15,9 @@ __pycache__/
 analyzer/clf.joblib
 analyzer/ground-truth.txt
 analyzer/reports/
-*.html
+# Generated HTML reports (analyzer/report.py --html) are never committed; a repo-wide *.html rule used to hide any legitimate HTML file too.
+analyzer/*.html
+analyzer/reports/*.html
 
 # Phase 4 candidate model artefacts.
 analyzer/model.joblib.candidate
@@ -34,6 +36,11 @@ guard/config.local.json.tmp*
 analyzer/snapshot.json
 analyzer/snapshot.json.tmp
 analyzer/.lastrun-*
+
+# Runtime data of the panel (users.json, audit.jsonl, sign-in counters): never committed.
+data/*
+!data/.htaccess
+!data/.gitkeep
 
 # Runtime files the guard writes into logs/ (error log, throttle markers, circuit-breaker marker).
 logs/guard-errors.log

@@ -25,6 +25,7 @@ definitive negative answer) or DnsTransient (could not tell); any other
 exception counts as transient.
 """
 
+import re
 import socket
 import time
 
@@ -130,11 +131,37 @@ class DefaultResolver(object):
 default_resolver = DefaultResolver()
 
 
+# A registered suffix: a dot, a name and at least one more label (never a bare top-level domain). The same rule the panel overlay
+# enforces when it WRITES bot_suffixes (guard/guard.php, type 'suffixes').
+SUFFIX_RE = re.compile(r'^\.[a-z0-9-]+(\.[a-z0-9-]+)+$')
+
+
+def clean_suffixes(table, warn=None):
+    """The bot -> suffix list table with every entry that is not a valid suffix dropped (warn(text) says which).
+
+    guard/config.php is edited by hand and nothing validated it: a suffix typed without its leading dot would have let
+    "notgooglebot.com" pass for ".googlebot.com" (matches_suffix also enforces a label boundary now, this is the second line).
+    """
+    out = {}
+    for bot, suffixes in (table or {}).items():
+        good = []
+        for suffix in (suffixes if isinstance(suffixes, (list, tuple)) else []):
+            text = str(suffix).strip().lower()
+            if SUFFIX_RE.match(text):
+                good.append(text)
+            elif warn is not None:
+                warn('bot_suffixes[%s]: %r is not a valid suffix (it must look like .googlebot.com); ignored' % (bot, suffix))
+        out[bot] = good
+    return out
+
+
 def matches_suffix(hostname, suffixes):
-    """True when hostname ends with one of the operator-listed suffixes."""
+    """True when hostname is, or is a subdomain of, one of the suffixes (a whole-label match: "notgooglebot.com" does not match
+    ".googlebot.com", nor "googlebot.com" without its dot)."""
     lowered = str(hostname or '').lower().rstrip('.')
     for suffix in suffixes or []:
-        if lowered.endswith(str(suffix).lower()):
+        bare = str(suffix).lower().strip().lstrip('.')
+        if bare and (lowered == bare or lowered.endswith('.' + bare)):
             return True
     return False
 
@@ -206,7 +233,9 @@ def verify_ip(ip, claimed_bot, bot_suffixes, resolver=default_resolver):
 
     matching = [h for h in hostnames if matches_suffix(h, suffixes)]
     if not matching:
-        return 'bad'                             # the PTR answer itself refutes it
+        # The PTR answer itself refutes it, but only from a resolver that demonstrably works right now (the same canary the
+        # NXDOMAIN path needs): one that answers PTR for anything (a redirecting ISP resolver) must not condemn a real crawler.
+        return 'bad' if _resolver_works(resolver) else 'unknown'
 
     transient = False
     for hostname in matching:

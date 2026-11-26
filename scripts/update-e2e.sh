@@ -39,9 +39,10 @@ JAR="$WORK/jar"
 failed=0
 check() { if [ "$2" = "1" ]; then echo "PASS  $1"; else echo "FAIL  $1"; failed=$((failed + 1)); fi; }
 csrf() { grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//'; }
+login_token() { curl -s -c "$1" -b "$1" "$URL?r=login" | grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//'; }   # the login form's CSRF field (it comes with a cookie)
 has() { grep -q -- "$1" <<<"$2" && echo 1 || echo 0; }
 
-curl -s -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "username=admin" --data-urlencode "password=$PASSWORD" "$URL?r=login"
+curl -s -o /dev/null -c "$JAR" -b "$JAR" --data-urlencode "csrf=$(login_token "$JAR")" --data-urlencode "username=admin" --data-urlencode "password=$PASSWORD" "$URL?r=login"
 page="$(curl -s -c "$JAR" -b "$JAR" "$URL?r=update")"
 check "the Update page opens after login and shows the installed version" "$(has '2026.01.01' "$page")"
 tok="$(csrf <<<"$page")"
@@ -110,7 +111,7 @@ check "a broken update is rolled back automatically and the result page says so"
 check "...the old version is running again and guard.off is gone" "$([ "$(cat "$INST/VERSION")" = "2026.01.01" ] && [ ! -f "$INST/guard.off" ] && ! grep -q 'function gv_log_policy() {}' "$INST/guard/log.php" && echo 1 || echo 0)"
 page="$(curl -s -c "$JAR" -b "$JAR" "$URL?r=dashboard")"
 check "the panel still works after the automatic rollback" "$(has 'data-chip="kill"' "$page")"
-audit="$(cat "$INST/panel/audit.jsonl" 2>/dev/null)"
+audit="$(cat "$INST/data/panel/audit.jsonl" "$INST/panel/audit.jsonl" 2>/dev/null)"        # the trail lives in data/panel (before 2026.11.39: panel/)
 check "the audit trail has the upload, apply, verified, rollback and refusal events" "$([ "$(has 'update_upload' "$audit")" = 1 ] && [ "$(has 'update_apply' "$audit")" = 1 ] && [ "$(has 'update_verified' "$audit")" = 1 ] && [ "$(has 'reauth_failed' "$audit")" = 1 ] && echo 1 || echo 0)"
 
 if grep -E 'Warning|Notice|Deprecated' "$WORK/php.log" | grep -v 'Cannot redeclare' >/dev/null 2>&1; then

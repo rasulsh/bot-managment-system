@@ -487,7 +487,7 @@ def _prune(p, state, now, rowstore_hours, ingest_days):
         names = sorted(os.listdir(p['rows']))
     except OSError:
         names = []
-    keep_from = _daystr(datetime.date.fromtimestamp(now) - datetime.timedelta(days=ingest_days - 1))
+    keep_from = _daystr(logs_mod.day_of(now) - datetime.timedelta(days=ingest_days - 1))
     for name in names:
         path = os.path.join(p['rows'], name)
         if name.endswith('.dat') and name.startswith('h-'):
@@ -553,7 +553,7 @@ def update(cfg, now=None, ingest_days=None, rowstore_hours=None, wait=300):
     with _Lock(p['lock'], True, wait):
         state = _load_state(p)
         stats['recovered'] = _recover(p, state)
-        today = datetime.date.fromtimestamp(now)
+        today = logs_mod.day_of(now)
         for offset in range(ingest_days - 1, -1, -1):          # oldest first: a first run prunes as it goes
             _ingest_day(p, state, cfg['log_dir'], today - datetime.timedelta(days=offset), now, stats)
         _prune(p, state, now, rowstore_hours, ingest_days)

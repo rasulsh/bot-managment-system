@@ -891,7 +891,9 @@ function gp_identity_verdicts($identity) {
 	if (is_string($clf) && is_numeric($clf)) { $out['clf'] = (int)$clf; }
 	$out['botok'] = gv_r_get($conn, gv_key('botok:' . $identity)) === '1';
 	$out['botbad'] = gv_r_get($conn, gv_key('botbad:' . $identity)) === '1';
-	$out['honeypot'] = gv_r_get($conn, gv_key('hp:' . $identity)) === '1';
+	// The honeypot mark is kept per device (hpd), per IPv6 /64 or IPv4 address (hpn); hp:<ip> is what releases before 2026.11.39 wrote.
+	$out['honeypot'] = gv_r_get($conn, gv_key('hpd:' . $identity)) === '1' || gv_r_get($conn, gv_key('hpn:' . gv_ip_net($identity))) === '1'
+		|| gv_r_get($conn, gv_key('hp:' . $identity)) === '1';
 	if (gv_r_get($conn, gv_key('allow:' . $identity)) === '1') {
 		$out['allow_ttl'] = gp_ttl(gv_key('allow:' . $identity));
 	}
@@ -930,12 +932,27 @@ function gp_overrides_list($limit = 200) {
 			$reply = gp_scan($conn, $cursor, gv_key($kind . ':') . '*');
 			if ($reply === null) { break; }
 			list($cursor, $keys) = $reply;
+			// One pipelined round trip for the whole SCAN page: the TTL of every key and, for the challenge kind, its value (which says
+			// CAPTCHA or JavaScript). It was one GET and one TTL round trip per override.
+			$cmds = array();
+			foreach ($keys as $key) {
+				$cmds[] = array('TTL', $key);
+				if ($kind === 'chal') { $cmds[] = array('GET', $key); }
+			}
+			$rep = $cmds ? gv_redis_pipeline($conn, $cmds) : array();
+			$at = 0;
 			foreach ($keys as $key) {
 				$identity = substr($key, strlen(gv_key($kind . ':')));
 				$name = $kind;
-				if ($kind === 'chal') { $name = (gv_r_get($conn, $key) === 'c') ? 'captcha' : 'challenge'; }
-				$out[] = array('kind' => $name, 'identity' => $identity,
-					'ttl' => gp_ttl($key));
+				$ttl = is_array($rep) && isset($rep[$at]) ? $rep[$at] : null;
+				$at++;
+				if ($kind === 'chal') {
+					$val = is_array($rep) && isset($rep[$at]) ? $rep[$at] : null;
+					$at++;
+					$name = ($val === 'c') ? 'captcha' : 'challenge';
+				}
+				$ttl = ($ttl === false || $ttl === null) ? null : (int)$ttl;
+				$out[] = array('kind' => $name, 'identity' => $identity, 'ttl' => ($ttl !== null && $ttl >= 0) ? $ttl : null);
 				if (count($out) >= $limit) { return $out; }
 			}
 			$guard++;

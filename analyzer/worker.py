@@ -36,6 +36,11 @@ except ImportError:        # pragma: no cover
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+if __name__ == '__main__':
+    # No bytecode, and files a manual run creates are not group-writable: a __pycache__ made under cron's umask 002 was 0775.
+    sys.dont_write_bytecode = True
+    os.umask(0o022)
+
 from analyzer import config as config_mod
 from analyzer import fsmode
 from analyzer import geo as geo_mod
@@ -55,6 +60,7 @@ MAX_OUTPUT = 8000
 # while they run: an empty queue, a snapshot, a replay, a GeoIP / IP list compile or a pip sync need none, so the worker (every minute) no
 # longer keeps nightly out of the lock.
 WRITE_JOBS = frozenset(['verify', 'nightly', 'train', 'train_clf', 'promote_ml', 'promote_clf'])
+JOBS_QUEUE_TTL = 86400     # seconds; the same as GP_JOB_TTL in panel/jobs.php, which sets it on every enqueue (a test compares the two)
 LOCK_WAIT_DEFAULT = 45     # seconds a write job waits for the lock before it goes back to the queue (the worker fires every minute)
 
 
@@ -203,8 +209,13 @@ class WriteLock(object):
             return True
         try:
             fh = fsmode.open_append(self.path)
-        except OSError:
-            return True            # an unwritable lock directory must not stop the queue: nothing else can hold what cannot be created
+        except OSError as exc:
+            # NOT acquired. A lock file this user cannot open (a permission-split install: the cron wrapper opens it as one user,
+            # the worker runs as another) used to count as "acquired", so write jobs ran unlocked beside nightly or a training run.
+            # The job goes back to the queue instead, and the warning names the file.
+            print('WARN: cannot open the write lock %s (%s): the job stays queued' % (self.path, exc), file=sys.stderr)
+            jobreport.warn('cannot open the write lock %s: write jobs stay queued until it can be opened by this user' % self.path)
+            return False
         deadline = time.time() + max(0.0, float(wait))
         while True:
             try:
@@ -266,6 +277,8 @@ def drain(client, cfg, max_jobs, wait=None, runner=None):
             if not lock.acquire(wait):
                 try:
                     client.rpush(redis_io.gp_key('jobs'), raw)
+                    # rpush on a list that was just emptied by rpop creates it again WITHOUT a TTL: give it the one the panel's enqueue sets
+                    client.expire(redis_io.gp_key('jobs'), JOBS_QUEUE_TTL)
                 except Exception as exc:
                     redis_io.warn('could not put a job back on the queue: %s' % exc)
                 print('The write lock is busy (nightly or a training run holds it): the %s job stays queued for the next firing.' % job_type_of(raw))

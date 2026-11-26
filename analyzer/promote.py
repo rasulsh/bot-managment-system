@@ -83,16 +83,27 @@ def check(kind, cfg):
 def promote(kind, cfg):
     """Move a checked candidate over the live path.
 
-    shutil.move is atomic within a filesystem, which the default paths share -
-    they are siblings in analyzer/. A half-written live model would be worse
-    than a stale one.
+    The move is os.replace when candidate and live are on one filesystem (the default paths are siblings in analyzer/): one atomic
+    rename. When they are not, shutil.move would copy straight over the live path (not atomic, and a half-written live model is worse
+    than a stale one), so the candidate is copied beside the live file first and renamed into place. Callers take the write lock
+    (analyzer/worker.py WriteLock) so a training run cannot swap the candidate between check() and the move.
     """
     verdict = check(kind, cfg)
     if not verdict['ok']:
         return verdict
     live, candidate = paths_for(kind, cfg)
     try:
-        shutil.move(candidate, live)
+        try:
+            os.replace(candidate, live)
+        except OSError:
+            tmp = '%s.tmp.%d' % (live, os.getpid())
+            try:
+                shutil.copy2(candidate, tmp)
+                os.replace(tmp, live)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            os.unlink(candidate)
     except Exception as exc:
         return {'ok': False, 'reason': 'could not move the candidate into place: %s' % exc,
                 'inspection': verdict['inspection']}
@@ -109,6 +120,11 @@ def live_status(cfg):
 
 def stale_warning(kind, info):
     """The loud one-line warning naming the fix, or '' when nothing is wrong."""
+    if info and info.get('unusable'):
+        return ('WARNING: the live %s model cannot be used (%s). No gv:%s verdicts are written until it is replaced; the guard keeps working '
+                'without that signal (nothing is blocked more because of it). The next nightly run trains a new one by itself%s.'
+                % (kind, info.get('error', 'unreadable'), kind,
+                   '' if kind == 'ml' else ' once there are enough labelled sessions'))
     if not info or not info.get('stale'):
         return ''
     return ('WARNING: the live %s model is stale (%s). No gv:%s verdicts will be '

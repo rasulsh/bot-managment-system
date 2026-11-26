@@ -14,6 +14,7 @@
 		<?php endif; ?>
 
 		<form method="post" action="index.php?r=login" class="gp-form">
+			<input type="hidden" name="csrf" value="<?= gp_e($login_csrf ?? '') ?>">
 			<label class="gp-field">
 				<span class="gp-label"><?= gp_e(gp_t('login_user')) ?></span>
 				<input class="gp-input" type="text" name="username" autocomplete="username"

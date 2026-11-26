@@ -299,6 +299,29 @@ def list_overrides(client, kind=None, limit=500):
     return out
 
 
+def ip_net(identity):
+    """The guard's gv_ip_net(): an IPv4 address as it is, an IPv6 address as its /64 ('2001:db8::/64'); anything else (a device id) as it is."""
+    ident = str(identity)
+    if ':' not in ident:
+        return ident
+    try:
+        import ipaddress
+        addr = ipaddress.ip_address(ident)
+    except ValueError:
+        return ident
+    if addr.version != 6:
+        return ident
+    return '%s/64' % ipaddress.ip_network('%s/64' % ident, strict=False).network_address.compressed
+
+
+def honeypot_mark(client, identity):
+    """Whether the guard holds a honeypot history for this identity: per device (hpd:<device>), per IPv6 /64 or IPv4 address (hpn:<net>),
+    or the hp:<ip> that releases before 2026.11.39 wrote. The same three keys the panel's Identity page reads."""
+    ident = str(identity)
+    return (_get(client, key('hpd:' + ident)) == '1' or _get(client, key('hpn:' + ip_net(ident))) == '1'
+            or _get(client, key('hp:' + ident)) == '1')
+
+
 def identity_verdicts(client, identity):
     """Every gv: verdict touching one identity - the first thing to look at
     when a customer reports being blocked."""
@@ -308,6 +331,6 @@ def identity_verdicts(client, identity):
         'clf': get_clf(client, identity),
         'botok': _get(client, key('botok:' + str(identity))) == '1',
         'botbad': _get(client, key('botbad:' + str(identity))) == '1',
-        'honeypot': _get(client, key('hp:' + str(identity))) == '1',
+        'honeypot': honeypot_mark(client, identity),
         'overrides': get_override(client, identity),
     }

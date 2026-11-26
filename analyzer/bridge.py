@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 
+from analyzer import botverify
 from analyzer import jobreport
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -189,6 +190,7 @@ def redis_block_status(php='php', config_path=None):
                            extra=['--redis-credentials'], quiet=True)
         block = data.get('redis') if isinstance(data, dict) else None
         panel = data.get('analyzer') if isinstance(data, dict) else None
+        _TZ_CACHE[key] = str(data.get('php_timezone') or '') if isinstance(data, dict) else ''
         _PANEL_CACHE[key] = dict(panel) if isinstance(panel, dict) else {}
         if isinstance(block, dict):
             _REDIS_CACHE[key] = (dict(block), '')
@@ -199,6 +201,13 @@ def redis_block_status(php='php', config_path=None):
 
 
 _PANEL_CACHE = {}
+_TZ_CACHE = {}
+
+
+def php_timezone(php='php', config_path=None):
+    """The time zone name PHP names the guard's daily log files by (read with the same dump as the Redis block), or ''."""
+    redis_block_status(php, config_path)
+    return _TZ_CACHE.get((php, config_path or ''), '')
 
 
 def panel_analyzer_settings(php='php', config_path=None):
@@ -236,6 +245,7 @@ def guard_config(cfg=None, php=None, config_path=None):
         if key in dumped:
             merged[key] = dumped[key]
     merged['source'] = 'guard'
+    merged['bot_suffixes'] = botverify.clean_suffixes(merged.get('bot_suffixes'), warn=lambda text: print('WARN: ' + text, file=sys.stderr))
     return merged
 
 

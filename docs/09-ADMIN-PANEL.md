@@ -537,6 +537,7 @@ guard/config-backups/
 guard/rules.json*
 guard/rules.cache.php*
 panel/panel.config.php
+data/panel/
 panel/users.json*
 panel/audit.jsonl
 panel/jobs-seen.json*
@@ -589,7 +590,7 @@ Both use the same script, `updates/rollback.php`, written from the old code befo
 
 **File modes.** The updater never relies on the modes in the ZIP: directories it creates are 0755, files 0644, `scripts/*.sh` 0755, nothing is group- or world-writable (the manifest counts the corrections). Files that did not change are corrected as well; the code directories lose group / world write; `logs/`, `lists/`, `geo/` and `updates/` keep their mode. Protected files are never touched. The result page runs the permission check (below).
 
-**After the update.** When `analyzer/requirements.txt` changed the panel queues the worker job `pip_sync`
+**After the update.** When `analyzer/requirements.txt` changed the result page offers a button; only when an administrator presses it (POST, CSRF, audited as `update_pip_queue`) the panel queues the worker job `pip_sync`
 (`<python> -m pip install -r analyzer/requirements.txt`, 10 minute limit, output in the job log; a failure raises a dashboard warning).
 The page prints the exact SSH command as well. The crontab check runs and any missing line is listed.
 
@@ -617,3 +618,8 @@ The sidebar and login page have a Light / Dark / Automatic switcher. The choice 
 ## Why the panel is still exposed by symlink
 
 Replacing the symlink with an `.htaccess` rewrite was tested on Apache 2.4 with mod_php. A per-directory `RewriteRule` cannot target a path outside the document root: Apache prepends the docroot, so the panel answers 404. `Alias` would work but needs the server or vhost config, which shared hosting does not give you. A small PHP stub in the docroot that `require`s the real panel would work, but it adds a second entry point that must repeat every guard (allowlist, headers, direct-access rules). Not worth the extra attack surface, so the symlink stays. OpenLiteSpeed was not tested.
+
+
+## Where the panel keeps its data (2026.11.39)
+
+`users.json` (every account's password hash), `audit.jsonl`, `jobs-seen.json` and the sign-in counters live in **`<install>/data/panel/`** (config key `panel_data_dir`), not in `panel/`: `panel/` is the one directory that is published to the web by a symlink or a copy, so a missing server rule there would make the account store downloadable. The first request after the update copies the old files over (once; a file that already exists in the new place is never overwritten), uses the old place when the new one cannot be written, and leaves the old copies in `panel/` for a rollback until the first run of the next release removes them. The dashboard checks every 10 minutes, from the server, that `<panel URL>/users.json` and `/audit.jsonl` are not served (403 / 404 is right; a 200 that returns the file is a critical alert; a soft-404 page or no answer is not an alarm). `scripts/exposure-check.sh <URL> <panel path>` probes the same files from outside.

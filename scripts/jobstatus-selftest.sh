@@ -88,6 +88,19 @@ GV_CONFIG="$WORK/config.php" FAKE_SECRET="leak sup3rS3cretValue99 and redis-pass
 ALL="$(cat "$GV_JOBLOG_DIR/jobs-errors.log" "$GV_JOBSTATUS_DIR/.jobstatus-worker.json" "$GV_JOBLOG_DIR/jobs.log")"
 ok "the configured secret and Redis password never reach the logs or the status" "$(yes_if [ -z "$(grep -c 'sup3rS3cretValue99\|redis-pass-12345' <<<"$ALL" | grep -v '^0$')" ])"
 ok "generic patterns (AUTH x, password=x, token: x) are redacted too" "$(yes_if [ -z "$(grep -c 'hunter2hunter2\|letmein99\|abc123456' <<<"$ALL" | grep -v '^0$')" ] && grep -q REDACTED <<<"$ALL")"
+# SEC-3 of the audit claimed the escaping of regex characters in a secret leaves the secret in the log. It does not (GNU sed escapes each
+# of them with a backslash); these secrets contain every one of  . * ^ $ & [ ] \ /  so that it stays true.
+python3 - "$WORK/config-meta.php" "$ROOT" <<'PY'
+import sys
+secret = 'pa.ss$w*rd^&[x]\\y/z'          # pa.ss$w*rd^&[x]\y/z (a PHP single-quoted literal: two backslashes are one)
+salt = 'dev/2026.salt*^$[]&'
+open(sys.argv[1], 'w').write("<?php\nif (!defined('GV_BOOT')) { http_response_code(404); exit; }\n$c = require '%s/scripts/config.dev.php';\n$c['secret'] = '%s';\n$c['holdout_salt'] = '%s';\n$c['redis']['password'] = 'pw.*^$&[]/long';\nreturn $c;\n" % (sys.argv[2], secret.replace('\\', '\\\\'), salt))
+PY
+: > "$GV_JOBLOG_DIR/jobs-errors.log"
+GV_CONFIG="$WORK/config-meta.php" FAKE_SECRET='leak pa.ss$w*rd^&[x]\y/z then dev/2026.salt*^$[]&  and pw.*^$&[]/long end' FAKE_MODE=secret bash "$CRON" worker > /dev/null 2>&1
+META="$(cat "$GV_JOBLOG_DIR/jobs-errors.log" "$GV_JOBSTATUS_DIR/.jobstatus-worker.json" "$GV_JOBLOG_DIR/jobs.log")"
+ok "a secret with . * ^ \$ & [ ] \\ / in it is redacted from the error log and the status file (the audit's SEC-3, locked in)" "$(yes_if [ -z "$(grep -cF -e 'w*rd^&[x]' -e 'salt*^$[]&' -e 'pw.*^$&[]' <<<"$META" | grep -v '^0$')" ] && grep -q REDACTED <<<"$META")"
+ok "...and what is around the secret is kept (only the secret is replaced)" "$(yes_if grep -q 'leak \[REDACTED\] then \[REDACTED\]' <<<"$META")"
 : > "$GV_JOBLOG_DIR/jobs-errors.log"
 FAKE_MODE=big bash "$CRON" verify > /dev/null 2>&1
 ok "the captured stderr in jobs-errors.log is capped near 64 KiB and keeps the END of the output" "$(yes_if [ "$(wc -c < "$GV_JOBLOG_DIR/jobs-errors.log")" -lt 70000 ] && grep -q 'tail-line' "$GV_JOBLOG_DIR/jobs-errors.log")"

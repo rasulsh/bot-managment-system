@@ -34,7 +34,7 @@ function gp_users_path() {
 	// GV_USERS lets the self-test keep the store out of the working tree, like GV_AUDIT.
 	$env = getenv('GV_USERS');
 	if (is_string($env) && $env !== '') { return $env; }
-	return __DIR__ . '/users.json';
+	return gv_panel_data_path('users.json');
 }
 
 // A valid bcrypt hash of a random string. Verifying against it for an unknown or disabled user makes the failure cost
@@ -50,7 +50,14 @@ function gp_users_norm($name) {
 // The rule for NEW names: lowercase letters, digits, dot, underscore, hyphen; 3 to 32 characters. Input is lowercased first
 // (unique, case-insensitive). An older install may have a name outside the rule (migrated as is); it can still log in.
 function gp_users_valid_name($name) {
-	return preg_match('/^[a-z0-9._-]{3,32}$/', gp_users_norm($name)) === 1;
+	return gp_users_name_ok(gp_users_norm($name), false);
+}
+
+// The ONE definition of a user name: the alphabet [a-z0-9._-] and a length. A NEW name is 3 to 32 characters; a name already in the store
+// (written by an older release) is accepted at 1 to 64 so that no existing administrator is locked out by a stricter rule. Both the
+// creation form and the store check call this function, so the two can no longer drift apart.
+function gp_users_name_ok($name, $stored) {
+	return is_string($name) && preg_match($stored ? '/^[a-z0-9._-]{1,64}$/' : '/^[a-z0-9._-]{3,32}$/', $name) === 1;
 }
 
 // Returns '' when fine, else a lang key.
@@ -75,7 +82,7 @@ function gp_users_validate($data) {
 	foreach ($data['users'] as $u) {
 		if (!is_array($u)) { return array(false, 'bad record'); }
 		$name = isset($u['username']) && is_string($u['username']) ? $u['username'] : '';
-		if (preg_match('/^[a-z0-9._-]{1,64}$/', $name) !== 1) { return array(false, 'bad username'); }
+		if (!gp_users_name_ok($name, true)) { return array(false, 'bad username'); }
 		if (isset($out[$name])) { return array(false, 'duplicate username'); }
 		if (!isset($u['role']) || !in_array($u['role'], gp_users_roles(), true)) { return array(false, 'unknown role'); }
 		if (!isset($u['password_hash']) || !is_string($u['password_hash']) || $u['password_hash'] === '') { return array(false, 'bad password hash'); }
@@ -92,7 +99,7 @@ function gp_users_from_config() {
 	$cfg = gp_panel_config();
 	if ($cfg === null || !isset($cfg['username'], $cfg['password_hash'])) { return null; }
 	$name = gp_users_norm($cfg['username']);
-	if (preg_match('/^[a-z0-9._-]{1,64}$/', $name) !== 1) { return null; }
+	if (!gp_users_name_ok($name, true)) { return null; }
 	$path = gp_panel_config_path();
 	$when = is_file($path) ? (int)@filemtime($path) : time();
 	return gp_users_record($name, 'admin', $cfg['password_hash'], 'migration', $when);

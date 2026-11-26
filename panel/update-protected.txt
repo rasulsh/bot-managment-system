@@ -17,6 +17,7 @@ guard/config-backups/
 guard/rules.json*
 guard/rules.cache.php*
 panel/panel.config.php
+data/panel/
 panel/users.json*
 panel/audit.jsonl
 panel/jobs-seen.json*

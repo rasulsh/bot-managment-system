@@ -40,10 +40,14 @@ for need in "$PHP_BIN" python3 curl redis-server redis-cli; do
 	command -v "$need" >/dev/null 2>&1 || { echo "ERROR: '$need' is required." >&2; exit 2; }
 done
 
+# An operator's own kill switch is put aside while the cases run and put back at the end (it used to be deleted by the cases and the cleanup).
+SAVED_OFF=""
+if [ -e "$ROOT/guard.off" ]; then SAVED_OFF="$ROOT/guard.off.saved-$$"; mv "$ROOT/guard.off" "$SAVED_OFF"; fi
 PIDS=()
 cleanup() {
 	for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
 	rm -f "$ROOT/guard.off"
+	[ -z "$SAVED_OFF" ] || mv "$SAVED_OFF" "$ROOT/guard.off"
 	rm -rf "$WORK"
 }
 trap cleanup EXIT

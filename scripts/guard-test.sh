@@ -43,8 +43,33 @@ handshake() {   # $1 nonce, $2 cookie jar, [$3 user agent] -> prints the HTTP st
 		-H "X-GV: $n" -H "X-GV-P: $c" -c "$jar" "$BASE_URL/"
 }
 
+# Every row is ASSERTED (audit LOG-16: the script used to print the matrix and always exit 0, and CI looked at 12 rows of ~40). A row fails
+# when `got` is not what the column for the deployment says: the "expected(enforced)" column by default (every enforce toggle on, as
+# scripts/config.dev.php), the "expected(monitor)" column with GV_MATRIX_MODE=monitor, nothing with GV_MATRIX_ASSERT=0. A SKIP row (a case
+# that needs Redis or a device id) is not a failure; the script says how many there were.
+FAILED=0
+SKIPPED=0
+FAILED_ROWS=""
+ASSERT="${GV_MATRIX_ASSERT:-1}"
+MODE="${GV_MATRIX_MODE:-enforced}"
+row_ok() {   # <got> <expected text> -> 0 when the expectation holds
+	local got="${1%% *}" want="$2" first
+	first="${want%% *}"
+	case "$want" in
+		'nonce found') [ "$1" = ok ] && return 0; return 1 ;;
+		*' or '*) local alt="${want#* or }"; alt="${alt%% *}"; [ "$got" = "$first" ] || [ "$got" = "$alt" ] && return 0; return 1 ;;
+		*'(503 without Redis)'*) [ "$got" = 200 ] || [ "$got" = 503 ] && return 0; return 1 ;;
+	esac
+	[ "$got" = "$first" ]
+}
 row() {
 	printf '%-44s | %-6s | %-18s | %s\n' "$1" "$2" "$3" "$4"
+	[ "$ASSERT" = 1 ] || return 0
+	if [ "$2" = SKIP ]; then SKIPPED=$((SKIPPED + 1)); return 0; fi
+	local want="$4"
+	[ "$MODE" = monitor ] && want="$3"
+	if ! row_ok "$2" "$want"; then FAILED=$((FAILED + 1)); FAILED_ROWS="$FAILED_ROWS
+  FAIL  $1: got '$2', expected '$want' ($MODE)"; fi
 }
 
 echo "Bot Guard HTTP test matrix against $BASE_URL"
@@ -238,6 +263,10 @@ else
 	row '10 known bot with gv:botbad seeded' "$got" '200' '403'
 	$REDIS_CLI $REDIS_ARGS del "gv:botbad:$CLIENT_IP" >/dev/null 2>&1
 
+	# Row 5 fetched the honeypot from this very address, which marks it (HP_HIST, +40 on every later score). The device rows below test the
+	# reputation and the anomaly level alone, so the mark is cleared first (it used to turn row 12's 200 into a 403 and nobody noticed).
+	$REDIS_CLI $REDIS_ARGS del "gv:hpn:$CLIENT_IP" "gv:hp:$CLIENT_IP" >/dev/null 2>&1
+
 	# 11/12. Reputation and anomaly level on a real device. Complete the
 	# handshake first: the device_id is the leading field of the token cookie.
 	jar=$(mktemp)
@@ -247,6 +276,14 @@ else
 	if [ -n "$nonce" ]; then
 		handshake "$nonce" "$jar" >/dev/null 2>&1
 		dev=$(awk '$6 == "_gv" {print $7}' "$jar" | head -1 | cut -d. -f1)
+	fi
+	# A freshly minted device lands in the 5% holdout (measured only, never blocked) once in twenty runs, which turned rows 11 and 12b into a
+	# coin flip. When the dev config can name an identity OUTSIDE the holdout, rows 11-12b use that one (its token is signed with the dev secret).
+	outside_pair=$("$PHP_BIN" "$ROOT/scripts/holdout-probe.php" --outside 2>/dev/null)
+	if [ -n "$outside_pair" ]; then
+		dev="${outside_pair%% *}"
+		jar_host=$(printf '%s' "$BASE_URL" | sed -e 's|^[a-z]*://||' -e 's|[:/].*$||')
+		printf '# Netscape HTTP Cookie File\n%s\tFALSE\t/\tFALSE\t0\t_gv\t%s\n' "$jar_host" "${outside_pair#* }" > "$jar"
 	fi
 
 	if [ -z "$dev" ]; then
@@ -402,5 +439,14 @@ echo "Inspect the log directory for one JSONL line per request above."
 echo "Phase 2 fields to watch: botv, rep, ml, and esc next to sc."
 echo "Phase 4: decision lines carry v and rid; outcome lines carry o=1 and the"
 echo "same rid. Capture is off unless capture_outcomes is enabled."
+if [ "$ASSERT" = 1 ]; then
+	echo
+	[ "$SKIPPED" -eq 0 ] || echo "Skipped (need Redis or a device id): $SKIPPED row(s)."
+	if [ "$FAILED" -gt 0 ]; then
+		echo "FAILED: $FAILED row(s) did not give the expected answer ($MODE column):$FAILED_ROWS"
+		exit 1
+	fi
+	echo "All asserted rows gave the expected answer ($MODE column)."
+fi
 echo "Default deployment path: <guard>/logs/guard-$(date +%Y%m%d).jsonl"
 echo "Dev router (scripts/config.dev.php) path: ${TMPDIR:-/tmp}/gv-logs/guard-$(date +%Y%m%d).jsonl"

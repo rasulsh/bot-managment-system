@@ -117,15 +117,19 @@ ok('panel settings: wrong types, bools and keys outside PANEL_KEYS are ignored',
 
 # End to end through PHP: a value written to the overlay reaches config.load(),
 # over an explicit analyzer config file (defaults < file < panel).
-overlay_path = os.path.join(config_mod.REPO_ROOT, 'guard', 'config.local.json')
-saved_overlay = open(overlay_path).read() if os.path.isfile(overlay_path) else None
+# The overlay is a temporary file named by GV_OVERLAY (the guard's and the dump's own switch): the real guard/config.local.json is never
+# read, written or restored by this suite.
+overlay_dir = tempfile.mkdtemp(prefix='gv-overlay-')
+overlay_path = os.path.join(overlay_dir, 'config.local.json')
+saved_env = os.environ.get('GV_OVERLAY')
 try:
-    with open(overlay_path, 'w') as fh:
+    with open(overlay_path, 'w', encoding='utf-8') as fh:
         fh.write('{"analyzer.window_days": 21, "analyzer.report_top_n": 5, "analyzer.window_days_typo": 1}')
+    os.environ['GV_OVERLAY'] = overlay_path
     config_mod.bridge._REDIS_CACHE.clear()
     config_mod.bridge._PANEL_CACHE.clear()
     handle, json_path = tempfile.mkstemp(suffix='.json')
-    with os.fdopen(handle, 'w') as fh:
+    with os.fdopen(handle, 'w', encoding='utf-8') as fh:
         fh.write('{"window_days": 3, "report_days": 9}')
     via_php = config_mod.load(json_path)
     os.unlink(json_path)
@@ -135,11 +139,11 @@ try:
         ok('panel settings reach the analyzer through PHP and win over the analyzer file',
            via_php['window_days'] == 21 and via_php['report_top_n'] == 5 and via_php['report_days'] == 9)
 finally:
-    if saved_overlay is None:
-        os.unlink(overlay_path)
+    if saved_env is None:
+        os.environ.pop('GV_OVERLAY', None)
     else:
-        with open(overlay_path, 'w') as fh:
-            fh.write(saved_overlay)
+        os.environ['GV_OVERLAY'] = saved_env
+    shutil.rmtree(overlay_dir, ignore_errors=True)
     config_mod.bridge._REDIS_CACHE.clear()
     config_mod.bridge._PANEL_CACHE.clear()
 
@@ -2006,6 +2010,40 @@ else:
     ok('identity_verdicts reads overrides and verdicts back under the prefix',
        iv['reputation'] == 7 and iv['overrides']['allow'] is not None and iv['overrides']['deny'] is None)
     ok('get_override reports the remaining ttl', 0 < redis_io.get_override(a, 'ident9')['allow'] <= 600)
+    # The honeypot mark: the guard writes hpd:<device> and hpn:<ipv4 | ipv6 /64> since 2026.11.39 (hp:<ip> before); identity_verdicts reads all three.
+    ok('ip_net: IPv4 as it is, IPv6 as its /64, a device id as it is, an unparsable address as it is',
+       redis_io.ip_net('203.0.113.9') == '203.0.113.9' and redis_io.ip_net('2001:db8:1:2:3:4:5:6') == '2001:db8:1:2::/64' and redis_io.ip_net('2001:DB8:0:0:ffff::1') == '2001:db8::/64'
+       and redis_io.ip_net('0123456789abcdef01234567') == '0123456789abcdef01234567' and redis_io.ip_net('zz:zz') == 'zz:zz')
+    ok('identity_verdicts: no honeypot mark means False', redis_io.identity_verdicts(a, 'devhp1')['honeypot'] is False)
+    admin.setex('shop1:gv:hpd:devhp1', 60, '1')
+    ok('identity_verdicts: a device mark (hpd:<device>) is a honeypot history', redis_io.identity_verdicts(a, 'devhp1')['honeypot'] is True)
+    admin.setex('shop1:gv:hpn:203.0.113.77', 60, '1')
+    ok('identity_verdicts: an IPv4 mark (hpn:<ip>) is a honeypot history', redis_io.identity_verdicts(a, '203.0.113.77')['honeypot'] is True
+       and redis_io.identity_verdicts(a, '203.0.113.78')['honeypot'] is False)
+    admin.setex('shop1:gv:hpn:2001:db8:aa:bb::/64', 60, '1')
+    ok('identity_verdicts: an IPv6 mark is per /64, so any address in the /64 shows it and another /64 does not',
+       redis_io.identity_verdicts(a, '2001:db8:aa:bb:1:2:3:4')['honeypot'] is True and redis_io.identity_verdicts(a, '2001:db8:aa:cc::1')['honeypot'] is False)
+    admin.setex('shop1:gv:hp:203.0.113.5', 60, '1')
+    ok('identity_verdicts: the hp:<ip> that releases before 2026.11.39 wrote is still seen', redis_io.identity_verdicts(a, '203.0.113.5')['honeypot'] is True)
+    # A write job that finds the write lock busy goes back on the REAL queue with a TTL (rpush on the emptied list would leave none).
+    rq_old = os.environ.get('GV_LOCK_DIR')
+    os.environ['GV_LOCK_DIR'] = tempfile.mkdtemp()
+    rq_busy = worker_mod.WriteLock(mode='nightly')
+    rq_busy.acquire(0)
+    admin.delete('shop1:gp:jobs')
+    a.rpush(redis_io.gp_key('jobs'), '{"id":"rq1","type":"nightly","params":{}}')
+    admin.persist('shop1:gp:jobs')
+    rq_done, rq_back = worker_mod.drain(a, {}, 4, wait=0)
+    ok('worker (real Redis): a deferred write job is back on the queue and the queue key has the 24 h TTL, not none',
+       rq_back == 1 and admin.llen('shop1:gp:jobs') == 1 and 0 < admin.ttl('shop1:gp:jobs') <= worker_mod.JOBS_QUEUE_TTL)
+    rq_busy.release()
+    admin.delete('shop1:gp:jobs')
+    if rq_old is None:
+        os.environ.pop('GV_LOCK_DIR', None)
+    else:
+        os.environ['GV_LOCK_DIR'] = rq_old
+    for k_ in ('hpd:devhp1', 'hpn:203.0.113.77', 'hpn:2001:db8:aa:bb::/64', 'hp:203.0.113.5'):
+        admin.delete('shop1:gv:' + k_)
     # Temporary challenge overrides: one key family (chal:), '1' = challenge, 'c' = CAPTCHA, the same as the guard and the panel.
     ok('set_override challenge / captcha writes gv:chal:<id> with value 1 / c and a TTL', redis_io.set_override(a, 'challenge', 'ident9', 600) and admin.get('shop1:gv:chal:ident9') == '1'
        and 0 < admin.ttl('shop1:gv:chal:ident9') <= 600 and redis_io.set_override(a, 'captcha', 'ident9', 600) and admin.get('shop1:gv:chal:ident9') == 'c')
@@ -2057,7 +2095,7 @@ else:
         dump_default = sp_x.check_output([php_bin_x, os.path.join(REPO, 'scripts', 'config-dump.php'),
                                           '--config', guard_cfg_path]).decode()
         ok('the default config dump never prints the Redis password or username',
-           's3cret' not in dump_default and '"password"' not in dump_default)
+           's3cret' not in dump_default and '"password":' not in dump_default and '"username":' not in dump_default)
         ok('...but still shows the safe parts (host, db, prefix)',
            '"prefix": "xl:"' in dump_default and '"db": 2' in dump_default)
 
@@ -3311,6 +3349,11 @@ class _FakeQueue(object):
     def rpush(self, key, raw):
         self.items.append(raw)
 
+    def expire(self, key, ttl):
+        self.expires = getattr(self, 'expires', [])
+        self.expires.append((key, ttl))
+        return True
+
 
 def _job(t, i='j1'):
     return _json_wl.dumps({'id': i, 'type': t, 'params': {}})
@@ -3350,6 +3393,8 @@ q = _FakeQueue([_job('nightly', 'n1'), _job('snapshot', 's1')])      # rpop take
 worker_mod.drain(q, {}, 8, wait=0, runner=wl_runner)
 ok('worker: the lock is held only around the write job (the read-only one before it ran without it)', wl_seen == [('snapshot', False), ('nightly', True)])
 # the lock is busy (nightly holds it): the write job goes back to the queue, is the next one popped, and the drain stops
+JQ_PANEL_TTL = int(re.search(r"define\('GP_JOB_TTL',\s*(\d+)\)", open(os.path.join(IL_ROOT, 'panel', 'jobs.php')).read()).group(1))
+JQ_TTL_NOTE = 'GP_JOB_TTL in panel/jobs.php = %d s' % JQ_PANEL_TTL
 busy = worker_mod.WriteLock(mode='nightly')
 ok('worker: the test holder takes the lock', busy.acquire(0))
 wl_seen[:] = []
@@ -3358,6 +3403,8 @@ t0 = time.time()
 done, back = worker_mod.drain(q, {}, 8, wait=0.6, runner=wl_runner)
 ok('worker: when the write lock stays busy the write job waits up to the wait, then goes back to the queue and the drain stops (read-only jobs before it still ran)',
    back == 1 and done == 1 and [t for t, _ in wl_seen] == ['snapshot'] and 0.5 <= time.time() - t0 < 5 and worker_mod.job_type_of(q.items[-1]) == 'verify' and len(q.items) == 2)
+ok('worker: a job put back on the queue gets the queue its TTL again (rpush on an emptied list creates a key with none), the same as the panel sets: %s' % JQ_TTL_NOTE,
+   getattr(q, 'expires', None) == [(redis_io.gp_key('jobs'), worker_mod.JOBS_QUEUE_TTL)] and worker_mod.JOBS_QUEUE_TTL == JQ_PANEL_TTL)
 holder_file = os.path.join(wl_dir, '.write.lock.holder')
 ok('worker: the holder file names who holds the lock (mode, pid, start) while it is held, and is removed on release', open(holder_file).read().split()[0] == 'nightly' and int(open(holder_file).read().split()[1]) == os.getpid())
 busy.release()
@@ -3558,11 +3605,12 @@ ok('label progress counts each source: 12 honeypot devices, 5 refuted claims, 2 
 # a run that did nothing else keeps the warning
 rc3, out3, err3, _ = nt_run(rows_present=False)
 w3, _r3 = jobreport_nt.parse(err3)
-ok('nightly with no input rows keeps its real warnings, and the classifier skip is then a warning too (the run did nothing useful)', any('no input rows' in w for w in w3) and any('classifier training' in w for w in w3)
-   and not jobreport_nt.parse_notes(err3))
+ok('nightly with no input rows keeps its real warnings; waiting for labels adds NO warning of its own, only the informational note (PR J: it used to warn here and whenever no identity had a device id)',
+   any('no input rows' in w for w in w3) and not any('classifier training' in w for w in w3) and any('classifier waiting for labels' in n for n in jobreport_nt.parse_notes(err3)))
 rc4, out4, err4, _ = nt_run(redis_up=False)
 w4, _r4 = jobreport_nt.parse(err4)
-ok('nightly with Redis unavailable: the warnings stay (nothing was written), no info note replaces them', any('Redis' in w for w in w4) and not jobreport_nt.parse_notes(err4))
+ok('nightly with Redis unavailable: the Redis warning stays (nothing was written); the label progress is a note beside it, never a second warning',
+   any('Redis' in w for w in w4) and not any('classifier training' in w for w in w4))
 shutil.rmtree(nt_dir, ignore_errors=True)
 
 ok('the worker records exit, warnings and the result of a job it ran', (lambda w: ('warnings' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read() and 'jobreport.parse' in open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analyzer', 'worker.py')).read()))(0))
@@ -4074,6 +4122,233 @@ if model_mod.SKLEARN_AVAILABLE:
         ok('batched classifier scoring equals one-by-one', ig_clfmod.score_many(ig_cb, ig_old_X[:200]) == [ig_clfmod.score(ig_cb, v) for v in ig_old_X[:200]])
 else:
     skip('batched scoring and training on the sample', 'scikit-learn not installed')
+
+section('Audit fixes (PR J): analyzer')
+
+# SEC-4: a suffix must match whole labels; bot_suffixes from a hand-edited config are validated at load
+ok('SEC-4: "notgooglebot.com" does not match ".googlebot.com", "crawl.googlebot.com" and "googlebot.com" itself do',
+   not botverify.matches_suffix('crawl.notgooglebot.com', ['.googlebot.com']) and not botverify.matches_suffix('notgooglebot.com', ['.googlebot.com'])
+   and botverify.matches_suffix('crawl-66-249-66-1.googlebot.com', ['.googlebot.com']) and botverify.matches_suffix('crawl.googlebot.com.', ['.googlebot.com']))
+ok('SEC-4: a suffix typed WITHOUT its dot ("googlebot.com") no longer lets "notgooglebot.com" pass',
+   not botverify.matches_suffix('crawl.notgooglebot.com', ['googlebot.com']) and botverify.matches_suffix('crawl.googlebot.com', ['googlebot.com']))
+sx_warn = []
+sx_clean = botverify.clean_suffixes({'googlebot': ['.googlebot.com', 'google.com', '.com', 'bad suffix', 5], 'bingbot': 'x'}, warn=sx_warn.append)
+ok('SEC-4: invalid suffixes (no leading dot, a bare TLD, junk, not a string, not a list) are dropped with a warning each, valid ones kept',
+   sx_clean == {'googlebot': ['.googlebot.com'], 'bingbot': []} and len(sx_warn) == 4)
+sx_cfg_path = os.path.join(tempfile.mkdtemp(prefix='gv-sx-'), 'c.json')
+open(sx_cfg_path, 'w').write('{"bot_suffixes": {"googlebot": ["googlebot.com", ".googlebot.com"]}}')
+sx_err = io_mod_sx = None
+import io as io_sx, contextlib as ctx_sx
+sx_buf = io_sx.StringIO()
+with ctx_sx.redirect_stderr(sx_buf):
+    sx_loaded = config_mod.load(sx_cfg_path)
+ok('SEC-4: config.load() applies the check to the bot_suffixes of the analyzer config and says which entry it ignored',
+   sx_loaded['bot_suffixes']['googlebot'] == ['.googlebot.com'] and 'googlebot.com' in sx_buf.getvalue() and 'not a valid suffix' in sx_buf.getvalue())
+
+# LOG-6: a non-matching PTR refutes a claim only while the resolver demonstrably works
+class SxResolver(object):
+    def __init__(self, healthy):
+        self._h = healthy
+    def ptr(self, ip):
+        return ['host.example.net']
+    def forward(self, host):
+        return []
+    def healthy(self, fresh=False):
+        return self._h
+ok('LOG-6: a PTR that does not match the crawler suffixes is "bad" from a healthy resolver', botverify.verify_ip('66.249.66.1', 'googlebot', {'googlebot': ['.googlebot.com']}, SxResolver(True)) == 'bad')
+ok('LOG-6: ...and only "unknown" when the resolver health canary fails in the same run (it used to write bad)', botverify.verify_ip('66.249.66.1', 'googlebot', {'googlebot': ['.googlebot.com']}, SxResolver(False)) == 'unknown')
+
+# LOG-2: the identity-wide script ratio decides the human label
+sx_feats = [{'script_ratio': 0.0, 'dur_s': 60.0}, {'script_ratio': 0.9, 'dur_s': 60.0}]
+ok('LOG-2: identity_features() carries the HIGHEST script_ratio of all sessions', labels_mod.identity_features(sx_feats)['script_ratio'] == 0.9 and labels_mod.identity_features([]) == {})
+sx_sess = {'dev': 'd', 'key': 'd', 'ip': '1.1.1.1', 'features': labels_mod.identity_features(sx_feats)}
+sx_lab = {'solved_challenge': 1, 'hp_any': 0}
+sx_first_only = dict(sx_sess, features=sx_feats[0])
+ok('LOG-2: an identity with one scripted session among browsing ones is NOT labelled human (the first session alone said it was)',
+   labels_mod.bot_labels(sx_first_only, sx_lab, [], {}, session_count=2, median_dwell=60.0) == 0 and labels_mod.bot_labels(sx_sess, sx_lab, [], {}, session_count=2, median_dwell=60.0) is None)
+# LOG-3: the median of an even count is the mean of the middle two, in the shared helper replay now uses
+ok('LOG-3: median([10, 30]) is 20, odd and empty counts as before', labels_mod.median([10.0, 30.0]) == 20.0 and labels_mod.median([5.0, 1.0, 9.0]) == 5.0 and labels_mod.median([]) == 0.0 and run_nightly_mod._median([10.0, 30.0]) == 20.0)
+sx_rs = [row(1000.0 + i * 60, dev='dm', p='/p%d' % i) for i in range(1)] + [row(5000.0 + i * 50, dev='dm', p='/q%d' % i) for i in range(2)]
+sx_sessions = logs_mod.sessionize(sx_rs, 600)
+ok('LOG-3: replay computes the dwell median with that helper (two sessions of 0 s and 50 s: 25, not 50)',
+   sorted(f['dur_s'] for f in [features_mod.session_features(x) for x in sx_sessions]) == [0.0, 50.0] and labels_mod.median([0.0, 50.0]) == 25.0
+   and 'labels_mod.median(' in open(os.path.join(IL_ROOT, 'analyzer', 'replay.py')).read())
+
+# LOG-5: replay --mode full leaves holdout rows alone
+sx_cfg_full = dict(cfg)
+sx_cfg_full['model_path'] = os.path.join(tempfile.mkdtemp(prefix='gv-sx5-'), 'none.joblib')
+sx_rows5 = [dict(row(1000.0 + i, dev='dh', rep=0, ml=-1, hold=1)) for i in range(3)] + [dict(row(1000.0 + i, dev='dn', rep=0, ml=-1, hold=0, hp=1)) for i in range(3)]
+sx_sess5 = logs_mod.sessionize(sx_rows5, 1800)
+sx_out5 = replay_mod.recompute_rows_full(sx_rows5, sx_sess5, sx_cfg_full, {})
+ok('LOG-5: recompute_rows_full replaces rep/ml of enforced rows and keeps the logged values of holdout rows (hold = 1)',
+   all(r['rep'] == 0 and r['ml'] == -1 for r in sx_out5 if r['hold'] == 1) and any(r['rep'] != 0 for r in sx_out5 if r['hold'] == 0))
+
+# LOG-4: the classifier's features do not carry the honeypot event
+sx_hp_rows = [row(1000.0, dev='dc', sc=10), row(1010.0, dev='dc', sc=10, rs=['HP_HIST']), row(1020.0, dev='dc', sc=50, rs=['HP_HIST'], hp=1, act='404_hp')]
+sx_hp_rows[1]['sc'] = 50
+sx_hp_rows[0]['_out'] = {'st': 200}
+sx_hp_rows[1]['_out'] = {'st': 200}
+sx_hp_rows[2]['_out'] = {'st': 404}
+sx_hp_sess = logs_mod.sessionize(sx_hp_rows, 1800)[0]
+sx_plain = features_mod.session_features(sx_hp_sess)
+sx_clf = features_mod.clf_features(sx_plain, sx_hp_sess)
+ok('LOG-4: score_mean for the classifier drops the HP_HIST +40 and the honeypot request ((10 + 10) / 2 = 10, plain was higher)', sx_plain['score_mean'] > 25 and sx_clf['score_mean'] == 10.0)
+ok('LOG-4: notfound_ratio for the classifier does not count the honeypot request\'s 404 (plain 1/3, classifier 0)', abs(sx_plain['notfound_ratio'] - 1.0 / 3) < 1e-9 and sx_clf['notfound_ratio'] == 0.0)
+ok('LOG-4: every other feature and the anomaly model\'s vector are untouched', all(sx_clf[k] == sx_plain[k] for k in features_mod.FEATURE_ORDER if k not in ('score_mean', 'notfound_ratio'))
+   and features_mod.feature_vector(sx_plain) == [float(sx_plain.get(n, 0.0)) for n in features_mod.FEATURE_ORDER]
+   and len(features_mod.clf_vector(sx_plain, sx_hp_sess)) == len(features_mod.FEATURE_ORDER))
+
+# LOG-7: the log day follows the zone PHP names the files with
+sx_ts = 1700000000                                  # 2023-11-14 22:13:20 UTC
+logs_mod.configure_timezone('Pacific/Kiritimati')   # UTC+14: already the 15th
+sx_day_kiri = logs_mod.day_of(sx_ts)
+logs_mod.configure_timezone('UTC')
+sx_day_utc = logs_mod.day_of(sx_ts)
+logs_mod.configure_timezone('America/Los_Angeles')
+sx_day_la = logs_mod.day_of(sx_ts)
+logs_mod.configure_timezone('Not/AZone')            # an unknown zone falls back to the host's, never raises
+sx_day_bad = logs_mod.day_of(sx_ts)
+logs_mod.configure_timezone(config_mod.bridge.php_timezone(php=config_mod.bridge.php_binary(cfg)) or '')
+ok('LOG-7: the day of one instant is 15 Nov in UTC+14, 14 Nov in UTC and in Los Angeles; an unknown zone gives the host date', str(sx_day_kiri) == '2023-11-15' and str(sx_day_utc) == '2023-11-14'
+   and str(sx_day_la) == '2023-11-14' and sx_day_bad == ig_dt.date.fromtimestamp(sx_ts))
+ok('LOG-7: config-dump.php reports the PHP zone and config.load() hands it to logs.py', isinstance(cfg.get('php_timezone'), str) and 'php_timezone' in open(os.path.join(IL_ROOT, 'scripts', 'config-dump.php')).read())
+
+# LOG-8: the snapshot is written as ASCII JSON whatever the locale is
+sx_dir = tempfile.mkdtemp(prefix='gv-sx8-')
+import subprocess as sp_sx
+sx_proc = sp_sx.run([sys.executable, '-c', r'import sys; sys.path.insert(0, %r); from analyzer import snapshot; sys.exit(0 if snapshot.write({"ua": "Mozilla \u00e9\u4e2d\u6587 \U0001F600"}, %r) else 1)' % (IL_ROOT, os.path.join(sx_dir, 's.json'))],
+                    env=dict(os.environ, LC_ALL='C', LANG='C', PYTHONUTF8='0', PYTHONCOERCECLOCALE='0'), stdout=sp_sx.PIPE, stderr=sp_sx.PIPE)
+sx_text = open(os.path.join(sx_dir, 's.json'), 'rb').read() if os.path.isfile(os.path.join(sx_dir, 's.json')) else b''
+ok('LOG-8: snapshot.write under LC_ALL=C with a non-ASCII User-Agent succeeds and the file is pure ASCII (\\u escapes)', sx_proc.returncode == 0 and sx_text and all(b < 128 for b in sx_text)
+   and ig_json.loads(sx_text.decode('ascii'))['ua'].startswith('Mozilla é'))
+
+# LOG-14 / LOG-11: a lock file that cannot be opened is NOT acquired; promote-model takes the same lock
+sx_lock_dir = tempfile.mkdtemp(prefix='gv-sx14-')
+sx_bad_lock = worker_mod.WriteLock(path=os.path.join(sx_lock_dir, 'no-such-dir', '.write.lock'))
+sx_buf2 = io_sx.StringIO()
+with ctx_sx.redirect_stderr(sx_buf2):
+    sx_got = sx_bad_lock.acquire(0)
+ok('LOG-14: a lock file that cannot be opened counts as NOT acquired (the job goes back to the queue), with a warning naming it', sx_got is False and 'cannot open the write lock' in sx_buf2.getvalue())
+from analyzer import ctl as ctl_sx
+sx_calls = []
+sx_acq = worker_mod.WriteLock.acquire
+worker_mod.WriteLock.acquire = lambda self, wait=0.0: (sx_calls.append(wait), False)[1]
+class SxArgs(object):
+    kind = 'ml'
+    cfg = cfg
+sx_buf3 = io_sx.StringIO()
+try:
+    with ctx_sx.redirect_stderr(sx_buf3):
+        sx_rc = ctl_sx.cmd_promote_model(None, SxArgs())
+finally:
+    worker_mod.WriteLock.acquire = sx_acq
+ok('LOG-11: ctl.py promote-model takes the write lock first and refuses (exit 1, nothing moved) when it cannot', sx_rc == 1 and sx_calls and 'write lock is busy' in sx_buf3.getvalue())
+
+# SEC-5: pinned requirements, no unpickling of a file others could have written
+sx_req = [l.strip() for l in open(os.path.join(IL_ROOT, 'analyzer', 'requirements.txt')) if l.strip() and not l.startswith('#')]
+ok('SEC-5: every line of requirements.txt is an exact == pin', sx_req and all(re.match(r'^[A-Za-z0-9_.-]+==[0-9][0-9A-Za-z.]*(\s*;.*)?$', l) for l in sx_req))
+sx_m = os.path.join(sx_dir, 'm.joblib')
+open(sx_m, 'w').write('x')
+os.chmod(sx_m, 0o664)
+ok('SEC-5: a model file that group or others can write is refused ("writable by group or others"), 0644 is accepted', 'writable by group' in fsmode_sx.unsafe_to_load(sx_m) if False else 'writable by group' in __import__('analyzer.fsmode', fromlist=['x']).unsafe_to_load(sx_m))
+os.chmod(sx_m, 0o644)
+sx_fs = __import__('analyzer.fsmode', fromlist=['x'])
+os.symlink(sx_m, sx_m + '.lnk')
+ok('SEC-5: ...a link is refused, a missing file is refused, an own 0644 regular file passes',
+   sx_fs.unsafe_to_load(sx_m) == '' and 'not a regular file' in sx_fs.unsafe_to_load(sx_m + '.lnk') and sx_fs.unsafe_to_load(sx_m + '.nope') != '')
+if model_mod.SKLEARN_AVAILABLE:
+    sx_mp = os.path.join(sx_dir, 'real.joblib')
+    model_mod.train([[float(i % 7) for _ in features_mod.FEATURE_ORDER] for i in range(40)], 0.05, sx_mp, 10)
+    sx_ok_load = model_mod.load(sx_mp) is not None
+    os.chmod(sx_mp, 0o666)
+    ok('SEC-5: model.load() / inspect() refuse the same model once it is world-writable, and say why', sx_ok_load and model_mod.load(sx_mp) is None
+       and 'refused to load' in model_mod.inspect(sx_mp)['error'])
+pip_src = open(os.path.join(IL_ROOT, 'panel', 'update.php')).read()
+ok('SEC-5: the update result page never enqueues pip_sync itself (gp_upd_post_verify has no gp_job_enqueue)',
+   'gp_job_enqueue' not in pip_src[pip_src.index('function gp_upd_post_verify'):pip_src.index('function gp_upd_pip_queue')])
+
+# A package update that makes a saved model unusable: reported, ignored, rebuilt by the next nightly run with no manual step
+if model_mod.SKLEARN_AVAILABLE:
+    import warnings as warn_sx
+    sx_mp2 = os.path.join(sx_dir, 'ver.joblib')
+    model_mod.train([[float(i % 7) for _ in features_mod.FEATURE_ORDER] for i in range(40)], 0.05, sx_mp2, 10)
+    sx_jl = model_mod.joblib.load
+    def sx_inconsistent(path, *a, **k):
+        from sklearn.exceptions import InconsistentVersionWarning
+        warn_sx.warn(InconsistentVersionWarning(estimator_name='IsolationForest', current_sklearn_version='1.6.1', original_sklearn_version='1.3.0'))
+        return sx_jl(path, *a, **k)
+    model_mod.joblib.load = sx_inconsistent
+    try:
+        sx_info = model_mod.inspect(sx_mp2)
+        sx_none = model_mod.load(sx_mp2)
+    finally:
+        model_mod.joblib.load = sx_jl
+    ok('PIP: a model saved by another scikit-learn version (InconsistentVersionWarning) is NOT loaded: inspect says unusable with the reason, load() gives None',
+       sx_none is None and sx_info['unusable'] and not sx_info['loadable'] and 'another scikit-learn version' in sx_info['error'])
+    sx_warn = promote_sx = None
+    from analyzer import promote as promote_sx
+    ok('PIP: the stale-model warning says the guard keeps working and that the next nightly run trains a new model by itself',
+       'keeps working' in promote_sx.stale_warning('ml', sx_info) and 'by itself' in promote_sx.stale_warning('ml', sx_info) and 'once there are enough labelled sessions' in promote_sx.stale_warning('clf', dict(sx_info)))
+    open(sx_mp2, 'wb').write(b'not a pickle at all')
+    ok('PIP: a corrupt model file is "unreadable" and unusable (rebuilt), a missing one is not "unusable" (it is created)', model_mod.inspect(sx_mp2)['unusable'] and not model_mod.inspect(sx_mp2 + '.none')['unusable'])
+    # the nightly run replaces the live model by itself (no --train, no promote)
+    nt_pip_logs = os.path.join(nt_dir, 'piplogs')
+    os.makedirs(nt_pip_logs, exist_ok=True)
+    with open(os.path.join(nt_pip_logs, 'guard-%s.jsonl' % ig_dt.date.today().strftime('%Y%m%d')), 'w') as fh:
+        for sx_i in range(40):
+            fh.write(ig_json.dumps(row(ig_time.time() - 200 + sx_i, dev='dp%d' % (sx_i % 8), ip='10.5.0.%d' % (sx_i % 8 + 1), p='/y%d' % sx_i)) + '\n')
+    nt_bad = os.path.join(nt_dir, 'model.joblib')
+    open(nt_bad, 'wb').write(b'garbage from another version')
+    os.chmod(nt_bad, 0o644)
+    rc_pip, out_pip, err_pip, cfg_pip = nt_run({'ml_min_train': 3, 'log_dir': nt_pip_logs})
+    ok('PIP: nightly finds the live model unusable, says why and trains a NEW live model in the same run (no manual step); it loads afterwards',
+       rc_pip == 0 and 'cannot be used' in out_pip and 'training a new one now' in out_pip and model_mod.load(nt_bad) is not None)
+else:
+    skip('PIP: a model from another scikit-learn version is unusable and rebuilt', 'scikit-learn not installed')
+ok('PIP: the confirmation text names models, the guard staying fail-open and the automatic retraining; the button repeats the warning',
+   all(w in open(os.path.join(IL_ROOT, 'panel', 'lang.php')).read() for w in ('READ THIS BEFORE YOU CONFIRM', 'stays fail-open', 'trains the anomaly model again by itself', 'I understand the models may need retraining')))
+
+# nightly: waiting for labels is never a warning, also when no identity carries a device id
+nt_devless = os.path.join(nt_dir, 'devless')
+os.makedirs(nt_devless, exist_ok=True)
+with open(os.path.join(nt_devless, 'guard-%s.jsonl' % ig_dt.date.today().strftime('%Y%m%d')), 'w') as fh:
+    for sx_i in range(30):
+        fh.write(ig_json.dumps(row(ig_time.time() - 100 + sx_i, dev='', ip='10.4.0.%d' % (sx_i % 5 + 1), uah='cccccccccccc', p='/x%d' % sx_i)) + '\n')
+rc_dl, out_dl, err_dl, _ = nt_run({'log_dir': nt_devless})
+w_dl, _res_dl = jobreport_nt.parse(err_dl)
+ok('nightly: rows but NO device id (devices_scored 0) and the classifier waiting for labels is still not a warning, only the informational note',
+   rc_dl == 0 and 'devices scored' in out_dl and not [w for w in w_dl if 'classifier' in w.lower() or 'did nothing' in w.lower()]
+   and any('classifier waiting for labels' in n for n in jobreport_nt.parse_notes(err_dl)))
+
+# the entry points do not write bytecode and a loose __pycache__ is removed by the next run
+ok('every analyzer entry point sets sys.dont_write_bytecode and umask 022 when run as a script',
+   all('sys.dont_write_bytecode = True' in open(os.path.join(IL_ROOT, 'analyzer', f)).read() for f in ('snapshot.py', 'run_verify.py', 'run_nightly.py', 'worker.py', 'report.py', 'replay.py', 'ctl.py')))
+sx_code = os.path.join(tempfile.mkdtemp(prefix='gv-sxpy-'), 'analyzer')
+os.makedirs(os.path.join(sx_code, '__pycache__'))
+os.chmod(os.path.join(sx_code, '__pycache__'), 0o775)
+ok('a group-writable __pycache__ that this user owns is removed (fsmode.remove_loose_pycache), a 0755 one is kept',
+   sx_fs.remove_loose_pycache(sx_code) == [os.path.join(sx_code, '__pycache__')] and not os.path.exists(os.path.join(sx_code, '__pycache__'))
+   and (os.makedirs(os.path.join(sx_code, '__pycache__'), 0o755) or True) and sx_fs.remove_loose_pycache(sx_code) == [] and os.path.isdir(os.path.join(sx_code, '__pycache__')))
+sx_sh = open(os.path.join(IL_ROOT, 'scripts', 'lib-jobstatus.sh')).read() + open(os.path.join(IL_ROOT, 'scripts', 'cron-check.sh')).read()
+ok('the shell wrappers export PYTHONDONTWRITEBYTECODE=1', sx_sh.count('PYTHONDONTWRITEBYTECODE=1') >= 2)
+
+# LOG-19: a geo source that disappears while the sources are listed does not abort the compile
+sx_geo = tempfile.mkdtemp(prefix='gv-sxgeo-')
+open(os.path.join(sx_geo, 'a.mmdb'), 'wb').write(b'not a database')
+sx_geo_mod = __import__('analyzer.geo', fromlist=['x'])
+sx_real_stat = os.stat
+def sx_flaky_stat(path, *a, **k):
+    if str(path).endswith('a.mmdb'):
+        raise OSError(2, 'gone')
+    return sx_real_stat(path, *a, **k)
+os.stat = sx_flaky_stat
+try:
+    sx_status = sx_geo_mod.compile_geo(sx_geo, now=1)
+except Exception as exc:
+    sx_status = exc
+finally:
+    os.stat = sx_real_stat
+ok('LOG-19: a geo source deleted while listing is skipped, not an uncaught OSError', not isinstance(sx_status, Exception))
 
 section('Idle priority')
 os.environ['GV_LOWPRIO'] = '0'

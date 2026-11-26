@@ -29,6 +29,7 @@ from __future__ import print_function
 
 import os
 
+from analyzer import fsmode
 from analyzer.features import FEATURE_ORDER
 
 try:
@@ -149,9 +150,9 @@ def load(model_path):
     """Return the persisted bundle, or None when there is nothing usable."""
     if not SKLEARN_AVAILABLE:
         return None
-    try:
-        bundle = joblib.load(model_path)
-    except Exception:
+    from analyzer.model import load_bundle
+    bundle, problem = load_bundle(model_path)      # never unpickles a file somebody else could have written; a version mismatch is "unusable"
+    if problem:
         return None
     if not isinstance(bundle, dict):
         return None
@@ -168,7 +169,7 @@ def inspect(model_path):
     Same reasoning as model.inspect: a stale classifier stops gv:clf being
     written, and with signals.clf on the effective score silently drops.
     """
-    out = {'exists': False, 'loadable': False, 'stale': False,
+    out = {'exists': False, 'loadable': False, 'stale': False, 'unusable': False,
            'feature_order': None, 'metrics': None, 'error': ''}
     if not os.path.isfile(model_path):
         out['error'] = 'no file at %s' % model_path
@@ -177,10 +178,11 @@ def inspect(model_path):
     if not SKLEARN_AVAILABLE:
         out['error'] = 'scikit-learn unavailable'
         return out
-    try:
-        bundle = joblib.load(model_path)
-    except Exception as exc:
-        out['error'] = 'unreadable: %s' % exc
+    from analyzer.model import load_bundle
+    bundle, problem = load_bundle(model_path)
+    if problem:
+        out['error'] = problem
+        out['unusable'] = True
         return out
     if not isinstance(bundle, dict) or 'model' not in bundle:
         out['error'] = 'not a classifier bundle'

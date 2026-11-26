@@ -32,8 +32,9 @@ function gp_prompt($label) {
 
 // Read without echoing where the SAPI allows it.
 //
-// Turning terminal echo off normally means running `stty`, and no file under
-// panel/ is permitted to execute a shell command - so this uses the readline
+// Turning terminal echo off normally means running `stty`, and this file does not
+// shell out to the terminal (the only process the panel starts is panel/health.php's
+// fixed `bash scripts/cron-check.sh --json`, and the self-test lists it) - so this uses the readline
 // extension when it is present and otherwise warns that the password will be
 // visible. Warning is better than either shelling out or refusing to install.
 function gp_prompt_hidden($label) {

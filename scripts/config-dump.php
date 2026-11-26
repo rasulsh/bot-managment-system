@@ -82,6 +82,7 @@ if ($gv_creds) {
 	$gv_cfg = array(
 		'redis'    => isset($gv_cfg['redis']) && is_array($gv_cfg['redis']) ? $gv_cfg['redis'] : array(),
 		'analyzer' => isset($gv_cfg['analyzer']) && is_array($gv_cfg['analyzer']) ? $gv_cfg['analyzer'] : array(),
+		'php_timezone' => date_default_timezone_get(),
 	);
 } else {
 	if (isset($gv_cfg['redis']) && is_array($gv_cfg['redis'])) {
@@ -95,6 +96,7 @@ unset($gv_cfg['secret'], $gv_cfg['holdout_salt'],
 $gv_flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
 if (defined('JSON_PRETTY_PRINT')) { $gv_flags |= JSON_PRETTY_PRINT; }
 // What the binary that ran this is: the analyzer warns when it is not the command-line build.
+$gv_cfg['php_timezone'] = date_default_timezone_get();       // the zone date('Ymd') names the daily log files in (guard/log.php)
 $gv_cfg['_php'] = array('sapi' => PHP_SAPI, 'version' => PHP_VERSION, 'binary' => (string)PHP_BINARY);
 $gv_json = json_encode($gv_cfg, $gv_flags);
 if ($gv_json === false) {

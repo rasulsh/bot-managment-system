@@ -25,6 +25,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+if __name__ == '__main__':
+    # No bytecode, and files a manual run creates are not group-writable: a __pycache__ made under cron's umask 002 was 0775.
+    sys.dont_write_bytecode = True
+    os.umask(0o022)
+
 from analyzer import classifier as clf_mod
 from analyzer import config as config_mod
 from analyzer import fsmode
@@ -120,7 +125,7 @@ def fold_rule_hits(totals, counts, recent):
 
 def collect_rule_hits_store(store, now, days=7):
     """collect_rule_hits over the ingest store (analyzer/ingest.py): the same numbers, without reading a log file."""
-    today = datetime.date.fromtimestamp(now)
+    today = logs_mod.day_of(now)
     totals = {}
     for offset in range(int(days)):
         key = (today - datetime.timedelta(days=offset)).strftime('%Y%m%d')
@@ -141,7 +146,7 @@ def collect_rule_hits(log_dir, now, cache_path=None, days=7):
     is unusable); the normal run takes the same numbers from the store
     (collect_rule_hits_store), which needs no cache file.
     """
-    today = datetime.date.fromtimestamp(now)
+    today = logs_mod.day_of(now)
     cache = {}
     if cache_path:
         try:
@@ -492,7 +497,7 @@ def build_dash(rows24, rows7, now):
 
 
 def local_tz():
-    """The analyzer host's time zone: daily log names, logrotate and 'today' follow it."""
+    """The analyzer host's time zone. Reported on the snapshot so the panel can warn when it differs from the panel's. The daily log files are NOT named by it: the guard names them by PHP's date (logs.configure_timezone / logs.day_of read that zone from config-dump.php)."""
     try:
         offset = datetime.datetime.now().astimezone().utcoffset()
         return {'name': time.tzname[0], 'offset': int(offset.total_seconds()) if offset is not None else 0}
@@ -734,7 +739,7 @@ def write(payload, path):
     tmp = path + '.tmp'
     try:
         with fsmode.open_text(tmp) as handle:
-            json.dump(payload, handle, ensure_ascii=False)
+            json.dump(payload, handle)         # ASCII with \\u escapes: attacker-chosen UAs and paths never depend on the locale
         os.replace(tmp, path)
         return True
     except Exception as exc:
@@ -770,7 +775,7 @@ def full_read_inputs(cfg, now, days):
     Used for --full-read, for --days other than 1, and when the incremental store cannot be used.
     """
     window = days * 86400
-    all_rows = list(logs_mod.read_lines(cfg['log_dir'], max(days * 2 + 1, 9), today=datetime.date.fromtimestamp(now)))   # 9 days: 24 h + 24 h before it, and 7 d for the dashboard
+    all_rows = list(logs_mod.read_lines(cfg['log_dir'], max(days * 2 + 1, 9), today=logs_mod.day_of(now)))   # 9 days: 24 h + 24 h before it, and 7 d for the dashboard
     rows = [r for r in all_rows if _ts_of(r) >= now - window]
     prev_rows = [r for r in all_rows if now - 2 * window <= _ts_of(r) < now - window]
     rows24 = [r for r in all_rows if _ts_of(r) >= now - 86400]

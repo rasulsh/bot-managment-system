@@ -54,6 +54,9 @@ def main():
     ip = os.environ.get('GV_CLIENT_IP', '127.0.0.1')
     cfg = {'log_dir': log_dir, 'model_path': os.path.join(log_dir, 'model.joblib')}
     client = redis_io.connect({'redis': {}})
+    if client is None:
+        print('FAIL  precondition: Redis is not reachable (start redis-server, or set the analyzer\'s Redis settings); nothing was tested')
+        return 2
     client.delete('gv:botok:' + ip, 'gv:botbad:' + ip, 'gv:hp:' + ip)
     before = fetch(base, 'v=before')                       # logs the bot claim
     cfg_path = os.path.join(log_dir, 'verify-e2e.json')
@@ -76,4 +79,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main() or 0)
