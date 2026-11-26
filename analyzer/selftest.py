@@ -2010,6 +2010,40 @@ else:
     ok('identity_verdicts reads overrides and verdicts back under the prefix',
        iv['reputation'] == 7 and iv['overrides']['allow'] is not None and iv['overrides']['deny'] is None)
     ok('get_override reports the remaining ttl', 0 < redis_io.get_override(a, 'ident9')['allow'] <= 600)
+    # The honeypot mark: the guard writes hpd:<device> and hpn:<ipv4 | ipv6 /64> since 2026.11.39 (hp:<ip> before); identity_verdicts reads all three.
+    ok('ip_net: IPv4 as it is, IPv6 as its /64, a device id as it is, an unparsable address as it is',
+       redis_io.ip_net('203.0.113.9') == '203.0.113.9' and redis_io.ip_net('2001:db8:1:2:3:4:5:6') == '2001:db8:1:2::/64' and redis_io.ip_net('2001:DB8:0:0:ffff::1') == '2001:db8::/64'
+       and redis_io.ip_net('0123456789abcdef01234567') == '0123456789abcdef01234567' and redis_io.ip_net('zz:zz') == 'zz:zz')
+    ok('identity_verdicts: no honeypot mark means False', redis_io.identity_verdicts(a, 'devhp1')['honeypot'] is False)
+    admin.setex('shop1:gv:hpd:devhp1', 60, '1')
+    ok('identity_verdicts: a device mark (hpd:<device>) is a honeypot history', redis_io.identity_verdicts(a, 'devhp1')['honeypot'] is True)
+    admin.setex('shop1:gv:hpn:203.0.113.77', 60, '1')
+    ok('identity_verdicts: an IPv4 mark (hpn:<ip>) is a honeypot history', redis_io.identity_verdicts(a, '203.0.113.77')['honeypot'] is True
+       and redis_io.identity_verdicts(a, '203.0.113.78')['honeypot'] is False)
+    admin.setex('shop1:gv:hpn:2001:db8:aa:bb::/64', 60, '1')
+    ok('identity_verdicts: an IPv6 mark is per /64, so any address in the /64 shows it and another /64 does not',
+       redis_io.identity_verdicts(a, '2001:db8:aa:bb:1:2:3:4')['honeypot'] is True and redis_io.identity_verdicts(a, '2001:db8:aa:cc::1')['honeypot'] is False)
+    admin.setex('shop1:gv:hp:203.0.113.5', 60, '1')
+    ok('identity_verdicts: the hp:<ip> that releases before 2026.11.39 wrote is still seen', redis_io.identity_verdicts(a, '203.0.113.5')['honeypot'] is True)
+    # A write job that finds the write lock busy goes back on the REAL queue with a TTL (rpush on the emptied list would leave none).
+    rq_old = os.environ.get('GV_LOCK_DIR')
+    os.environ['GV_LOCK_DIR'] = tempfile.mkdtemp()
+    rq_busy = worker_mod.WriteLock(mode='nightly')
+    rq_busy.acquire(0)
+    admin.delete('shop1:gp:jobs')
+    a.rpush(redis_io.gp_key('jobs'), '{"id":"rq1","type":"nightly","params":{}}')
+    admin.persist('shop1:gp:jobs')
+    rq_done, rq_back = worker_mod.drain(a, {}, 4, wait=0)
+    ok('worker (real Redis): a deferred write job is back on the queue and the queue key has the 24 h TTL, not none',
+       rq_back == 1 and admin.llen('shop1:gp:jobs') == 1 and 0 < admin.ttl('shop1:gp:jobs') <= worker_mod.JOBS_QUEUE_TTL)
+    rq_busy.release()
+    admin.delete('shop1:gp:jobs')
+    if rq_old is None:
+        os.environ.pop('GV_LOCK_DIR', None)
+    else:
+        os.environ['GV_LOCK_DIR'] = rq_old
+    for k_ in ('hpd:devhp1', 'hpn:203.0.113.77', 'hpn:2001:db8:aa:bb::/64', 'hp:203.0.113.5'):
+        admin.delete('shop1:gv:' + k_)
     # Temporary challenge overrides: one key family (chal:), '1' = challenge, 'c' = CAPTCHA, the same as the guard and the panel.
     ok('set_override challenge / captcha writes gv:chal:<id> with value 1 / c and a TTL', redis_io.set_override(a, 'challenge', 'ident9', 600) and admin.get('shop1:gv:chal:ident9') == '1'
        and 0 < admin.ttl('shop1:gv:chal:ident9') <= 600 and redis_io.set_override(a, 'captcha', 'ident9', 600) and admin.get('shop1:gv:chal:ident9') == 'c')
@@ -3315,6 +3349,11 @@ class _FakeQueue(object):
     def rpush(self, key, raw):
         self.items.append(raw)
 
+    def expire(self, key, ttl):
+        self.expires = getattr(self, 'expires', [])
+        self.expires.append((key, ttl))
+        return True
+
 
 def _job(t, i='j1'):
     return _json_wl.dumps({'id': i, 'type': t, 'params': {}})
@@ -3354,6 +3393,8 @@ q = _FakeQueue([_job('nightly', 'n1'), _job('snapshot', 's1')])      # rpop take
 worker_mod.drain(q, {}, 8, wait=0, runner=wl_runner)
 ok('worker: the lock is held only around the write job (the read-only one before it ran without it)', wl_seen == [('snapshot', False), ('nightly', True)])
 # the lock is busy (nightly holds it): the write job goes back to the queue, is the next one popped, and the drain stops
+JQ_PANEL_TTL = int(re.search(r"define\('GP_JOB_TTL',\s*(\d+)\)", open(os.path.join(IL_ROOT, 'panel', 'jobs.php')).read()).group(1))
+JQ_TTL_NOTE = 'GP_JOB_TTL in panel/jobs.php = %d s' % JQ_PANEL_TTL
 busy = worker_mod.WriteLock(mode='nightly')
 ok('worker: the test holder takes the lock', busy.acquire(0))
 wl_seen[:] = []
@@ -3362,6 +3403,8 @@ t0 = time.time()
 done, back = worker_mod.drain(q, {}, 8, wait=0.6, runner=wl_runner)
 ok('worker: when the write lock stays busy the write job waits up to the wait, then goes back to the queue and the drain stops (read-only jobs before it still ran)',
    back == 1 and done == 1 and [t for t, _ in wl_seen] == ['snapshot'] and 0.5 <= time.time() - t0 < 5 and worker_mod.job_type_of(q.items[-1]) == 'verify' and len(q.items) == 2)
+ok('worker: a job put back on the queue gets the queue its TTL again (rpush on an emptied list creates a key with none), the same as the panel sets: %s' % JQ_TTL_NOTE,
+   getattr(q, 'expires', None) == [(redis_io.gp_key('jobs'), worker_mod.JOBS_QUEUE_TTL)] and worker_mod.JOBS_QUEUE_TTL == JQ_PANEL_TTL)
 holder_file = os.path.join(wl_dir, '.write.lock.holder')
 ok('worker: the holder file names who holds the lock (mode, pid, start) while it is held, and is removed on release', open(holder_file).read().split()[0] == 'nightly' and int(open(holder_file).read().split()[1]) == os.getpid())
 busy.release()

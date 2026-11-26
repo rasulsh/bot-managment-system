@@ -60,6 +60,7 @@ MAX_OUTPUT = 8000
 # while they run: an empty queue, a snapshot, a replay, a GeoIP / IP list compile or a pip sync need none, so the worker (every minute) no
 # longer keeps nightly out of the lock.
 WRITE_JOBS = frozenset(['verify', 'nightly', 'train', 'train_clf', 'promote_ml', 'promote_clf'])
+JOBS_QUEUE_TTL = 86400     # seconds; the same as GP_JOB_TTL in panel/jobs.php, which sets it on every enqueue (a test compares the two)
 LOCK_WAIT_DEFAULT = 45     # seconds a write job waits for the lock before it goes back to the queue (the worker fires every minute)
 
 
@@ -276,6 +277,8 @@ def drain(client, cfg, max_jobs, wait=None, runner=None):
             if not lock.acquire(wait):
                 try:
                     client.rpush(redis_io.gp_key('jobs'), raw)
+                    # rpush on a list that was just emptied by rpop creates it again WITHOUT a TTL: give it the one the panel's enqueue sets
+                    client.expire(redis_io.gp_key('jobs'), JOBS_QUEUE_TTL)
                 except Exception as exc:
                     redis_io.warn('could not put a job back on the queue: %s' % exc)
                 print('The write lock is busy (nightly or a training run holds it): the %s job stays queued for the next firing.' % job_type_of(raw))
